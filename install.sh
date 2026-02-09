@@ -30,7 +30,7 @@ echo "Linked binary to ~/.local/bin/codex-collab"
 
 # Symlink skill
 mkdir -p ~/.claude/skills
-ln -sf "$REPO_DIR/skill" ~/.claude/skills/codex-collab
+ln -sfn "$REPO_DIR/skill" ~/.claude/skills/codex-collab
 echo "Linked skill to ~/.claude/skills/codex-collab"
 
 # Verify
@@ -43,6 +43,6 @@ if ! command -v codex-collab >/dev/null 2>&1; then
 fi
 
 echo ""
-codex-collab health
+"$REPO_DIR/bin/codex-collab" health
 echo ""
 echo "Done. Run 'codex-collab --help' to get started."
