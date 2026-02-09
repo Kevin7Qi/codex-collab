@@ -473,7 +473,7 @@ export function refreshJobStatus(jobId: string): Job | null {
         // Log may not exist if session was killed very early
       }
       // The .exit file is written by the shell immediately after codex exits,
-      // before the echo/read, so it exists iff codex ran to completion.
+      // before the echo/sleep, so it exists iff codex ran to completion.
       const exitFile = join(config.jobsDir, `${jobId}.exit`);
       try {
         const exitCode = readFileSync(exitFile, "utf-8").trim();

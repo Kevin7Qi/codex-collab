@@ -11,15 +11,12 @@ Claude + Codex collaboration bridge. A CLI that manages Codex sessions in tmux, 
 ## Install
 
 ```bash
-bun install
-
-# Symlink binary and skill
-ln -sf ~/Documents/Coding/codex-collab/bin/codex-collab ~/.local/bin/codex-collab
-mkdir -p ~/.claude/skills
-ln -sf ~/Documents/Coding/codex-collab/skill ~/.claude/skills/codex-collab
-
-codex-collab health
+git clone https://github.com/Kevin7Qi/codex-collab.git
+cd codex-collab
+./install.sh
 ```
+
+The install script checks prerequisites, installs dependencies, and symlinks the binary and Claude Code skill.
 
 ## Quick Start
 

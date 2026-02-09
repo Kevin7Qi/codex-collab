@@ -123,7 +123,7 @@ export function createSession(options: {
 
     // Inner shell command — values are from validated config enums, not raw user input.
     // The exit code is written to a .exit file immediately after script exits,
-    // before the echo/read, so it's reliable even if the user closes the pane.
+    // before the echo/sleep, so it's reliable even if the user closes the pane.
     const shellCmd = `script -q "${logFile}" -c "codex ${codexArgs}"; echo $? > "${exitFile}"; echo "\\n\\n[codex-collab: Session complete. Closing in 30s.]"; sleep 30`;
 
     // Use -x 220 so the codex TUI doesn't truncate spinner lines.
