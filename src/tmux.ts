@@ -35,6 +35,69 @@ export function sessionExists(sessionName: string): boolean {
 }
 
 /**
+ * Check if a screen looks like the codex TUI is ready for input
+ * (shows the model info banner and input prompt, not an update dialog).
+ */
+function isCodexReady(screen: string): boolean {
+  const lower = screen.toLowerCase();
+  // Must show the TUI banner AND have finished loading the model
+  // (the "loading" screen also shows "? for shortcuts" so we can't rely on that alone)
+  return (
+    lower.includes("openai codex") &&
+    lower.includes("? for shortcuts") &&
+    !lower.includes("model:     loading")
+  );
+}
+
+/**
+ * Check if the screen shows an update prompt.
+ */
+function isUpdatePrompt(screen: string): boolean {
+  const lower = screen.toLowerCase();
+  return (
+    lower.includes("update available") ||
+    lower.includes("new version") ||
+    lower.includes("update now") ||
+    lower.includes("skip until next")
+  );
+}
+
+/**
+ * Poll for the codex TUI to be ready. If an update prompt appears, accept it.
+ * Polls up to maxAttempts times with pollInterval seconds between checks.
+ */
+function waitForCodexReady(
+  sessionName: string,
+  maxAttempts: number = 15,
+  pollInterval: number = 2
+): void {
+  for (let i = 0; i < maxAttempts; i++) {
+    const screen = capturePane(sessionName);
+    if (!screen) {
+      spawnSync("sleep", [String(pollInterval)]);
+      continue;
+    }
+
+    if (isCodexReady(screen)) {
+      return; // TUI is ready for input
+    }
+
+    if (isUpdatePrompt(screen)) {
+      // Accept the update (Enter selects the default/first option)
+      execSync(`tmux send-keys -t "${sessionName}" Enter`, {
+        stdio: "pipe",
+      });
+      // Give the update time to download and install
+      spawnSync("sleep", ["15"]);
+      continue; // Re-check after update
+    }
+
+    // Not ready yet, not update prompt — codex is still loading
+    spawnSync("sleep", [String(pollInterval)]);
+  }
+}
+
+/**
  * Create a new tmux session running codex.
  * If interactive is true, skip auto-sending a prompt (leave user at TUI input).
  */
@@ -53,32 +116,28 @@ export function createSession(options: {
   try {
     const codexArgs = [
       `-c`,
-      `model="${options.model}"`,
+      `model=${options.model}`,
       `-c`,
-      `model_reasoning_effort="${options.reasoningEffort}"`,
-      `-c`,
-      `skip_update_check=true`,
+      `model_reasoning_effort=${options.reasoningEffort}`,
       `-a`,
       `never`,
       `-s`,
       options.sandbox,
     ].join(" ");
 
-    const shellCmd = `script -q "${logFile}" codex ${codexArgs}; echo "\\n\\n[codex-collab: Session complete. Press Enter to close.]"; read`;
+    // Use script -c on Linux to wrap the full codex command as a single string,
+    // preventing script from consuming codex's flags (e.g. -s).
+    // The outer tmux command uses single quotes, and script -c uses double quotes.
+    // Model args are unquoted inside the double quotes (they're simple alphanumeric values).
+    const shellCmd = `script -q "${logFile}" -c "codex ${codexArgs}"; echo "\\n\\n[codex-collab: Session complete. Press Enter to close.]"; read`;
 
     execSync(
       `tmux new-session -d -s "${sessionName}" -c "${options.cwd}" '${shellCmd}'`,
       { stdio: "pipe", cwd: options.cwd }
     );
 
-    // Give codex a moment to initialize
-    spawnSync("sleep", ["1"]);
-
-    // Skip update prompt if it appears
-    execSync(`tmux send-keys -t "${sessionName}" "3"`, { stdio: "pipe" });
-    spawnSync("sleep", ["0.5"]);
-    execSync(`tmux send-keys -t "${sessionName}" Enter`, { stdio: "pipe" });
-    spawnSync("sleep", ["1"]);
+    // Wait for codex TUI to be ready (handles update prompts if they appear)
+    waitForCodexReady(sessionName);
 
     // If not interactive, send the prompt
     if (!options.interactive && options.prompt) {

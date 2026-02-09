@@ -14,8 +14,8 @@ Claude + Codex collaboration bridge. A CLI that manages Codex sessions in tmux, 
 # Install dependencies
 bun install
 
-# Add to PATH (add to your shell profile)
-export PATH="$HOME/Documents/Coding/codex-collab/bin:$PATH"
+# Symlink the binary to a directory on PATH
+ln -sf ~/Documents/Coding/codex-collab/bin/codex-collab ~/.local/bin/codex-collab
 
 # Symlink the skill so Claude Code discovers it
 mkdir -p ~/.claude/skills
@@ -62,6 +62,7 @@ codex-collab kill <id>
 | `send-control <id> <key>` | Send control sequences (C-c, C-d) |
 | `capture <id> [lines]` | Capture terminal output |
 | `output <id>` | Full session output |
+| `wait <id>` | Wait for codex to finish (poll-based) |
 | `watch <id>` | Stream output updates |
 | `jobs [--json]` | List jobs |
 | `status <id>` | Job status |

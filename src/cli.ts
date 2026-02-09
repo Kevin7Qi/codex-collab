@@ -18,6 +18,7 @@ import {
   getJobOutput,
   getJobFullOutput,
   getAttachCommand,
+  waitForJob,
   Job,
   getJobsJson,
 } from "./jobs.ts";
@@ -40,6 +41,7 @@ Usage:
   codex-collab send-control <id> <key>        Send control sequences (C-c, C-d)
   codex-collab capture <id> [lines]           Capture recent terminal output (default: 50)
   codex-collab output <id>                    Full session output
+  codex-collab wait <id>                      Wait for codex to finish (poll-based)
   codex-collab watch <id>                     Stream output updates
   codex-collab jobs [--json]                  List jobs
   codex-collab status <id>                    Job status
@@ -59,6 +61,8 @@ Options:
   --strip-ansi               Remove ANSI escape codes from output
   --json                     Output JSON (jobs command only)
   --interactive              Start in interactive TUI mode (no auto-prompt)
+  --timeout <seconds>        Wait timeout in seconds (default: 900)
+  --interval <seconds>       Wait poll interval in seconds (default: 30)
   --limit <n>                Limit jobs shown
   --all                      Show all jobs
   -h, --help                 Show this help
@@ -96,6 +100,8 @@ interface Options {
   stripAnsi: boolean;
   json: boolean;
   interactive: boolean;
+  timeout: number;
+  interval: number;
   jobsLimit: number | null;
   jobsAll: boolean;
 }
@@ -125,6 +131,8 @@ function parseArgs(args: string[]): {
     stripAnsi: false,
     json: false,
     interactive: false,
+    timeout: 900,
+    interval: 30,
     jobsLimit: config.jobsListLimit,
     jobsAll: false,
   };
@@ -178,6 +186,20 @@ function parseArgs(args: string[]): {
       options.json = true;
     } else if (arg === "--interactive") {
       options.interactive = true;
+    } else if (arg === "--timeout") {
+      const val = Number(args[++i]);
+      if (!Number.isFinite(val) || val <= 0) {
+        console.error(`Invalid timeout: ${args[i]}`);
+        process.exit(1);
+      }
+      options.timeout = val;
+    } else if (arg === "--interval") {
+      const val = Number(args[++i]);
+      if (!Number.isFinite(val) || val <= 0) {
+        console.error(`Invalid interval: ${args[i]}`);
+        process.exit(1);
+      }
+      options.interval = val;
     } else if (arg === "--limit") {
       const raw = args[++i];
       const parsed = Number(raw);
@@ -513,6 +535,51 @@ async function main() {
           console.error(
             `Could not capture output for job ${positional[0]}`
           );
+          process.exit(1);
+        }
+        break;
+      }
+
+      case "wait": {
+        if (positional.length === 0) {
+          console.error("Error: No job ID provided");
+          process.exit(1);
+        }
+
+        const jobId = positional[0];
+        const job = loadJob(jobId);
+        if (!job) {
+          console.error(`Job ${jobId} not found`);
+          process.exit(1);
+        }
+
+        console.error(
+          `Waiting for job ${jobId} to finish (timeout: ${options.timeout}s, poll interval: ${options.interval}s)...`
+        );
+
+        const result = waitForJob(jobId, {
+          timeoutSec: options.timeout,
+          intervalSec: options.interval,
+        });
+
+        if (result.done) {
+          console.error("Done.");
+          if (result.output) {
+            let output = result.output;
+            if (options.stripAnsi) {
+              output = stripAnsiCodes(output);
+            }
+            console.log(output);
+          }
+        } else {
+          console.error("Timed out waiting for completion.");
+          if (result.output) {
+            let output = result.output;
+            if (options.stripAnsi) {
+              output = stripAnsiCodes(output);
+            }
+            console.log(output);
+          }
           process.exit(1);
         }
         break;

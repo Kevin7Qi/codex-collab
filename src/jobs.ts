@@ -496,3 +496,55 @@ export function getAttachCommand(jobId: string): string | null {
 
   return `tmux attach -t "${job.tmuxSession}"`;
 }
+
+/**
+ * Poll a job's capture output until codex finishes working.
+ * Returns the final capture output, or null if timed out / job not found.
+ */
+export function waitForJob(
+  jobId: string,
+  options: { timeoutSec?: number; intervalSec?: number } = {}
+): { done: boolean; output: string | null } {
+  const { spawnSync } = require("child_process");
+  const timeoutSec = options.timeoutSec ?? 900;
+  const intervalSec = options.intervalSec ?? 30;
+  const deadline = Date.now() + timeoutSec * 1000;
+
+  const job = loadJob(jobId);
+  if (!job || !job.tmuxSession) {
+    return { done: false, output: null };
+  }
+
+  // Grace period: wait for the spinner to appear before checking for completion.
+  // Without this, calling `wait` right after `send` can return immediately
+  // because codex hasn't rendered the spinner yet.
+  let sawSpinner = false;
+
+  while (Date.now() < deadline) {
+    // Check if session still exists
+    if (!sessionExists(job.tmuxSession)) {
+      return { done: true, output: null };
+    }
+
+    const output = capturePane(job.tmuxSession, { lines: 50 });
+    if (output) {
+      const lower = output.toLowerCase();
+      // Codex spinner shows "• <task description> (<time> • esc to interrupt)"
+      // The task description varies, so detect the spinner by its consistent suffix
+      const isWorking = lower.includes("esc to interrupt");
+
+      if (isWorking) {
+        sawSpinner = true;
+      } else if (sawSpinner) {
+        // Spinner appeared and is now gone — task is complete
+        return { done: true, output };
+      }
+    }
+
+    spawnSync("sleep", [String(intervalSec)]);
+  }
+
+  // Timed out — return last capture
+  const finalOutput = capturePane(job.tmuxSession!, { lines: 50 });
+  return { done: false, output: finalOutput };
+}
