@@ -72,7 +72,7 @@ function waitForCodexReady(
   pollInterval: number = 2
 ): void {
   for (let i = 0; i < maxAttempts; i++) {
-    const screen = capturePane(sessionName);
+    const screen = capturePaneUnchecked(sessionName);
     if (!screen) {
       spawnSync("sleep", [String(pollInterval)]);
       continue;
@@ -179,13 +179,9 @@ export function createSession(options: {
 }
 
 /**
- * Send text + Enter to a session (for chat input)
+ * Send text + Enter to a session (unchecked — skips sessionExists guard)
  */
-export function sendMessage(sessionName: string, message: string): boolean {
-  if (!sessionExists(sessionName)) {
-    return false;
-  }
-
+export function sendMessageUnchecked(sessionName: string, message: string): boolean {
   try {
     const escapedMessage = message.replace(/'/g, "'\\''");
     execSync(`tmux send-keys -t "${sessionName}" '${escapedMessage}'`, {
@@ -202,6 +198,31 @@ export function sendMessage(sessionName: string, message: string): boolean {
 }
 
 /**
+ * Send text + Enter to a session (for chat input)
+ */
+export function sendMessage(sessionName: string, message: string): boolean {
+  if (!sessionExists(sessionName)) {
+    return false;
+  }
+
+  return sendMessageUnchecked(sessionName, message);
+}
+
+/**
+ * Send raw keystrokes without Enter (unchecked — skips sessionExists guard)
+ */
+export function sendKeysUnchecked(sessionName: string, keys: string): boolean {
+  try {
+    execSync(`tmux send-keys -t "${sessionName}" ${keys}`, {
+      stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Send raw keystrokes without Enter (for TUI navigation: arrows, numbers, Escape, Tab, Enter)
  */
 export function sendKeys(sessionName: string, keys: string): boolean {
@@ -209,10 +230,15 @@ export function sendKeys(sessionName: string, keys: string): boolean {
     return false;
   }
 
+  return sendKeysUnchecked(sessionName, keys);
+}
+
+/**
+ * Send control sequences (unchecked — skips sessionExists guard)
+ */
+export function sendControlUnchecked(sessionName: string, key: string): boolean {
   try {
-    execSync(`tmux send-keys -t "${sessionName}" ${keys}`, {
-      stdio: "pipe",
-    });
+    execSync(`tmux send-keys -t "${sessionName}" ${key}`, { stdio: "pipe" });
     return true;
   } catch {
     return false;
@@ -227,25 +253,16 @@ export function sendControl(sessionName: string, key: string): boolean {
     return false;
   }
 
-  try {
-    execSync(`tmux send-keys -t "${sessionName}" ${key}`, { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
+  return sendControlUnchecked(sessionName, key);
 }
 
 /**
- * Capture the current pane content
+ * Capture the current pane content (unchecked — skips sessionExists guard)
  */
-export function capturePane(
+export function capturePaneUnchecked(
   sessionName: string,
   options: { lines?: number; start?: number } = {}
 ): string | null {
-  if (!sessionExists(sessionName)) {
-    return null;
-  }
-
   try {
     let cmd = `tmux capture-pane -t "${sessionName}" -p`;
 
@@ -270,13 +287,23 @@ export function capturePane(
 }
 
 /**
- * Get the full scrollback buffer
+ * Capture the current pane content
  */
-export function captureFullHistory(sessionName: string): string | null {
+export function capturePane(
+  sessionName: string,
+  options: { lines?: number; start?: number } = {}
+): string | null {
   if (!sessionExists(sessionName)) {
     return null;
   }
 
+  return capturePaneUnchecked(sessionName, options);
+}
+
+/**
+ * Get the full scrollback buffer (unchecked — skips sessionExists guard)
+ */
+export function captureFullHistoryUnchecked(sessionName: string): string | null {
   try {
     const output = execSync(
       `tmux capture-pane -t "${sessionName}" -p -S -`,
@@ -292,17 +319,32 @@ export function captureFullHistory(sessionName: string): string | null {
   }
 }
 
-export function killSession(sessionName: string): boolean {
+/**
+ * Get the full scrollback buffer
+ */
+export function captureFullHistory(sessionName: string): string | null {
   if (!sessionExists(sessionName)) {
-    return false;
+    return null;
   }
 
+  return captureFullHistoryUnchecked(sessionName);
+}
+
+export function killSessionUnchecked(sessionName: string): boolean {
   try {
     execSync(`tmux kill-session -t "${sessionName}"`, { stdio: "pipe" });
     return true;
   } catch {
     return false;
   }
+}
+
+export function killSession(sessionName: string): boolean {
+  if (!sessionExists(sessionName)) {
+    return false;
+  }
+
+  return killSessionUnchecked(sessionName);
 }
 
 export function listSessions(): TmuxSession[] {
@@ -365,7 +407,7 @@ export function watchSession(
   const interval = setInterval(() => {
     if (!running) return;
 
-    const content = capturePane(sessionName, { lines: 100 });
+    const content = capturePaneUnchecked(sessionName, { lines: 100 });
     if (content && content !== lastContent) {
       const newContent = content.replace(lastContent, "").trim();
       if (newContent) {

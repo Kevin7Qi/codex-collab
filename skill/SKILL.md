@@ -15,205 +15,180 @@ codex-collab is a bridge between Claude and Codex. It manages Codex sessions in 
 
 ## Collaboration Modes
 
-These are examples — the user can define their own:
-
-- **Pair programming** — You work on code, send it to Codex for review. Or Codex implements while you watch and steer via `capture` + `send`.
-- **Code review** — Use Codex's built-in `/review` command (see workflow below).
+- **Code review** — Single-command `review` or manual step-by-step (see below).
+- **Pair programming** — You work on code, Codex reviews. Or Codex implements while you steer via `send`.
 - **Plan review** — Draft a plan, send it to Codex for feedback, iterate.
 - **Parallel work** — You and Codex work on different parts simultaneously. Start multiple jobs.
 - **Research** — Spin up a read-only Codex session to investigate something while you continue other work.
 
-## Code Review with `/review`
+## Code Review (Recommended: Single Command)
 
-Codex has a built-in `/review` command with a TUI menu. Use an interactive session to drive it:
-
-### `/review` Menu
-
-When you send `/review`, Codex shows 4 presets:
-
-| # | Preset | What it does | Next step |
-|---|--------|--------------|-----------|
-| 1 | Review against a base branch (PR Style) | Diffs current branch vs a base | Searchable branch picker → Enter to confirm |
-| 2 | Review uncommitted changes | Reviews `git diff` (staged + unstaged) | Starts immediately |
-| 3 | Review a commit | Reviews a single commit's changes | Searchable commit picker → Enter to confirm |
-| 4 | Custom review instructions | Reviews with your own focus prompt | Text input for custom instructions |
-
-Navigation: **Down/Up** to move between options, **Enter** to select, **Escape** to go back.
-
-### Example: PR-style review against a base branch
+The `review` command handles the entire review workflow in one call:
 
 ```bash
-# 1. Start interactive session in the project directory
+# PR-style review against main (default)
+codex-collab review -d /path/to/project --content-only
+
+# Review uncommitted changes
+codex-collab review --mode uncommitted -d /path/to/project --content-only
+
+# Review a specific commit
+codex-collab review --mode commit --ref abc1234 -d /path/to/project --content-only
+
+# Custom review focus
+codex-collab review "Focus on security issues" -d /path/to/project --content-only
+
+# Reuse an existing session
+codex-collab review --reuse <id> "Check error handling" -d /path/to/project --content-only
+```
+
+Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
+
+**Always run reviews in the background** — they take 5-15 minutes:
+
+```bash
+# Via Bash tool with run_in_background=true
+codex-collab review -d /path/to/project --content-only
+# Continue working on other things...
+```
+
+### Manual Step-by-Step Review (Fallback)
+
+For fine-grained control over the review TUI, use an interactive session:
+
+```bash
+# Start interactive session
 codex-collab start --interactive -s read-only -d /path/to/project
 
-# 2. Send the /review command
+# Send /review and navigate the menu
 codex-collab send <id> "/review"
+codex-collab send-keys <id> Enter           # Select option 1 (PR-style)
+codex-collab send-keys <id> Enter           # Accept default branch (main)
 
-# 3. Wait for the menu, then capture to see it
-codex-collab capture <id> --strip-ansi
+# Wait for completion in the background
+codex-collab wait <id>
 
-# 4. Option 1 is already selected (default), press Enter
-codex-collab send-keys <id> Enter
-
-# 5. Branch picker appears — capture to see branches, Enter to confirm default (main)
-codex-collab capture <id> --strip-ansi
-codex-collab send-keys <id> Enter
-
-# 6. Wait for the review to finish in the background (can take 5-15 minutes)
-codex-collab wait <id> --strip-ansi   # run in background
-
-# 7. When done, get the full review output:
-codex-collab output <id> --strip-ansi
+# Read results
+codex-collab output <id> --content-only
 ```
 
-### Example: Review uncommitted changes
+## Context Efficiency
+
+These patterns minimize context window waste:
+
+- **Use `--content-only`** when reading output — strips TUI chrome (banner, tips, shortcuts, idle prompt). Implies `--strip-ansi`.
+- **Use `output --content-only`** to read results, NOT `capture`. Output gets the full scrollback; capture gets only the visible pane.
+- **Run `review` and `wait` in the background** (Bash tool `run_in_background`). They block otherwise.
+- **Don't `capture` repeatedly for polling** — `wait` handles that internally. One `wait` then one `output` is the pattern.
+- **`wait` prints only a status line** (`Done in Xm Ys`) — it no longer dumps the capture. Read results separately with `output`.
+
+### Optimal review pattern:
 
 ```bash
-codex-collab start --interactive -s read-only -d /path/to/project
-codex-collab send <id> "/review"
-codex-collab capture <id> --strip-ansi
-# Navigate to option 2
-codex-collab send-keys <id> Down
-codex-collab send-keys <id> Enter
-# Wait for completion
-codex-collab wait <id> --strip-ansi
-codex-collab output <id> --strip-ansi
+# 1. Start review in background
+codex-collab review -d /project --content-only   # run_in_background=true
+
+# 2. When background task finishes, the output is the review
+# No separate output/capture needed — review prints results directly
 ```
 
-### Example: Review a specific commit
+### Optimal prompted task pattern:
 
 ```bash
-codex-collab start --interactive -s read-only -d /path/to/project
-codex-collab send <id> "/review"
-codex-collab capture <id> --strip-ansi
-# Navigate to option 3
-codex-collab send-keys <id> Down
-codex-collab send-keys <id> Down
-codex-collab send-keys <id> Enter
-# Searchable commit picker appears — capture to see, type to search, Enter to select
-codex-collab capture <id> --strip-ansi
-codex-collab send-keys <id> Enter
+# 1. Start task
+codex-collab start "implement X" -d /project
+
+# 2. Wait in background
+codex-collab wait <id>                           # run_in_background=true
+
+# 3. Read results when done
+codex-collab output <id> --content-only
 ```
 
-### Example: Custom review instructions
+## Session Reuse
+
+Prefer reusing sessions over starting fresh to save startup time and reduce resource waste.
+
+| Situation | Action |
+|-----------|--------|
+| Same project, session running | `codex-collab reset <id>` then reuse |
+| Same project, want review | `codex-collab review --reuse <id> -d /project` |
+| Different project | Start new session |
+| Session crashed / stuck | `codex-collab kill <id>` then start new |
+
+Before starting a new session, check for reusable ones:
 
 ```bash
-# Shortcut: pass instructions directly to /review (skips the menu)
-codex-collab start --interactive -s read-only -d /path/to/project
-codex-collab send <id> "/review Focus on security issues and shell injection risks"
-# Wait for completion
-codex-collab wait <id> --strip-ansi
-codex-collab output <id> --strip-ansi
+codex-collab jobs          # Look for running interactive sessions in the same project
+codex-collab reset <id>    # Clear context with /new
 ```
 
-### Waiting for Review Completion
-
-Codex reviews are thorough and can take **5-15 minutes**. Use the `wait` command in the background so you can continue working:
-
-```bash
-# Run wait in the background (via Bash tool with run_in_background)
-codex-collab wait <id> --strip-ansi
-# Continue doing other work while codex reviews...
-# Check the background task output when notified it's done
-```
-
-The full review output is available via `codex-collab output <id> --strip-ansi` once complete.
+The `reset` command sends `/new` to an existing session, clearing Codex's context without killing the process. This is faster than starting a fresh session.
 
 ## Waiting for Completion
 
-Use the `wait` command to block until codex finishes. **Run this in the background** so you can continue other work while codex is busy:
-
 ```bash
 # Wait for codex to finish (default: 900s timeout, 30s poll interval)
-codex-collab wait <id> --strip-ansi
+codex-collab wait <id>
 
 # Custom timeout and interval
-codex-collab wait <id> --timeout 1800 --interval 60 --strip-ansi
+codex-collab wait <id> --timeout 1800 --interval 60
 ```
 
-The `wait` command polls `capture` internally, checking for the spinner (`esc to interrupt`) to disappear. It prints the final capture output when done, or exits with code 1 on timeout.
+`wait` polls internally, checking for the spinner to disappear. It prints only a status line to stderr (`Done in Xm Ys` or `Timed out after Xm Ys`). Use `output` to read actual results.
 
-**Important**: For long-running tasks (reviews, complex prompts), always run `wait` in the background rather than blocking. This lets you continue working on other things while codex processes.
+**Always run `wait` in the background** for long tasks.
 
 ## CLI Reference
+
+### Review
+
+```bash
+codex-collab review [options]                     # PR-style (default)
+codex-collab review --mode uncommitted [options]   # Uncommitted changes
+codex-collab review --mode commit [options]        # Latest commit
+codex-collab review --mode commit --ref <hash>     # Specific commit
+codex-collab review "instructions" [options]       # Custom review
+codex-collab review --reuse <id> [options]         # Reuse existing session
+```
 
 ### Starting Sessions
 
 ```bash
-# Start with a prompt (Codex begins working immediately)
-codex-collab start "implement the login form" -d /path/to/project
-
-# Start interactive (no auto-prompt — you navigate the TUI)
+codex-collab start "prompt" -d /path/to/project
 codex-collab start --interactive -d /path/to/project
-
-# With file context
-codex-collab start "review these files" -f "src/**/*.ts" -d /path/to/project
-
-# With codebase map
-codex-collab start "understand the architecture" --map -d /path/to/project
-
-# Read-only sandbox
-codex-collab start "investigate the bug" -s read-only -d /path/to/project
+codex-collab start "review these" -f "src/**/*.ts" -d /project
+codex-collab start "investigate" -s read-only -d /project
 ```
 
-### Seeing What Codex Shows
+### Reading Output
 
 ```bash
-# Capture the current terminal screen (default: 50 lines)
-codex-collab capture <id>
-
-# Capture more lines
-codex-collab capture <id> 100
-
-# Strip ANSI codes for clean text
-codex-collab capture <id> --strip-ansi
-
-# Full session output (scrollback)
-codex-collab output <id>
-
-# Wait for codex to finish working
-codex-collab wait <id> --strip-ansi
-
-# Stream updates
-codex-collab watch <id>
+codex-collab capture <id> --content-only     # Current screen (clean)
+codex-collab output <id> --content-only      # Full scrollback (clean)
+codex-collab wait <id>                       # Wait for completion (status only)
 ```
 
 ### Sending Input
 
 ```bash
-# Send a chat message (text + Enter)
-codex-collab send <id> "please also check error handling"
-
-# Send raw keystrokes (no Enter appended — for TUI navigation)
-codex-collab send-keys <id> Down
-codex-collab send-keys <id> Up
+codex-collab send <id> "message"             # Text + Enter
+codex-collab send-keys <id> Down             # Raw keystroke
 codex-collab send-keys <id> Enter
-codex-collab send-keys <id> Escape
-codex-collab send-keys <id> Tab
-
-# Send control sequences
-codex-collab send-control <id> C-c   # Ctrl+C (interrupt)
-codex-collab send-control <id> C-d   # Ctrl+D (EOF)
+codex-collab send-control <id> C-c           # Ctrl+C
 ```
 
-### Job Management
+### Session Management
 
 ```bash
-# List jobs
-codex-collab jobs
-codex-collab jobs --json
-
-# Job status
-codex-collab status <id>
-
-# Kill a running job
-codex-collab kill <id>
-
-# Clean old completed jobs
-codex-collab clean
-
-# Get tmux attach command
-codex-collab attach <id>
+codex-collab reset <id>                      # Send /new (clear context)
+codex-collab kill <id>                       # Kill session
+codex-collab jobs                            # List jobs
+codex-collab jobs --json                     # List jobs (JSON)
+codex-collab status <id>                     # Job details
+codex-collab attach <id>                     # tmux attach command
+codex-collab clean                           # Remove old jobs
+codex-collab health                          # Check prerequisites
 ```
 
 ### Options
@@ -226,36 +201,24 @@ codex-collab attach <id>
 | `-f, --file <glob>` | Include files matching glob (repeatable) |
 | `-d, --dir <path>` | Working directory |
 | `--map` | Include codebase map |
-| `--dry-run` | Show prompt without executing |
 | `--strip-ansi` | Remove ANSI codes from output |
+| `--content-only` | Strip TUI chrome (implies --strip-ansi) |
+| `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
+| `--ref <hash>` | Commit ref for --mode commit |
+| `--reuse <id>` | Reuse existing session for review |
+| `--timeout <sec>` | Wait/review timeout (default: 900) |
+| `--interval <sec>` | Poll interval (default: 30) |
 | `--interactive` | Start in interactive TUI mode |
 | `--json` | JSON output (jobs command) |
 
-### Health Check
-
-```bash
-codex-collab health
-```
-
-## Interactive TUI Workflow
-
-When using `--interactive`, Codex starts with an empty input. You navigate the TUI with `send-keys`:
-
-1. `codex-collab start --interactive -d /path/to/project`
-2. `codex-collab capture <id> --strip-ansi` — see what's on screen
-3. `codex-collab send-keys <id> Down` — navigate a menu
-4. `codex-collab send-keys <id> Enter` — select an option
-5. `codex-collab send <id> "your message"` — type and submit text
-
-This pattern works for all Codex TUI interactions: `/review`, `/compact`, model switching, etc.
-
 ## Tips
 
-- **Always use `--strip-ansi`** when reading capture/output programmatically. Raw terminal output contains ANSI escape codes that are hard to parse.
-- **Codex is meticulous.** Reviews and complex tasks take 5-15 minutes. Don't poll too aggressively — check every 30-60 seconds.
-- **Use `-s read-only`** for reviews and research. Only use `workspace-write` or `danger-full-access` when Codex needs to modify files.
+- **Always use `--content-only`** when reading output programmatically. It strips ANSI codes AND TUI chrome.
+- **Codex is meticulous.** Reviews take 5-15 minutes. Run in background.
+- **Use `-s read-only`** for reviews and research.
 - **Use `-d`** to set the working directory. Codex operates in the directory it was started in.
 - **Multiple concurrent sessions** are supported. Each gets its own tmux session and job ID.
+- **Reuse sessions** when working on the same project repeatedly. `reset` is much faster than `start`.
 
 ## Prerequisites
 

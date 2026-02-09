@@ -19,8 +19,12 @@ import {
   getJobFullOutput,
   getAttachCommand,
   waitForJob,
+  resetJob,
+  findReusableJob,
+  runReview,
   Job,
   getJobsJson,
+  type ReviewMode,
 } from "./jobs.ts";
 import {
   loadFiles,
@@ -34,6 +38,8 @@ const HELP = `
 codex-collab — Claude + Codex collaboration bridge
 
 Usage:
+  codex-collab review [options]               Code review (PR-style by default)
+  codex-collab review "instructions" [options] Custom review with specific focus
   codex-collab start "prompt" [options]       Start a Codex session with a prompt
   codex-collab start --interactive [options]   Start a session without auto-prompt (TUI mode)
   codex-collab send <id> "message"            Send text + Enter to a session
@@ -43,6 +49,7 @@ Usage:
   codex-collab output <id>                    Full session output
   codex-collab wait <id>                      Wait for codex to finish (poll-based)
   codex-collab watch <id>                     Stream output updates
+  codex-collab reset <id>                     Send /new to clear session context
   codex-collab jobs [--json]                  List jobs
   codex-collab status <id>                    Job status
   codex-collab attach <id>                    Print tmux attach command
@@ -59,33 +66,50 @@ Options:
   --map                      Include codebase map if available
   --dry-run                  Show prompt without executing
   --strip-ansi               Remove ANSI escape codes from output
+  --content-only             Strip TUI chrome (banner, tips, shortcuts) from output
+                             (implies --strip-ansi)
   --json                     Output JSON (jobs command only)
   --interactive              Start in interactive TUI mode (no auto-prompt)
   --timeout <seconds>        Wait timeout in seconds (default: 900)
   --interval <seconds>       Wait poll interval in seconds (default: 30)
+  --mode <mode>              Review mode: pr, uncommitted, commit, custom (default: pr)
+  --ref <hash>               Commit ref for --mode commit
+  --reuse <id>               Reuse an existing session for review
   --limit <n>                Limit jobs shown
   --all                      Show all jobs
   -h, --help                 Show this help
 
 Examples:
+  # Code review (PR-style against main)
+  codex-collab review -d /path/to/project --content-only
+
+  # Review uncommitted changes
+  codex-collab review --mode uncommitted -d /path/to/project --content-only
+
+  # Review a specific commit
+  codex-collab review --mode commit --ref abc1234 -d /path/to/project
+
+  # Custom review focus
+  codex-collab review "Focus on security issues" -d /path/to/project
+
+  # Reuse an existing session
+  codex-collab review --reuse abc123 "Check error handling"
+
+  # Reset a session (clear context with /new)
+  codex-collab reset abc123
+
   # Start a prompted session
   codex-collab start "Review this code for security issues" -f "src/**/*.ts"
 
   # Start an interactive session for TUI navigation
   codex-collab start --interactive -d /path/to/project
 
-  # See what Codex is showing
-  codex-collab capture abc123
+  # See what Codex is showing (clean output)
+  codex-collab capture abc123 --content-only
 
-  # Send a chat message
-  codex-collab send abc123 "Also check the auth module"
-
-  # Send raw keystrokes (TUI navigation)
-  codex-collab send-keys abc123 Down
-  codex-collab send-keys abc123 Enter
-
-  # Send Ctrl+C
-  codex-collab send-control abc123 C-c
+  # Wait for completion, then read results separately
+  codex-collab wait abc123
+  codex-collab output abc123 --content-only
 `;
 
 interface Options {
@@ -98,12 +122,16 @@ interface Options {
   parentSessionId: string | null;
   dryRun: boolean;
   stripAnsi: boolean;
+  contentOnly: boolean;
   json: boolean;
   interactive: boolean;
   timeout: number;
   interval: number;
   jobsLimit: number | null;
   jobsAll: boolean;
+  reviewMode: ReviewMode;
+  reviewRef: string | null;
+  reuseJobId: string | null;
 }
 
 function stripAnsiCodes(text: string): string {
@@ -112,6 +140,68 @@ function stripAnsiCodes(text: string): string {
     .replace(/\x1b\][^\x07]*\x07/g, "")
     .replace(/\r/g, "")
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
+}
+
+function extractContent(text: string): string {
+  const lines = text.split('\n');
+  const result: string[] = [];
+  let inBanner = false;
+
+  let inTip = false;
+
+  for (const line of lines) {
+    // Skip banner block (╭ through ╰ inclusive)
+    if (line.trimStart().startsWith('╭')) {
+      inBanner = true;
+      continue;
+    }
+    if (inBanner) {
+      if (line.trimStart().startsWith('╰')) {
+        inBanner = false;
+      }
+      continue;
+    }
+
+    // Skip tip lines (including wrapped continuations)
+    if (/^\s*Tip:/.test(line)) {
+      inTip = true;
+      continue;
+    }
+    if (inTip) {
+      // Continuation: indented, not a content marker (›, •, ─)
+      if (line.trim() === '' || (/^\s/.test(line) && !/^\s*[›•─]/.test(line))) {
+        continue;
+      }
+      inTip = false;
+    }
+
+    // Skip shortcuts/context line
+    if (line.includes('? for shortcuts') || /\d+%\s*context left/.test(line)) continue;
+
+    result.push(line);
+  }
+
+  // Remove trailing idle prompt placeholder and blank lines
+  while (result.length > 0) {
+    const last = result[result.length - 1];
+    if (last.trim() === '' || /^\s*›/.test(last)) {
+      result.pop();
+    } else {
+      break;
+    }
+  }
+
+  // Remove leading empty lines
+  while (result.length > 0 && result[0].trim() === '') {
+    result.shift();
+  }
+
+  // Remove trailing empty lines
+  while (result.length > 0 && result[result.length - 1].trim() === '') {
+    result.pop();
+  }
+
+  return result.join('\n');
 }
 
 function parseArgs(args: string[]): {
@@ -129,12 +219,16 @@ function parseArgs(args: string[]): {
     parentSessionId: null,
     dryRun: false,
     stripAnsi: false,
+    contentOnly: false,
     json: false,
     interactive: false,
     timeout: 900,
     interval: 30,
     jobsLimit: config.jobsListLimit,
     jobsAll: false,
+    reviewMode: "pr" as ReviewMode,
+    reviewRef: null,
+    reuseJobId: null,
   };
 
   const positional: string[] = [];
@@ -182,6 +276,8 @@ function parseArgs(args: string[]): {
       options.dryRun = true;
     } else if (arg === "--strip-ansi") {
       options.stripAnsi = true;
+    } else if (arg === "--content-only") {
+      options.contentOnly = true;
     } else if (arg === "--json") {
       options.json = true;
     } else if (arg === "--interactive") {
@@ -210,6 +306,23 @@ function parseArgs(args: string[]): {
       options.jobsLimit = Math.floor(parsed);
     } else if (arg === "--all") {
       options.jobsAll = true;
+    } else if (arg === "--mode") {
+      if (i + 1 >= args.length) { console.error("--mode requires a value"); process.exit(1); }
+      const mode = args[++i] as ReviewMode;
+      const validModes: ReviewMode[] = ["pr", "uncommitted", "commit", "custom"];
+      if (validModes.includes(mode)) {
+        options.reviewMode = mode;
+      } else {
+        console.error(`Invalid review mode: ${mode}`);
+        console.error(`Valid options: ${validModes.join(", ")}`);
+        process.exit(1);
+      }
+    } else if (arg === "--ref") {
+      if (i + 1 >= args.length) { console.error("--ref requires a value"); process.exit(1); }
+      options.reviewRef = args[++i];
+    } else if (arg === "--reuse") {
+      if (i + 1 >= args.length) { console.error("--reuse requires a value"); process.exit(1); }
+      options.reuseJobId = args[++i];
     } else if (!arg.startsWith("-")) {
       if (!command) {
         command = arg;
@@ -527,7 +640,9 @@ async function main() {
         let output = getJobOutput(positional[0], lines);
 
         if (output) {
-          if (options.stripAnsi) {
+          if (options.contentOnly) {
+            output = extractContent(stripAnsiCodes(output));
+          } else if (options.stripAnsi) {
             output = stripAnsiCodes(output);
           }
           console.log(output);
@@ -557,29 +672,17 @@ async function main() {
           `Waiting for job ${jobId} to finish (timeout: ${options.timeout}s, poll interval: ${options.interval}s)...`
         );
 
+        const waitStart = Date.now();
         const result = waitForJob(jobId, {
           timeoutSec: options.timeout,
           intervalSec: options.interval,
         });
+        const elapsed = Date.now() - waitStart;
 
         if (result.done) {
-          console.error("Done.");
-          if (result.output) {
-            let output = result.output;
-            if (options.stripAnsi) {
-              output = stripAnsiCodes(output);
-            }
-            console.log(output);
-          }
+          console.error(`Done in ${formatDuration(elapsed)}`);
         } else {
-          console.error("Timed out waiting for completion.");
-          if (result.output) {
-            let output = result.output;
-            if (options.stripAnsi) {
-              output = stripAnsiCodes(output);
-            }
-            console.log(output);
-          }
+          console.error(`Timed out after ${formatDuration(elapsed)}`);
           process.exit(1);
         }
         break;
@@ -593,7 +696,9 @@ async function main() {
 
         let output = getJobFullOutput(positional[0]);
         if (output) {
-          if (options.stripAnsi) {
+          if (options.contentOnly) {
+            output = extractContent(stripAnsiCodes(output));
+          } else if (options.stripAnsi) {
             output = stripAnsiCodes(output);
           }
           console.log(output);
@@ -772,6 +877,82 @@ async function main() {
           console.log(`Deleted job: ${positional[0]}`);
         } else {
           console.error(`Could not delete job: ${positional[0]}`);
+          process.exit(1);
+        }
+        break;
+      }
+
+      case "review": {
+        if (!isTmuxAvailable()) {
+          console.error("Error: tmux is required but not installed");
+          process.exit(1);
+        }
+
+        // If positional args provided and mode not explicitly set, treat as custom instructions
+        let mode = options.reviewMode;
+        let instructions: string | undefined;
+        if (positional.length > 0 && mode === "pr") {
+          mode = "custom";
+          instructions = positional.join(" ");
+        } else if (mode === "custom") {
+          instructions = positional.join(" ") || undefined;
+          if (!instructions) {
+            console.error("Error: Custom review mode requires instructions");
+            process.exit(1);
+          }
+        }
+
+        console.error(`Starting ${mode} review in ${options.dir}...`);
+
+        const reviewResult = runReview({
+          mode,
+          instructions,
+          ref: options.reviewRef ?? undefined,
+          cwd: options.dir,
+          model: options.model,
+          reasoningEffort: options.reasoning,
+          timeoutSec: options.timeout,
+          intervalSec: options.interval,
+          reuseJobId: options.reuseJobId ?? undefined,
+        });
+
+        if (reviewResult.error) {
+          console.error(`Error: ${reviewResult.error}`);
+          process.exit(1);
+        }
+
+        console.error(`Job: ${reviewResult.jobId}`);
+
+        if (reviewResult.done) {
+          console.error("Review complete.");
+          if (reviewResult.output) {
+            let output = reviewResult.output;
+            if (options.contentOnly) {
+              output = extractContent(stripAnsiCodes(output));
+            } else if (options.stripAnsi) {
+              output = stripAnsiCodes(output);
+            }
+            console.log(output);
+          }
+        } else {
+          console.error("Review timed out. Check output with:");
+          console.error(`  codex-collab output ${reviewResult.jobId} --content-only`);
+          process.exit(1);
+        }
+        break;
+      }
+
+      case "reset": {
+        if (positional.length === 0) {
+          console.error("Error: No job ID provided");
+          process.exit(1);
+        }
+
+        if (resetJob(positional[0])) {
+          console.log(`Reset job: ${positional[0]} (sent /new)`);
+        } else {
+          console.error(`Could not reset job: ${positional[0]}`);
+          console.error("Job may not be running or tmux session not found");
           process.exit(1);
         }
         break;
