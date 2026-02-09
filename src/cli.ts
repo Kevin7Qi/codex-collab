@@ -20,7 +20,6 @@ import {
   getAttachCommand,
   waitForJob,
   resetJob,
-  findReusableJob,
   runReview,
   Job,
   getJobsJson,
@@ -33,6 +32,7 @@ import {
   loadCodebaseMap,
 } from "./files.ts";
 import { isTmuxAvailable, listSessions } from "./tmux.ts";
+import { resolve } from "path";
 
 const HELP = `
 codex-collab — Claude + Codex collaboration bridge
@@ -142,7 +142,39 @@ function stripAnsiCodes(text: string): string {
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
 }
 
-function extractContent(text: string): string {
+/**
+ * Word-wrap a single line to `width`, preserving leading indentation.
+ * Continuation lines are indented to the same level as the original.
+ */
+function wrapLine(line: string, width: number): string {
+  if (line.length <= width) return line;
+
+  const indent = line.match(/^(\s*)/)![1];
+  const content = line.slice(indent.length);
+
+  // Don't wrap lines that look like structural/code content
+  // (box-drawing, tree connectors, separators)
+  if (/^[│└┌┐┘─╭╰…]/.test(content)) return line;
+
+  const words = content.split(/(\s+)/);
+  const lines: string[] = [];
+  let current = indent;
+
+  for (const word of words) {
+    if (current.length + word.length > width && current.trim() !== '') {
+      lines.push(current.trimEnd());
+      current = indent + word.trimStart();
+    } else {
+      current += word;
+    }
+  }
+  if (current.trim() !== '') lines.push(current.trimEnd());
+
+  return lines.join('\n');
+}
+
+function extractContent(text: string, width?: number): string {
+  const cols = width ?? process.stdout.columns ?? 80;
   const lines = text.split('\n');
   const result: string[] = [];
   let inBanner = false;
@@ -178,7 +210,7 @@ function extractContent(text: string): string {
     // Skip shortcuts/context line
     if (line.includes('? for shortcuts') || /\d+%\s*context left/.test(line)) continue;
 
-    result.push(line);
+    result.push(wrapLine(line, cols));
   }
 
   // Remove trailing idle prompt placeholder and blank lines
@@ -267,7 +299,7 @@ function parseArgs(args: string[]): {
     } else if (arg === "-f" || arg === "--file") {
       options.files.push(args[++i]);
     } else if (arg === "-d" || arg === "--dir") {
-      options.dir = args[++i];
+      options.dir = resolve(args[++i]);
     } else if (arg === "--parent-session") {
       options.parentSessionId = args[++i] ?? null;
     } else if (arg === "--map") {

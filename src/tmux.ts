@@ -131,8 +131,12 @@ export function createSession(options: {
     // Model args are unquoted inside the double quotes (they're simple alphanumeric values).
     const shellCmd = `script -q "${logFile}" -c "codex ${codexArgs}"; echo "\\n\\n[codex-collab: Session complete. Press Enter to close.]"; read`;
 
+    // Use -x 220 so the codex TUI doesn't truncate spinner lines.
+    // The spinner suffix "esc to interrupt" must be visible for waitForJob
+    // to detect work-in-progress; at the default 80 columns, long task
+    // descriptions push it past the pane width.
     execSync(
-      `tmux new-session -d -s "${sessionName}" -c "${options.cwd}" '${shellCmd}'`,
+      `tmux new-session -d -s "${sessionName}" -x 220 -y 50 -c "${options.cwd}" '${shellCmd}'`,
       { stdio: "pipe", cwd: options.cwd }
     );
 

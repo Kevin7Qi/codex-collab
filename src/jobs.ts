@@ -497,6 +497,11 @@ export function resetJob(jobId: string): boolean {
   if (!job || !job.tmuxSession) return false;
   if (job.status !== "running") return false;
 
+  // Verify codex is still running, not sitting at the post-exit "read" prompt.
+  // Prompted jobs leave tmux alive at `read` after codex exits.
+  const screen = capturePaneUnchecked(job.tmuxSession, { lines: 10 });
+  if (!screen || screen.includes("[codex-collab: Session complete")) return false;
+
   if (!sendMessageUnchecked(job.tmuxSession, "/new")) return false;
 
   job.prompt = "(reset)";
@@ -506,22 +511,6 @@ export function resetJob(jobId: string): boolean {
   job.error = undefined;
   saveJob(job);
   return true;
-}
-
-export function findReusableJob(cwd: string): Job | null {
-  const jobs = listJobs();
-  for (const job of jobs) {
-    if (
-      job.status === "running" &&
-      job.interactive &&
-      job.cwd === cwd &&
-      job.tmuxSession &&
-      sessionExists(job.tmuxSession)
-    ) {
-      return job;
-    }
-  }
-  return null;
 }
 
 export function getAttachCommand(jobId: string): string | null {
@@ -573,13 +562,17 @@ export function waitForJob(
     if (isWorking) {
       sawSpinner = true;
     } else if (sawSpinner) {
-      // Spinner disappeared — confirm it's truly gone with rapid checks.
-      // Codex briefly drops the spinner between tool calls, so a single
-      // observation isn't reliable.
-      const confirmMs = 10_000;
-      const confirmInterval = 2_000;
-      const confirmDeadline = Math.min(Date.now() + confirmMs, deadline);
+      // Spinner disappeared — confirm it's truly gone.
+      // Between tool calls the spinner drops but the screen keeps changing
+      // (new tool output). After real completion the screen is static.
+      // Use screen stability to distinguish: 2 consecutive unchanged checks
+      // (~6s) means idle. Fall back to 30s max if the screen keeps changing
+      // without the spinner (edge case).
+      const confirmInterval = 3_000;
+      const confirmDeadline = Math.min(Date.now() + 30_000, deadline);
       let confirmed = true;
+      let stableCount = 0;
+      let lastScreen = output;
       while (Date.now() < confirmDeadline) {
         Bun.sleepSync(confirmInterval);
         const check = capturePaneUnchecked(job.tmuxSession, { lines: 50 });
@@ -589,9 +582,19 @@ export function waitForJob(
           confirmed = false;
           break;
         }
-        output = check; // keep freshest capture
+        if (check === lastScreen) {
+          stableCount++;
+          if (stableCount >= 2) break; // Screen unchanged for ~6s — done
+        } else {
+          stableCount = 0;
+          lastScreen = check;
+        }
+        output = check;
       }
       if (confirmed) return { done: true, output };
+      // Spinner came back — skip the main sleep and re-check immediately
+      // so we don't miss the next transition
+      continue;
     } else if (!sawSpinner && Date.now() - waitStarted > gracePeriodMs) {
       // Grace period expired and spinner was never seen.
       // Codex is at idle prompt — task completed before we started polling.
@@ -671,9 +674,12 @@ export function runReview(options: RunReviewOptions): ReviewResult {
     if (existing.status !== "running" || !sessionExists(existing.tmuxSession)) {
       return { jobId: options.reuseJobId, done: false, output: null, error: "Session is no longer running" };
     }
-    // Reset the session with /new before reusing
+    // Reset the session with /new before reusing, and clear tmux scrollback
+    // so getJobFullOutput doesn't capture stale history from prior tasks.
     sendMessageUnchecked(existing.tmuxSession, "/new");
     Bun.sleepSync(2000);
+    try { execSync(`tmux clear-history -t "${existing.tmuxSession}"`, { stdio: "pipe" }); } catch {}
+
     existing.prompt = "(review)";
     existing.startedAt = new Date().toISOString();
     existing.completedAt = undefined;
