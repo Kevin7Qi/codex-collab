@@ -406,16 +406,16 @@ function refreshJobsForDisplay(jobs: Job[]): Job[] {
   });
 }
 
-function sortJobsRunningFirst(jobs: Job[]): Job[] {
-  const statusRank: Record<Job["status"], number> = {
-    running: 0,
-    pending: 1,
-    failed: 2,
-    completed: 3,
-  };
+const STATUS_RANK: Record<Job["status"], number> = {
+  running: 0,
+  pending: 1,
+  failed: 2,
+  completed: 3,
+};
 
+function sortJobsRunningFirst(jobs: Job[]): Job[] {
   return [...jobs].sort((a, b) => {
-    const rankDiff = statusRank[a.status] - statusRank[b.status];
+    const rankDiff = STATUS_RANK[a.status] - STATUS_RANK[b.status];
     if (rankDiff !== 0) return rankDiff;
     return (
       new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -819,15 +819,9 @@ async function main() {
         if (options.json) {
           const payload = getJobsJson();
           const limit = options.jobsAll ? null : options.jobsLimit;
-          const statusRank: Record<Job["status"], number> = {
-            running: 0,
-            pending: 1,
-            failed: 2,
-            completed: 3,
-          };
           payload.jobs.sort((a, b) => {
             const rankDiff =
-              statusRank[a.status] - statusRank[b.status];
+              STATUS_RANK[a.status] - STATUS_RANK[b.status];
             if (rankDiff !== 0) return rankDiff;
             return (
               new Date(b.created_at).getTime() -

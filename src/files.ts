@@ -16,11 +16,14 @@ export async function loadFiles(
   const files: FileContent[] = [];
   const seen = new Set<string>();
 
+  const excluded = new Set<string>();
+
   for (const pattern of patterns) {
     if (pattern.startsWith("!")) {
       const negPattern = pattern.slice(1);
       const matches = await glob(negPattern, { cwd: baseDir, absolute: true });
       for (const match of matches) {
+        excluded.add(match);
         seen.delete(match);
       }
       continue;
@@ -29,7 +32,7 @@ export async function loadFiles(
     const matches = await glob(pattern, { cwd: baseDir, absolute: true });
 
     for (const match of matches) {
-      if (seen.has(match)) continue;
+      if (seen.has(match) || excluded.has(match)) continue;
 
       try {
         const stat = statSync(match);
@@ -50,7 +53,8 @@ export async function loadFiles(
     }
   }
 
-  return files;
+  // Remove any files that were later excluded by negation patterns
+  return files.filter((f) => !excluded.has(resolve(baseDir, f.path)));
 }
 
 export function estimateTokens(text: string): number {

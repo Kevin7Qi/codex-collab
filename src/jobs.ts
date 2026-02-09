@@ -11,7 +11,7 @@ import {
 import { join } from "path";
 import { config, ReasoningEffort, SandboxMode } from "./config.ts";
 import { randomBytes } from "crypto";
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 import {
   extractSessionId,
   findSessionFile,
@@ -20,12 +20,12 @@ import {
 } from "./session-parser.ts";
 import {
   createSession,
-  killSession,
   killSessionUnchecked,
   sessionExists,
   getSessionName,
   capturePaneUnchecked,
   captureFullHistoryUnchecked,
+  clearHistoryUnchecked,
   isSessionActive,
   sendMessageUnchecked,
   sendKeysUnchecked,
@@ -58,7 +58,14 @@ function generateJobId(): string {
   return randomBytes(4).toString("hex");
 }
 
+const JOB_ID_RE = /^[0-9a-f]{8}$/;
+
+function isValidJobId(jobId: string): boolean {
+  return JOB_ID_RE.test(jobId);
+}
+
 function getJobPath(jobId: string): string {
+  if (!isValidJobId(jobId)) throw new Error(`Invalid job ID: ${jobId}`);
   return join(config.jobsDir, `${jobId}.json`);
 }
 
@@ -237,11 +244,9 @@ export function deleteJob(jobId: string): boolean {
 
   try {
     unlinkSync(getJobPath(jobId));
-    try {
-      unlinkSync(join(config.jobsDir, `${jobId}.prompt`));
-    } catch {
-      // Prompt file may not exist
-    }
+    try { unlinkSync(join(config.jobsDir, `${jobId}.prompt`)); } catch {}
+    try { unlinkSync(join(config.jobsDir, `${jobId}.log`)); } catch {}
+    try { unlinkSync(join(config.jobsDir, `${jobId}.exit`)); } catch {}
     return true;
   } catch {
     return false;
@@ -359,7 +364,7 @@ export function killJob(jobId: string): boolean {
   if (!job) return false;
 
   if (job.tmuxSession) {
-    killSession(job.tmuxSession);
+    killSessionUnchecked(job.tmuxSession);
   }
 
   job.status = "failed";
@@ -460,13 +465,25 @@ export function refreshJobStatus(jobId: string): Job | null {
 
   if (job.status === "running" && job.tmuxSession) {
     if (!sessionExists(job.tmuxSession)) {
-      job.status = "completed";
       job.completedAt = new Date().toISOString();
       const logFile = join(config.jobsDir, `${jobId}.log`);
       try {
         job.result = readFileSync(logFile, "utf-8");
       } catch {
-        // No log file
+        // Log may not exist if session was killed very early
+      }
+      // The .exit file is written by the shell immediately after codex exits,
+      // before the echo/read, so it exists iff codex ran to completion.
+      const exitFile = join(config.jobsDir, `${jobId}.exit`);
+      try {
+        const exitCode = readFileSync(exitFile, "utf-8").trim();
+        job.status = exitCode === "0" ? "completed" : "failed";
+        if (exitCode !== "0") {
+          job.error = `Codex exited with code ${exitCode}`;
+        }
+      } catch {
+        job.status = "failed";
+        job.error = "Session terminated unexpectedly";
       }
       saveJob(job);
     } else {
@@ -678,7 +695,7 @@ export function runReview(options: RunReviewOptions): ReviewResult {
     // so getJobFullOutput doesn't capture stale history from prior tasks.
     sendMessageUnchecked(existing.tmuxSession, "/new");
     Bun.sleepSync(2000);
-    try { execSync(`tmux clear-history -t "${existing.tmuxSession}"`, { stdio: "pipe" }); } catch {}
+    clearHistoryUnchecked(existing.tmuxSession);
 
     existing.prompt = "(review)";
     existing.startedAt = new Date().toISOString();
@@ -761,12 +778,9 @@ export function runReview(options: RunReviewOptions): ReviewResult {
         return { jobId: job.id, done: false, output: null, error: err };
       }
       if (options.ref) {
-        // Type the ref to filter the searchable picker (without Enter)
+        // Type the ref to filter the searchable picker (literal, without Enter)
         Bun.sleepSync(500);
-        const escapedRef = options.ref.replace(/'/g, "'\\''");
-        try {
-          execSync(`tmux send-keys -t "${sessionName}" '${escapedRef}'`, { stdio: "pipe" });
-        } catch { /* session may have died */ }
+        spawnSync("tmux", ["send-keys", "-l", "-t", sessionName, options.ref], { stdio: "pipe" });
         Bun.sleepSync(1000);
         // Verify the picker found a match (it shows "no matches" if the ref is invalid)
         const filtered = capturePaneUnchecked(sessionName, { lines: 30 });
