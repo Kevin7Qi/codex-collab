@@ -25,7 +25,7 @@ echo "Installing dependencies..."
 
 # Symlink binary
 mkdir -p ~/.local/bin
-ln -sf "$REPO_DIR/bin/codex-collab" ~/.local/bin/codex-collab
+ln -sf "$REPO_DIR/src/cli.ts" ~/.local/bin/codex-collab
 echo "Linked binary to ~/.local/bin/codex-collab"
 
 # Symlink skill
@@ -43,6 +43,6 @@ if ! command -v codex-collab >/dev/null 2>&1; then
 fi
 
 echo ""
-"$REPO_DIR/bin/codex-collab" health
+"$REPO_DIR/src/cli.ts" health
 echo ""
 echo "Done. Run 'codex-collab --help' to get started."

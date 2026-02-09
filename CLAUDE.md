@@ -8,8 +8,6 @@ CLI tool for Claude + Codex collaboration via tmux sessions.
 
 ```bash
 bun run src/cli.ts --help
-# or via shell wrapper
-./bin/codex-collab --help
 codex-collab health
 ```
 
