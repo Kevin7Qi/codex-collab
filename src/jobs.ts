@@ -434,22 +434,29 @@ export function getJobFullOutput(jobId: string): string | null {
   }
 }
 
-export function cleanupOldJobs(maxAgeDays: number = 7): number {
+export function cleanupOldJobs(maxAgeDays: number = 7): { deleted: number; sessions: number } {
   const jobs = listJobs();
   const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
-  let cleaned = 0;
+  let deleted = 0;
+  let sessions = 0;
 
   for (const job of jobs) {
+    if (job.status !== "completed" && job.status !== "failed") continue;
+
+    // Kill stale tmux sessions for all completed/failed jobs
+    if (job.tmuxSession && sessionExists(job.tmuxSession)) {
+      killSessionUnchecked(job.tmuxSession);
+      sessions++;
+    }
+
+    // Delete job files only if old enough
     const jobTime = new Date(job.completedAt || job.createdAt).getTime();
-    if (
-      jobTime < cutoff &&
-      (job.status === "completed" || job.status === "failed")
-    ) {
-      if (deleteJob(job.id)) cleaned++;
+    if (jobTime < cutoff) {
+      if (deleteJob(job.id)) deleted++;
     }
   }
 
-  return cleaned;
+  return { deleted, sessions };
 }
 
 export function isJobRunning(jobId: string): boolean {

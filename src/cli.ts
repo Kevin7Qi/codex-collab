@@ -899,7 +899,9 @@ async function main() {
 
       case "clean": {
         const cleaned = cleanupOldJobs(7);
-        console.log(`Cleaned ${cleaned} old jobs`);
+        if (cleaned.sessions > 0) console.log(`Killed ${cleaned.sessions} stale sessions`);
+        if (cleaned.deleted > 0) console.log(`Deleted ${cleaned.deleted} old jobs`);
+        if (cleaned.sessions === 0 && cleaned.deleted === 0) console.log("Nothing to clean");
         break;
       }
 
