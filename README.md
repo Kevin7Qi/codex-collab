@@ -24,12 +24,16 @@ codex-collab health
 ## Quick Start
 
 ```bash
-# Code review (single command, handles everything)
-codex-collab review -d /path/to/project --content-only
-codex-collab review --mode uncommitted -d . --content-only
-codex-collab review --mode commit --ref abc1234 -d . --content-only
+# Run a prompted task (single command: start + wait + output)
+codex-collab run "what does this project do?" -s read-only --content-only
+codex-collab run --reuse <id> "now summarize the key files" --content-only
 
-# Start a prompted task
+# Code review (single command, handles everything)
+codex-collab review --content-only
+codex-collab review --mode uncommitted --content-only
+codex-collab review --mode commit --ref abc1234 --content-only
+
+# Manual start + wait + output (fallback)
 codex-collab start "refactor auth module" -d /path/to/project
 codex-collab wait <id>
 codex-collab output <id> --content-only
@@ -40,14 +44,15 @@ codex-collab send <id> "check the auth module"
 codex-collab send-keys <id> Enter
 
 # Session reuse (faster than starting fresh)
-codex-collab reset <id>
-codex-collab review --reuse <id> -d /path/to/project --content-only
+codex-collab run --reuse <id> "follow-up question" --content-only
+codex-collab review --reuse <id> --content-only
 ```
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
+| `run "prompt" [opts]` | Run a prompt: start session, wait, print output |
 | `review [opts]` | One-shot code review (PR, uncommitted, commit) |
 | `start "prompt" [opts]` | Start a Codex session with a prompt |
 | `start --interactive [opts]` | Start a session in TUI mode |

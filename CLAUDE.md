@@ -18,7 +18,7 @@ codex-collab health
 | File | Purpose |
 |------|---------|
 | `src/cli.ts` | CLI commands, argument parsing, output formatting |
-| `src/jobs.ts` | Job lifecycle, persistence, polling, review orchestration |
+| `src/jobs.ts` | Job lifecycle, persistence, polling, run/review orchestration |
 | `src/tmux.ts` | tmux session management (all via spawnSync, no shell) |
 | `src/config.ts` | Configuration constants |
 | `src/files.ts` | File loading for context injection (supports negation globs) |

@@ -15,11 +15,51 @@ codex-collab is a bridge between Claude and Codex. It manages Codex sessions in 
 
 ## Collaboration Modes
 
+- **Run** — Single-command `run` for any prompted task (research, analysis, implementation). Starts session, sends prompt, waits, returns output.
 - **Code review** — Single-command `review` or manual step-by-step (see below).
 - **Pair programming** — You work on code, Codex reviews. Or Codex implements while you steer via `send`.
 - **Plan review** — Draft a plan, send it to Codex for feedback, iterate.
 - **Parallel work** — You and Codex work on different parts simultaneously. Start multiple jobs.
 - **Research** — Spin up a read-only Codex session to investigate something while you continue other work.
+
+## Run Command (Recommended for Prompted Tasks)
+
+The `run` command handles prompted tasks in one call: starts an interactive session, sends the prompt, waits for completion, and prints output. The session stays reusable afterward.
+
+```bash
+# Research task
+codex-collab run "what does this project do?" -s read-only --content-only
+
+# Implementation task
+codex-collab run "add input validation to the login form" --content-only
+
+# Include files for context
+codex-collab run "review these files for bugs" -f "src/**/*.ts" --content-only
+
+# Reuse an existing session (faster, preserves Codex's file cache)
+codex-collab run --reuse <id> "now check the error handling" --content-only
+
+# Specify working directory (omit -d if already in the project dir)
+codex-collab run "investigate the auth module" -d /path/to/project --content-only
+```
+
+**Always run in the background** — tasks can take minutes:
+
+```bash
+# Via Bash tool with run_in_background=true
+codex-collab run "investigate X" -s read-only --content-only
+# Continue working on other things...
+```
+
+### Optimal run pattern:
+
+```bash
+# 1. Run prompt in background
+codex-collab run "investigate X" -s read-only --content-only  # run_in_background=true
+
+# 2. When background task finishes, the output is the result
+# No separate output/capture needed — run prints results directly
+```
 
 ## Code Review (Recommended: Single Command)
 
@@ -95,13 +135,12 @@ codex-collab review -d /project --content-only   # run_in_background=true
 ### Optimal prompted task pattern:
 
 ```bash
-# 1. Start task
-codex-collab start "implement X" -d /project
+# Preferred: use run (handles start + wait + output in one call)
+codex-collab run "implement X" --content-only    # run_in_background=true
 
-# 2. Wait in background
+# Fallback: manual start + wait + output
+codex-collab start "implement X"
 codex-collab wait <id>                           # run_in_background=true
-
-# 3. Read results when done
 codex-collab output <id> --content-only
 ```
 
@@ -111,8 +150,9 @@ Prefer reusing sessions over starting fresh to save startup time and reduce reso
 
 | Situation | Action |
 |-----------|--------|
-| Same project, session running | `codex-collab reset <id>` then reuse |
-| Same project, want review | `codex-collab review --reuse <id> -d /project` |
+| Same project, new prompt | `codex-collab run --reuse <id> "prompt"` |
+| Same project, want review | `codex-collab review --reuse <id>` |
+| Same project, manual control | `codex-collab reset <id>` then send |
 | Different project | Start new session |
 | Session crashed / stuck | `codex-collab kill <id>` then start new |
 
@@ -140,6 +180,15 @@ codex-collab wait <id> --timeout 1800 --interval 60
 **Always run `wait` in the background** for long tasks.
 
 ## CLI Reference
+
+### Run
+
+```bash
+codex-collab run "prompt" [options]              # New session, send prompt, wait, print output
+codex-collab run --reuse <id> "prompt" [options] # Reuse existing session
+codex-collab run "prompt" -f "src/**/*.ts"       # Include files for context
+codex-collab run "prompt" -s read-only           # Read-only sandbox
+```
 
 ### Review
 
@@ -205,7 +254,7 @@ codex-collab health                          # Check prerequisites
 | `--content-only` | Strip TUI chrome (implies --strip-ansi) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
-| `--reuse <id>` | Reuse existing session for review |
+| `--reuse <id>` | Reuse existing session (run and review) |
 | `--timeout <sec>` | Wait/review timeout (default: 900) |
 | `--interval <sec>` | Poll interval (default: 30) |
 | `--interactive` | Start in interactive TUI mode |
@@ -216,9 +265,10 @@ codex-collab health                          # Check prerequisites
 - **Always use `--content-only`** when reading output programmatically. It strips ANSI codes AND TUI chrome.
 - **Codex is meticulous.** Reviews take 5-15 minutes. Run in background.
 - **Use `-s read-only`** for reviews and research.
-- **Use `-d`** to set the working directory. Codex operates in the directory it was started in.
+- **Omit `-d` if already in the project directory** — it defaults to cwd. Only pass `-d` when the target project differs from your current directory.
 - **Multiple concurrent sessions** are supported. Each gets its own tmux session and job ID.
-- **Reuse sessions** when working on the same project repeatedly. `reset` is much faster than `start`.
+- **Reuse sessions** when working on the same project repeatedly. `run --reuse` and `review --reuse` are much faster than starting fresh.
+- **Validate Codex's findings.** After reading Codex's review or analysis output, verify each finding against the actual source code before presenting to the user. Drop false positives, note which findings you verified.
 
 ## Prerequisites
 

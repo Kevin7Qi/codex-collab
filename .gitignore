@@ -18,3 +18,6 @@ dist/
 
 # Bun
 bun.lockb
+
+# Reference projects
+.ref/

@@ -649,6 +649,93 @@ export function waitForContent(
   return null;
 }
 
+/**
+ * Reuse an existing interactive session: validate it's alive, send /new, clear history.
+ */
+function reuseSession(jobId: string): { job: Job; sessionName: string } | { error: string } {
+  const existing = loadJob(jobId);
+  if (!existing?.tmuxSession) return { error: "Job not found or no session" };
+  if (existing.status !== "running" || !sessionExists(existing.tmuxSession)) {
+    return { error: "Session is no longer running" };
+  }
+  // Guard: check Codex is still alive (not at post-exit read prompt)
+  const screen = capturePaneUnchecked(existing.tmuxSession, { lines: 10 });
+  if (!screen || screen.includes("[codex-collab: Session complete")) {
+    return { error: "Codex has exited in this session" };
+  }
+  if (!sendMessageUnchecked(existing.tmuxSession, "/new")) {
+    return { error: "Failed to send /new to reset session" };
+  }
+  Bun.sleepSync(2000);
+  clearHistoryUnchecked(existing.tmuxSession);
+  return { job: existing, sessionName: existing.tmuxSession };
+}
+
+export interface RunPromptOptions {
+  prompt: string;
+  cwd: string;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  sandbox?: SandboxMode;
+  timeoutSec?: number;
+  intervalSec?: number;
+  reuseJobId?: string;
+}
+
+export interface RunResult {
+  jobId: string;
+  done: boolean;
+  output: string | null;
+  error?: string;
+}
+
+/**
+ * Run a prompt in a single call: start (or reuse) an interactive session, send the prompt, wait, return output.
+ */
+export function runPrompt(options: RunPromptOptions): RunResult {
+  const timeoutSec = options.timeoutSec ?? 900;
+  const intervalSec = options.intervalSec ?? 30;
+
+  let job: Job;
+  let sessionName: string;
+
+  if (options.reuseJobId) {
+    const reuse = reuseSession(options.reuseJobId);
+    if ("error" in reuse) {
+      return { jobId: options.reuseJobId, done: false, output: null, error: reuse.error };
+    }
+    reuse.job.prompt = options.prompt;
+    reuse.job.startedAt = new Date().toISOString();
+    reuse.job.completedAt = undefined;
+    saveJob(reuse.job);
+    job = reuse.job;
+    sessionName = reuse.sessionName;
+  } else {
+    job = startInteractiveJob({
+      model: options.model,
+      reasoningEffort: options.reasoningEffort,
+      sandbox: options.sandbox,
+      cwd: options.cwd,
+    });
+    if (job.status === "failed" || !job.tmuxSession) {
+      return { jobId: job.id, done: false, output: null, error: job.error || "Failed to start session" };
+    }
+    sessionName = job.tmuxSession;
+  }
+
+  // Send the prompt
+  if (!sendMessageUnchecked(sessionName, options.prompt)) {
+    return { jobId: job.id, done: false, output: null, error: "Failed to send prompt to session" };
+  }
+
+  // Wait for completion (done = spinner stopped, codex is idle — session stays reusable)
+  const result = waitForJob(job.id, { timeoutSec, intervalSec });
+
+  // Fetch full scrollback on completion (pane capture truncates long output)
+  const fullOutput = result.done ? (getJobFullOutput(job.id) ?? result.output) : result.output;
+  return { jobId: job.id, done: result.done, output: fullOutput };
+}
+
 export type ReviewMode = "pr" | "uncommitted" | "commit" | "custom";
 
 export interface RunReviewOptions {
@@ -684,25 +771,16 @@ export function runReview(options: RunReviewOptions): ReviewResult {
 
   // Either reuse an existing session or start a new one
   if (options.reuseJobId) {
-    const existing = loadJob(options.reuseJobId);
-    if (!existing || !existing.tmuxSession) {
-      return { jobId: options.reuseJobId, done: false, output: null, error: "Job not found or no session" };
+    const reuse = reuseSession(options.reuseJobId);
+    if ("error" in reuse) {
+      return { jobId: options.reuseJobId, done: false, output: null, error: reuse.error };
     }
-    if (existing.status !== "running" || !sessionExists(existing.tmuxSession)) {
-      return { jobId: options.reuseJobId, done: false, output: null, error: "Session is no longer running" };
-    }
-    // Reset the session with /new before reusing, and clear tmux scrollback
-    // so getJobFullOutput doesn't capture stale history from prior tasks.
-    sendMessageUnchecked(existing.tmuxSession, "/new");
-    Bun.sleepSync(2000);
-    clearHistoryUnchecked(existing.tmuxSession);
-
-    existing.prompt = "(review)";
-    existing.startedAt = new Date().toISOString();
-    existing.completedAt = undefined;
-    saveJob(existing);
-    job = existing;
-    sessionName = existing.tmuxSession;
+    reuse.job.prompt = "(review)";
+    reuse.job.startedAt = new Date().toISOString();
+    reuse.job.completedAt = undefined;
+    saveJob(reuse.job);
+    job = reuse.job;
+    sessionName = reuse.sessionName;
     isReused = true;
   } else {
     job = startInteractiveJob({

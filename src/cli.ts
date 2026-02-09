@@ -21,6 +21,7 @@ import {
   waitForJob,
   resetJob,
   runReview,
+  runPrompt,
   Job,
   getJobsJson,
   type ReviewMode,
@@ -32,12 +33,14 @@ import {
   loadCodebaseMap,
 } from "./files.ts";
 import { isTmuxAvailable, listSessions } from "./tmux.ts";
-import { resolve } from "path";
+import { resolve, basename } from "path";
 
 const HELP = `
 codex-collab — Claude + Codex collaboration bridge
 
 Usage:
+  codex-collab run "prompt" [options]          Run a prompt and wait for output
+  codex-collab run --reuse <id> "prompt"       Reuse existing session
   codex-collab review [options]               Code review (PR-style by default)
   codex-collab review "instructions" [options] Custom review with specific focus
   codex-collab start "prompt" [options]       Start a Codex session with a prompt
@@ -74,12 +77,18 @@ Options:
   --interval <seconds>       Wait poll interval in seconds (default: 30)
   --mode <mode>              Review mode: pr, uncommitted, commit, custom (default: pr)
   --ref <hash>               Commit ref for --mode commit
-  --reuse <id>               Reuse an existing session for review
+  --reuse <id>               Reuse an existing session (run and review)
   --limit <n>                Limit jobs shown
   --all                      Show all jobs
   -h, --help                 Show this help
 
 Examples:
+  # Run a prompt (starts session, waits, prints output)
+  codex-collab run "what does this project do?" -s read-only --content-only
+
+  # Reuse an existing session
+  codex-collab run --reuse abc123 "now summarize the key files" --content-only
+
   # Code review (PR-style against main)
   codex-collab review -d /path/to/project --content-only
 
@@ -391,11 +400,12 @@ function formatJobStatus(job: Job): string {
     : "-";
 
   const status = job.status.toUpperCase().padEnd(10);
+  const dir = basename(job.cwd).slice(0, 20).padEnd(20);
   const mode = job.interactive ? "[interactive]" : "";
   const promptPreview =
     job.prompt.slice(0, 50) + (job.prompt.length > 50 ? "..." : "");
 
-  return `${job.id}  ${status}  ${elapsed.padEnd(8)}  ${job.reasoningEffort.padEnd(6)}  ${mode}${promptPreview}`;
+  return `${job.id}  ${status}  ${elapsed.padEnd(8)}  ${job.reasoningEffort.padEnd(6)}  ${dir}  ${mode}${promptPreview}`;
 }
 
 function refreshJobsForDisplay(jobs: Job[]): Job[] {
@@ -843,9 +853,9 @@ async function main() {
           console.log("No jobs");
         } else {
           console.log(
-            "ID        STATUS      ELAPSED   EFFORT  PROMPT"
+            "ID        STATUS      ELAPSED   EFFORT  DIR                   PROMPT"
           );
-          console.log("-".repeat(80));
+          console.log("-".repeat(100));
           for (const job of jobs) {
             console.log(formatJobStatus(job));
           }
@@ -979,6 +989,89 @@ async function main() {
         } else {
           console.error(`Could not reset job: ${positional[0]}`);
           console.error("Job may not be running or tmux session not found");
+          process.exit(1);
+        }
+        break;
+      }
+
+      case "run": {
+        if (!isTmuxAvailable()) {
+          console.error("Error: tmux is required but not installed");
+          process.exit(1);
+        }
+
+        if (positional.length === 0) {
+          console.error("Error: No prompt provided");
+          console.error("Usage: codex-collab run \"prompt\" [options]");
+          process.exit(1);
+        }
+
+        let prompt = positional.join(" ");
+
+        if (options.files.length > 0) {
+          const files = await loadFiles(options.files, options.dir);
+          prompt = formatPromptWithFiles(prompt, files);
+          console.error(`Included ${files.length} files`);
+        }
+
+        if (options.includeMap) {
+          const map = await loadCodebaseMap(options.dir);
+          if (map) {
+            prompt = `## Codebase Map\n\n${map}\n\n---\n\n${prompt}`;
+            console.error("Included codebase map");
+          } else {
+            console.error("No codebase map found");
+          }
+        }
+
+        if (options.dryRun) {
+          const tokens = estimateTokens(prompt);
+          console.log(`Would send ~${tokens.toLocaleString()} tokens`);
+          console.log(`Model: ${options.model}`);
+          console.log(`Reasoning: ${options.reasoning}`);
+          console.log(`Sandbox: ${options.sandbox}`);
+          console.log("\n--- Prompt Preview ---\n");
+          console.log(prompt.slice(0, 3000));
+          if (prompt.length > 3000) {
+            console.log(`\n... (${prompt.length - 3000} more characters)`);
+          }
+          process.exit(0);
+        }
+
+        console.error(`Running prompt in ${options.dir}...`);
+
+        const runResult = runPrompt({
+          prompt,
+          cwd: options.dir,
+          model: options.model,
+          reasoningEffort: options.reasoning,
+          sandbox: options.sandbox,
+          timeoutSec: options.timeout,
+          intervalSec: options.interval,
+          reuseJobId: options.reuseJobId ?? undefined,
+        });
+
+        if (runResult.error) {
+          console.error(`Error: ${runResult.error}`);
+          process.exit(1);
+        }
+
+        console.error(`Job: ${runResult.jobId}`);
+
+        if (runResult.done) {
+          console.error("Done.");
+          if (runResult.output) {
+            let output = runResult.output;
+            if (options.contentOnly) {
+              output = extractContent(stripAnsiCodes(output));
+            } else if (options.stripAnsi) {
+              output = stripAnsiCodes(output);
+            }
+            console.log(output);
+          }
+        } else {
+          console.error("Timed out. Check output with:");
+          console.error(`  codex-collab output ${runResult.jobId} --content-only`);
           process.exit(1);
         }
         break;
