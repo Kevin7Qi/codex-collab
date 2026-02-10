@@ -27,11 +27,8 @@ codex-collab run "what does this project do?" -s read-only --content-only
 # Implementation task
 codex-collab run "add input validation to the login form" --content-only
 
-# Include files for context
-codex-collab run "review these files for bugs" -f "src/**/*.ts" --content-only
-
-# Reuse an existing session (faster, preserves Codex's file cache)
-codex-collab run --reuse <id> "now check the error handling" --content-only
+# Resume an existing session (faster, preserves Codex's file cache)
+codex-collab run --resume <id> "now check the error handling" --content-only
 
 # Specify working directory (omit -d if already in the project dir)
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
@@ -72,8 +69,8 @@ codex-collab review --mode commit --ref abc1234 -d /path/to/project --content-on
 # Custom review focus
 codex-collab review "Focus on security issues" -d /path/to/project --content-only
 
-# Reuse an existing session
-codex-collab review --reuse <id> "Check error handling" -d /path/to/project --content-only
+# Resume an existing session
+codex-collab review --resume <id> "Check error handling" -d /path/to/project --content-only
 ```
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
@@ -92,7 +89,7 @@ For fine-grained control over the review TUI, use an interactive session:
 
 ```bash
 # Start interactive session
-codex-collab start --interactive -s read-only -d /path/to/project
+codex-collab start -s read-only -d /path/to/project
 
 # Send /review and navigate the menu
 codex-collab send <id> "/review"
@@ -112,9 +109,8 @@ These patterns minimize context window waste:
 
 - **Use `--content-only`** when reading output — strips TUI chrome (banner, tips, shortcuts, idle prompt). Implies `--strip-ansi`.
 - **Use `output --content-only`** to read results, NOT `capture`. Output gets the full scrollback; capture gets only the visible pane.
-- **Run `review` and `wait` in the background** (Bash tool `run_in_background`). They block otherwise.
-- **Don't `capture` repeatedly for polling** — `wait` handles that internally. One `wait` then one `output` is the pattern.
-- **`wait` prints only a status line** (`Done in Xm Ys`) — it no longer dumps the capture. Read results separately with `output`.
+- **`run` and `review` handle waiting internally** — just run them in the background (Bash tool `run_in_background`). No separate `wait` or `output` call needed; they print results directly when done.
+- **`wait` is only for manual workflows** (`start` + `send`). It polls for the spinner to disappear and prints a status line to stderr. Use `output` afterward to read results.
 
 ### Optimal review pattern:
 
@@ -132,25 +128,26 @@ codex-collab review -d /project --content-only   # run_in_background=true
 # Preferred: use run (handles start + wait + output in one call)
 codex-collab run "implement X" --content-only    # run_in_background=true
 
-# Fallback: manual start + wait + output
-codex-collab start "implement X"
+# Fallback: manual start + send + wait + output
+codex-collab start -d /path/to/project
+codex-collab send <id> "implement X"
 codex-collab wait <id>                           # run_in_background=true
 codex-collab output <id> --content-only
 ```
 
-## Session Reuse
+## Resuming Sessions
 
-Prefer reusing sessions over starting fresh to save startup time and reduce resource waste.
+Prefer resuming sessions over starting fresh to save startup time and reduce resource waste.
 
 | Situation | Action |
 |-----------|--------|
-| Same project, new prompt | `codex-collab run --reuse <id> "prompt"` |
-| Same project, want review | `codex-collab review --reuse <id>` |
+| Same project, new prompt | `codex-collab run --resume <id> "prompt"` |
+| Same project, want review | `codex-collab review --resume <id>` |
 | Same project, manual control | `codex-collab reset <id>` then send |
 | Different project | Start new session |
 | Session crashed / stuck | `codex-collab kill <id>` then start new |
 
-Before starting a new session, check for reusable ones:
+Before starting a new session, check for resumable ones:
 
 ```bash
 codex-collab jobs          # Look for running interactive sessions in the same project
@@ -161,17 +158,17 @@ The `reset` command sends `/new` to an existing session, clearing Codex's contex
 
 ## Waiting for Completion
 
+`run` and `review` wait internally — no separate `wait` needed. The `wait` command is only for manual workflows where you use `start` + `send` separately.
+
 ```bash
-# Wait for codex to finish (default: 900s timeout, 30s poll interval)
+# Only needed after manual start + send (not needed with run/review)
 codex-collab wait <id>
 
 # Custom timeout and interval
 codex-collab wait <id> --timeout 1800 --interval 60
 ```
 
-`wait` polls internally, checking for the spinner to disappear. It prints only a status line to stderr (`Done in Xm Ys` or `Timed out after Xm Ys`). Use `output` to read actual results.
-
-**Always run `wait` in the background** for long tasks.
+`wait` polls for the spinner to disappear, then prints a status line to stderr. Use `output --content-only` afterward to read results. **Always run in the background** for long tasks.
 
 ## CLI Reference
 
@@ -179,8 +176,7 @@ codex-collab wait <id> --timeout 1800 --interval 60
 
 ```bash
 codex-collab run "prompt" [options]              # New session, send prompt, wait, print output
-codex-collab run --reuse <id> "prompt" [options] # Reuse existing session
-codex-collab run "prompt" -f "src/**/*.ts"       # Include files for context
+codex-collab run --resume <id> "prompt" [options] # Resume existing session
 codex-collab run "prompt" -s read-only           # Read-only sandbox
 ```
 
@@ -192,22 +188,20 @@ codex-collab review --mode uncommitted [options]   # Uncommitted changes
 codex-collab review --mode commit [options]        # Latest commit
 codex-collab review --mode commit --ref <hash>     # Specific commit
 codex-collab review "instructions" [options]       # Custom review
-codex-collab review --reuse <id> [options]         # Reuse existing session
+codex-collab review --resume <id> [options]         # Resume existing session
 ```
 
 ### Starting Sessions
 
 ```bash
-codex-collab start "prompt" -d /path/to/project
-codex-collab start --interactive -d /path/to/project
-codex-collab start "review these" -f "src/**/*.ts" -d /project
-codex-collab start "investigate" -s read-only -d /project
+codex-collab start -d /path/to/project               # Interactive TUI session
+codex-collab start -s read-only -d /path/to/project   # Read-only session
 ```
 
 ### Reading Output
 
 ```bash
-codex-collab capture <id> --content-only     # Current screen (clean)
+codex-collab capture <id> [lines] --content-only  # Current screen (default: 50 lines)
 codex-collab output <id> --content-only      # Full scrollback (clean)
 codex-collab wait <id>                       # Wait for completion (status only)
 ```
@@ -218,7 +212,7 @@ codex-collab wait <id>                       # Wait for completion (status only)
 codex-collab send <id> "message"             # Text + Enter
 codex-collab send-keys <id> Down             # Raw keystroke
 codex-collab send-keys <id> Enter
-codex-collab send-control <id> C-c           # Ctrl+C
+codex-collab send-keys <id> C-c              # Ctrl+C
 ```
 
 ### Session Management
@@ -230,6 +224,7 @@ codex-collab jobs                            # List jobs
 codex-collab jobs --json                     # List jobs (JSON)
 codex-collab status <id>                     # Job details
 codex-collab attach <id>                     # tmux attach command
+codex-collab delete <id>                     # Delete job and its files
 codex-collab clean                           # Remove old jobs
 codex-collab health                          # Check prerequisites
 ```
@@ -240,19 +235,38 @@ codex-collab health                          # Check prerequisites
 |------|-------------|
 | `-r, --reasoning <level>` | Reasoning effort: low, medium, high, xhigh |
 | `-m, --model <model>` | Model name |
-| `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access |
-| `-f, --file <glob>` | Include files matching glob (repeatable) |
+| `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory |
-| `--map` | Include codebase map |
 | `--strip-ansi` | Remove ANSI codes from output |
 | `--content-only` | Strip TUI chrome (implies --strip-ansi) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
-| `--reuse <id>` | Reuse existing session (run and review) |
+| `--resume <id>` | Resume existing session (run and review) |
 | `--timeout <sec>` | Wait/review timeout (default: 900) |
 | `--interval <sec>` | Poll interval (default: 30) |
-| `--interactive` | Start in interactive TUI mode |
 | `--json` | JSON output (jobs command) |
+| `--limit <n>` | Limit jobs shown |
+| `--all` | Show all jobs |
+
+## Non-Interactive Tasks (codex exec)
+
+For simple one-shot tasks that don't need session management, use `codex exec` directly instead of codex-collab:
+
+```bash
+# Run a prompt, get output on stdout
+codex exec "explain what this project does" -s read-only
+
+# Specify working directory
+codex exec "summarize the auth module" -s read-only -C /path/to/project
+
+# Resume the most recent Codex session
+codex exec resume --last
+
+# Resume a specific session with a follow-up prompt
+codex exec resume <session-id> "now check the error handling"
+```
+
+Use codex-collab's `run` and `review` commands when you need session resumption, multi-step TUI interaction, or approval handling.
 
 ## Tips
 
@@ -261,13 +275,9 @@ codex-collab health                          # Check prerequisites
 - **Use `-s read-only`** for reviews and research.
 - **Omit `-d` if already in the project directory** — it defaults to cwd. Only pass `-d` when the target project differs from your current directory.
 - **Multiple concurrent sessions** are supported. Each gets its own tmux session and job ID.
-- **Reuse sessions** when working on the same project repeatedly. `run --reuse` and `review --reuse` are much faster than starting fresh.
+- **Resume sessions** when working on the same project repeatedly. `run --resume` and `review --resume` are much faster than starting fresh.
 - **Validate Codex's findings.** After reading Codex's review or analysis output, verify each finding against the actual source code before presenting to the user. Drop false positives, note which findings you verified.
 
 ## Prerequisites
 
-- **tmux** — `sudo apt install tmux`
-- **bun** — TypeScript runtime
-- **codex** — `npm install -g @openai/codex`
-
-All three must be on PATH. Run `codex-collab health` to verify.
+Requires tmux, bun, and codex CLI on PATH. Run `codex-collab health` to verify.

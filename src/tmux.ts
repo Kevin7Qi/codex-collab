@@ -1,15 +1,7 @@
 // tmux helper functions for codex-collab
 
 import { spawnSync } from "child_process";
-import { writeFileSync } from "fs";
 import { config } from "./config.ts";
-
-export interface TmuxSession {
-  name: string;
-  attached: boolean;
-  windows: number;
-  created: string;
-}
 
 /**
  * Run a tmux command with argument array (no shell interpolation).
@@ -24,7 +16,7 @@ function tmux(args: string[], options?: { maxBuffer?: number }): { status: numbe
   return { status: result.status ?? 1, stdout: (result.stdout ?? "") as string };
 }
 
-export function getSessionName(jobId: string): string {
+function getSessionName(jobId: string): string {
   return `${config.tmuxPrefix}-${jobId}`;
 }
 
@@ -73,7 +65,7 @@ function waitForCodexReady(
   for (let i = 0; i < maxAttempts; i++) {
     const screen = capturePaneUnchecked(sessionName);
     if (!screen) {
-      spawnSync("sleep", [String(pollInterval)]);
+      Bun.sleepSync(pollInterval * 1000);
       continue;
     }
 
@@ -83,17 +75,16 @@ function waitForCodexReady(
 
     if (isUpdatePrompt(screen)) {
       tmux(["send-keys", "-t", sessionName, "Enter"]);
-      spawnSync("sleep", ["15"]);
+      Bun.sleepSync(15_000);
       continue;
     }
 
-    spawnSync("sleep", [String(pollInterval)]);
+    Bun.sleepSync(pollInterval * 1000);
   }
 }
 
 /**
- * Create a new tmux session running codex.
- * If interactive is true, skip auto-sending a prompt (leave user at TUI input).
+ * Create a tmux session running the Codex TUI.
  *
  * Note: the inner shell command (`script -c "codex ..."`) is a pre-built string
  * from validated config values (model, reasoning, sandbox), not user input.
@@ -101,8 +92,6 @@ function waitForCodexReady(
  */
 export function createSession(options: {
   jobId: string;
-  prompt?: string;
-  interactive?: boolean;
   model: string;
   reasoningEffort: string;
   sandbox: string;
@@ -145,24 +134,6 @@ export function createSession(options: {
     // Wait for codex TUI to be ready (handles update prompts if they appear)
     waitForCodexReady(sessionName);
 
-    // If not interactive, send the prompt
-    if (!options.interactive && options.prompt) {
-      const promptFile = `${config.jobsDir}/${options.jobId}.prompt`;
-      writeFileSync(promptFile, options.prompt);
-
-      if (options.prompt.length < 5000) {
-        // -l: literal mode, prevents tmux from interpreting backslash sequences
-        tmux(["send-keys", "-l", "-t", sessionName, options.prompt]);
-        spawnSync("sleep", ["0.3"]);
-        tmux(["send-keys", "-t", sessionName, "Enter"]);
-      } else {
-        tmux(["load-buffer", promptFile]);
-        tmux(["paste-buffer", "-t", sessionName]);
-        spawnSync("sleep", ["0.3"]);
-        tmux(["send-keys", "-t", sessionName, "Enter"]);
-      }
-    }
-
     return { sessionName, success: true };
   } catch (err) {
     return {
@@ -174,17 +145,20 @@ export function createSession(options: {
 }
 
 /**
+ * Send literal text without Enter (for typing into search fields / pickers).
+ * Uses -l to prevent tmux from interpreting backslash sequences.
+ */
+export function sendLiteralUnchecked(sessionName: string, text: string): boolean {
+  return tmux(["send-keys", "-l", "-t", sessionName, text]).status === 0;
+}
+
+/**
  * Send text + Enter to a session.
- * Uses -l (literal) to prevent tmux from interpreting backslash sequences.
  */
 export function sendMessageUnchecked(sessionName: string, message: string): boolean {
-  try {
-    if (tmux(["send-keys", "-l", "-t", sessionName, message]).status !== 0) return false;
-    spawnSync("sleep", ["0.3"]);
-    return tmux(["send-keys", "-t", sessionName, "Enter"]).status === 0;
-  } catch {
-    return false;
-  }
+  if (!sendLiteralUnchecked(sessionName, message)) return false;
+  Bun.sleepSync(300);
+  return sendKeysUnchecked(sessionName, "Enter");
 }
 
 /**
@@ -195,24 +169,14 @@ export function sendKeysUnchecked(sessionName: string, keys: string): boolean {
 }
 
 /**
- * Send control sequences (C-c, C-d, etc.)
- */
-export function sendControlUnchecked(sessionName: string, key: string): boolean {
-  return tmux(["send-keys", "-t", sessionName, key]).status === 0;
-}
-
-/**
  * Capture the current pane content.
  */
 export function capturePaneUnchecked(
   sessionName: string,
-  options: { lines?: number; start?: number } = {}
+  options: { lines?: number } = {}
 ): string | null {
   try {
     const args = ["capture-pane", "-t", sessionName, "-p"];
-    if (options.start !== undefined) {
-      args.push("-S", String(options.start));
-    }
 
     const { status, stdout } = tmux(args);
     if (status !== 0) return null;
@@ -252,49 +216,4 @@ export function clearHistoryUnchecked(sessionName: string): boolean {
 
 export function killSessionUnchecked(sessionName: string): boolean {
   return tmux(["kill-session", "-t", sessionName]).status === 0;
-}
-
-export function listSessions(): TmuxSession[] {
-  try {
-    const { status, stdout } = tmux([
-      "list-sessions", "-F",
-      "#{session_name}|#{session_attached}|#{session_windows}|#{session_created}",
-    ]);
-    if (status !== 0) return [];
-
-    return stdout
-      .trim()
-      .split("\n")
-      .filter((line) => line.startsWith(config.tmuxPrefix))
-      .map((line) => {
-        const [name, attached, windows, created] = line.split("|");
-        return {
-          name,
-          attached: attached === "1",
-          windows: parseInt(windows, 10),
-          created: new Date(parseInt(created, 10) * 1000).toISOString(),
-        };
-      });
-  } catch {
-    return [];
-  }
-}
-
-export function isSessionActive(sessionName: string): boolean {
-  if (!sessionExists(sessionName)) return false;
-
-  try {
-    const { status, stdout } = tmux([
-      "list-panes", "-t", sessionName, "-F", "#{pane_pid}",
-    ]);
-    if (status !== 0) return false;
-
-    const pid = stdout.trim();
-    if (!pid) return false;
-
-    process.kill(parseInt(pid, 10), 0);
-    return true;
-  } catch {
-    return false;
-  }
 }

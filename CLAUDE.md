@@ -20,14 +20,13 @@ codex-collab health
 | `src/jobs.ts` | Job lifecycle, persistence, polling, run/review orchestration |
 | `src/tmux.ts` | tmux session management (all via spawnSync, no shell) |
 | `src/config.ts` | Configuration constants |
-| `src/files.ts` | File loading for context injection (supports negation globs) |
 | `src/session-parser.ts` | Parse Codex session files for metadata |
 | `SKILL.md` | Claude Code skill definition |
 
 ## Dependencies
 
 - **Runtime**: Bun, tmux, codex CLI
-- **NPM**: glob (file matching)
+- **NPM**: (none)
 
 ## Architecture Notes
 

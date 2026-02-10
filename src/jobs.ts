@@ -11,7 +11,6 @@ import {
 import { join } from "path";
 import { config, ReasoningEffort, SandboxMode } from "./config.ts";
 import { randomBytes } from "crypto";
-import { spawnSync } from "child_process";
 import {
   extractSessionId,
   findSessionFile,
@@ -22,25 +21,21 @@ import {
   createSession,
   killSessionUnchecked,
   sessionExists,
-  getSessionName,
   capturePaneUnchecked,
   captureFullHistoryUnchecked,
   clearHistoryUnchecked,
-  isSessionActive,
   sendMessageUnchecked,
+  sendLiteralUnchecked,
   sendKeysUnchecked,
-  sendControlUnchecked,
 } from "./tmux.ts";
 
 export interface Job {
   id: string;
   status: "pending" | "running" | "completed" | "failed";
   prompt: string;
-  interactive: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sandbox: SandboxMode;
-  parentSessionId?: string;
   cwd: string;
   createdAt: string;
   startedAt?: string;
@@ -170,7 +165,6 @@ export type JobsJsonEntry = {
   id: string;
   status: Job["status"];
   prompt: string;
-  interactive: boolean;
   model: string;
   reasoning: ReasoningEffort;
   cwd: string;
@@ -215,7 +209,6 @@ export function getJobsJson(): JobsJsonOutput {
       id: effective.id,
       status: effective.status,
       prompt: truncateText(effective.prompt, 100),
-      interactive: effective.interactive,
       model: effective.model,
       reasoning: effective.reasoningEffort,
       cwd: effective.cwd,
@@ -253,65 +246,10 @@ export function deleteJob(jobId: string): boolean {
   }
 }
 
-export interface StartJobOptions {
-  prompt: string;
-  model?: string;
-  reasoningEffort?: ReasoningEffort;
-  sandbox?: SandboxMode;
-  parentSessionId?: string;
-  cwd?: string;
-}
-
-export function startJob(options: StartJobOptions): Job {
-  ensureJobsDir();
-
-  const jobId = generateJobId();
-  const cwd = options.cwd || process.cwd();
-
-  const job: Job = {
-    id: jobId,
-    status: "pending",
-    prompt: options.prompt,
-    interactive: false,
-    model: options.model || config.model,
-    reasoningEffort: options.reasoningEffort || config.defaultReasoningEffort,
-    sandbox: options.sandbox || config.defaultSandbox,
-    parentSessionId: options.parentSessionId,
-    cwd,
-    createdAt: new Date().toISOString(),
-  };
-
-  saveJob(job);
-
-  const result = createSession({
-    jobId,
-    prompt: options.prompt,
-    interactive: false,
-    model: job.model,
-    reasoningEffort: job.reasoningEffort,
-    sandbox: job.sandbox,
-    cwd,
-  });
-
-  if (result.success) {
-    job.status = "running";
-    job.startedAt = new Date().toISOString();
-    job.tmuxSession = result.sessionName;
-  } else {
-    job.status = "failed";
-    job.error = result.error || "Failed to create tmux session";
-    job.completedAt = new Date().toISOString();
-  }
-
-  saveJob(job);
-  return job;
-}
-
 export interface StartInteractiveJobOptions {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   sandbox?: SandboxMode;
-  parentSessionId?: string;
   cwd?: string;
 }
 
@@ -325,11 +263,9 @@ export function startInteractiveJob(options: StartInteractiveJobOptions): Job {
     id: jobId,
     status: "pending",
     prompt: "(interactive)",
-    interactive: true,
     model: options.model || config.model,
     reasoningEffort: options.reasoningEffort || config.defaultReasoningEffort,
     sandbox: options.sandbox || config.defaultSandbox,
-    parentSessionId: options.parentSessionId,
     cwd,
     createdAt: new Date().toISOString(),
   };
@@ -338,7 +274,6 @@ export function startInteractiveJob(options: StartInteractiveJobOptions): Job {
 
   const result = createSession({
     jobId,
-    interactive: true,
     model: job.model,
     reasoningEffort: job.reasoningEffort,
     sandbox: job.sandbox,
@@ -386,13 +321,6 @@ export function sendKeysToJob(jobId: string, keys: string): boolean {
   if (!job || !job.tmuxSession) return false;
 
   return sendKeysUnchecked(job.tmuxSession, keys);
-}
-
-export function sendControlToJob(jobId: string, key: string): boolean {
-  const job = loadJob(jobId);
-  if (!job || !job.tmuxSession) return false;
-
-  return sendControlUnchecked(job.tmuxSession, key);
 }
 
 export function getJobOutput(jobId: string, lines?: number): string | null {
@@ -457,13 +385,6 @@ export function cleanupOldJobs(maxAgeDays: number = 7): { deleted: number; sessi
   }
 
   return { deleted, sessions };
-}
-
-export function isJobRunning(jobId: string): boolean {
-  const job = loadJob(jobId);
-  if (!job || !job.tmuxSession) return false;
-
-  return isSessionActive(job.tmuxSession);
 }
 
 export function refreshJobStatus(jobId: string): Job | null {
@@ -634,6 +555,18 @@ export function waitForJob(
 }
 
 /**
+ * On completion, fetch full scrollback (pane capture truncates long output).
+ * Falls back to the wait result's partial output.
+ */
+function resolveOutput(
+  jobId: string,
+  result: { done: boolean; output: string | null }
+): string | null {
+  if (result.done) return getJobFullOutput(jobId) ?? result.output;
+  return result.output;
+}
+
+/**
  * Poll capturePane until the output matches a pattern (or times out).
  * Returns the matched output or null on timeout.
  */
@@ -657,9 +590,9 @@ export function waitForContent(
 }
 
 /**
- * Reuse an existing interactive session: validate it's alive, send /new, clear history.
+ * Resume an existing interactive session: validate it's alive, send /new, clear history.
  */
-function reuseSession(jobId: string): { job: Job; sessionName: string } | { error: string } {
+function resumeSession(jobId: string): { job: Job; sessionName: string } | { error: string } {
   const existing = loadJob(jobId);
   if (!existing?.tmuxSession) return { error: "Job not found or no session" };
   if (existing.status !== "running" || !sessionExists(existing.tmuxSession)) {
@@ -678,6 +611,48 @@ function reuseSession(jobId: string): { job: Job; sessionName: string } | { erro
   return { job: existing, sessionName: existing.tmuxSession };
 }
 
+interface AcquireSessionOptions {
+  resumeJobId?: string;
+  prompt: string;
+  model?: string;
+  reasoningEffort?: ReasoningEffort;
+  sandbox?: SandboxMode;
+  cwd: string;
+}
+
+type AcquireResult =
+  | { job: Job; sessionName: string; isResumed: boolean }
+  | { error: string; jobId: string };
+
+/**
+ * Acquire a session: either resume an existing one or start a new one.
+ * Shared by runPrompt and runReview.
+ */
+function acquireSession(opts: AcquireSessionOptions): AcquireResult {
+  if (opts.resumeJobId) {
+    const resumed = resumeSession(opts.resumeJobId);
+    if ("error" in resumed) {
+      return { error: resumed.error, jobId: opts.resumeJobId };
+    }
+    resumed.job.prompt = opts.prompt;
+    resumed.job.startedAt = new Date().toISOString();
+    resumed.job.completedAt = undefined;
+    saveJob(resumed.job);
+    return { job: resumed.job, sessionName: resumed.sessionName, isResumed: true };
+  }
+
+  const job = startInteractiveJob({
+    model: opts.model,
+    reasoningEffort: opts.reasoningEffort,
+    sandbox: opts.sandbox,
+    cwd: opts.cwd,
+  });
+  if (job.status === "failed" || !job.tmuxSession) {
+    return { error: job.error || "Failed to start session", jobId: job.id };
+  }
+  return { job, sessionName: job.tmuxSession, isResumed: false };
+}
+
 export interface RunPromptOptions {
   prompt: string;
   cwd: string;
@@ -686,7 +661,7 @@ export interface RunPromptOptions {
   sandbox?: SandboxMode;
   timeoutSec?: number;
   intervalSec?: number;
-  reuseJobId?: string;
+  resumeJobId?: string;
 }
 
 export interface RunResult {
@@ -697,38 +672,24 @@ export interface RunResult {
 }
 
 /**
- * Run a prompt in a single call: start (or reuse) an interactive session, send the prompt, wait, return output.
+ * Run a prompt in a single call: start (or resume) an interactive session, send the prompt, wait, return output.
  */
 export function runPrompt(options: RunPromptOptions): RunResult {
   const timeoutSec = options.timeoutSec ?? 900;
   const intervalSec = options.intervalSec ?? 30;
 
-  let job: Job;
-  let sessionName: string;
-
-  if (options.reuseJobId) {
-    const reuse = reuseSession(options.reuseJobId);
-    if ("error" in reuse) {
-      return { jobId: options.reuseJobId, done: false, output: null, error: reuse.error };
-    }
-    reuse.job.prompt = options.prompt;
-    reuse.job.startedAt = new Date().toISOString();
-    reuse.job.completedAt = undefined;
-    saveJob(reuse.job);
-    job = reuse.job;
-    sessionName = reuse.sessionName;
-  } else {
-    job = startInteractiveJob({
-      model: options.model,
-      reasoningEffort: options.reasoningEffort,
-      sandbox: options.sandbox,
-      cwd: options.cwd,
-    });
-    if (job.status === "failed" || !job.tmuxSession) {
-      return { jobId: job.id, done: false, output: null, error: job.error || "Failed to start session" };
-    }
-    sessionName = job.tmuxSession;
+  const session = acquireSession({
+    resumeJobId: options.resumeJobId,
+    prompt: options.prompt,
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    sandbox: options.sandbox,
+    cwd: options.cwd,
+  });
+  if ("error" in session) {
+    return { jobId: session.jobId, done: false, output: null, error: session.error };
   }
+  const { job, sessionName } = session;
 
   // Send the prompt
   if (!sendMessageUnchecked(sessionName, options.prompt)) {
@@ -739,7 +700,7 @@ export function runPrompt(options: RunPromptOptions): RunResult {
   const result = waitForJob(job.id, { timeoutSec, intervalSec });
 
   // Fetch full scrollback on completion (pane capture truncates long output)
-  const fullOutput = result.done ? (getJobFullOutput(job.id) ?? result.output) : result.output;
+  const fullOutput = resolveOutput(job.id, result);
   return { jobId: job.id, done: result.done, output: fullOutput };
 }
 
@@ -754,7 +715,7 @@ export interface RunReviewOptions {
   reasoningEffort?: ReasoningEffort;
   timeoutSec?: number;
   intervalSec?: number;
-  reuseJobId?: string;
+  resumeJobId?: string;
 }
 
 export interface ReviewResult {
@@ -772,41 +733,33 @@ export function runReview(options: RunReviewOptions): ReviewResult {
   const timeoutSec = options.timeoutSec ?? 900;
   const intervalSec = options.intervalSec ?? 30;
 
-  let job: Job;
-  let sessionName: string;
-  let isReused = false;
+  const session = acquireSession({
+    resumeJobId: options.resumeJobId,
+    prompt: "(review)",
+    model: options.model,
+    reasoningEffort: options.reasoningEffort,
+    sandbox: "read-only",
+    cwd: options.cwd,
+  });
+  if ("error" in session) {
+    return { jobId: session.jobId, done: false, output: null, error: session.error };
+  }
+  const { job, sessionName, isResumed } = session;
 
-  // Either reuse an existing session or start a new one
-  if (options.reuseJobId) {
-    const reuse = reuseSession(options.reuseJobId);
-    if ("error" in reuse) {
-      return { jobId: options.reuseJobId, done: false, output: null, error: reuse.error };
-    }
-    reuse.job.prompt = "(review)";
-    reuse.job.startedAt = new Date().toISOString();
-    reuse.job.completedAt = undefined;
-    saveJob(reuse.job);
-    job = reuse.job;
-    sessionName = reuse.sessionName;
-    isReused = true;
-  } else {
-    job = startInteractiveJob({
-      model: options.model,
-      reasoningEffort: options.reasoningEffort,
-      sandbox: "read-only",
-      cwd: options.cwd,
-    });
-    if (job.status === "failed" || !job.tmuxSession) {
-      return { jobId: job.id, done: false, output: null, error: job.error || "Failed to start session" };
-    }
-    sessionName = job.tmuxSession;
+  function failReview(err: string): ReviewResult {
+    if (!isResumed) killSessionUnchecked(sessionName);
+    job.status = "failed";
+    job.error = err;
+    job.completedAt = new Date().toISOString();
+    saveJob(job);
+    return { jobId: job.id, done: false, output: null, error: err };
   }
 
   // Custom mode: send /review with instructions directly (bypasses menu)
   if (options.mode === "custom" && options.instructions) {
     sendMessageUnchecked(sessionName, `/review ${options.instructions}`);
     const result = waitForJob(job.id, { timeoutSec, intervalSec });
-    const fullOutput = result.done ? (getJobFullOutput(job.id) ?? result.output) : result.output;
+    const fullOutput = resolveOutput(job.id, result);
     return { jobId: job.id, done: result.done, output: fullOutput };
   }
 
@@ -816,13 +769,7 @@ export function runReview(options: RunReviewOptions): ReviewResult {
   // Wait for the review preset menu to appear
   const menuScreen = waitForContent(sessionName, /select a review preset/i, 30);
   if (!menuScreen) {
-    const err = "Review menu did not appear (timed out)";
-    if (!isReused) killSessionUnchecked(sessionName);
-    job.status = "failed";
-    job.error = err;
-    job.completedAt = new Date().toISOString();
-    saveJob(job);
-    return { jobId: job.id, done: false, output: null, error: err };
+    return failReview("Review menu did not appear (timed out)");
   }
 
   // Navigate based on mode
@@ -854,29 +801,17 @@ export function runReview(options: RunReviewOptions): ReviewResult {
       // not in the preset menu ("Review a commit")
       const commitScreen = waitForContent(sessionName, /Type to search/i, 15);
       if (!commitScreen) {
-        const err = "Commit picker did not appear (timed out)";
-        if (!isReused) killSessionUnchecked(sessionName);
-        job.status = "failed";
-        job.error = err;
-        job.completedAt = new Date().toISOString();
-        saveJob(job);
-        return { jobId: job.id, done: false, output: null, error: err };
+        return failReview("Commit picker did not appear (timed out)");
       }
       if (options.ref) {
         // Type the ref to filter the searchable picker (literal, without Enter)
         Bun.sleepSync(500);
-        spawnSync("tmux", ["send-keys", "-l", "-t", sessionName, options.ref], { stdio: "pipe" });
+        sendLiteralUnchecked(sessionName, options.ref);
         Bun.sleepSync(1000);
         // Verify the picker found a match (it shows "no matches" if the ref is invalid)
         const filtered = capturePaneUnchecked(sessionName, { lines: 30 });
         if (filtered && /no matches/i.test(filtered)) {
-          const err = `Commit not found in picker: ${options.ref}`;
-          if (!isReused) killSessionUnchecked(sessionName);
-          job.status = "failed";
-          job.error = err;
-          job.completedAt = new Date().toISOString();
-          saveJob(job);
-          return { jobId: job.id, done: false, output: null, error: err };
+          return failReview(`Commit not found in picker: ${options.ref}`);
         }
         sendKeysUnchecked(sessionName, "Enter");
       } else {
@@ -893,6 +828,6 @@ export function runReview(options: RunReviewOptions): ReviewResult {
 
   // Fetch full scrollback — waitForJob only returns the visible pane,
   // which truncates long reviews
-  const fullOutput = result.done ? (getJobFullOutput(job.id) ?? result.output) : result.output;
+  const fullOutput = resolveOutput(job.id, result);
   return { jobId: job.id, done: result.done, output: fullOutput };
 }

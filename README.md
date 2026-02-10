@@ -1,14 +1,18 @@
 # codex-collab
 
-Claude + Codex collaboration bridge. A CLI that manages Codex sessions in tmux, giving Claude the ability to see Codex's TUI, send messages and keystrokes, and read output.
+Collaborate with [Codex](https://github.com/openai/codex) from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run tasks, get code reviews, do parallel research, all without leaving your Claude session.
+
+codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) that manages persistent Codex sessions in tmux. Normally, Claude can only call Codex in non-interactive mode (single prompt in, single response out). codex-collab keeps sessions alive so Claude can steer them mid-task, reuse context across prompts, and chain multi-step workflows like interactive code review.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh/) — TypeScript runtime
-- [tmux](https://github.com/tmux/tmux) — terminal multiplexer
-- [Codex CLI](https://github.com/openai/codex) — `npm install -g @openai/codex`
+Tested on Linux (Ubuntu 22.04). All three must be installed and on your PATH.
 
-## Install
+- [Bun](https://bun.sh/) >= 1.0 — runs the CLI
+- [tmux](https://github.com/tmux/tmux) >= 3.2 — hosts Codex sessions in the background
+- [Codex CLI](https://github.com/openai/codex) >= 0.9 — the agent being orchestrated (`npm install -g @openai/codex`)
+
+## Installation
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
@@ -16,7 +20,7 @@ cd codex-collab
 ./install.sh
 ```
 
-The install script builds a self-contained bundle, copies it to `~/.claude/skills/codex-collab/`, and symlinks the binary.
+The install script builds a self-contained bundle, copies it to `~/.claude/skills/codex-collab/`, and symlinks the binary. Once installed, Claude discovers the skill automatically.
 
 For development (live-reloading source changes):
 
@@ -27,28 +31,14 @@ For development (live-reloading source changes):
 ## Quick Start
 
 ```bash
-# Run a prompted task (single command: start + wait + output)
+# Run a prompted task
 codex-collab run "what does this project do?" -s read-only --content-only
-codex-collab run --reuse <id> "now summarize the key files" --content-only
 
-# Code review (single command, handles everything)
+# Code review
 codex-collab review --content-only
-codex-collab review --mode uncommitted --content-only
-codex-collab review --mode commit --ref abc1234 --content-only
 
-# Manual start + wait + output (fallback)
-codex-collab start "refactor auth module" -d /path/to/project
-codex-collab wait <id>
-codex-collab output <id> --content-only
-
-# Interactive session
-codex-collab start --interactive -d /path/to/project
-codex-collab send <id> "check the auth module"
-codex-collab send-keys <id> Enter
-
-# Session reuse (faster than starting fresh)
-codex-collab run --reuse <id> "follow-up question" --content-only
-codex-collab review --reuse <id> --content-only
+# Resume a session
+codex-collab run --resume <id> "now check error handling" --content-only
 ```
 
 ## CLI Commands
@@ -57,44 +47,57 @@ codex-collab review --reuse <id> --content-only
 |---------|-------------|
 | `run "prompt" [opts]` | Run a prompt: start session, wait, print output |
 | `review [opts]` | One-shot code review (PR, uncommitted, commit) |
-| `start "prompt" [opts]` | Start a Codex session with a prompt |
-| `start --interactive [opts]` | Start a session in TUI mode |
-| `send <id> "message"` | Send text + Enter |
-| `send-keys <id> <key>` | Send raw keystrokes |
-| `send-control <id> <key>` | Send control sequences (C-c, C-d) |
-| `capture <id>` | Capture current screen |
-| `output <id>` | Full scrollback output |
-| `wait <id>` | Wait for Codex to finish (poll-based) |
-| `reset <id>` | Clear context with /new |
 | `jobs [--json]` | List jobs |
-| `status <id>` | Job details |
-| `attach <id>` | Print tmux attach command |
 | `kill <id>` | Kill a running job |
-| `delete <id>` | Delete job and its files |
 | `clean` | Remove old completed jobs |
-| `sessions` | List raw tmux sessions |
 | `health` | Check dependencies |
 
-### Key Options
+<details>
+<summary>Job management</summary>
+
+| Command | Description |
+|---------|-------------|
+| `status <id>` | Job details |
+| `reset <id>` | Clear context with /new |
+| `delete <id>` | Delete job and its files |
+| `attach <id>` | Print tmux attach command |
+
+</details>
+
+<details>
+<summary>Advanced — manual control</summary>
+
+For fine-grained control when `run` and `review` aren't enough.
+
+| Command | Description |
+|---------|-------------|
+| `start [opts]` | Start an interactive session (TUI mode) |
+| `send <id> "message"` | Send text + Enter |
+| `send-keys <id> <key>` | Send raw keystrokes (Down, Enter, Escape, C-c, etc.) |
+| `capture <id> [lines]` | Capture current screen (default: 50 lines) |
+| `output <id>` | Full scrollback output |
+| `wait <id>` | Wait for Codex to finish (poll-based) |
+
+</details>
+
+<details>
+<summary>Options</summary>
 
 | Flag | Description |
 |------|-------------|
 | `-d, --dir <path>` | Working directory |
-| `-f, --file <glob>` | Include files (repeatable) |
 | `-m, --model <model>` | Model name |
 | `-r, --reasoning <level>` | low, medium, high, xhigh |
-| `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access |
+| `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
-| `--reuse <id>` | Reuse existing session for review |
+| `--resume <id>` | Resume existing session |
+| `--strip-ansi` | Remove ANSI escape codes from output |
 | `--content-only` | Strip TUI chrome and ANSI codes |
+| `--json` | JSON output (`jobs` command) |
 | `--timeout <sec>` | Wait/review timeout (default: 900) |
 | `--interval <sec>` | Poll interval (default: 30) |
+| `--limit <n>` | Limit jobs shown |
+| `--all` | Show all jobs |
 
-## Claude Code Skill
-
-`SKILL.md` at the project root teaches Claude how to use the CLI. It's installed to `~/.claude/skills/codex-collab/` by `install.sh`.
-
-## License
-
-MIT
+</details>
