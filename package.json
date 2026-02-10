@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "bun build src/cli.ts --outdir dist --target node"
+    "build": "bun build src/cli.ts --outfile skill/codex-collab/scripts/codex-collab --target bun"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

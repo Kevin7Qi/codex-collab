@@ -1,12 +1,6 @@
 ---
 name: codex-collab
-description: Collaborate with Codex — pair programming, code review, plan feedback, or any mode the user defines
-triggers:
-  - codex-collab
-  - codex collab
-  - collaborate with codex
-  - pair with codex
-  - codex review
+description: Delegate tasks to Codex — run prompts, code review, research, pair programming, or any collaboration mode. Use when the user asks to use Codex, send work to Codex, have Codex review/investigate/implement something, or collaborate with Codex.
 ---
 
 # codex-collab

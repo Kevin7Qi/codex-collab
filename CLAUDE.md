@@ -7,6 +7,7 @@ CLI tool for Claude + Codex collaboration via tmux sessions.
 ## Development
 
 ```bash
+./install.sh --dev    # symlink for live iteration
 bun run src/cli.ts --help
 codex-collab health
 ```
@@ -21,7 +22,7 @@ codex-collab health
 | `src/config.ts` | Configuration constants |
 | `src/files.ts` | File loading for context injection (supports negation globs) |
 | `src/session-parser.ts` | Parse Codex session files for metadata |
-| `skill/SKILL.md` | Claude Code skill definition |
+| `SKILL.md` | Claude Code skill definition |
 
 ## Dependencies
 
@@ -37,4 +38,4 @@ codex-collab health
 - `waitForJob` detects completion via screen stability (2 consecutive unchanged captures)
 - Job IDs are validated (`/^[0-9a-f]{8}$/`) before use in file paths
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running
-- Skill hardlinked to `~/.claude/skills/codex-collab/SKILL.md`
+- Skill installed to `~/.claude/skills/codex-collab/` via `install.sh` (build + copy; `--dev` for symlinks)

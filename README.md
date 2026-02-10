@@ -16,7 +16,13 @@ cd codex-collab
 ./install.sh
 ```
 
-The install script checks prerequisites, installs dependencies, and symlinks the binary and Claude Code skill.
+The install script builds a self-contained bundle, copies it to `~/.claude/skills/codex-collab/`, and symlinks the binary.
+
+For development (live-reloading source changes):
+
+```bash
+./install.sh --dev
+```
 
 ## Quick Start
 
@@ -87,7 +93,7 @@ codex-collab review --reuse <id> --content-only
 
 ## Claude Code Skill
 
-The skill at `skill/SKILL.md` teaches Claude how to use the CLI. Trigger with `/codex-collab` in Claude Code.
+`SKILL.md` at the project root teaches Claude how to use the CLI. It's installed to `~/.claude/skills/codex-collab/` by `install.sh`.
 
 ## License
 
