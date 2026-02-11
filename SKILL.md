@@ -54,10 +54,12 @@ codex-collab run "investigate X" -s read-only --content-only  # run_in_backgroun
 
 ## Code Review (Recommended: Single Command)
 
-The `review` command handles the entire review workflow in one call:
+The `review` command handles the entire review workflow in one call.
+
+**Note**: When no `--mode` is specified, passing a prompt string switches from the default `pr` mode to `custom` mode, which bypasses the built-in diff workflow. For a standard PR review, do not pass a prompt.
 
 ```bash
-# PR-style review against main (default)
+# PR-style review against main (default — no prompt)
 codex-collab review -d /path/to/project --content-only
 
 # Review uncommitted changes
