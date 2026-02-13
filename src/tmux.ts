@@ -55,18 +55,6 @@ function isUpdatePrompt(screen: string): boolean {
 }
 
 /**
- * Check if the screen shows a post-update message (codex updated itself and exited).
- * The shell command will detect this and restart codex automatically.
- */
-function isPostUpdateScreen(screen: string): boolean {
-  const lower = screen.toLowerCase();
-  return (
-    lower.includes("update ran successfully") ||
-    lower.includes("please restart")
-  );
-}
-
-/**
  * Poll for the codex TUI to be ready. If an update prompt appears, accept it.
  * If codex self-updates and exits, the shell command restarts it automatically;
  * we just keep polling through the transient post-update screen.
@@ -93,13 +81,7 @@ function waitForCodexReady(
       continue;
     }
 
-    // Post-update screen: codex exited after self-update, shell is restarting it.
-    // Don't waste an attempt sleeping — just keep polling.
-    if (isPostUpdateScreen(screen)) {
-      Bun.sleepSync(pollInterval * 1000);
-      continue;
-    }
-
+    // Post-update screen or other transient state — keep polling.
     Bun.sleepSync(pollInterval * 1000);
   }
 }

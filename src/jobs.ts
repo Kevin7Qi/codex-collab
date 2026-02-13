@@ -54,6 +54,7 @@ function generateJobId(): string {
 }
 
 const JOB_ID_RE = /^[0-9a-f]{8}$/;
+const TERMINAL_STATUSES: ReadonlySet<Job["status"]> = new Set(["completed", "failed", "killed"]);
 
 function isValidJobId(jobId: string): boolean {
   return JOB_ID_RE.test(jobId);
@@ -368,9 +369,9 @@ export function cleanupOldJobs(maxAgeDays: number = 7): { deleted: number; sessi
   let sessions = 0;
 
   for (const job of jobs) {
-    if (job.status !== "completed" && job.status !== "failed" && job.status !== "killed") continue;
+    if (!TERMINAL_STATUSES.has(job.status)) continue;
 
-    // Kill stale tmux sessions for all completed/failed jobs
+    // Kill stale tmux sessions for all terminal jobs
     if (job.tmuxSession && sessionExists(job.tmuxSession)) {
       killSessionUnchecked(job.tmuxSession);
       sessions++;

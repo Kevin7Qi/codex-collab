@@ -4,13 +4,11 @@
 // They require tmux to be available and create short-lived sessions.
 
 import { describe, it, expect, afterEach, setDefaultTimeout } from "bun:test";
+import { spawnSync } from "child_process";
+import { readFileSync, writeFileSync, unlinkSync } from "fs";
 
 // These are integration tests that create real tmux sessions — give them room.
 setDefaultTimeout(30_000);
-import { spawnSync } from "child_process";
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "fs";
-import { join } from "path";
-import { config } from "./config.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -29,11 +27,6 @@ function tmux(args: string[]): { status: number; stdout: string } {
 
 function sessionExists(name: string): boolean {
   return tmux(["has-session", "-t", name]).status === 0;
-}
-
-function capturePaneText(name: string): string {
-  const { stdout } = tmux(["capture-pane", "-t", name, "-p"]);
-  return stdout;
 }
 
 function killSession(name: string): void {
@@ -195,8 +188,7 @@ describe("idle watchdog", () => {
 
 describe("killed job status", () => {
   it("killJob sets status to killed, not failed", async () => {
-    // Import dynamically to avoid circular issues
-    const { startInteractiveJob, killJob, loadJob } = await import("./jobs.ts");
+    const { startInteractiveJob, killJob, loadJob, deleteJob } = await import("./jobs.ts");
 
     const job = startInteractiveJob({
       cwd: process.cwd(),
@@ -216,8 +208,6 @@ describe("killed job status", () => {
     expect(reloaded!.status).toBe("killed");
     expect(reloaded!.error).toBeUndefined();
 
-    // Cleanup
-    const { deleteJob } = await import("./jobs.ts");
     deleteJob(job.id);
   });
 });
