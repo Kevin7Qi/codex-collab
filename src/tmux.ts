@@ -55,11 +55,25 @@ function isUpdatePrompt(screen: string): boolean {
 }
 
 /**
+ * Check if the screen shows a post-update message (codex updated itself and exited).
+ * The shell command will detect this and restart codex automatically.
+ */
+function isPostUpdateScreen(screen: string): boolean {
+  const lower = screen.toLowerCase();
+  return (
+    lower.includes("update ran successfully") ||
+    lower.includes("please restart")
+  );
+}
+
+/**
  * Poll for the codex TUI to be ready. If an update prompt appears, accept it.
+ * If codex self-updates and exits, the shell command restarts it automatically;
+ * we just keep polling through the transient post-update screen.
  */
 function waitForCodexReady(
   sessionName: string,
-  maxAttempts: number = 15,
+  maxAttempts: number = 30,
   pollInterval: number = 2
 ): void {
   for (let i = 0; i < maxAttempts; i++) {
@@ -76,6 +90,13 @@ function waitForCodexReady(
     if (isUpdatePrompt(screen)) {
       tmux(["send-keys", "-t", sessionName, "Enter"]);
       Bun.sleepSync(15_000);
+      continue;
+    }
+
+    // Post-update screen: codex exited after self-update, shell is restarting it.
+    // Don't waste an attempt sleeping — just keep polling.
+    if (isPostUpdateScreen(screen)) {
+      Bun.sleepSync(pollInterval * 1000);
       continue;
     }
 
@@ -113,7 +134,7 @@ export function createSession(options: {
     // Inner shell command — values are from validated config enums, not raw user input.
     // The exit code is written to a .exit file immediately after script exits,
     // before the echo/sleep, so it's reliable even if the user closes the pane.
-    const shellCmd = `script -q "${logFile}" -c "codex ${codexArgs}"; echo $? > "${exitFile}"; echo "\\n\\n[codex-collab: Session complete. Closing in 30s.]"; sleep 30`;
+    const shellCmd = `script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; if grep -aq "Please restart Codex" "${logFile}" 2>/dev/null; then script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; fi; echo $rc > "${exitFile}"; echo "\\n\\n[codex-collab: Session complete. Closing in 30s.]"; sleep 30`;
 
     // Use -x 220 so the codex TUI doesn't truncate spinner lines.
     // The spinner suffix "esc to interrupt" must be visible for waitForJob
