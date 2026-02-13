@@ -406,7 +406,8 @@ const STATUS_RANK: Record<Job["status"], number> = {
   running: 0,
   pending: 1,
   failed: 2,
-  completed: 3,
+  killed: 3,
+  completed: 4,
 };
 
 function sortByStatusThenDate<T extends { status: Job["status"] }>(

@@ -134,7 +134,16 @@ export function createSession(options: {
     // Inner shell command — values are from validated config enums, not raw user input.
     // The exit code is written to a .exit file immediately after script exits,
     // before the echo/sleep, so it's reliable even if the user closes the pane.
-    const shellCmd = `script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; if grep -aq "Please restart Codex" "${logFile}" 2>/dev/null; then script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; fi; echo $rc > "${exitFile}"; echo "\\n\\n[codex-collab: Session complete. Closing in 30s.]"; sleep 30`;
+    //
+    // Idle watchdog: a background loop checks log mtime every 60s. If codex
+    // has been idle for defaultTimeout minutes, it sends /exit to trigger a
+    // clean shutdown. Three safeguards prevent orphan watchdog processes:
+    //   1. trap EXIT kills it when the parent shell exits
+    //   2. tmux has-session check exits if the pane is gone
+    //   3. it's a child of the pane shell, so gets SIGHUP on pane close
+    const idleTimeoutSec = config.defaultTimeout * 60;
+    const watchdog = `(while sleep 60; do tmux has-session -t "${sessionName}" 2>/dev/null || break; age=$(( $(date +%s) - $(stat -c %Y "${logFile}" 2>/dev/null || echo 0) )); [ $age -gt ${idleTimeoutSec} ] && tmux send-keys -t "${sessionName}" /exit Enter && break; done) &`;
+    const shellCmd = `${watchdog} _wd=$!; trap "kill $_wd 2>/dev/null" EXIT; script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; if grep -aq "Please restart Codex" "${logFile}" 2>/dev/null; then script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; fi; echo $rc > "${exitFile}"; echo "\\n\\n[codex-collab: Session complete. Closing in 30s.]"; sleep 30`;
 
     // Use -x 220 so the codex TUI doesn't truncate spinner lines.
     // The spinner suffix "esc to interrupt" must be visible for waitForJob

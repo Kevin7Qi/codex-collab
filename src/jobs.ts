@@ -31,7 +31,7 @@ import {
 
 export interface Job {
   id: string;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "completed" | "failed" | "killed";
   prompt: string;
   model: string;
   reasoningEffort: ReasoningEffort;
@@ -302,8 +302,7 @@ export function killJob(jobId: string): boolean {
     killSessionUnchecked(job.tmuxSession);
   }
 
-  job.status = "failed";
-  job.error = "Killed by user";
+  job.status = "killed";
   job.completedAt = new Date().toISOString();
   saveJob(job);
   return true;
@@ -369,7 +368,7 @@ export function cleanupOldJobs(maxAgeDays: number = 7): { deleted: number; sessi
   let sessions = 0;
 
   for (const job of jobs) {
-    if (job.status !== "completed" && job.status !== "failed") continue;
+    if (job.status !== "completed" && job.status !== "failed" && job.status !== "killed") continue;
 
     // Kill stale tmux sessions for all completed/failed jobs
     if (job.tmuxSession && sessionExists(job.tmuxSession)) {
@@ -410,8 +409,7 @@ export function refreshJobStatus(jobId: string): Job | null {
           job.error = `Codex exited with code ${exitCode}`;
         }
       } catch {
-        job.status = "failed";
-        job.error = "Session terminated unexpectedly";
+        job.status = "killed";
       }
       saveJob(job);
     } else {

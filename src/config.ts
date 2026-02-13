@@ -16,7 +16,7 @@ export const config = {
   jobsDir: `${process.env.HOME}/.codex-collab/jobs`,
 
   // Default inactivity timeout in minutes for running jobs
-  defaultTimeout: 60,
+  defaultTimeout: 45,
 
   // Default number of jobs to show in listings
   jobsListLimit: 20,
