@@ -34,22 +34,12 @@ codex-collab run --resume <id> "now check the error handling" --content-only
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
 ```
 
-**Always run in the background** — tasks can take minutes:
+**IMPORTANT: Always use `run_in_background=true`** — tasks take minutes. You will be notified automatically when the command finishes. Do NOT block waiting for the result; tell the user it's running and wait for their instructions.
 
 ```bash
 # Via Bash tool with run_in_background=true
 codex-collab run "investigate X" -s read-only --content-only
-# Continue working on other things...
-```
-
-### Optimal run pattern:
-
-```bash
-# 1. Run prompt in background
-codex-collab run "investigate X" -s read-only --content-only  # run_in_background=true
-
-# 2. When background task finishes, the output is the result
-# No separate output/capture needed — run prints results directly
+# Tell the user it's running, then wait for their next instruction
 ```
 
 ## Code Review (Recommended: Single Command)
@@ -77,13 +67,7 @@ codex-collab review --resume <id> "Check error handling" -d /path/to/project --c
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
-**Always run reviews in the background** — they take 5-15 minutes:
-
-```bash
-# Via Bash tool with run_in_background=true
-codex-collab review -d /path/to/project --content-only
-# Continue working on other things...
-```
+**IMPORTANT: Always use `run_in_background=true`** — reviews take 5-15 minutes. You will be notified automatically when done. Do NOT block waiting; tell the user it's running and wait for their instructions.
 
 ### Manual Step-by-Step Review (Fallback)
 
@@ -117,18 +101,18 @@ These patterns minimize context window waste:
 ### Optimal review pattern:
 
 ```bash
-# 1. Start review in background
-codex-collab review -d /project --content-only   # run_in_background=true
-
-# 2. When background task finishes, the output is the review
-# No separate output/capture needed — review prints results directly
+# 1. Start review in background (run_in_background=true)
+codex-collab review -d /project --content-only
+# 2. Tell the user the review is running, wait for their next instruction
+# 3. When notified of completion, the output IS the review
 ```
 
 ### Optimal prompted task pattern:
 
 ```bash
-# Preferred: use run (handles start + wait + output in one call)
-codex-collab run "implement X" --content-only    # run_in_background=true
+# Preferred: use run in background (run_in_background=true)
+codex-collab run "implement X" --content-only
+# Tell the user it's running, wait for their next instruction
 
 # Fallback: manual start + send + wait + output
 codex-collab start -d /path/to/project
