@@ -4,6 +4,7 @@ export function stripAnsiCodes(text: string): string {
   return text
     .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
     .replace(/\x1b\][^\x07]*\x07/g, "")
+    .replace(/\[[\d;]*m/g, "")
     .replace(/\r/g, "")
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
 }

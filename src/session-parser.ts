@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "fs";
 import type { Dirent } from "fs";
 import { extname, join } from "path";
+import { stripAnsiCodes } from "./utils.ts";
 
 export type SessionTokens = {
   input: number;
@@ -207,12 +208,6 @@ function parseJsonSession(content: string): ParsedSessionData | null {
   };
 }
 
-function stripAnsiCodes(text: string): string {
-  return text
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
-    .replace(/\[[\d;]*m/g, "");
-}
-
 export function extractSessionId(logContent: string): string | null {
   const cleanContent = stripAnsiCodes(logContent);
 
@@ -261,7 +256,7 @@ export function findSessionFile(sessionId: string): string | null {
       if (!entry.isFile()) continue;
       const extension = extname(entry.name);
       if (!SESSION_EXTENSIONS.has(extension)) continue;
-      if (fullPath.includes(sessionId)) return fullPath;
+      if (entry.name.includes(sessionId)) return fullPath;
     }
   }
 

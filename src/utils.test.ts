@@ -48,6 +48,12 @@ describe("stripAnsiCodes", () => {
     const messy = "\x1b[1m\x1b]0;t\x07H\x01e\rllo\x1b[0m";
     expect(stripAnsiCodes(messy)).toBe("Hello");
   });
+
+  it("removes orphaned SGR brackets (mangled log output)", () => {
+    // script command logs can have ESC stripped, leaving bare [32m etc.
+    expect(stripAnsiCodes("hello [32mworld[0m")).toBe("hello world");
+    expect(stripAnsiCodes("[1;31merror[0m")).toBe("error");
+  });
 });
 
 // ---------------------------------------------------------------------------
