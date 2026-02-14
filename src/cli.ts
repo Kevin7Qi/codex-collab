@@ -161,6 +161,7 @@ function parseArgs(args: string[]): {
       console.log(HELP);
       process.exit(0);
     } else if (arg === "-r" || arg === "--reasoning") {
+      if (i + 1 >= args.length) { console.error("--reasoning requires a value"); process.exit(1); }
       const level = args[++i] as ReasoningEffort;
       if (config.reasoningEfforts.includes(level)) {
         options.reasoning = level;
@@ -172,8 +173,15 @@ function parseArgs(args: string[]): {
         process.exit(1);
       }
     } else if (arg === "-m" || arg === "--model") {
-      options.model = args[++i];
+      if (i + 1 >= args.length) { console.error("--model requires a value"); process.exit(1); }
+      const model = args[++i];
+      if (/[^a-zA-Z0-9._\-\/:]/.test(model)) {
+        console.error(`Invalid model name: ${model}`);
+        process.exit(1);
+      }
+      options.model = model;
     } else if (arg === "-s" || arg === "--sandbox") {
+      if (i + 1 >= args.length) { console.error("--sandbox requires a value"); process.exit(1); }
       const mode = args[++i] as SandboxMode;
       if (config.sandboxModes.includes(mode)) {
         options.sandbox = mode;
@@ -185,6 +193,7 @@ function parseArgs(args: string[]): {
         process.exit(1);
       }
     } else if (arg === "-d" || arg === "--dir") {
+      if (i + 1 >= args.length) { console.error("--dir requires a value"); process.exit(1); }
       options.dir = resolve(args[++i]);
     } else if (arg === "--strip-ansi") {
       options.stripAnsi = true;
@@ -193,6 +202,7 @@ function parseArgs(args: string[]): {
     } else if (arg === "--json") {
       options.json = true;
     } else if (arg === "--timeout") {
+      if (i + 1 >= args.length) { console.error("--timeout requires a value"); process.exit(1); }
       const val = Number(args[++i]);
       if (!Number.isFinite(val) || val <= 0) {
         console.error(`Invalid timeout: ${args[i]}`);
@@ -200,6 +210,7 @@ function parseArgs(args: string[]): {
       }
       options.timeout = val;
     } else if (arg === "--interval") {
+      if (i + 1 >= args.length) { console.error("--interval requires a value"); process.exit(1); }
       const val = Number(args[++i]);
       if (!Number.isFinite(val) || val <= 0) {
         console.error(`Invalid interval: ${args[i]}`);
@@ -207,6 +218,7 @@ function parseArgs(args: string[]): {
       }
       options.interval = val;
     } else if (arg === "--limit") {
+      if (i + 1 >= args.length) { console.error("--limit requires a value"); process.exit(1); }
       const raw = args[++i];
       const parsed = Number(raw);
       if (!Number.isFinite(parsed) || parsed < 1) {

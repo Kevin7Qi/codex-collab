@@ -96,4 +96,28 @@ describe("CLI invalid inputs", () => {
     expect(exitCode).toBe(1);
     expect(stderr).toContain("Unknown option");
   });
+
+  it("--model without value exits 1", () => {
+    const { stderr, exitCode } = run("run", "test", "--model");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("--model requires a value");
+  });
+
+  it("--model with shell metacharacters exits 1", () => {
+    const { stderr, exitCode } = run("run", "test", "--model", "foo;rm -rf /");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Invalid model name");
+  });
+
+  it("--reasoning without value exits 1", () => {
+    const { stderr, exitCode } = run("run", "test", "--reasoning");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("--reasoning requires a value");
+  });
+
+  it("--dir without value exits 1", () => {
+    const { stderr, exitCode } = run("run", "test", "--dir");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("--dir requires a value");
+  });
 });
