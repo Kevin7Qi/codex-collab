@@ -470,11 +470,12 @@ export function getAttachCommand(jobId: string): string | null {
  */
 export function waitForJob(
   jobId: string,
-  options: { timeoutSec?: number; intervalSec?: number } = {}
+  options: { timeoutSec?: number; intervalSec?: number; requireSpinner?: boolean } = {}
 ): { done: boolean; output: string | null } {
 
   const timeoutSec = options.timeoutSec ?? 900;
   const intervalSec = options.intervalSec ?? 30;
+  const requireSpinner = options.requireSpinner ?? false;
   const deadline = Date.now() + timeoutSec * 1000;
 
   const job = loadJob(jobId);
@@ -485,10 +486,11 @@ export function waitForJob(
   // Grace period: wait for the spinner to appear before checking for completion.
   // Without this, calling `wait` right after `send` can return immediately
   // because codex hasn't rendered the spinner yet.
-  // After the grace period, if no spinner was ever seen and codex is idle, report done.
+  // After the grace period, if no spinner was ever seen and codex is idle, report done
+  // (unless requireSpinner is set, in which case report not-done to avoid false positives).
   let sawSpinner = false;
   const waitStarted = Date.now();
-  const gracePeriodMs = 15_000;
+  const gracePeriodMs = Math.max(30_000, intervalSec * 2.5 * 1000);
 
   while (Date.now() < deadline) {
     let output = capturePaneUnchecked(job.tmuxSession, { lines: 50 });
@@ -541,8 +543,10 @@ export function waitForJob(
       continue;
     } else if (!sawSpinner && Date.now() - waitStarted > gracePeriodMs) {
       // Grace period expired and spinner was never seen.
-      // Codex is at idle prompt — task completed before we started polling.
-      return { done: true, output };
+      // If requireSpinner is set, this means the submission wasn't confirmed —
+      // report not-done instead of falsely declaring completion.
+      // Otherwise (manual `wait`), assume codex finished before we started polling.
+      return { done: !requireSpinner, output };
     }
 
     Bun.sleepSync(intervalSec * 1000);
@@ -696,11 +700,18 @@ export function runPrompt(options: RunPromptOptions): RunResult {
   }
 
   // Wait for completion (done = spinner stopped, codex is idle — session stays reusable)
-  const result = waitForJob(job.id, { timeoutSec, intervalSec });
+  const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true });
 
   // Fetch full scrollback on completion (pane capture truncates long output)
   const fullOutput = resolveOutput(job.id, result);
-  return { jobId: job.id, done: result.done, output: fullOutput };
+  if (!result.done) {
+    return {
+      jobId: job.id, done: false, output: fullOutput,
+      error: "Codex never started processing (spinner not detected). "
+        + "Session is still running — check with: codex-collab capture " + job.id,
+    };
+  }
+  return { jobId: job.id, done: true, output: fullOutput };
 }
 
 export type ReviewMode = "pr" | "uncommitted" | "commit" | "custom";
@@ -757,9 +768,16 @@ export function runReview(options: RunReviewOptions): ReviewResult {
   // Custom mode: send /review with instructions directly (bypasses menu)
   if (options.mode === "custom" && options.instructions) {
     sendMessageUnchecked(sessionName, `/review ${options.instructions}`);
-    const result = waitForJob(job.id, { timeoutSec, intervalSec });
+    const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true });
     const fullOutput = resolveOutput(job.id, result);
-    return { jobId: job.id, done: result.done, output: fullOutput };
+    if (!result.done) {
+      return {
+        jobId: job.id, done: false, output: fullOutput,
+        error: "Codex never started processing (spinner not detected). "
+          + "Session is still running — check with: codex-collab capture " + job.id,
+      };
+    }
+    return { jobId: job.id, done: true, output: fullOutput };
   }
 
   // Menu modes: send /review and navigate the TUI menu
@@ -823,10 +841,17 @@ export function runReview(options: RunReviewOptions): ReviewResult {
   }
 
   // Wait for the review to complete
-  const result = waitForJob(job.id, { timeoutSec, intervalSec });
+  const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true });
 
   // Fetch full scrollback — waitForJob only returns the visible pane,
   // which truncates long reviews
   const fullOutput = resolveOutput(job.id, result);
-  return { jobId: job.id, done: result.done, output: fullOutput };
+  if (!result.done) {
+    return {
+      jobId: job.id, done: false, output: fullOutput,
+      error: "Codex never started processing (spinner not detected). "
+        + "Session is still running — check with: codex-collab capture " + job.id,
+    };
+  }
+  return { jobId: job.id, done: true, output: fullOutput };
 }
