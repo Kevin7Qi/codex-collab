@@ -124,7 +124,7 @@ export function createSession(options: {
     //   2. tmux has-session check exits if the pane is gone
     //   3. it's a child of the pane shell, so gets SIGHUP on pane close
     const idleTimeoutSec = config.defaultTimeout * 60;
-    const watchdog = `(while sleep 60; do tmux has-session -t "${sessionName}" 2>/dev/null || break; age=$(( $(date +%s) - $(stat -c %Y "${logFile}" 2>/dev/null || echo 0) )); [ $age -gt ${idleTimeoutSec} ] && tmux send-keys -t "${sessionName}" /exit Enter && break; done) &`;
+    const watchdog = `(while sleep 60; do tmux has-session -t "${sessionName}" 2>/dev/null || break; age=$(( $(date +%s) - $(stat -c %Y "${logFile}" 2>/dev/null || echo 0) )); [ $age -gt ${idleTimeoutSec} ] && tmux send-keys -l -t "${sessionName}" /exit && sleep 1 && tmux send-keys -t "${sessionName}" Enter && break; done) &`;
     const shellCmd = `${watchdog} _wd=$!; trap "kill $_wd 2>/dev/null" EXIT; script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; if grep -aq "Please restart Codex" "${logFile}" 2>/dev/null; then script -q "${logFile}" -c "codex ${codexArgs}"; rc=$?; fi; echo $rc > "${exitFile}"; echo "\\n\\n[codex-collab: Session complete. Closing in 30s.]"; sleep 30`;
 
     // Use -x 220 so the codex TUI doesn't truncate spinner lines.

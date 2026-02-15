@@ -61,7 +61,8 @@ function killSession(name: string): void {
 function createTestSession(name: string, cmd: string): void {
   createdSessions.push(name);
   const result = spawnSync("tmux", [
-    "new-session", "-d", "-s", name, "-x", "120", "-y", "20", cmd,
+    "new-session", "-d", "-s", name, "-x", "120", "-y", "20",
+    "-e", "HISTFILE=/dev/null", cmd,
   ], { stdio: "pipe" });
   if (result.status !== 0) {
     throw new Error(`Failed to create session ${name}: exit ${result.status}`);
