@@ -27,7 +27,7 @@ codex-collab run "what does this project do?" -s read-only --content-only
 # Implementation task
 codex-collab run "add input validation to the login form" --content-only
 
-# Resume an existing session (faster, preserves Codex's file cache)
+# Resume an existing session (preserves conversation context)
 codex-collab run --resume <id> "now check the error handling" --content-only
 
 # Specify working directory (omit -d if already in the project dir)
@@ -123,24 +123,24 @@ codex-collab output <id> --content-only
 
 ## Resuming Sessions
 
-Prefer resuming sessions over starting fresh to save startup time and reduce resource waste.
+When consecutive tasks relate to the same project, resume the existing session. Codex retains the conversation history, so follow-ups like "now fix what you found" or "check the tests too" work better when Codex already has context from the previous exchange. Start a fresh session when the task is unrelated or targets a different project.
 
 | Situation | Action |
 |-----------|--------|
 | Same project, new prompt | `codex-collab run --resume <id> "prompt"` |
 | Same project, want review | `codex-collab review --resume <id>` |
-| Same project, manual control | `codex-collab reset <id>` then send |
+| Same project, clean slate | `codex-collab reset <id>` then resume |
+| Same project, manual control | `codex-collab send <id> "message"` |
 | Different project | Start new session |
 | Session crashed / stuck | `codex-collab kill <id>` then start new |
 
-Before starting a new session, check for resumable ones:
+Sessions time out after 45 minutes of inactivity. If a session has expired, start a new one. If you've lost track of the job ID, use `codex-collab jobs` to find running sessions.
+
+To clear context without killing the session, use `reset`:
 
 ```bash
-codex-collab jobs          # Look for running interactive sessions in the same project
-codex-collab reset <id>    # Clear context with /new
+codex-collab reset <id>    # Sends /new to clear Codex's conversation history in this session
 ```
-
-The `reset` command sends `/new` to an existing session, clearing Codex's context without killing the process. This is faster than starting a fresh session.
 
 ## Waiting for Completion
 
@@ -261,7 +261,7 @@ Use codex-collab's `run` and `review` commands when you need session resumption,
 - **Use `-s read-only`** for reviews and research.
 - **Omit `-d` if already in the project directory** — it defaults to cwd. Only pass `-d` when the target project differs from your current directory.
 - **Multiple concurrent sessions** are supported. Each gets its own tmux session and job ID.
-- **Resume sessions** when working on the same project repeatedly. `run --resume` and `review --resume` are much faster than starting fresh.
+- **Resume sessions** when follow-up tasks relate to previous ones. Codex can build on what it already found, and you skip startup overhead. Use `run --resume` or `review --resume`.
 - **Validate Codex's findings.** After reading Codex's review or analysis output, verify each finding against the actual source code before presenting to the user. Drop false positives, note which findings you verified.
 
 ## Prerequisites

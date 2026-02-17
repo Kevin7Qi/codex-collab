@@ -593,7 +593,8 @@ export function waitForContent(
 }
 
 /**
- * Resume an existing interactive session: validate it's alive, send /new, clear history.
+ * Resume an existing interactive session: validate it's alive and return it.
+ * Conversation context is preserved. Use `resetJob` to clear context with /new.
  */
 function resumeSession(jobId: string): { job: Job; sessionName: string } | { error: string } {
   const existing = loadJob(jobId);
@@ -606,11 +607,6 @@ function resumeSession(jobId: string): { job: Job; sessionName: string } | { err
   if (!screen || screen.includes("[codex-collab: Session complete")) {
     return { error: "Codex has exited in this session" };
   }
-  if (!sendMessageUnchecked(existing.tmuxSession, "/new")) {
-    return { error: "Failed to send /new to reset session" };
-  }
-  Bun.sleepSync(2000);
-  clearHistoryUnchecked(existing.tmuxSession);
   return { job: existing, sessionName: existing.tmuxSession };
 }
 

@@ -2,7 +2,14 @@
 
 Collaborate with [Codex](https://github.com/openai/codex) from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run tasks, get code reviews, do parallel research, all without leaving your Claude session.
 
-codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) that manages persistent Codex sessions in tmux. Normally, Claude can only call Codex in non-interactive mode (single prompt in, single response out). codex-collab keeps sessions alive so Claude can steer them mid-task, reuse context across prompts, and chain multi-step workflows like interactive code review.
+codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) that manages persistent Codex sessions in tmux. Unlike single-shot Codex calls, sessions stay alive so you can resume them, chain prompts, and interact mid-task.
+
+## Why
+
+- **Background execution** — Codex runs in a persistent tmux session. Claude doesn't block waiting; it gets notified when the work is done.
+- **Review automation** — One command to trigger Codex's `/review` TUI for PRs, uncommitted changes, or specific commits. codex-collab navigates the menu and runs Codex in a read-only sandbox.
+- **Session reuse** — Sessions stay alive in tmux. Resume one to send follow-up prompts, build on previous responses, or steer the work in a new direction.
+- **Clean output** — Strips TUI chrome and ANSI codes so Claude gets readable text, not terminal noise.
 
 ## Prerequisites
 
@@ -20,7 +27,7 @@ cd codex-collab
 ./install.sh
 ```
 
-The install script builds a self-contained bundle, copies it to `~/.claude/skills/codex-collab/`, and symlinks the binary. Once installed, Claude discovers the skill automatically.
+The install script builds a self-contained bundle, copies it to `~/.claude/skills/codex-collab/`, and symlinks the binary. Once installed, Claude discovers the skill automatically and can invoke it without explicit prompting.
 
 For development (live-reloading source changes):
 
@@ -101,3 +108,7 @@ For fine-grained control when `run` and `review` aren't enough.
 | `--all` | Show all jobs |
 
 </details>
+
+## See also
+
+For single-prompt Codex calls, the official [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk) is simpler. codex-collab exists because you need persistent sessions or background execution.
