@@ -17,6 +17,7 @@ import {
   parseSessionFile,
   type ParsedSessionData,
 } from "./session-parser.ts";
+import { processOutput } from "./utils.ts";
 import {
   createSession,
   killSessionUnchecked,
@@ -68,6 +69,12 @@ function getJobPath(jobId: string): string {
 export function saveJob(job: Job): void {
   ensureJobsDir();
   writeFileSync(getJobPath(job.id), JSON.stringify(job, null, 2));
+
+  // Clean up transient files once the job reaches a terminal state
+  if (TERMINAL_STATUSES.has(job.status)) {
+    try { unlinkSync(join(config.jobsDir, `${job.id}.log`)); } catch {}
+    try { unlinkSync(join(config.jobsDir, `${job.id}.exit`)); } catch {}
+  }
 }
 
 export function loadJob(jobId: string): Job | null {
@@ -98,6 +105,11 @@ export function listJobs(): Job[] {
       (a, b) =>
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
     );
+}
+
+/** Strip ANSI codes and TUI chrome before storing result in the job JSON. */
+function cleanResult(raw: string): string {
+  return processOutput(raw, { contentOnly: true, stripAnsi: true });
 }
 
 function truncateText(value: string, maxLength: number): string {
@@ -396,7 +408,7 @@ export function refreshJobStatus(jobId: string): Job | null {
       job.completedAt = new Date().toISOString();
       const logFile = join(config.jobsDir, `${jobId}.log`);
       try {
-        job.result = readFileSync(logFile, "utf-8");
+        job.result = cleanResult(readFileSync(logFile, "utf-8"));
       } catch {
         // Log may not exist if session was killed very early
       }
@@ -420,14 +432,25 @@ export function refreshJobStatus(jobId: string): Job | null {
         job.completedAt = new Date().toISOString();
         const fullOutput = captureFullHistoryUnchecked(job.tmuxSession);
         if (fullOutput) {
-          job.result = fullOutput;
+          job.result = cleanResult(fullOutput);
         }
         saveJob(job);
       } else if (isInactiveTimedOut(job)) {
-        killSessionUnchecked(job.tmuxSession);
-        job.status = "failed";
-        job.error = `Timed out after ${config.defaultTimeout} minutes of inactivity`;
-        job.completedAt = new Date().toISOString();
+        // The watchdog sends /exit for a clean shutdown; give it a moment
+        // to produce the "Session complete" marker before we intervene.
+        Bun.sleepSync(3000);
+        const recheck = capturePaneUnchecked(job.tmuxSession, { lines: 20 });
+        if (recheck && recheck.includes("[codex-collab: Session complete")) {
+          job.status = "completed";
+          job.completedAt = new Date().toISOString();
+          const fullOutput = captureFullHistoryUnchecked(job.tmuxSession);
+          if (fullOutput) job.result = cleanResult(fullOutput);
+        } else {
+          killSessionUnchecked(job.tmuxSession);
+          job.status = "completed";
+          job.error = `Session expired after ${config.defaultTimeout} minutes of inactivity`;
+          job.completedAt = new Date().toISOString();
+        }
         saveJob(job);
       }
     }
@@ -633,6 +656,8 @@ function acquireSession(opts: AcquireSessionOptions): AcquireResult {
     if ("error" in resumed) {
       return { error: resumed.error, jobId: opts.resumeJobId };
     }
+    // Clear tmux scrollback so output capture returns only the new response
+    clearHistoryUnchecked(resumed.sessionName);
     resumed.job.prompt = opts.prompt;
     resumed.job.startedAt = new Date().toISOString();
     resumed.job.completedAt = undefined;
@@ -777,7 +802,9 @@ export function runReview(options: RunReviewOptions): ReviewResult {
   }
 
   // Menu modes: send /review and navigate the TUI menu
-  sendMessageUnchecked(sessionName, "/review");
+  if (!sendMessageUnchecked(sessionName, "/review")) {
+    return failReview("Failed to send /review to session");
+  }
 
   // Wait for the review preset menu to appear
   const menuScreen = waitForContent(sessionName, /select a review preset/i, 30);

@@ -543,6 +543,34 @@ describe("job status transitions", () => {
     expect(refreshed!.completedAt).toBeDefined();
   });
 
+  it("session alive + inactivity timeout → completed (not failed)", () => {
+    const sessionName = `${TEST_PREFIX}-timeout`;
+    const job = makeRunningJob(sessionName);
+    saveJob(job);
+
+    // Create a real session with no "Session complete" marker
+    createTestSession(sessionName, "sleep 300");
+    sleep(500);
+
+    // Create a log file with a stale mtime (1 hour ago) so isInactiveTimedOut triggers
+    const logFile = join(config.jobsDir, `${job.id}.log`);
+    writeFileSync(logFile, "stale log");
+    const oldTime = new Date(Date.now() - 60 * 60 * 1000);
+    spawnSync("touch", ["-d", oldTime.toISOString(), logFile]);
+
+    const refreshed = refreshJobStatus(job.id);
+    expect(refreshed).not.toBeNull();
+    expect(refreshed!.status).toBe("completed");
+    expect(refreshed!.error).toContain("expired");
+    expect(refreshed!.completedAt).toBeDefined();
+
+    // Session should have been killed
+    sleep(500);
+    expect(sessionExists(sessionName)).toBe(false);
+
+    try { unlinkSync(logFile); } catch {}
+  });
+
   it("killJob sets status to killed with no error", () => {
     const sessionName = `${TEST_PREFIX}-kill-test`;
     const job = makeRunningJob(sessionName);

@@ -301,21 +301,15 @@ function refreshJobsForDisplay(jobs: Job[]): Job[] {
   });
 }
 
-const STATUS_RANK: Record<Job["status"], number> = {
-  running: 0,
-  pending: 1,
-  failed: 2,
-  killed: 3,
-  completed: 4,
-};
-
-function sortByStatusThenDate<T extends { status: Job["status"] }>(
+/** Sort jobs by date (newest first), with running/pending pinned to the top. */
+function sortJobs<T extends { status: Job["status"] }>(
   items: T[],
   getDate: (item: T) => string
 ): T[] {
   return [...items].sort((a, b) => {
-    const rankDiff = STATUS_RANK[a.status] - STATUS_RANK[b.status];
-    if (rankDiff !== 0) return rankDiff;
+    const aActive = a.status === "running" || a.status === "pending" ? 1 : 0;
+    const bActive = b.status === "running" || b.status === "pending" ? 1 : 0;
+    if (aActive !== bActive) return bActive - aActive;
     return new Date(getDate(b)).getTime() - new Date(getDate(a)).getTime();
   });
 }
@@ -534,7 +528,7 @@ async function main() {
           const payload = getJobsJson();
           const limit = options.jobsAll ? null : options.jobsLimit;
           payload.jobs = applyJobsLimit(
-            sortByStatusThenDate(payload.jobs, (j) => j.created_at),
+            sortJobs(payload.jobs, (j) => j.created_at),
             limit
           );
           console.log(JSON.stringify(payload, null, 2));
@@ -544,7 +538,7 @@ async function main() {
         const limit = options.jobsAll ? null : options.jobsLimit;
         const allJobs = refreshJobsForDisplay(listJobs());
         const jobs = applyJobsLimit(
-          sortByStatusThenDate(allJobs, (j) => j.createdAt),
+          sortJobs(allJobs, (j) => j.createdAt),
           limit
         );
         if (jobs.length === 0) {

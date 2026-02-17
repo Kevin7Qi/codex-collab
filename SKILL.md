@@ -5,7 +5,7 @@ description: Delegate tasks to Codex — run prompts, code review, research, pai
 
 # codex-collab
 
-codex-collab is a bridge between Claude and Codex. It manages Codex sessions in tmux and gives you the ability to see Codex's TUI, send messages and keystrokes, and read its output. How you collaborate depends on what the user wants.
+codex-collab is a bridge between Claude and Codex. It manages Codex sessions in tmux and gives you the ability to see Codex's TUI, send messages and keystrokes, and read its output.
 
 ## Collaboration Modes
 
@@ -34,12 +34,12 @@ codex-collab run --resume <id> "now check the error handling" --content-only
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
 ```
 
-**IMPORTANT: Always use `run_in_background=true`** — tasks take minutes. You will be notified automatically when the command finishes. Do NOT block waiting for the result; tell the user it's running and wait for their instructions.
+**IMPORTANT: Always use `run_in_background=true`** — tasks take minutes. You will be notified automatically when the command finishes. After launching, tell the user it's running and ask what they'd like to do next. Do NOT spawn a task or agent to wait for or monitor the result.
+
+If the user asks about progress, use `capture` to check the current screen:
 
 ```bash
-# Via Bash tool with run_in_background=true
-codex-collab run "investigate X" -s read-only --content-only
-# Tell the user it's running, then wait for their next instruction
+codex-collab capture <id> --content-only
 ```
 
 ## Code Review (Recommended: Single Command)
@@ -67,7 +67,7 @@ codex-collab review --resume <id> "Check error handling" -d /path/to/project --c
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
-**IMPORTANT: Always use `run_in_background=true`** — reviews take 5-15 minutes. You will be notified automatically when done. Do NOT block waiting; tell the user it's running and wait for their instructions.
+**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 5-15 minutes. You will be notified automatically when done. After launching, tell the user it's running and ask what they'd like to do next. Do NOT spawn a task or agent to wait for or monitor the result.
 
 ### Manual Step-by-Step Review (Fallback)
 
@@ -91,35 +91,9 @@ codex-collab output <id> --content-only
 
 ## Context Efficiency
 
-These patterns minimize context window waste:
-
 - **Use `--content-only`** when reading output — strips TUI chrome (banner, tips, shortcuts, idle prompt). Implies `--strip-ansi`.
 - **Use `output --content-only`** to read results, NOT `capture`. Output gets the full scrollback; capture gets only the visible pane.
-- **`run` and `review` handle waiting internally** — just run them in the background (Bash tool `run_in_background`). No separate `wait` or `output` call needed; they print results directly when done.
-- **`wait` is only for manual workflows** (`start` + `send`). It polls for the spinner to disappear and prints a status line to stderr. Use `output` afterward to read results.
-
-### Optimal review pattern:
-
-```bash
-# 1. Start review in background (run_in_background=true)
-codex-collab review -d /project --content-only
-# 2. Tell the user the review is running, wait for their next instruction
-# 3. When notified of completion, the output IS the review
-```
-
-### Optimal prompted task pattern:
-
-```bash
-# Preferred: use run in background (run_in_background=true)
-codex-collab run "implement X" --content-only
-# Tell the user it's running, wait for their next instruction
-
-# Fallback: manual start + send + wait + output
-codex-collab start -d /path/to/project
-codex-collab send <id> "implement X"
-codex-collab wait <id>                           # run_in_background=true
-codex-collab output <id> --content-only
-```
+- **`run` and `review` print results on completion** — no separate `output` call needed. The `wait` + `output` pattern is only for manual `start` + `send` workflows.
 
 ## Resuming Sessions
 
@@ -129,7 +103,7 @@ When consecutive tasks relate to the same project, resume the existing session. 
 |-----------|--------|
 | Same project, new prompt | `codex-collab run --resume <id> "prompt"` |
 | Same project, want review | `codex-collab review --resume <id>` |
-| Same project, clean slate | `codex-collab reset <id>` then resume |
+| Same project, clean slate | `codex-collab reset <id>` then `run --resume <id> "prompt"` |
 | Same project, manual control | `codex-collab send <id> "message"` |
 | Different project | Start new session |
 | Session crashed / stuck | `codex-collab kill <id>` then start new |
@@ -144,17 +118,16 @@ codex-collab reset <id>    # Sends /new to clear Codex's conversation history in
 
 ## Waiting for Completion
 
-`run` and `review` wait internally — no separate `wait` needed. The `wait` command is only for manual workflows where you use `start` + `send` separately.
+The `wait` command is only for manual workflows (`start` + `send`). Do NOT use `wait` after `run` or `review` — they already wait internally and print results when done. Adding a separate `wait` causes duplicate notifications.
+
+`wait` polls for the spinner to disappear, then prints a status line to stderr. Use `output --content-only` afterward to read results.
+
+Always run `wait` in the background (`run_in_background=true`).
 
 ```bash
-# Only needed after manual start + send (not needed with run/review)
 codex-collab wait <id>
-
-# Custom timeout and interval
 codex-collab wait <id> --timeout 1800 --interval 60
 ```
-
-`wait` polls for the spinner to disappear, then prints a status line to stderr. Use `output --content-only` afterward to read results. **Always run in the background** for long tasks.
 
 ## CLI Reference
 
@@ -236,32 +209,18 @@ codex-collab health                          # Check prerequisites
 
 ## Non-Interactive Tasks (codex exec)
 
-For simple one-shot tasks that don't need session management, use `codex exec` directly instead of codex-collab:
+For simple one-shot tasks that don't need session management, use `codex exec` directly. Use codex-collab when you need session reuse, TUI interaction, or review automation.
 
 ```bash
-# Run a prompt, get output on stdout
 codex exec "explain what this project does" -s read-only
-
-# Specify working directory
 codex exec "summarize the auth module" -s read-only -C /path/to/project
-
-# Resume the most recent Codex session
-codex exec resume --last
-
-# Resume a specific session with a follow-up prompt
-codex exec resume <session-id> "now check the error handling"
 ```
-
-Use codex-collab's `run` and `review` commands when you need session resumption, multi-step TUI interaction, or approval handling.
 
 ## Tips
 
-- **Always use `--content-only`** when reading output programmatically. It strips ANSI codes AND TUI chrome.
-- **Codex is meticulous.** Reviews take 5-15 minutes. Run in background.
-- **Use `-s read-only`** for reviews and research.
+- **`run --resume` requires a prompt.** `review --resume` works without one (it uses the review workflow), but `run --resume <id>` will error if no prompt is given.
 - **Omit `-d` if already in the project directory** — it defaults to cwd. Only pass `-d` when the target project differs from your current directory.
 - **Multiple concurrent sessions** are supported. Each gets its own tmux session and job ID.
-- **Resume sessions** when follow-up tasks relate to previous ones. Codex can build on what it already found, and you skip startup overhead. Use `run --resume` or `review --resume`.
 - **Validate Codex's findings.** After reading Codex's review or analysis output, verify each finding against the actual source code before presenting to the user. Drop false positives, note which findings you verified.
 
 ## Prerequisites
