@@ -32,7 +32,7 @@ export function sessionExists(sessionName: string): boolean {
  * Check if a screen looks like the codex TUI is ready for input
  * (shows the model info banner and input prompt, not an update dialog).
  */
-function isCodexReady(screen: string): boolean {
+export function isCodexReady(screen: string): boolean {
   const lower = screen.toLowerCase();
   return (
     lower.includes("openai codex") &&
@@ -169,6 +169,8 @@ export function sendLiteralUnchecked(sessionName: string, text: string): boolean
  */
 export function sendMessageUnchecked(sessionName: string, message: string): boolean {
   if (!sendLiteralUnchecked(sessionName, message)) return false;
+  // Give the TUI time to process pasted text before sending Enter.
+  // Longer messages need more time; cap at 5s.
   Bun.sleepSync(Math.min(300 + message.length, 5000));
   return sendKeysUnchecked(sessionName, "Enter");
 }

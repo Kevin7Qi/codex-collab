@@ -28,6 +28,7 @@ import {
   sendMessageUnchecked,
   sendLiteralUnchecked,
   sendKeysUnchecked,
+  isCodexReady,
 } from "./tmux.ts";
 
 export interface Job {
@@ -490,7 +491,10 @@ export function getAttachCommand(jobId: string): string | null {
 /**
  * Confirm screen stability: check that the pane is unchanged for N consecutive
  * captures at 3s intervals, and the spinner hasn't reappeared.
- * Returns { confirmed: true } if stable, { confirmed: false } if spinner came back.
+ *
+ * Returns { confirmed: true } if stable or session is gone.
+ * Returns { confirmed: false } if the spinner reappeared or the 30s
+ * confirmation window expired without achieving the required stability.
  */
 function confirmStable(
   sessionName: string,
@@ -520,7 +524,7 @@ function confirmStable(
     }
     lastOutput = check;
   }
-  return { confirmed: true, lastOutput };
+  return { confirmed: false, lastOutput };
 }
 
 /**
@@ -545,15 +549,16 @@ export function waitForJob(
   // Two spinner flags:
   // - confirmedInLoop: the wait loop itself observed the spinner (authoritative)
   // - spinnerSeen: ensureSubmitted observed the spinner before this loop started
-  // The quick 6s stability check only fires when confirmedInLoop is true.
-  // When only spinnerSeen is true, a stricter 15s stability check is used
-  // to avoid false completion during quiet gaps between tool calls.
+  // The standard stability check (2 consecutive unchanged captures, minimum ~6s)
+  // only fires when confirmedInLoop is true.
+  // When only spinnerSeen is true, a stricter check (5 consecutive, minimum ~15s)
+  // is used to avoid false completion during quiet gaps between tool calls.
   let confirmedInLoop = false;
   const spinnerSeen = options.spinnerSeen ?? false;
   const waitStarted = Date.now();
   const gracePeriodMs = spinnerSeen
     ? 10_000  // ensureSubmitted confirmed submission; shorter wait before stability check
-    : Math.max(30_000, intervalSec * 2.5 * 1000);
+    : Math.max(30_000, intervalSec * 2.5 * 1000); // no prior confirmation; wait longer before assuming idle
 
   while (Date.now() < deadline) {
     let output = capturePaneUnchecked(job.tmuxSession, { lines: 50 });
@@ -572,15 +577,16 @@ export function waitForJob(
       confirmedInLoop = true;
     } else if (confirmedInLoop) {
       // Spinner appeared AND disappeared in this loop — confirm with standard
-      // stability check: 2 consecutive unchanged captures (~6s).
+      // stability check: 2 consecutive unchanged captures at 3s intervals.
       const { confirmed, lastOutput } = confirmStable(job.tmuxSession, output, 2, deadline);
       if (lastOutput) output = lastOutput;
       if (confirmed) return { done: true, output };
       continue;
     } else if (spinnerSeen && Date.now() - waitStarted > gracePeriodMs) {
-      // ensureSubmitted saw the spinner but this loop didn't — likely a fast
-      // completion. Use a stricter stability check (5 consecutive = ~15s) to
-      // avoid false completion during quiet gaps between tool calls.
+      // ensureSubmitted saw the spinner but this loop hasn't — the task may have
+      // completed quickly, or the spinner may be between appearances (tool-call gaps).
+      // Use a stricter stability check (5 consecutive unchanged captures) to
+      // distinguish true completion from transient quiet periods.
       const { confirmed, lastOutput } = confirmStable(job.tmuxSession, output, 5, deadline);
       if (lastOutput) output = lastOutput;
       if (confirmed) return { done: true, output };
@@ -700,14 +706,18 @@ function acquireSession(opts: AcquireSessionOptions): AcquireResult {
 
 /**
  * Verify that Codex started processing after a prompt was sent.
- * Rapid-polls for the spinner (500ms intervals), then retries Enter if needed.
- * Returns true if the spinner was observed (prompt confirmed submitted).
+ * Phase 1: rapid-polls for the spinner (500ms intervals, up to 5s).
+ * Phase 2: retries Enter if the idle prompt is visible (up to maxRetries times).
+ *
+ * Returns true if the spinner was observed or the session disappeared
+ * (implying the prompt was processed). Returns false if the spinner was
+ * never detected after all retries.
  */
 function ensureSubmitted(
   sessionName: string,
   maxRetries: number = 2,
 ): boolean {
-  // Phase 1: rapid poll for spinner — catches fast tasks that complete in 1-3s
+  // Phase 1: rapid poll for spinner appearance (up to 5s at 500ms intervals)
   const rapidEnd = Date.now() + 5_000;
   while (Date.now() < rapidEnd) {
     const screen = capturePaneUnchecked(sessionName, { lines: 50 });
@@ -716,13 +726,31 @@ function ensureSubmitted(
     Bun.sleepSync(500);
   }
 
-  // Phase 2: no spinner seen — Enter may have been swallowed. Retry and check.
+  // Phase 2: no spinner seen — Enter may have been swallowed. Retry Enter
+  // only when the Codex TUI has text in the input area (banner present but
+  // idle hints gone). If isCodexReady is true, the input area is empty —
+  // nothing to submit, so pressing Enter won't help.
   for (let i = 0; i < maxRetries; i++) {
-    sendKeysUnchecked(sessionName, "Enter");
-    Bun.sleepSync(3_000);
     const screen = capturePaneUnchecked(sessionName, { lines: 50 });
     if (!screen) return true;
-    if (screen.toLowerCase().includes("esc to interrupt")) return true;
+    const lower = screen.toLowerCase();
+    if (lower.includes("esc to interrupt")) return true;
+    if (isCodexReady(screen)) {
+      // Idle with empty input — text was already submitted or never arrived
+      Bun.sleepSync(3_000);
+      continue;
+    }
+    if (!lower.includes("openai codex")) {
+      // Not the Codex TUI at all — don't press Enter
+      Bun.sleepSync(3_000);
+      continue;
+    }
+    // Banner present but not idle — text likely in input area, retry Enter
+    sendKeysUnchecked(sessionName, "Enter");
+    Bun.sleepSync(3_000);
+    const after = capturePaneUnchecked(sessionName, { lines: 50 });
+    if (!after) return true;
+    if (after.toLowerCase().includes("esc to interrupt")) return true;
   }
   return false;
 }
@@ -771,7 +799,8 @@ export function runPrompt(options: RunPromptOptions): RunResult {
   }
   const preSubmitMs = Date.now();
   const spinnerSeen = ensureSubmitted(sessionName);
-  const remainingTimeout = Math.max(0, timeoutSec - (Date.now() - preSubmitMs) / 1000);
+  const elapsedSec = (Date.now() - preSubmitMs) / 1000;
+  const remainingTimeout = Math.max(0, timeoutSec - elapsedSec);
 
   // Wait for completion (done = spinner stopped, codex is idle — session stays reusable)
   const result = waitForJob(job.id, { timeoutSec: remainingTimeout, intervalSec, requireSpinner: true, spinnerSeen });
@@ -779,10 +808,12 @@ export function runPrompt(options: RunPromptOptions): RunResult {
   // Fetch full scrollback on completion (pane capture truncates long output)
   const fullOutput = resolveOutput(job.id, result);
   if (!result.done) {
+    const errorMsg = spinnerSeen
+      ? "Codex started but did not finish within the timeout. "
+      : "Codex never started processing (spinner not detected). ";
     return {
       jobId: job.id, done: false, output: fullOutput,
-      error: "Codex never started processing (spinner not detected). "
-        + "Session is still running — check with: codex-collab capture " + job.id,
+      error: errorMsg + "Session is still running — check with: codex-collab capture " + job.id,
     };
   }
   return { jobId: job.id, done: true, output: fullOutput };
@@ -841,17 +872,22 @@ export function runReview(options: RunReviewOptions): ReviewResult {
 
   // Custom mode: send /review with instructions directly (bypasses menu)
   if (options.mode === "custom" && options.instructions) {
-    sendMessageUnchecked(sessionName, `/review ${options.instructions}`);
+    if (!sendMessageUnchecked(sessionName, `/review ${options.instructions}`)) {
+      return failReview("Failed to send /review command to session");
+    }
     const preSubmitMs = Date.now();
     const spinnerSeen = ensureSubmitted(sessionName);
-    const remainingTimeout = Math.max(0, timeoutSec - (Date.now() - preSubmitMs) / 1000);
+    const elapsedSec = (Date.now() - preSubmitMs) / 1000;
+    const remainingTimeout = Math.max(0, timeoutSec - elapsedSec);
     const result = waitForJob(job.id, { timeoutSec: remainingTimeout, intervalSec, requireSpinner: true, spinnerSeen });
     const fullOutput = resolveOutput(job.id, result);
     if (!result.done) {
+      const errorMsg = spinnerSeen
+        ? "Codex started but did not finish within the timeout. "
+        : "Codex never started processing (spinner not detected). ";
       return {
         jobId: job.id, done: false, output: fullOutput,
-        error: "Codex never started processing (spinner not detected). "
-          + "Session is still running — check with: codex-collab capture " + job.id,
+        error: errorMsg + "Session is still running — check with: codex-collab capture " + job.id,
       };
     }
     return { jobId: job.id, done: true, output: fullOutput };
