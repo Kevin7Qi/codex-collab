@@ -488,6 +488,42 @@ export function getAttachCommand(jobId: string): string | null {
 }
 
 /**
+ * Confirm screen stability: check that the pane is unchanged for N consecutive
+ * captures at 3s intervals, and the spinner hasn't reappeared.
+ * Returns { confirmed: true } if stable, { confirmed: false } if spinner came back.
+ */
+function confirmStable(
+  sessionName: string,
+  currentOutput: string,
+  requiredStable: number,
+  deadline: number,
+): { confirmed: boolean; lastOutput: string | null } {
+  const interval = 3_000;
+  const confirmDeadline = Math.min(Date.now() + 30_000, deadline);
+  let stableCount = 0;
+  let lastScreen = currentOutput;
+  let lastOutput: string | null = currentOutput;
+
+  while (Date.now() < confirmDeadline) {
+    Bun.sleepSync(interval);
+    const check = capturePaneUnchecked(sessionName, { lines: 50 });
+    if (check === null) return { confirmed: true, lastOutput: null };
+    if (check.toLowerCase().includes("esc to interrupt")) {
+      return { confirmed: false, lastOutput: check };
+    }
+    if (check === lastScreen) {
+      stableCount++;
+      if (stableCount >= requiredStable) return { confirmed: true, lastOutput: check };
+    } else {
+      stableCount = 0;
+      lastScreen = check;
+    }
+    lastOutput = check;
+  }
+  return { confirmed: true, lastOutput };
+}
+
+/**
  * Poll a job's capture output until codex finishes working.
  * Returns the final capture output, or null if timed out / job not found.
  */
@@ -506,14 +542,18 @@ export function waitForJob(
     return { done: false, output: null };
   }
 
-  // Grace period: wait for the spinner to appear before checking for completion.
-  // Without this, calling `wait` right after `send` can return immediately
-  // because codex hasn't rendered the spinner yet.
-  // After the grace period, if no spinner was ever seen and codex is idle, report done
-  // (unless requireSpinner is set, in which case report not-done to avoid false positives).
-  let sawSpinner = options.spinnerSeen ?? false;
+  // Two spinner flags:
+  // - confirmedInLoop: the wait loop itself observed the spinner (authoritative)
+  // - spinnerSeen: ensureSubmitted observed the spinner before this loop started
+  // The quick 6s stability check only fires when confirmedInLoop is true.
+  // When only spinnerSeen is true, a stricter 15s stability check is used
+  // to avoid false completion during quiet gaps between tool calls.
+  let confirmedInLoop = false;
+  const spinnerSeen = options.spinnerSeen ?? false;
   const waitStarted = Date.now();
-  const gracePeriodMs = Math.max(30_000, intervalSec * 2.5 * 1000);
+  const gracePeriodMs = spinnerSeen
+    ? 10_000  // ensureSubmitted confirmed submission; shorter wait before stability check
+    : Math.max(30_000, intervalSec * 2.5 * 1000);
 
   while (Date.now() < deadline) {
     let output = capturePaneUnchecked(job.tmuxSession, { lines: 50 });
@@ -529,43 +569,24 @@ export function waitForJob(
     const isWorking = lower.includes("esc to interrupt");
 
     if (isWorking) {
-      sawSpinner = true;
-    } else if (sawSpinner) {
-      // Spinner disappeared — confirm it's truly gone.
-      // Between tool calls the spinner drops but the screen keeps changing
-      // (new tool output). After real completion the screen is static.
-      // Use screen stability to distinguish: 2 consecutive unchanged checks
-      // (~6s) means idle. Fall back to 30s max if the screen keeps changing
-      // without the spinner (edge case).
-      const confirmInterval = 3_000;
-      const confirmDeadline = Math.min(Date.now() + 30_000, deadline);
-      let confirmed = true;
-      let stableCount = 0;
-      let lastScreen = output;
-      while (Date.now() < confirmDeadline) {
-        Bun.sleepSync(confirmInterval);
-        const check = capturePaneUnchecked(job.tmuxSession, { lines: 50 });
-        if (check === null) return { done: true, output: null };
-        if (check.toLowerCase().includes("esc to interrupt")) {
-          // Spinner came back — still working
-          confirmed = false;
-          break;
-        }
-        if (check === lastScreen) {
-          stableCount++;
-          if (stableCount >= 2) break; // Screen unchanged for ~6s — done
-        } else {
-          stableCount = 0;
-          lastScreen = check;
-        }
-        output = check;
-      }
+      confirmedInLoop = true;
+    } else if (confirmedInLoop) {
+      // Spinner appeared AND disappeared in this loop — confirm with standard
+      // stability check: 2 consecutive unchanged captures (~6s).
+      const { confirmed, lastOutput } = confirmStable(job.tmuxSession, output, 2, deadline);
+      if (lastOutput) output = lastOutput;
       if (confirmed) return { done: true, output };
-      // Spinner came back — skip the main sleep and re-check immediately
-      // so we don't miss the next transition
       continue;
-    } else if (!sawSpinner && Date.now() - waitStarted > gracePeriodMs) {
-      // Grace period expired and spinner was never seen.
+    } else if (spinnerSeen && Date.now() - waitStarted > gracePeriodMs) {
+      // ensureSubmitted saw the spinner but this loop didn't — likely a fast
+      // completion. Use a stricter stability check (5 consecutive = ~15s) to
+      // avoid false completion during quiet gaps between tool calls.
+      const { confirmed, lastOutput } = confirmStable(job.tmuxSession, output, 5, deadline);
+      if (lastOutput) output = lastOutput;
+      if (confirmed) return { done: true, output };
+      continue;
+    } else if (!spinnerSeen && !confirmedInLoop && Date.now() - waitStarted > gracePeriodMs) {
+      // Grace period expired and spinner was never seen by anyone.
       // If requireSpinner is set, this means the submission wasn't confirmed —
       // report not-done instead of falsely declaring completion.
       // Otherwise (manual `wait`), assume codex finished before we started polling.
@@ -748,10 +769,12 @@ export function runPrompt(options: RunPromptOptions): RunResult {
   if (!sendMessageUnchecked(sessionName, options.prompt)) {
     return { jobId: job.id, done: false, output: null, error: "Failed to send prompt to session" };
   }
+  const preSubmitMs = Date.now();
   const spinnerSeen = ensureSubmitted(sessionName);
+  const remainingTimeout = Math.max(0, timeoutSec - (Date.now() - preSubmitMs) / 1000);
 
   // Wait for completion (done = spinner stopped, codex is idle — session stays reusable)
-  const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true, spinnerSeen });
+  const result = waitForJob(job.id, { timeoutSec: remainingTimeout, intervalSec, requireSpinner: true, spinnerSeen });
 
   // Fetch full scrollback on completion (pane capture truncates long output)
   const fullOutput = resolveOutput(job.id, result);
@@ -819,8 +842,10 @@ export function runReview(options: RunReviewOptions): ReviewResult {
   // Custom mode: send /review with instructions directly (bypasses menu)
   if (options.mode === "custom" && options.instructions) {
     sendMessageUnchecked(sessionName, `/review ${options.instructions}`);
+    const preSubmitMs = Date.now();
     const spinnerSeen = ensureSubmitted(sessionName);
-    const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true, spinnerSeen });
+    const remainingTimeout = Math.max(0, timeoutSec - (Date.now() - preSubmitMs) / 1000);
+    const result = waitForJob(job.id, { timeoutSec: remainingTimeout, intervalSec, requireSpinner: true, spinnerSeen });
     const fullOutput = resolveOutput(job.id, result);
     if (!result.done) {
       return {
