@@ -34,7 +34,7 @@ codex-collab run --resume <id> "now check the error handling" --content-only
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
 ```
 
-**IMPORTANT: Always use `run_in_background=true`** — tasks take minutes. You will be notified automatically when the command finishes. After launching, tell the user it's running and ask what they'd like to do next. Do NOT spawn a task or agent to wait for or monitor the result.
+**IMPORTANT: Always use `run_in_background=true`** — tasks take minutes. You will be notified automatically when the command finishes. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
 
 If the user asks about progress, use `capture` to check the current screen:
 
@@ -67,7 +67,7 @@ codex-collab review --resume <id> "Check error handling" -d /path/to/project --c
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
-**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 5-15 minutes. You will be notified automatically when done. After launching, tell the user it's running and ask what they'd like to do next. Do NOT spawn a task or agent to wait for or monitor the result.
+**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 5-15 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
 
 ### Manual Step-by-Step Review (Fallback)
 

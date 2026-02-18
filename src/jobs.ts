@@ -493,7 +493,7 @@ export function getAttachCommand(jobId: string): string | null {
  */
 export function waitForJob(
   jobId: string,
-  options: { timeoutSec?: number; intervalSec?: number; requireSpinner?: boolean } = {}
+  options: { timeoutSec?: number; intervalSec?: number; requireSpinner?: boolean; spinnerSeen?: boolean } = {}
 ): { done: boolean; output: string | null } {
 
   const timeoutSec = options.timeoutSec ?? 900;
@@ -511,7 +511,7 @@ export function waitForJob(
   // because codex hasn't rendered the spinner yet.
   // After the grace period, if no spinner was ever seen and codex is idle, report done
   // (unless requireSpinner is set, in which case report not-done to avoid false positives).
-  let sawSpinner = false;
+  let sawSpinner = options.spinnerSeen ?? false;
   const waitStarted = Date.now();
   const gracePeriodMs = Math.max(30_000, intervalSec * 2.5 * 1000);
 
@@ -677,6 +677,35 @@ function acquireSession(opts: AcquireSessionOptions): AcquireResult {
   return { job, sessionName: job.tmuxSession, isResumed: false };
 }
 
+/**
+ * Verify that Codex started processing after a prompt was sent.
+ * Rapid-polls for the spinner (500ms intervals), then retries Enter if needed.
+ * Returns true if the spinner was observed (prompt confirmed submitted).
+ */
+function ensureSubmitted(
+  sessionName: string,
+  maxRetries: number = 2,
+): boolean {
+  // Phase 1: rapid poll for spinner — catches fast tasks that complete in 1-3s
+  const rapidEnd = Date.now() + 5_000;
+  while (Date.now() < rapidEnd) {
+    const screen = capturePaneUnchecked(sessionName, { lines: 50 });
+    if (!screen) return true; // session gone — was submitted
+    if (screen.toLowerCase().includes("esc to interrupt")) return true;
+    Bun.sleepSync(500);
+  }
+
+  // Phase 2: no spinner seen — Enter may have been swallowed. Retry and check.
+  for (let i = 0; i < maxRetries; i++) {
+    sendKeysUnchecked(sessionName, "Enter");
+    Bun.sleepSync(3_000);
+    const screen = capturePaneUnchecked(sessionName, { lines: 50 });
+    if (!screen) return true;
+    if (screen.toLowerCase().includes("esc to interrupt")) return true;
+  }
+  return false;
+}
+
 export interface RunPromptOptions {
   prompt: string;
   cwd: string;
@@ -719,9 +748,10 @@ export function runPrompt(options: RunPromptOptions): RunResult {
   if (!sendMessageUnchecked(sessionName, options.prompt)) {
     return { jobId: job.id, done: false, output: null, error: "Failed to send prompt to session" };
   }
+  const spinnerSeen = ensureSubmitted(sessionName);
 
   // Wait for completion (done = spinner stopped, codex is idle — session stays reusable)
-  const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true });
+  const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true, spinnerSeen });
 
   // Fetch full scrollback on completion (pane capture truncates long output)
   const fullOutput = resolveOutput(job.id, result);
@@ -789,7 +819,8 @@ export function runReview(options: RunReviewOptions): ReviewResult {
   // Custom mode: send /review with instructions directly (bypasses menu)
   if (options.mode === "custom" && options.instructions) {
     sendMessageUnchecked(sessionName, `/review ${options.instructions}`);
-    const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true });
+    const spinnerSeen = ensureSubmitted(sessionName);
+    const result = waitForJob(job.id, { timeoutSec, intervalSec, requireSpinner: true, spinnerSeen });
     const fullOutput = resolveOutput(job.id, result);
     if (!result.done) {
       return {

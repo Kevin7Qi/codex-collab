@@ -169,7 +169,7 @@ export function sendLiteralUnchecked(sessionName: string, text: string): boolean
  */
 export function sendMessageUnchecked(sessionName: string, message: string): boolean {
   if (!sendLiteralUnchecked(sessionName, message)) return false;
-  Bun.sleepSync(300);
+  Bun.sleepSync(Math.min(300 + message.length, 5000));
   return sendKeysUnchecked(sessionName, "Enter");
 }
 
