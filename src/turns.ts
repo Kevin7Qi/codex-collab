@@ -3,7 +3,7 @@
 import type { AppServerClient } from "./protocol";
 import type {
   UserInput, TurnStartParams, TurnStartResponse, TurnCompletedParams,
-  ReviewTarget, ReviewStartParams, ReviewStartResponse, ReviewDelivery,
+  ReviewTarget, ReviewStartParams, ReviewDelivery,
   TurnResult, ItemStartedParams, ItemCompletedParams, DeltaParams,
   CommandApprovalRequest, FileChangeApprovalRequest,
   AgentMessageItem,
@@ -35,13 +35,6 @@ export async function runTurn(
   input: UserInput[],
   opts: TurnOptions,
 ): Promise<TurnResult> {
-  const startTime = Date.now();
-  opts.dispatcher.reset();
-
-  // Register event + approval handlers, collect unsubscribe functions
-  const unsubs = registerEventHandlers(client, opts);
-
-  // Start the turn
   const params: TurnStartParams = {
     threadId,
     input,
@@ -51,34 +44,7 @@ export async function runTurn(
     approvalPolicy: opts.approvalPolicy,
   };
 
-  const { turn } = await client.request<TurnStartResponse>("turn/start", params);
-  const turnId = turn.id;
-
-  // Wait for turn/completed notification
-  const completedTurn = await waitForTurnCompletion(client, turnId, opts.timeoutMs);
-
-  // Unsubscribe all handlers
-  for (const unsub of unsubs) unsub();
-
-  opts.dispatcher.flush();
-
-  // Extract output: prefer accumulated deltas, fall back to turn.items agentMessage
-  let output = opts.dispatcher.getAccumulatedOutput();
-  if (!output && completedTurn.turn.items) {
-    const agentMsg = completedTurn.turn.items.find(
-      (i): i is AgentMessageItem => i.type === "agentMessage",
-    );
-    if (agentMsg) output = agentMsg.text;
-  }
-
-  return {
-    status: completedTurn.turn.status as TurnResult["status"],
-    output,
-    filesChanged: opts.dispatcher.getFilesChanged(),
-    commandsRun: opts.dispatcher.getCommandsRun(),
-    error: completedTurn.turn.error?.message,
-    durationMs: Date.now() - startTime,
-  };
+  return executeTurn(client, "turn/start", params, opts);
 }
 
 /**
@@ -91,21 +57,33 @@ export async function runReview(
   target: ReviewTarget,
   opts: ReviewOptions,
 ): Promise<TurnResult> {
-  const startTime = Date.now();
-  opts.dispatcher.reset();
-
-  const unsubs = registerEventHandlers(client, opts);
-
   const params: ReviewStartParams = {
     threadId,
     target,
     delivery: opts.delivery,
   };
 
-  const { turn } = await client.request<ReviewStartResponse>("review/start", params);
-  const turnId = turn.id;
+  return executeTurn(client, "review/start", params, opts);
+}
 
-  const completedTurn = await waitForTurnCompletion(client, turnId, opts.timeoutMs);
+/**
+ * Shared turn lifecycle: register handlers, send the start request,
+ * wait for completion, collect results, and clean up.
+ */
+async function executeTurn(
+  client: AppServerClient,
+  method: string,
+  params: TurnStartParams | ReviewStartParams,
+  opts: TurnOptions,
+): Promise<TurnResult> {
+  const startTime = Date.now();
+  opts.dispatcher.reset();
+
+  const unsubs = registerEventHandlers(client, opts);
+
+  const { turn } = await client.request<TurnStartResponse>(method, params);
+
+  const completedTurn = await waitForTurnCompletion(client, turn.id, opts.timeoutMs);
 
   for (const unsub of unsubs) unsub();
 

@@ -162,7 +162,7 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
 
   // Reject all pending requests (used on process exit or close)
   function rejectAll(reason: string): void {
-    for (const [id, entry] of pending) {
+    for (const entry of pending.values()) {
       clearTimeout(entry.timer);
       entry.reject(new Error(reason));
     }
@@ -195,23 +195,15 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     if (isRequest(msg)) {
       const handler = requestHandlers.get(msg.method);
       if (handler) {
-        try {
-          const result = handler(msg.params);
-          if (result instanceof Promise) {
-            result.then(
-              (res) => write(formatResponse(msg.id, res)),
-              (err) => {
-                console.error(`[codex] Error in request handler for "${msg.method}": ${err instanceof Error ? err.message : String(err)}`);
-                write(formatResponse(msg.id, null));
-              },
-            );
-          } else {
-            write(formatResponse(msg.id, result));
-          }
-        } catch (err) {
-          console.error(`[codex] Error in request handler for "${msg.method}": ${err instanceof Error ? err.message : String(err)}`);
-          write(formatResponse(msg.id, null));
-        }
+        Promise.resolve()
+          .then(() => handler(msg.params))
+          .then(
+            (res) => write(formatResponse(msg.id, res)),
+            (err) => {
+              console.error(`[codex] Error in request handler for "${msg.method}": ${err instanceof Error ? err.message : String(err)}`);
+              write(formatResponse(msg.id, null));
+            },
+          );
       } else {
         write(JSON.stringify({ id: msg.id, error: { code: -32601, message: `Method not found: ${msg.method}` } }) + "\n");
       }
@@ -332,6 +324,14 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     write(formatResponse(id, result));
   }
 
+  /** Wait for the process to exit within the given timeout. */
+  function waitForExit(timeoutMs: number): Promise<boolean> {
+    return Promise.race([
+      proc.exited.then(() => true),
+      new Promise<false>((r) => setTimeout(() => r(false), timeoutMs)),
+    ]);
+  }
+
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
@@ -347,25 +347,11 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     }
 
     // Step 2: Wait up to 5s for graceful exit
-    const graceful = await Promise.race([
-      proc.exited.then(() => true),
-      new Promise<false>((r) => setTimeout(() => r(false), 5000)),
-    ]);
-    if (graceful) {
-      await readLoop;
-      return;
-    }
+    if (await waitForExit(5000)) { await readLoop; return; }
 
     // Step 3: SIGTERM, wait 3s
     proc.kill("SIGTERM");
-    const termed = await Promise.race([
-      proc.exited.then(() => true),
-      new Promise<false>((r) => setTimeout(() => r(false), 3000)),
-    ]);
-    if (termed) {
-      await readLoop;
-      return;
-    }
+    if (await waitForExit(3000)) { await readLoop; return; }
 
     // Step 4: SIGKILL
     proc.kill("SIGKILL");

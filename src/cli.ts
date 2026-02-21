@@ -8,7 +8,7 @@ import {
   type SandboxMode,
   type ApprovalPolicy,
 } from "./config";
-import { connect } from "./protocol";
+import { connect, type AppServerClient } from "./protocol";
 import {
   registerThread,
   resolveThreadId,
@@ -22,6 +22,7 @@ import { EventDispatcher } from "./events";
 import {
   autoApproveHandler,
   InteractiveApprovalHandler,
+  type ApprovalHandler,
 } from "./approvals";
 import {
   existsSync,
@@ -36,6 +37,7 @@ import type {
   ReviewTarget,
   ThreadListResponse,
   ModelListResponse,
+  TurnResult,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -230,9 +232,7 @@ function progress(text: string): void {
   console.log(`[codex] ${text}`);
 }
 
-function getApprovalHandler(
-  policy: ApprovalPolicy,
-): import("./approvals").ApprovalHandler {
+function getApprovalHandler(policy: ApprovalPolicy): ApprovalHandler {
   if (policy === "never") return autoApproveHandler;
   return new InteractiveApprovalHandler(config.approvalsDir, progress);
 }
@@ -261,6 +261,62 @@ function pluralize(n: number, word: string): string {
 // Commands
 // ---------------------------------------------------------------------------
 
+/** Start or resume a thread, returning threadId and shortId. */
+async function startOrResumeThread(
+  client: AppServerClient,
+  opts: Options,
+  extraStartParams?: Record<string, unknown>,
+): Promise<{ threadId: string; shortId: string }> {
+  if (opts.resumeId) {
+    const threadId = resolveThreadId(config.threadsFile, opts.resumeId);
+    const shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
+    await client.request("thread/resume", {
+      threadId,
+      model: opts.model,
+      cwd: opts.dir,
+      approvalPolicy: opts.approval,
+    });
+    return { threadId, shortId };
+  }
+
+  const startParams: Record<string, unknown> = {
+    model: opts.model,
+    cwd: opts.dir,
+    approvalPolicy: opts.approval,
+    ...extraStartParams,
+  };
+  const resp = await client.request<{ thread: { id: string } }>(
+    "thread/start",
+    startParams,
+  );
+  const threadId = resp.thread.id;
+  registerThread(config.threadsFile, threadId, {
+    model: opts.model,
+    cwd: opts.dir,
+  });
+  const shortId = findShortId(config.threadsFile, threadId) ?? "unknown";
+  return { threadId, shortId };
+}
+
+/** Print turn result and exit with appropriate code. */
+function printResultAndExit(
+  result: TurnResult,
+  shortId: string,
+  label: string,
+  contentOnly: boolean,
+): never {
+  if (!contentOnly) {
+    progress(`${label} ${result.status} (${formatDuration(result.durationMs)}${result.filesChanged.length > 0 ? `, ${pluralize(result.filesChanged.length, "file")} changed` : ""})`);
+    if (result.output) console.log("\n--- Result ---");
+  }
+
+  if (result.output) console.log(result.output);
+  if (result.error) console.error(`\nError: ${result.error}`);
+  if (!contentOnly) console.error(`\nThread: ${shortId}`);
+
+  process.exit(result.status === "completed" ? 0 : 1);
+}
+
 async function cmdRun(positional: string[], opts: Options) {
   if (positional.length === 0) {
     die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
@@ -270,45 +326,18 @@ async function cmdRun(positional: string[], opts: Options) {
   const timeoutMs = opts.timeout * 1000;
 
   const client = await connect();
-  let threadId: string;
-  let shortId: string;
+  const sandboxOverride = opts.sandbox !== config.defaultSandbox
+    ? { sandbox: opts.sandbox }
+    : undefined;
+  const { threadId, shortId } = await startOrResumeThread(client, opts, sandboxOverride);
 
-  if (opts.resumeId) {
-    threadId = resolveThreadId(config.threadsFile, opts.resumeId);
-    shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
-    await client.request("thread/resume", {
-      threadId,
-      model: opts.model,
-      cwd: opts.dir,
-      approvalPolicy: opts.approval,
-    });
-    if (!opts.contentOnly) {
+  if (!opts.contentOnly) {
+    if (opts.resumeId) {
       progress(`Resumed thread ${shortId} (${opts.model})`);
+    } else {
+      progress(`Thread ${shortId} started (${opts.model}, ${opts.sandbox})`);
     }
-  } else {
-    const startParams: Record<string, unknown> = {
-        model: opts.model,
-        cwd: opts.dir,
-        approvalPolicy: opts.approval,
-      };
-    if (opts.sandbox !== config.defaultSandbox) {
-      startParams.sandbox = opts.sandbox;
-    }
-    const resp = await client.request<{ thread: { id: string } }>(
-      "thread/start",
-      startParams,
-    );
-    threadId = resp.thread.id;
-    registerThread(config.threadsFile, threadId, {
-      model: opts.model,
-      cwd: opts.dir,
-    });
-    shortId = findShortId(config.threadsFile, threadId) ?? "unknown";
-    if (!opts.contentOnly) {
-      progress(
-        `Thread ${shortId} started (${opts.model}, ${opts.sandbox})`,
-      );
-    }
+    progress("Turn started");
   }
 
   const dispatcher = new EventDispatcher(
@@ -316,10 +345,6 @@ async function cmdRun(positional: string[], opts: Options) {
     config.logsDir,
     opts.contentOnly ? () => {} : progress,
   );
-
-  if (!opts.contentOnly) {
-    progress("Turn started");
-  }
 
   const result = await runTurn(
     client,
@@ -337,29 +362,7 @@ async function cmdRun(positional: string[], opts: Options) {
   );
 
   await client.close();
-
-  if (!opts.contentOnly) {
-    progress(
-      `Turn ${result.status} (${formatDuration(result.durationMs)}, ${pluralize(result.filesChanged.length, "file")} changed)`,
-    );
-    if (result.output) {
-      console.log("\n--- Result ---");
-    }
-  }
-
-  if (result.output) {
-    console.log(result.output);
-  }
-
-  if (result.error) {
-    console.error(`\nError: ${result.error}`);
-  }
-
-  if (!opts.contentOnly) {
-    console.error(`\nThread: ${shortId}`);
-  }
-
-  process.exit(result.status === "completed" ? 0 : 1);
+  printResultAndExit(result, shortId, "Turn", opts.contentOnly);
 }
 
 async function cmdReview(positional: string[], opts: Options) {
@@ -391,44 +394,15 @@ async function cmdReview(positional: string[], opts: Options) {
   }
 
   const client = await connect();
-  let threadId: string;
-  let shortId: string;
+  const { threadId, shortId } = await startOrResumeThread(
+    client, opts, { sandbox: "read-only" },
+  );
 
-  if (opts.resumeId) {
-    threadId = resolveThreadId(config.threadsFile, opts.resumeId);
-    shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
-    await client.request("thread/resume", {
-      threadId,
-      model: opts.model,
-      cwd: opts.dir,
-      approvalPolicy: opts.approval,
-    });
-    if (!opts.contentOnly) {
+  if (!opts.contentOnly) {
+    if (opts.resumeId) {
       progress(`Resumed thread ${shortId} for review`);
-    }
-  } else {
-    // Reviews always use read-only sandbox
-    const reviewSandbox = "read-only";
-    const startParams: Record<string, unknown> = {
-        model: opts.model,
-        cwd: opts.dir,
-        approvalPolicy: opts.approval,
-      };
-    startParams.sandbox = reviewSandbox;
-    const resp = await client.request<{ thread: { id: string } }>(
-      "thread/start",
-      startParams,
-    );
-    threadId = resp.thread.id;
-    registerThread(config.threadsFile, threadId, {
-      model: opts.model,
-      cwd: opts.dir,
-    });
-    shortId = findShortId(config.threadsFile, threadId) ?? "unknown";
-    if (!opts.contentOnly) {
-      progress(
-        `Thread ${shortId} started for review (${opts.model}, ${reviewSandbox})`,
-      );
+    } else {
+      progress(`Thread ${shortId} started for review (${opts.model}, read-only)`);
     }
   }
 
@@ -448,19 +422,7 @@ async function cmdReview(positional: string[], opts: Options) {
   });
 
   await client.close();
-
-  if (!opts.contentOnly) {
-    progress(
-      `Review ${result.status} (${formatDuration(result.durationMs)})`,
-    );
-    if (result.output) console.log("\n--- Result ---");
-  }
-
-  if (result.output) console.log(result.output);
-  if (result.error) console.error(`\nError: ${result.error}`);
-  if (!opts.contentOnly) console.error(`\nThread: ${shortId}`);
-
-  process.exit(result.status === "completed" ? 0 : 1);
+  printResultAndExit(result, shortId, "Review", opts.contentOnly);
 }
 
 async function cmdJobs(opts: Options) {
@@ -550,42 +512,33 @@ async function cmdKill(positional: string[]) {
   progress(`Archived thread ${id}`);
 }
 
-async function cmdOutput(positional: string[]) {
+/** Resolve a positional ID arg to a log file path, or die with an error. */
+function resolveLogPath(positional: string[], usage: string): string {
   const id = positional[0];
-  if (!id) die("Usage: codex-collab output <id>");
+  if (!id) die(usage);
   validateId(id);
-
-  // Resolve to short ID for log file
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
+  return `${config.logsDir}/${shortId}.log`;
+}
 
-  const logPath = `${config.logsDir}/${shortId}.log`;
-  if (!existsSync(logPath)) die(`No log file for thread ${shortId}`);
-
+async function cmdOutput(positional: string[]) {
+  const logPath = resolveLogPath(positional, "Usage: codex-collab output <id>");
+  if (!existsSync(logPath)) die(`No log file for thread`);
   console.log(readFileSync(logPath, "utf-8"));
 }
 
 async function cmdProgress(positional: string[]) {
-  const id = positional[0];
-  if (!id) die("Usage: codex-collab progress <id>");
-  validateId(id);
-
-  const threadId = resolveThreadId(config.threadsFile, id);
-  const shortId = findShortId(config.threadsFile, threadId);
-  if (!shortId) die(`Thread not found: ${id}`);
-
-  const logPath = `${config.logsDir}/${shortId}.log`;
+  const logPath = resolveLogPath(positional, "Usage: codex-collab progress <id>");
   if (!existsSync(logPath)) {
     console.log("No activity yet.");
     return;
   }
 
   // Show last 20 lines
-  const content = readFileSync(logPath, "utf-8");
-  const lines = content.trim().split("\n");
-  const tail = lines.slice(-20);
-  console.log(tail.join("\n"));
+  const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+  console.log(lines.slice(-20).join("\n"));
 }
 
 async function cmdModels() {
@@ -622,55 +575,38 @@ async function cmdApproveOrDecline(
   );
 }
 
-async function cmdClean() {
-  // Clean old log files (older than 7 days)
-  let logsDeleted = 0;
-  if (existsSync(config.logsDir)) {
-    const now = Date.now();
-    const sevenDays = 7 * 24 * 60 * 60 * 1000;
-    for (const file of readdirSync(config.logsDir)) {
-      const path = `${config.logsDir}/${file}`;
-      try {
-        const stat = Bun.file(path);
-        const mtime = stat.lastModified;
-        if (now - mtime > sevenDays) {
-          unlinkSync(path);
-          logsDeleted++;
-        }
-      } catch {
-        // skip files we can't stat
+/** Delete files older than maxAgeMs in the given directory. Returns count deleted. */
+function deleteOldFiles(dir: string, maxAgeMs: number): number {
+  if (!existsSync(dir)) return 0;
+  const now = Date.now();
+  let deleted = 0;
+  for (const file of readdirSync(dir)) {
+    const path = `${dir}/${file}`;
+    try {
+      if (now - Bun.file(path).lastModified > maxAgeMs) {
+        unlinkSync(path);
+        deleted++;
       }
+    } catch {
+      // skip files we can't stat
     }
   }
+  return deleted;
+}
 
-  // Clean old approval files
-  let approvalsDeleted = 0;
-  if (existsSync(config.approvalsDir)) {
-    const now = Date.now();
-    const oneDayMs = 24 * 60 * 60 * 1000;
-    for (const file of readdirSync(config.approvalsDir)) {
-      const path = `${config.approvalsDir}/${file}`;
-      try {
-        const stat = Bun.file(path);
-        const mtime = stat.lastModified;
-        if (now - mtime > oneDayMs) {
-          unlinkSync(path);
-          approvalsDeleted++;
-        }
-      } catch {
-        // skip files we can't stat
-      }
-    }
-  }
+async function cmdClean() {
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  const oneDayMs = 24 * 60 * 60 * 1000;
+
+  const logsDeleted = deleteOldFiles(config.logsDir, sevenDaysMs);
+  const approvalsDeleted = deleteOldFiles(config.approvalsDir, oneDayMs);
 
   // Clean stale thread mappings
   const mapping = loadThreadMapping(config.threadsFile);
   let mappingsRemoved = 0;
   const now = Date.now();
-  const sevenDays = 7 * 24 * 60 * 60 * 1000;
   for (const [shortId, entry] of Object.entries(mapping)) {
-    const age = now - new Date(entry.createdAt).getTime();
-    if (age > sevenDays) {
+    if (now - new Date(entry.createdAt).getTime() > sevenDaysMs) {
       delete mapping[shortId];
       mappingsRemoved++;
     }

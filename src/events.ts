@@ -17,7 +17,7 @@ export class EventDispatcher {
   private onProgress: ProgressCallback;
 
   constructor(
-    private shortId: string,
+    shortId: string,
     logsDir: string,
     onProgress?: ProgressCallback,
   ) {
