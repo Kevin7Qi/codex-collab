@@ -35,11 +35,15 @@ export function formatResponse(id: RequestId, result: unknown): string {
   return JSON.stringify({ id, result }) + "\n";
 }
 
-/** Parse a JSON-RPC message from a line. Returns null if unparseable. */
+/** Parse a JSON-RPC message from a line. Returns null if unparseable or not a valid protocol message. */
 export function parseMessage(line: string): JsonRpcMessage | null {
   try {
-    return JSON.parse(line);
+    const raw = JSON.parse(line);
+    if (typeof raw !== "object" || raw === null) return null;
+    if (!("method" in raw) && !("id" in raw)) return null;
+    return raw as JsonRpcMessage;
   } catch {
+    console.error(`[codex] Warning: unparseable message from app server: ${line.slice(0, 200)}`);
     return null;
   }
 }
@@ -145,8 +149,14 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     if (closed) return;
     try {
       proc.stdin.write(data);
-    } catch {
-      // stdin may already be closed
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!exited) {
+        console.error(`[codex] Failed to write to app server: ${msg}`);
+      }
+      if (msg.includes("EPIPE") || msg.includes("closed")) {
+        rejectAll("App server stdin write failed: " + msg);
+      }
     }
   }
 
@@ -185,15 +195,25 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     if (isRequest(msg)) {
       const handler = requestHandlers.get(msg.method);
       if (handler) {
-        const result = handler(msg.params);
-        if (result instanceof Promise) {
-          result.then(
-            (res) => write(formatResponse(msg.id, res)),
-            () => write(formatResponse(msg.id, null)),
-          );
-        } else {
-          write(formatResponse(msg.id, result));
+        try {
+          const result = handler(msg.params);
+          if (result instanceof Promise) {
+            result.then(
+              (res) => write(formatResponse(msg.id, res)),
+              (err) => {
+                console.error(`[codex] Error in request handler for "${msg.method}": ${err instanceof Error ? err.message : String(err)}`);
+                write(formatResponse(msg.id, null));
+              },
+            );
+          } else {
+            write(formatResponse(msg.id, result));
+          }
+        } catch (err) {
+          console.error(`[codex] Error in request handler for "${msg.method}": ${err instanceof Error ? err.message : String(err)}`);
+          write(formatResponse(msg.id, null));
         }
+      } else {
+        write(JSON.stringify({ id: msg.id, error: { code: -32601, message: `Method not found: ${msg.method}` } }) + "\n");
       }
       return;
     }
@@ -204,8 +224,8 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
         for (const h of handlers) {
           try {
             h(msg.params);
-          } catch {
-            // notification handler errors are swallowed
+          } catch (e) {
+            console.error(`[codex] Error in notification handler for "${msg.method}": ${e instanceof Error ? e.message : String(e)}`);
           }
         }
       }
@@ -236,8 +256,11 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
           }
         }
       }
-    } catch {
-      // stream closed
+    } catch (e) {
+      if (!closed && !exited) {
+        console.error(`[codex] Read loop error: ${e instanceof Error ? e.message : String(e)}`);
+        rejectAll("Read loop failed unexpectedly");
+      }
     } finally {
       reader.releaseLock();
     }
@@ -298,7 +321,10 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
   function onRequest(method: string, handler: ServerRequestHandler): () => void {
     requestHandlers.set(method, handler);
     return () => {
-      requestHandlers.delete(method);
+      // Only delete if this is still our handler
+      if (requestHandlers.get(method) === handler) {
+        requestHandlers.delete(method);
+      }
     };
   }
 
@@ -314,8 +340,10 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     // Step 1: Close stdin to signal the server to exit
     try {
       proc.stdin.end();
-    } catch {
-      // already closed
+    } catch (e) {
+      if (!exited) {
+        console.error(`[codex] Warning: stdin.end() failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
 
     // Step 2: Wait up to 5s for graceful exit
