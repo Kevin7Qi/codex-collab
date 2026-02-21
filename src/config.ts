@@ -19,8 +19,8 @@ export const config = {
   defaultApprovalPolicy: "never" as const,
 
   // Timeouts
-  defaultTimeout: 900, // 15 minutes for turn completion (seconds)
-  requestTimeout: 30_000, // 30s for individual protocol requests (ms)
+  defaultTimeout: 900, // seconds — turn completion (15 min)
+  requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
 
   // Data paths
   dataDir: `${home}/.codex-collab`,

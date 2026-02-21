@@ -51,28 +51,12 @@ export interface InitializeResponse {
 
 // --- Threads ---
 
-export type ApprovalPolicy = "never" | "on-request" | "always";
-export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
-export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
-
-// Map our CLI sandbox names to protocol values
-export const sandboxToProtocol: Record<SandboxMode, string | null> = {
-  "read-only": "restricted",
-  "workspace-write": null, // server default
-  "danger-full-access": null, // handled via sandbox policy
-};
-
-// Map our CLI approval names to protocol values
-export const approvalToProtocol: Record<ApprovalPolicy, string> = {
-  never: "never",
-  "on-request": "on-request",
-  always: "always",
-};
+export type { ApprovalPolicy, SandboxMode, ReasoningEffort } from "./config";
 
 export interface ThreadStartParams {
   model?: string;
   cwd?: string;
-  approvalPolicy?: string;
+  approvalPolicy?: ApprovalPolicy;
   sandbox?: string | null;
   config?: Record<string, unknown>;
 }
@@ -102,7 +86,7 @@ export interface ThreadStartResponse {
   model: string;
   modelProvider: string;
   cwd: string;
-  approvalPolicy: string;
+  approvalPolicy: ApprovalPolicy;
   sandbox: unknown;
   reasoningEffort?: string;
 }
@@ -111,7 +95,7 @@ export interface ThreadResumeParams {
   threadId: string;
   model?: string;
   cwd?: string;
-  approvalPolicy?: string;
+  approvalPolicy?: ApprovalPolicy;
   sandbox?: string | null;
   config?: Record<string, unknown>;
 }
@@ -153,10 +137,10 @@ export interface TurnStartParams {
   threadId: string;
   input: UserInput[];
   cwd?: string;
-  approvalPolicy?: string;
+  approvalPolicy?: ApprovalPolicy;
   sandboxPolicy?: unknown;
   model?: string;
-  effort?: string;
+  effort?: ReasoningEffort;
 }
 
 export interface Turn {
