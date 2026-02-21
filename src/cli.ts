@@ -15,6 +15,7 @@ import {
   findShortId,
   loadThreadMapping,
   removeThread,
+  saveThreadMapping,
 } from "./threads";
 import { runTurn, runReview } from "./turns";
 import { EventDispatcher } from "./events";
@@ -217,6 +218,14 @@ function die(msg: string): never {
   process.exit(1);
 }
 
+/** Validate that an ID is safe for use in file paths. */
+function validateId(id: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    die(`Invalid ID: "${id}"`);
+  }
+  return id;
+}
+
 function progress(text: string): void {
   console.log(`[codex] ${text}`);
 }
@@ -266,7 +275,7 @@ async function cmdRun(positional: string[], opts: Options) {
 
   if (opts.resumeId) {
     threadId = resolveThreadId(config.threadsFile, opts.resumeId);
-    shortId = opts.resumeId;
+    shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
     await client.request("thread/resume", {
       threadId,
       model: opts.model,
@@ -387,7 +396,7 @@ async function cmdReview(positional: string[], opts: Options) {
 
   if (opts.resumeId) {
     threadId = resolveThreadId(config.threadsFile, opts.resumeId);
-    shortId = opts.resumeId;
+    shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
     await client.request("thread/resume", {
       threadId,
       model: opts.model,
@@ -398,14 +407,14 @@ async function cmdReview(positional: string[], opts: Options) {
       progress(`Resumed thread ${shortId} for review`);
     }
   } else {
+    // Reviews always use read-only sandbox
+    const reviewSandbox = "read-only";
     const startParams: Record<string, unknown> = {
         model: opts.model,
         cwd: opts.dir,
         approvalPolicy: opts.approval,
       };
-    if (opts.sandbox !== config.defaultSandbox) {
-      startParams.sandbox = opts.sandbox;
-    }
+    startParams.sandbox = reviewSandbox;
     const resp = await client.request<{ thread: { id: string } }>(
       "thread/start",
       startParams,
@@ -418,7 +427,7 @@ async function cmdReview(positional: string[], opts: Options) {
     shortId = findShortId(config.threadsFile, threadId) ?? "unknown";
     if (!opts.contentOnly) {
       progress(
-        `Thread ${shortId} started for review (${opts.model}, read-only)`,
+        `Thread ${shortId} started for review (${opts.model}, ${reviewSandbox})`,
       );
     }
   }
@@ -500,6 +509,7 @@ async function cmdJobs(opts: Options) {
 async function cmdKill(positional: string[]) {
   const id = positional[0];
   if (!id) die("Usage: codex-collab kill <id>");
+  validateId(id);
 
   const threadId = resolveThreadId(config.threadsFile, id);
   const client = await connect();
@@ -543,10 +553,11 @@ async function cmdKill(positional: string[]) {
 async function cmdOutput(positional: string[]) {
   const id = positional[0];
   if (!id) die("Usage: codex-collab output <id>");
+  validateId(id);
 
   // Resolve to short ID for log file
-  const mapping = loadThreadMapping(config.threadsFile);
-  const shortId = Object.keys(mapping).find((k) => k.startsWith(id));
+  const threadId = resolveThreadId(config.threadsFile, id);
+  const shortId = findShortId(config.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
 
   const logPath = `${config.logsDir}/${shortId}.log`;
@@ -558,9 +569,10 @@ async function cmdOutput(positional: string[]) {
 async function cmdProgress(positional: string[]) {
   const id = positional[0];
   if (!id) die("Usage: codex-collab progress <id>");
+  validateId(id);
 
-  const mapping = loadThreadMapping(config.threadsFile);
-  const shortId = Object.keys(mapping).find((k) => k.startsWith(id));
+  const threadId = resolveThreadId(config.threadsFile, id);
+  const shortId = findShortId(config.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
 
   const logPath = `${config.logsDir}/${shortId}.log`;
@@ -597,6 +609,7 @@ async function cmdApproveOrDecline(
   const approvalId = positional[0];
   const verb = decision === "accept" ? "approve" : "decline";
   if (!approvalId) die(`Usage: codex-collab ${verb} <approval-id>`);
+  validateId(approvalId);
 
   const requestPath = `${config.approvalsDir}/${approvalId}.json`;
   if (!existsSync(requestPath))
@@ -663,7 +676,6 @@ async function cmdClean() {
     }
   }
   if (mappingsRemoved > 0) {
-    const { saveThreadMapping } = await import("./threads");
     saveThreadMapping(config.threadsFile, mapping);
   }
 
@@ -684,6 +696,7 @@ async function cmdClean() {
 async function cmdDelete(positional: string[]) {
   const id = positional[0];
   if (!id) die("Usage: codex-collab delete <id>");
+  validateId(id);
 
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
@@ -805,7 +818,8 @@ async function main() {
   const { command, positional, options } = parseArgs(rawArgs);
 
   // Create data directories for commands that need them
-  const noDataDirCommands = new Set(["health", undefined]);
+  // Commands that don't need data directories. "" = no command (shows help).
+  const noDataDirCommands = new Set(["health", ""]);
   if (!noDataDirCommands.has(command)) {
     ensureDataDirs();
   }
