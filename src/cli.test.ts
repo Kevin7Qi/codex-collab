@@ -39,25 +39,9 @@ describe("CLI valid commands", () => {
   });
 
   it("health command runs without crashing", () => {
-    // May fail if tmux/codex not installed, but should not crash with unhandled exception
+    // May fail if codex not installed, but should not crash with unhandled exception
     const { exitCode } = run("health");
     expect([0, 1]).toContain(exitCode);
-  });
-
-  it("jobs command with no jobs succeeds", () => {
-    const { stdout, exitCode } = run("jobs");
-    expect(exitCode).toBe(0);
-    // Either "No jobs" or a table header
-    expect(stdout).toMatch(/No jobs|ID/);
-  });
-
-  it("jobs --json produces valid JSON", () => {
-    const { stdout, exitCode } = run("jobs", "--json");
-    expect(exitCode).toBe(0);
-    const parsed = JSON.parse(stdout);
-    expect(parsed).toHaveProperty("generated_at");
-    expect(parsed).toHaveProperty("jobs");
-    expect(Array.isArray(parsed.jobs)).toBe(true);
   });
 });
 
@@ -85,8 +69,6 @@ describe("CLI invalid inputs", () => {
   });
 
   it("run without prompt exits 1", () => {
-    // This requires tmux — if tmux not available, exits 1 with different message.
-    // Either way, exit code should be 1.
     const { exitCode } = run("run");
     expect(exitCode).toBe(1);
   });
