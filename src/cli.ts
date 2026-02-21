@@ -277,13 +277,17 @@ async function cmdRun(positional: string[], opts: Options) {
       progress(`Resumed thread ${shortId} (${opts.model})`);
     }
   } else {
-    const resp = await client.request<{ thread: { id: string } }>(
-      "thread/start",
-      {
+    const startParams: Record<string, unknown> = {
         model: opts.model,
         cwd: opts.dir,
         approvalPolicy: opts.approval,
-      },
+      };
+    if (opts.sandbox !== config.defaultSandbox) {
+      startParams.sandbox = opts.sandbox;
+    }
+    const resp = await client.request<{ thread: { id: string } }>(
+      "thread/start",
+      startParams,
     );
     threadId = resp.thread.id;
     registerThread(config.threadsFile, threadId, {
@@ -394,13 +398,17 @@ async function cmdReview(positional: string[], opts: Options) {
       progress(`Resumed thread ${shortId} for review`);
     }
   } else {
-    const resp = await client.request<{ thread: { id: string } }>(
-      "thread/start",
-      {
+    const startParams: Record<string, unknown> = {
         model: opts.model,
         cwd: opts.dir,
         approvalPolicy: opts.approval,
-      },
+      };
+    if (opts.sandbox !== config.defaultSandbox) {
+      startParams.sandbox = opts.sandbox;
+    }
+    const resp = await client.request<{ thread: { id: string } }>(
+      "thread/start",
+      startParams,
     );
     threadId = resp.thread.id;
     registerThread(config.threadsFile, threadId, {

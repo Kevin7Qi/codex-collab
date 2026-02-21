@@ -112,9 +112,8 @@ export class EventDispatcher {
   }
 
   private progress(text: string): void {
-    const line = `[codex] ${text}`;
-    this.onProgress(line);
-    this.log(line);
+    this.onProgress(text);
+    this.log(`[codex] ${text}`);
   }
 
   private log(entry: string): void {

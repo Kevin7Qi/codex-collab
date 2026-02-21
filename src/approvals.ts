@@ -34,11 +34,11 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
 
   async handleCommandApproval(req: CommandApprovalRequest): Promise<ApprovalDecision> {
     const id = req.approvalId ?? req.itemId;
-    this.onProgress(`[codex] APPROVAL NEEDED`);
-    this.onProgress(`[codex]   Command: ${req.command}`);
-    if (req.reason) this.onProgress(`[codex]   Reason: ${req.reason}`);
-    this.onProgress(`[codex]   Approve: codex-collab approve ${id}`);
-    this.onProgress(`[codex]   Decline: codex-collab decline ${id}`);
+    this.onProgress(`APPROVAL NEEDED`);
+    this.onProgress(`  Command: ${req.command}`);
+    if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
+    this.onProgress(`  Approve: codex-collab approve ${id}`);
+    this.onProgress(`  Decline: codex-collab decline ${id}`);
 
     this.writeRequestFile(id, {
       type: "commandExecution",
@@ -54,10 +54,10 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
 
   async handleFileChangeApproval(req: FileChangeApprovalRequest): Promise<ApprovalDecision> {
     const id = req.itemId;
-    this.onProgress(`[codex] APPROVAL NEEDED (file change)`);
-    if (req.reason) this.onProgress(`[codex]   Reason: ${req.reason}`);
-    this.onProgress(`[codex]   Approve: codex-collab approve ${id}`);
-    this.onProgress(`[codex]   Decline: codex-collab decline ${id}`);
+    this.onProgress(`APPROVAL NEEDED (file change)`);
+    if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
+    this.onProgress(`  Approve: codex-collab approve ${id}`);
+    this.onProgress(`  Decline: codex-collab decline ${id}`);
 
     this.writeRequestFile(id, {
       type: "fileChange",
