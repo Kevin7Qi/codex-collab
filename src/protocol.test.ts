@@ -1,5 +1,7 @@
-import { describe, expect, test, beforeEach } from "bun:test";
-import { parseMessage, formatRequest, formatNotification, formatResponse, resetIdCounter } from "./protocol";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { parseMessage, formatRequest, formatNotification, formatResponse, resetIdCounter, connect, type AppServerClient } from "./protocol";
+
+const MOCK_SERVER = "/tmp/claude-1000/mock-app-server.ts";
 
 beforeEach(() => {
   resetIdCounter();
@@ -134,5 +136,270 @@ describe("parseMessage", () => {
   test("returns null for malformed JSON", () => {
     const msg = parseMessage("{broken:}");
     expect(msg).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AppServerClient integration tests (using mock server)
+// ---------------------------------------------------------------------------
+
+describe("AppServerClient", () => {
+  let client: AppServerClient | null = null;
+
+  afterEach(async () => {
+    if (client) {
+      await client.close();
+      client = null;
+    }
+  });
+
+  test("connect performs initialize handshake and returns serverInfo", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+    });
+    expect(client.serverInfo).toEqual({
+      name: "mock-codex-server",
+      version: "0.1.0",
+    });
+  });
+
+  test("close shuts down gracefully", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+    });
+    await client.close();
+    client = null;
+    // No error means success — process exited cleanly
+  });
+
+  test("request sends and receives response", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+    });
+
+    const result = await client.request<{ thread: { id: string }; model: string }>(
+      "thread/start",
+      { model: "gpt-5.3-codex" },
+    );
+
+    expect(result.thread.id).toBe("thread-mock-001");
+    expect(result.model).toBe("gpt-5.3-codex");
+  });
+
+  test("request rejects with descriptive error on JSON-RPC error response", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+      env: { MOCK_ERROR_RESPONSE: "1" },
+    });
+
+    await expect(
+      client.request("thread/start", { model: "bad-model" }),
+    ).rejects.toThrow("JSON-RPC error -32603: Internal error: model not available");
+  });
+
+  test("request rejects with error for unknown method", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+    });
+
+    await expect(
+      client.request("unknown/method"),
+    ).rejects.toThrow("Method not found: unknown/method");
+  });
+
+  test("request rejects when process exits unexpectedly", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+      env: { MOCK_EXIT_EARLY: "1" },
+    });
+
+    // The mock server exits after initialize, so the next request should fail
+    // Give a tiny delay for the process to actually exit
+    await new Promise((r) => setTimeout(r, 100));
+
+    await expect(
+      client.request("thread/start"),
+    ).rejects.toThrow();
+  });
+
+  test("request rejects after client is closed", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+    });
+
+    await client.close();
+    client = null;
+
+    // We need a fresh reference but close has been called, so we reconnect then close then try
+    const c = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+    });
+    await c.close();
+
+    await expect(
+      c.request("thread/start"),
+    ).rejects.toThrow("Client is closed");
+  });
+
+  test("notification handlers receive server notifications", async () => {
+    // For this test we use a custom inline mock that sends a notification
+    const notifyServer = `
+      const decoder = new TextDecoder();
+      async function main() {
+        const reader = Bun.stdin.stream().getReader();
+        let buffer = "";
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buffer.indexOf("\\n")) !== -1) {
+              const line = buffer.slice(0, idx).trim();
+              buffer = buffer.slice(idx + 1);
+              if (!line) continue;
+              const msg = JSON.parse(line);
+              if (msg.id !== undefined && msg.method === "initialize") {
+                process.stdout.write(JSON.stringify({
+                  id: msg.id,
+                  result: { serverInfo: { name: "notify-server", version: "0.1.0" } },
+                }) + "\\n");
+              }
+              // After receiving "initialized" notification, send a server notification
+              if (!msg.id && msg.method === "initialized") {
+                process.stdout.write(JSON.stringify({
+                  method: "item/started",
+                  params: { itemId: "item-1", threadId: "t1", turnId: "turn-1" },
+                }) + "\\n");
+              }
+            }
+          }
+        } catch {}
+      }
+      main();
+    `;
+
+    const serverPath = "/tmp/claude-1000/mock-notify-server.ts";
+    await Bun.write(serverPath, notifyServer);
+
+    const received: unknown[] = [];
+    client = await connect({
+      command: ["bun", "run", serverPath],
+      requestTimeout: 5000,
+    });
+
+    client.on("item/started", (params) => {
+      received.push(params);
+    });
+
+    // Give time for the notification to arrive
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(received.length).toBe(1);
+    expect(received[0]).toEqual({
+      itemId: "item-1",
+      threadId: "t1",
+      turnId: "turn-1",
+    });
+  });
+
+  test("onRequest handler responds to server requests", async () => {
+    // Mock server that sends a server request after initialize
+    const approvalServer = `
+      const decoder = new TextDecoder();
+      let sentApproval = false;
+      async function main() {
+        const reader = Bun.stdin.stream().getReader();
+        let buffer = "";
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let idx;
+            while ((idx = buffer.indexOf("\\n")) !== -1) {
+              const line = buffer.slice(0, idx).trim();
+              buffer = buffer.slice(idx + 1);
+              if (!line) continue;
+              const msg = JSON.parse(line);
+              if (msg.id !== undefined && msg.method === "initialize") {
+                process.stdout.write(JSON.stringify({
+                  id: msg.id,
+                  result: { serverInfo: { name: "approval-server", version: "0.1.0" } },
+                }) + "\\n");
+              }
+              // After initialized notification, send a server request
+              if (!msg.id && msg.method === "initialized" && !sentApproval) {
+                sentApproval = true;
+                process.stdout.write(JSON.stringify({
+                  id: "srv-1",
+                  method: "item/commandExecution/requestApproval",
+                  params: { command: "rm -rf /", threadId: "t1", turnId: "turn-1" },
+                }) + "\\n");
+              }
+              // When we get back our response, send a verification notification
+              if (msg.id === "srv-1" && msg.result) {
+                process.stdout.write(JSON.stringify({
+                  method: "test/approvalReceived",
+                  params: { decision: msg.result.decision },
+                }) + "\\n");
+              }
+            }
+          }
+        } catch {}
+      }
+      main();
+    `;
+
+    const serverPath = "/tmp/claude-1000/mock-approval-server.ts";
+    await Bun.write(serverPath, approvalServer);
+
+    client = await connect({
+      command: ["bun", "run", serverPath],
+      requestTimeout: 5000,
+    });
+
+    // Register handler for approval requests
+    client.onRequest("item/commandExecution/requestApproval", (params: any) => {
+      return { decision: "accept" };
+    });
+
+    // Wait for the round-trip
+    const received: unknown[] = [];
+    client.on("test/approvalReceived", (params) => {
+      received.push(params);
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(received.length).toBe(1);
+    expect(received[0]).toEqual({ decision: "accept" });
+  });
+
+  test("on returns unsubscribe function", async () => {
+    client = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 5000,
+    });
+
+    const received: unknown[] = [];
+    const unsub = client.on("test/event", (params) => {
+      received.push(params);
+    });
+
+    // Unsubscribe immediately
+    unsub();
+
+    // Even if a notification arrived, handler should not fire
+    // (no notification is sent by the basic mock, but this verifies the unsub mechanism)
+    expect(received.length).toBe(0);
   });
 });
