@@ -1,4 +1,6 @@
-// Configuration for codex-collab
+// src/config.ts — Configuration for codex-collab
+
+const home = process.env.HOME || "/tmp";
 
 export const config = {
   // Default model
@@ -12,18 +14,28 @@ export const config = {
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,
   defaultSandbox: "workspace-write" as const,
 
-  // Job storage directory
-  jobsDir: `${process.env.HOME}/.codex-collab/jobs`,
+  // Approval policies
+  approvalPolicies: ["never", "on-request", "always"] as const,
+  defaultApprovalPolicy: "never" as const,
 
-  // Default inactivity timeout in minutes for running jobs
-  defaultTimeout: 45,
+  // Timeouts
+  defaultTimeout: 900, // 15 minutes for turn completion (seconds)
+  requestTimeout: 30_000, // 30s for individual protocol requests (ms)
 
-  // Default number of jobs to show in listings
+  // Data paths
+  dataDir: `${home}/.codex-collab`,
+  threadsFile: `${home}/.codex-collab/threads.json`,
+  logsDir: `${home}/.codex-collab/logs`,
+  approvalsDir: `${home}/.codex-collab/approvals`,
+
+  // Display
   jobsListLimit: 20,
 
-  // tmux session prefix
-  tmuxPrefix: "codex-collab",
+  // Client identity (sent during initialize handshake)
+  clientName: "codex-collab",
+  clientVersion: "2.0.0",
 };
 
 export type ReasoningEffort = (typeof config.reasoningEfforts)[number];
 export type SandboxMode = (typeof config.sandboxModes)[number];
+export type ApprovalPolicy = (typeof config.approvalPolicies)[number];
