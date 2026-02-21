@@ -12,6 +12,14 @@ export interface ApprovalHandler {
   handleFileChangeApproval(req: FileChangeApprovalRequest): Promise<ApprovalDecision>;
 }
 
+/** Validate that an ID is safe for use in file paths. */
+function validateId(id: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new Error(`Invalid approval ID: "${id}"`);
+  }
+  return id;
+}
+
 /** Auto-approve all requests immediately. */
 export const autoApproveHandler: ApprovalHandler = {
   async handleCommandApproval() {
@@ -22,7 +30,8 @@ export const autoApproveHandler: ApprovalHandler = {
   },
 };
 
-/** Interactive handler: write request to file, poll for decision file. */
+/** File-based IPC approval handler. Writes a .json request file, then polls for
+ *  a .decision file created by `codex-collab approve/decline` in a separate process. */
 export class InteractiveApprovalHandler implements ApprovalHandler {
   constructor(
     private approvalsDir: string,
@@ -33,7 +42,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
   }
 
   async handleCommandApproval(req: CommandApprovalRequest): Promise<ApprovalDecision> {
-    const id = req.approvalId ?? req.itemId;
+    const id = validateId(req.approvalId ?? req.itemId);
     this.onProgress(`APPROVAL NEEDED`);
     this.onProgress(`  Command: ${req.command}`);
     if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
@@ -53,7 +62,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
   }
 
   async handleFileChangeApproval(req: FileChangeApprovalRequest): Promise<ApprovalDecision> {
-    const id = req.itemId;
+    const id = validateId(req.itemId);
     this.onProgress(`APPROVAL NEEDED (file change)`);
     if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
     this.onProgress(`  Approve: codex-collab approve ${id}`);
@@ -71,26 +80,43 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
   }
 
   private writeRequestFile(id: string, data: unknown): void {
-    writeFileSync(`${this.approvalsDir}/${id}.json`, JSON.stringify(data, null, 2));
+    try {
+      writeFileSync(`${this.approvalsDir}/${id}.json`, JSON.stringify(data, null, 2));
+    } catch (e) {
+      console.error(`[codex] Failed to write approval request: ${e instanceof Error ? e.message : e}`);
+      throw e;
+    }
   }
 
-  private async pollForDecision(id: string): Promise<ApprovalDecision> {
+  private async pollForDecision(id: string, timeoutMs = 3_600_000): Promise<ApprovalDecision> {
     const decisionPath = `${this.approvalsDir}/${id}.decision`;
     const requestPath = `${this.approvalsDir}/${id}.json`;
+    const deadline = Date.now() + timeoutMs;
 
-    while (true) {
+    while (Date.now() < deadline) {
       if (existsSync(decisionPath)) {
-        const decision = readFileSync(decisionPath, "utf-8").trim();
-        // Clean up both files
+        let decision: string;
         try {
-          unlinkSync(decisionPath);
-        } catch {}
-        try {
-          unlinkSync(requestPath);
-        } catch {}
+          decision = readFileSync(decisionPath, "utf-8").trim();
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw e;
+        }
+        // Clean up files
+        for (const path of [decisionPath, requestPath]) {
+          try {
+            unlinkSync(path);
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+              console.error(`[codex] Warning: Failed to clean up ${path}: ${(e as Error).message}`);
+            }
+          }
+        }
         return decision === "accept" ? "accept" : "decline";
       }
       await new Promise((r) => setTimeout(r, this.pollIntervalMs));
     }
+
+    throw new Error(`Approval ${id} timed out waiting for decision after ${timeoutMs / 1000}s`);
   }
 }

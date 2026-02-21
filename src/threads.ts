@@ -1,6 +1,6 @@
 // src/threads.ts — Thread lifecycle and short ID mapping
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "fs";
 import { randomBytes } from "crypto";
 import { dirname } from "path";
 import type { ThreadMapping } from "./types";
@@ -11,9 +11,18 @@ export function generateShortId(): string {
 
 export function loadThreadMapping(threadsFile: string): ThreadMapping {
   if (!existsSync(threadsFile)) return {};
+  let content: string;
   try {
-    return JSON.parse(readFileSync(threadsFile, "utf-8"));
-  } catch {
+    content = readFileSync(threadsFile, "utf-8");
+  } catch (e) {
+    throw new Error(`Cannot read threads file ${threadsFile}: ${e instanceof Error ? e.message : e}`);
+  }
+  try {
+    return JSON.parse(content);
+  } catch (e) {
+    console.error(
+      `[codex] Warning: threads file is corrupted (${e instanceof Error ? e.message : e}). Thread history may be incomplete.`,
+    );
     return {};
   }
 }
@@ -21,7 +30,9 @@ export function loadThreadMapping(threadsFile: string): ThreadMapping {
 export function saveThreadMapping(threadsFile: string, mapping: ThreadMapping): void {
   const dir = dirname(threadsFile);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  writeFileSync(threadsFile, JSON.stringify(mapping, null, 2));
+  const tmpPath = threadsFile + ".tmp";
+  writeFileSync(tmpPath, JSON.stringify(mapping, null, 2));
+  renameSync(tmpPath, threadsFile);
 }
 
 export function registerThread(

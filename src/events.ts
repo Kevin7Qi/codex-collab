@@ -3,7 +3,7 @@
 import { appendFileSync, mkdirSync, existsSync } from "fs";
 import type {
   ItemStartedParams, ItemCompletedParams, DeltaParams,
-  FileChange, CommandExec, CommandExecutionItem, FileChangeItem,
+  FileChange, CommandExec,
 } from "./types";
 
 type ProgressCallback = (line: string) => void;
@@ -34,11 +34,9 @@ export class EventDispatcher {
       case "reasoning":
         this.progress("Reasoning...");
         break;
-      case "commandExecution": {
-        const cmd = (item as CommandExecutionItem).command;
-        this.progress(`Running: ${cmd}`);
+      case "commandExecution":
+        this.progress(`Running: ${item.command}`);
         break;
-      }
       case "agentMessage":
         this.progress("Agent responding...");
         break;
@@ -51,21 +49,19 @@ export class EventDispatcher {
 
     switch (item.type) {
       case "commandExecution": {
-        const cmd = item as CommandExecutionItem;
         this.commandsRun.push({
-          command: cmd.command,
-          exitCode: cmd.exitCode ?? null,
-          durationMs: cmd.durationMs ?? null,
+          command: item.command,
+          exitCode: item.exitCode ?? null,
+          durationMs: item.durationMs ?? null,
         });
-        const duration = cmd.durationMs ? `${(cmd.durationMs / 1000).toFixed(1)}s` : "";
-        const exit = cmd.exitCode !== null && cmd.exitCode !== undefined ? `exit ${cmd.exitCode}` : "";
+        const duration = item.durationMs ? `${(item.durationMs / 1000).toFixed(1)}s` : "";
+        const exit = item.exitCode !== null && item.exitCode !== undefined ? `exit ${item.exitCode}` : "";
         const parts = [exit, duration].filter(Boolean).join(", ");
         this.progress(`Command completed${parts ? ` (${parts})` : ""}`);
         break;
       }
       case "fileChange": {
-        const fc = item as FileChangeItem;
-        for (const change of fc.changes) {
+        for (const change of item.changes) {
           this.filesChanged.push({
             path: change.path,
             kind: change.kind.type,
@@ -107,7 +103,11 @@ export class EventDispatcher {
 
   flush(): void {
     if (this.logBuffer.length === 0) return;
-    appendFileSync(this.logPath, this.logBuffer.join("\n") + "\n");
+    try {
+      appendFileSync(this.logPath, this.logBuffer.join("\n") + "\n");
+    } catch (e) {
+      console.error(`[codex] Warning: Failed to write log to ${this.logPath}: ${e instanceof Error ? e.message : e}`);
+    }
     this.logBuffer = [];
   }
 
