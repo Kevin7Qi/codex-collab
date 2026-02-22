@@ -276,6 +276,7 @@ async function startOrResumeThread(
       cwd: opts.dir,
       approvalPolicy: opts.approval,
       persistExtendedHistory: false,
+      ...extraStartParams,
     });
     return { threadId, shortId };
   }

@@ -1,9 +1,39 @@
 // src/threads.ts — Thread lifecycle and short ID mapping
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, openSync, closeSync, unlinkSync } from "fs";
 import { randomBytes } from "crypto";
 import { dirname } from "path";
 import type { ThreadMapping } from "./types";
+
+/**
+ * Acquire an advisory file lock using O_CREAT|O_EXCL on a .lock file.
+ * Returns a release function. Spins with short sleeps on contention.
+ */
+function acquireLock(filePath: string): () => void {
+  const lockPath = filePath + ".lock";
+  const maxAttempts = 100;
+  let fd: number | undefined;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      fd = openSync(lockPath, "wx");
+      break;
+    } catch {
+      // Lock held — wait and retry
+      Bun.sleepSync(10 + Math.random() * 20);
+    }
+  }
+  if (fd === undefined) {
+    // Stale lock — force acquire
+    try { unlinkSync(lockPath); } catch {}
+    fd = openSync(lockPath, "w");
+  }
+
+  return () => {
+    try { closeSync(fd!); } catch {}
+    try { unlinkSync(lockPath); } catch {}
+  };
+}
 
 export function generateShortId(): string {
   return randomBytes(4).toString("hex");
@@ -40,16 +70,21 @@ export function registerThread(
   threadId: string,
   meta?: { model?: string; cwd?: string },
 ): ThreadMapping {
-  const mapping = loadThreadMapping(threadsFile);
-  const shortId = generateShortId();
-  mapping[shortId] = {
-    threadId,
-    createdAt: new Date().toISOString(),
-    model: meta?.model,
-    cwd: meta?.cwd,
-  };
-  saveThreadMapping(threadsFile, mapping);
-  return mapping;
+  const release = acquireLock(threadsFile);
+  try {
+    const mapping = loadThreadMapping(threadsFile);
+    const shortId = generateShortId();
+    mapping[shortId] = {
+      threadId,
+      createdAt: new Date().toISOString(),
+      model: meta?.model,
+      cwd: meta?.cwd,
+    };
+    saveThreadMapping(threadsFile, mapping);
+    return mapping;
+  } finally {
+    release();
+  }
 }
 
 export function resolveThreadId(threadsFile: string, idOrPrefix: string): string {
@@ -79,7 +114,12 @@ export function findShortId(threadsFile: string, threadId: string): string | nul
 }
 
 export function removeThread(threadsFile: string, shortId: string): void {
-  const mapping = loadThreadMapping(threadsFile);
-  delete mapping[shortId];
-  saveThreadMapping(threadsFile, mapping);
+  const release = acquireLock(threadsFile);
+  try {
+    const mapping = loadThreadMapping(threadsFile);
+    delete mapping[shortId];
+    saveThreadMapping(threadsFile, mapping);
+  } finally {
+    release();
+  }
 }

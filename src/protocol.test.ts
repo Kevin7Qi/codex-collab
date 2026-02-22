@@ -1,7 +1,65 @@
-import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { describe, expect, test, beforeAll, beforeEach, afterEach } from "bun:test";
 import { parseMessage, formatRequest, formatNotification, formatResponse, resetIdCounter, connect, type AppServerClient } from "./protocol";
 
-const MOCK_SERVER = "/tmp/claude-1000/mock-app-server.ts";
+const TEST_DIR = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-protocol`;
+const MOCK_SERVER = `${TEST_DIR}/mock-app-server.ts`;
+
+const MOCK_SERVER_SOURCE = `#!/usr/bin/env bun
+const decoder = new TextDecoder();
+function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
+const exitEarly = process.env.MOCK_EXIT_EARLY === "1";
+const errorResponse = process.env.MOCK_ERROR_RESPONSE === "1";
+async function main() {
+  const reader = Bun.stdin.stream().getReader();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\\n")) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        let msg;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.id !== undefined && msg.method) {
+          switch (msg.method) {
+            case "initialize":
+              respond({ id: msg.id, result: { userAgent: "mock-codex-server/0.1.0" } });
+              if (exitEarly) setTimeout(() => process.exit(0), 50);
+              break;
+            case "thread/start":
+              if (errorResponse) {
+                respond({ id: msg.id, error: { code: -32603, message: "Internal error: model not available" } });
+              } else {
+                respond({ id: msg.id, result: {
+                  thread: { id: "thread-mock-001", preview: "", modelProvider: "openai",
+                    createdAt: Date.now(), updatedAt: Date.now(), status: { type: "idle" },
+                    path: null, cwd: "/tmp", cliVersion: "0.1.0", source: "mock", name: null,
+                    agentNickname: null, agentRole: null, gitInfo: null, turns: [] },
+                  model: msg.params?.model || "gpt-5.3-codex", modelProvider: "openai",
+                  cwd: "/tmp", approvalPolicy: "never", sandbox: null,
+                }});
+              }
+              break;
+            default:
+              respond({ id: msg.id, error: { code: -32601, message: "Method not found: " + msg.method } });
+          }
+        }
+      }
+    }
+  } catch {}
+}
+main();
+`;
+
+beforeAll(async () => {
+  const { mkdirSync, existsSync } = await import("fs");
+  if (!existsSync(TEST_DIR)) mkdirSync(TEST_DIR, { recursive: true });
+  await Bun.write(MOCK_SERVER, MOCK_SERVER_SOURCE);
+});
 
 beforeEach(() => {
   resetIdCounter();
@@ -299,7 +357,7 @@ describe("AppServerClient", () => {
       main();
     `;
 
-    const serverPath = "/tmp/claude-1000/mock-notify-server.ts";
+    const serverPath = `${TEST_DIR}/mock-notify-server.ts`;
     await Bun.write(serverPath, notifyServer);
 
     const received: unknown[] = [];
@@ -371,7 +429,7 @@ describe("AppServerClient", () => {
       main();
     `;
 
-    const serverPath = "/tmp/claude-1000/mock-approval-server.ts";
+    const serverPath = `${TEST_DIR}/mock-approval-server.ts`;
     await Bun.write(serverPath, approvalServer);
 
     client = await connect({
