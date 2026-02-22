@@ -26,7 +26,7 @@ describe("EventDispatcher", () => {
     const dispatcher = new EventDispatcher("test2", TEST_LOG_DIR, (line) => lines.push(line));
 
     dispatcher.handleItemStarted({
-      item: { type: "commandExecution", id: "i1", command: "npm test", cwd: "/proj", status: "inProgress" },
+      item: { type: "commandExecution", id: "i1", command: "npm test", cwd: "/proj", status: "inProgress", processId: null, commandActions: [] },
       threadId: "t1",
       turnId: "turn1",
     });
@@ -59,7 +59,7 @@ describe("EventDispatcher", () => {
     dispatcher.handleItemCompleted({
       item: {
         type: "commandExecution", id: "i1", command: "echo hello", cwd: "/tmp",
-        status: "completed", exitCode: 0, durationMs: 100,
+        status: "completed", exitCode: 0, durationMs: 100, processId: null, commandActions: [],
       },
       threadId: "t1",
       turnId: "turn1",
@@ -72,13 +72,25 @@ describe("EventDispatcher", () => {
     expect(content).toContain("echo hello");
   });
 
+  test("captures review output from exitedReviewMode item/completed", () => {
+    const dispatcher = new EventDispatcher("test-review", TEST_LOG_DIR);
+
+    dispatcher.handleItemCompleted({
+      item: { type: "exitedReviewMode", id: "review-1", review: "Code looks great" },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    expect(dispatcher.getAccumulatedOutput()).toBe("Code looks great");
+  });
+
   test("collects file changes and commands", () => {
     const dispatcher = new EventDispatcher("test5", TEST_LOG_DIR);
 
     dispatcher.handleItemCompleted({
       item: {
         type: "commandExecution", id: "i1", command: "npm test", cwd: "/proj",
-        status: "completed", exitCode: 0, durationMs: 4200,
+        status: "completed", exitCode: 0, durationMs: 4200, processId: null, commandActions: [],
       },
       threadId: "t1",
       turnId: "turn1",

@@ -75,21 +75,51 @@ function createMockClient(opts: {
 }
 
 describe("runTurn", () => {
-  test("returns completed TurnResult", async () => {
-    const client = createMockClient({
-      startMethod: "turn/start",
-      startResponse: {
-        turn: { id: "turn-1", items: [], status: "inProgress" },
+  test("returns completed TurnResult with delta-streamed output", async () => {
+    const notificationHandlers = new Map<string, Set<(params: unknown) => void>>();
+
+    const client: AppServerClient = {
+      async request<T>(method: string): Promise<T> {
+        if (method === "turn/start") {
+          // Fire agent message deltas, then turn/completed
+          setTimeout(() => {
+            const deltaHandlers = notificationHandlers.get("item/agentMessage/delta");
+            if (deltaHandlers) {
+              for (const h of deltaHandlers) {
+                h({ threadId: "thr-1", turnId: "turn-1", itemId: "msg-1", delta: "Hello from Codex" });
+              }
+            }
+          }, 20);
+
+          setTimeout(() => {
+            const handlers = notificationHandlers.get("turn/completed");
+            if (handlers) {
+              for (const h of handlers) {
+                h({
+                  threadId: "thr-1",
+                  turn: { id: "turn-1", items: [], status: "completed", error: null },
+                });
+              }
+            }
+          }, 50);
+
+          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+        }
+        throw new Error(`Unexpected method: ${method}`);
       },
-      completionParams: {
-        threadId: "thr-1",
-        turn: {
-          id: "turn-1",
-          items: [{ type: "agentMessage", id: "msg-1", text: "Hello from Codex" }],
-          status: "completed",
-        },
+      notify() {},
+      on(method: string, handler: (params: unknown) => void): () => void {
+        if (!notificationHandlers.has(method)) {
+          notificationHandlers.set(method, new Set());
+        }
+        notificationHandlers.get(method)!.add(handler);
+        return () => { notificationHandlers.get(method)?.delete(handler); };
       },
-    });
+      onRequest(): () => void { return () => {}; },
+      respond() {},
+      async close() {},
+      userAgent: "mock/1.0",
+    };
 
     const dispatcher = new EventDispatcher("test-turn", TEST_LOG_DIR, () => {});
 
@@ -100,7 +130,6 @@ describe("runTurn", () => {
     });
 
     expect(result.status).toBe("completed");
-    // Output comes from turn.items agentMessage fallback since no deltas streamed
     expect(result.output).toBe("Hello from Codex");
     expect(result.durationMs).toBeGreaterThan(0);
   });
@@ -134,6 +163,7 @@ describe("runTurn", () => {
                     id: "turn-1",
                     items: [{ type: "agentMessage", id: "msg-1", text: "Streamed output" }],
                     status: "completed",
+                    error: null,
                   },
                 });
               }
@@ -182,7 +212,7 @@ describe("runTurn", () => {
           id: "turn-1",
           items: [],
           status: "failed",
-          error: { message: "Context window exceeded", codexErrorInfo: "ContextWindowExceeded" },
+          error: { message: "Context window exceeded", codexErrorInfo: "contextWindowExceeded", additionalDetails: null },
         },
       },
     });
@@ -246,6 +276,7 @@ describe("runTurn", () => {
                     type: "commandExecution", id: "cmd-1",
                     command: "npm test", cwd: "/proj",
                     status: "completed", exitCode: 0, durationMs: 1200,
+                    processId: null, commandActions: [],
                   },
                   threadId: "thr-1",
                   turnId: "turn-1",
@@ -271,7 +302,7 @@ describe("runTurn", () => {
               for (const h of handlers) {
                 h({
                   threadId: "thr-1",
-                  turn: { id: "turn-1", items: [], status: "completed" },
+                  turn: { id: "turn-1", items: [], status: "completed", error: null },
                 });
               }
             }
@@ -327,7 +358,7 @@ describe("runTurn", () => {
               for (const h of handlers) {
                 h({
                   threadId: "thr-1",
-                  turn: { id: "turn-1", items: [], status: "completed" },
+                  turn: { id: "turn-1", items: [], status: "completed", error: null },
                 });
               }
             }
@@ -376,12 +407,22 @@ describe("runTurn", () => {
     const client: AppServerClient = {
       async request<T>(method: string): Promise<T> {
         if (method === "turn/start") {
+          // Stream delta for the correct turn
+          setTimeout(() => {
+            const deltaHandlers = notificationHandlers.get("item/agentMessage/delta");
+            if (deltaHandlers) {
+              for (const h of deltaHandlers) {
+                h({ threadId: "thr-1", turnId: "turn-1", itemId: "msg-1", delta: "correct" });
+              }
+            }
+          }, 10);
+
           // Fire turn/completed for wrong turn first, then correct turn
           setTimeout(() => {
             const handlers = notificationHandlers.get("turn/completed");
             if (handlers) {
               for (const h of handlers) {
-                h({ threadId: "thr-1", turn: { id: "wrong-turn", items: [], status: "completed" } });
+                h({ threadId: "thr-1", turn: { id: "wrong-turn", items: [], status: "completed", error: null } });
               }
             }
           }, 20);
@@ -392,11 +433,7 @@ describe("runTurn", () => {
               for (const h of handlers) {
                 h({
                   threadId: "thr-1",
-                  turn: {
-                    id: "turn-1",
-                    items: [{ type: "agentMessage", id: "m1", text: "correct" }],
-                    status: "completed",
-                  },
+                  turn: { id: "turn-1", items: [], status: "completed", error: null },
                 });
               }
             }
@@ -432,22 +469,58 @@ describe("runTurn", () => {
 });
 
 describe("runReview", () => {
-  test("sends review/start and returns TurnResult", async () => {
-    const client = createMockClient({
-      startMethod: "review/start",
-      startResponse: {
-        turn: { id: "review-turn-1", items: [], status: "inProgress" },
-        reviewThreadId: "review-thr-1",
-      } as ReviewStartResponse,
-      completionParams: {
-        threadId: "thr-1",
-        turn: {
-          id: "review-turn-1",
-          items: [{ type: "agentMessage", id: "msg-1", text: "Review: looks good" }],
-          status: "completed",
-        },
+  test("captures review output from exitedReviewMode item/completed", async () => {
+    const notificationHandlers = new Map<string, Set<(params: unknown) => void>>();
+
+    const client: AppServerClient = {
+      async request<T>(method: string): Promise<T> {
+        if (method === "review/start") {
+          // Simulate review lifecycle: item/completed with exitedReviewMode, then turn/completed
+          setTimeout(() => {
+            const completedHandlers = notificationHandlers.get("item/completed");
+            if (completedHandlers) {
+              for (const h of completedHandlers) {
+                h({
+                  item: { type: "exitedReviewMode", id: "review-turn-1", review: "Review: looks good" },
+                  threadId: "thr-1",
+                  turnId: "review-turn-1",
+                });
+              }
+            }
+          }, 20);
+
+          setTimeout(() => {
+            const handlers = notificationHandlers.get("turn/completed");
+            if (handlers) {
+              for (const h of handlers) {
+                h({
+                  threadId: "thr-1",
+                  turn: { id: "review-turn-1", items: [], status: "completed", error: null },
+                });
+              }
+            }
+          }, 50);
+
+          return {
+            turn: { id: "review-turn-1", items: [], status: "inProgress" },
+            reviewThreadId: "review-thr-1",
+          } as T;
+        }
+        throw new Error(`Unexpected method: ${method}`);
       },
-    });
+      notify() {},
+      on(method: string, handler: (params: unknown) => void): () => void {
+        if (!notificationHandlers.has(method)) {
+          notificationHandlers.set(method, new Set());
+        }
+        notificationHandlers.get(method)!.add(handler);
+        return () => { notificationHandlers.get(method)?.delete(handler); };
+      },
+      onRequest(): () => void { return () => {}; },
+      respond() {},
+      async close() {},
+      userAgent: "mock/1.0",
+    };
 
     const dispatcher = new EventDispatcher("test-review", TEST_LOG_DIR, () => {});
 
@@ -479,7 +552,7 @@ describe("runReview", () => {
           id: "review-turn-2",
           items: [],
           status: "failed",
-          error: { message: "No changes to review" },
+          error: { message: "No changes to review", codexErrorInfo: null, additionalDetails: null },
         },
       },
     });
@@ -499,6 +572,88 @@ describe("runReview", () => {
 
     expect(result.status).toBe("failed");
     expect(result.error).toBe("No changes to review");
+  });
+});
+
+describe("review output via exitedReviewMode", () => {
+  test("exitedReviewMode overrides any earlier accumulated output", async () => {
+    const notificationHandlers = new Map<string, Set<(params: unknown) => void>>();
+
+    const client: AppServerClient = {
+      async request<T>(method: string): Promise<T> {
+        if (method === "review/start") {
+          // Some delta arrives first (shouldn't happen for reviews, but test the override)
+          setTimeout(() => {
+            const deltaHandlers = notificationHandlers.get("item/agentMessage/delta");
+            if (deltaHandlers) {
+              for (const h of deltaHandlers) {
+                h({ threadId: "thr-1", turnId: "review-turn-1", itemId: "msg-1", delta: "partial" });
+              }
+            }
+          }, 10);
+
+          // Then exitedReviewMode arrives with the full review
+          setTimeout(() => {
+            const completedHandlers = notificationHandlers.get("item/completed");
+            if (completedHandlers) {
+              for (const h of completedHandlers) {
+                h({
+                  item: { type: "exitedReviewMode", id: "review-turn-1", review: "Full review text" },
+                  threadId: "thr-1",
+                  turnId: "review-turn-1",
+                });
+              }
+            }
+          }, 20);
+
+          setTimeout(() => {
+            const handlers = notificationHandlers.get("turn/completed");
+            if (handlers) {
+              for (const h of handlers) {
+                h({
+                  threadId: "thr-1",
+                  turn: { id: "review-turn-1", items: [], status: "completed", error: null },
+                });
+              }
+            }
+          }, 50);
+
+          return {
+            turn: { id: "review-turn-1", items: [], status: "inProgress" },
+            reviewThreadId: "review-thr-1",
+          } as T;
+        }
+        throw new Error(`Unexpected method: ${method}`);
+      },
+      notify() {},
+      on(method: string, handler: (params: unknown) => void): () => void {
+        if (!notificationHandlers.has(method)) {
+          notificationHandlers.set(method, new Set());
+        }
+        notificationHandlers.get(method)!.add(handler);
+        return () => { notificationHandlers.get(method)?.delete(handler); };
+      },
+      onRequest(): () => void { return () => {}; },
+      respond() {},
+      async close() {},
+      userAgent: "mock/1.0",
+    };
+
+    const dispatcher = new EventDispatcher("test-review-override", TEST_LOG_DIR, () => {});
+
+    const result = await runReview(
+      client,
+      "thr-1",
+      { type: "uncommittedChanges" },
+      {
+        dispatcher,
+        approvalHandler: autoApproveHandler,
+        timeoutMs: 5000,
+      },
+    );
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toBe("Full review text");
   });
 });
 
@@ -548,7 +703,7 @@ describe("approval wiring", () => {
               for (const h of handlers) {
                 h({
                   threadId: "thr-1",
-                  turn: { id: "turn-1", items: [], status: "completed" },
+                  turn: { id: "turn-1", items: [], status: "completed", error: null },
                 });
               }
             }

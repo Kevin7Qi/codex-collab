@@ -6,7 +6,6 @@ import type {
   ReviewTarget, ReviewStartParams, ReviewDelivery,
   TurnResult, ItemStartedParams, ItemCompletedParams, DeltaParams,
   CommandApprovalRequest, FileChangeApprovalRequest,
-  AgentMessageItem,
   ApprovalPolicy, ReasoningEffort,
 } from "./types";
 import type { EventDispatcher } from "./events";
@@ -89,13 +88,11 @@ async function executeTurn(
     opts.dispatcher.flushOutput();
     opts.dispatcher.flush();
 
-    let output = opts.dispatcher.getAccumulatedOutput();
-    if (!output && completedTurn.turn.items) {
-      const agentMsg = completedTurn.turn.items.find(
-        (i): i is AgentMessageItem => i.type === "agentMessage",
-      );
-      if (agentMsg) output = agentMsg.text;
-    }
+    // Output comes from accumulated item/agentMessage/delta notifications
+    // (for normal turns) or from exitedReviewMode item/completed notification
+    // (for reviews). Note: turn/completed Turn.items is always [] per protocol
+    // spec — items are only populated on thread/resume or thread/fork.
+    const output = opts.dispatcher.getAccumulatedOutput();
 
     return {
       status: completedTurn.turn.status as TurnResult["status"],

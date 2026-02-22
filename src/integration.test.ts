@@ -10,7 +10,7 @@ describe.skipIf(!hasCodex)("integration", () => {
   test("connect and list models", async () => {
     const client = await connect();
     try {
-      const resp = await client.request<{ data: Array<{ modelId: string }> }>("model/list", {});
+      const resp = await client.request<{ data: Array<{ id: string }> }>("model/list", {});
       expect(resp.data.length).toBeGreaterThan(0);
     } finally {
       await client.close();
@@ -22,12 +22,15 @@ describe.skipIf(!hasCodex)("integration", () => {
     try {
       const startResp = await client.request<{ thread: { id: string } }>("thread/start", {
         cwd: process.cwd(),
+        experimentalRawEvents: false,
+        persistExtendedHistory: false,
       });
       expect(startResp.thread.id).toBeTruthy();
 
       // Verify we can read the thread back from the same connection
       const readResp = await client.request<{ thread: { id: string } }>("thread/read", {
         threadId: startResp.thread.id,
+        includeTurns: false,
       });
       expect(readResp.thread.id).toBe(startResp.thread.id);
 

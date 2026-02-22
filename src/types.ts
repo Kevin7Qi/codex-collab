@@ -75,6 +75,9 @@ export interface Thread {
   cliVersion: string;
   source: string;
   name: string | null;
+  agentNickname: string | null;
+  agentRole: string | null;
+  gitInfo: { sha: string | null; branch: string | null; originUrl: string | null } | null;
   turns: Turn[];
 }
 
@@ -117,7 +120,7 @@ export interface ThreadListParams {
 
 export interface ThreadListResponse {
   data: Thread[];
-  nextCursor?: string;
+  nextCursor: string | null;
 }
 
 export interface ThreadReadParams {
@@ -151,13 +154,23 @@ export interface Turn {
   id: string;
   items: ThreadItem[];
   status: "inProgress" | "completed" | "interrupted" | "failed";
-  error?: TurnError;
+  error: TurnError | null;
 }
+
+export type CodexErrorInfo =
+  | "contextWindowExceeded" | "usageLimitExceeded" | "serverOverloaded"
+  | { httpConnectionFailed: { httpStatusCode: number | null } }
+  | { responseStreamConnectionFailed: { httpStatusCode: number | null } }
+  | "internalServerError" | "unauthorized" | "badRequest"
+  | "threadRollbackFailed" | "sandboxError"
+  | { responseStreamDisconnected: { httpStatusCode: number | null } }
+  | { responseTooManyFailedAttempts: { httpStatusCode: number | null } }
+  | "other";
 
 export interface TurnError {
   message: string;
-  codexErrorInfo?: string;
-  additionalDetails?: string;
+  codexErrorInfo: CodexErrorInfo | null;
+  additionalDetails: string | null;
 }
 
 export interface TurnStartResponse {
@@ -179,6 +192,8 @@ export type ThreadItem =
   | FileChangeItem
   | McpToolCallItem
   | WebSearchItem
+  | EnteredReviewModeItem
+  | ExitedReviewModeItem
   | GenericItem;
 
 export interface UserMessageItem {
@@ -207,10 +222,18 @@ export interface CommandExecutionItem {
   command: string;
   cwd: string;
   status: "inProgress" | "completed" | "failed" | "declined";
+  processId: string | null;
+  commandActions: Array<CommandAction>;
   aggregatedOutput?: string | null;
   exitCode?: number | null;
   durationMs?: number | null;
 }
+
+export type CommandAction =
+  | { type: "read"; command: string; name: string; path: string }
+  | { type: "listFiles"; command: string; path: string | null }
+  | { type: "search"; command: string; query: string | null; path: string | null }
+  | { type: "unknown"; command: string };
 
 export interface FileChangeItem {
   type: "fileChange";
@@ -220,7 +243,7 @@ export interface FileChangeItem {
     kind: { type: "add" } | { type: "delete" } | { type: "update"; move_path: string | null };
     diff: string;
   }>;
-  status: "completed" | "failed" | "declined";
+  status: "inProgress" | "completed" | "failed" | "declined";
 }
 
 export interface McpToolCallItem {
@@ -239,6 +262,18 @@ export interface WebSearchItem {
   type: "webSearch";
   id: string;
   query: string;
+}
+
+export interface EnteredReviewModeItem {
+  type: "enteredReviewMode";
+  id: string;
+  review: string;
+}
+
+export interface ExitedReviewModeItem {
+  type: "exitedReviewMode";
+  id: string;
+  review: string;
 }
 
 export interface GenericItem {
@@ -327,16 +362,20 @@ export interface ModelListParams {
 export interface Model {
   id: string;
   model: string;
+  upgrade: string | null;
   displayName: string;
-  description?: string;
-  hidden?: boolean;
-  supportedReasoningEfforts?: Array<{ reasoningEffort: string; description: string }>;
-  defaultReasoningEffort?: string;
+  description: string;
+  hidden: boolean;
+  supportedReasoningEfforts: Array<{ reasoningEffort: string; description: string }>;
+  defaultReasoningEffort: string;
+  inputModalities: string[];
+  supportsPersonality: boolean;
+  isDefault: boolean;
 }
 
 export interface ModelListResponse {
   data: Model[];
-  nextCursor?: string;
+  nextCursor: string | null;
 }
 
 // --- Turn result (our own type, not protocol) ---

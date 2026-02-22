@@ -289,7 +289,7 @@ describe("AppServerClient", () => {
               if (!msg.id && msg.method === "initialized") {
                 process.stdout.write(JSON.stringify({
                   method: "item/started",
-                  params: { itemId: "item-1", threadId: "t1", turnId: "turn-1" },
+                  params: { item: { type: "agentMessage", id: "item-1", text: "" }, threadId: "t1", turnId: "turn-1" },
                 }) + "\\n");
               }
             }
@@ -317,7 +317,7 @@ describe("AppServerClient", () => {
 
     expect(received.length).toBe(1);
     expect(received[0]).toEqual({
-      itemId: "item-1",
+      item: { type: "agentMessage", id: "item-1", text: "" },
       threadId: "t1",
       turnId: "turn-1",
     });
@@ -354,7 +354,7 @@ describe("AppServerClient", () => {
                 process.stdout.write(JSON.stringify({
                   id: "srv-1",
                   method: "item/commandExecution/requestApproval",
-                  params: { command: "rm -rf /", threadId: "t1", turnId: "turn-1" },
+                  params: { command: "rm -rf /", threadId: "t1", turnId: "turn-1", itemId: "item-1" },
                 }) + "\\n");
               }
               // When we get back our response, send a verification notification

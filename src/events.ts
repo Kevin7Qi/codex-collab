@@ -59,6 +59,11 @@ export class EventDispatcher {
         }
         break;
       }
+      case "exitedReviewMode": {
+        this.accumulatedOutput = item.review;
+        this.log(`review output (${item.review.length} chars)`);
+        break;
+      }
     }
   }
 
