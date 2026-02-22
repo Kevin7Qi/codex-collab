@@ -6,7 +6,7 @@ import type { ApprovalHandler } from "./approvals";
 import type { AppServerClient } from "./protocol";
 import type {
   TurnResult, TurnCompletedParams, TurnStartResponse,
-  ReviewStartResponse, RequestId, InitializeResponse,
+  ReviewStartResponse, RequestId,
 } from "./types";
 import { mkdirSync, rmSync, existsSync } from "fs";
 
@@ -70,7 +70,7 @@ function createMockClient(opts: {
 
     async close() {},
 
-    serverInfo: { name: "mock", version: "1.0" },
+    userAgent: "mock/1.0",
   };
 }
 
@@ -155,7 +155,7 @@ describe("runTurn", () => {
       onRequest(): () => void { return () => {}; },
       respond() {},
       async close() {},
-      serverInfo: { name: "mock", version: "1.0" },
+      userAgent: "mock/1.0",
     };
 
     const dispatcher = new EventDispatcher("test-turn-delta", TEST_LOG_DIR, () => {});
@@ -211,7 +211,7 @@ describe("runTurn", () => {
       onRequest(): () => void { return () => {}; },
       respond() {},
       async close() {},
-      serverInfo: { name: "mock", version: "1.0" },
+      userAgent: "mock/1.0",
     };
 
     const dispatcher = new EventDispatcher("test-turn-timeout", TEST_LOG_DIR, () => {});
@@ -292,7 +292,7 @@ describe("runTurn", () => {
       onRequest(): () => void { return () => {}; },
       respond() {},
       async close() {},
-      serverInfo: { name: "mock", version: "1.0" },
+      userAgent: "mock/1.0",
     };
 
     const dispatcher = new EventDispatcher("test-turn-collect", TEST_LOG_DIR, () => {});
@@ -347,7 +347,7 @@ describe("runTurn", () => {
       onRequest(): () => void { return () => {}; },
       respond() {},
       async close() {},
-      serverInfo: { name: "mock", version: "1.0" },
+      userAgent: "mock/1.0",
     };
 
     const dispatcher = new EventDispatcher("test-turn-params", TEST_LOG_DIR, () => {});
@@ -512,7 +512,7 @@ describe("approval wiring", () => {
       },
       respond() {},
       async close() {},
-      serverInfo: { name: "mock", version: "1.0" },
+      userAgent: "mock/1.0",
     };
 
     const dispatcher = new EventDispatcher("test-approval-wiring", TEST_LOG_DIR, () => {});

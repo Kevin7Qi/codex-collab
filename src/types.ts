@@ -46,7 +46,7 @@ export interface InitializeParams {
 }
 
 export interface InitializeResponse {
-  serverInfo: { name: string; version: string };
+  userAgent: string;
 }
 
 // --- Threads ---
@@ -105,7 +105,7 @@ export type ThreadResumeResponse = ThreadStartResponse;
 export interface ThreadListParams {
   cursor?: string;
   limit?: number;
-  sortKey?: "createdAt" | "updatedAt";
+  sortKey?: "created_at" | "updated_at";
   sourceKinds?: string[];
   archived?: boolean;
   cwd?: string;
@@ -321,11 +321,13 @@ export interface ModelListParams {
 }
 
 export interface Model {
-  modelId: string;
-  provider: string;
+  id: string;
+  model: string;
   displayName: string;
+  description?: string;
   hidden?: boolean;
-  reasoningEffortOptions?: Array<{ name: string }>;
+  supportedReasoningEfforts?: Array<{ reasoningEffort: string; description: string }>;
+  defaultReasoningEffort?: string;
 }
 
 export interface ModelListResponse {

@@ -429,7 +429,7 @@ async function cmdJobs(opts: Options) {
   const client = await connect();
   const resp = await client.request<ThreadListResponse>("thread/list", {
     limit: opts.limit,
-    sortKey: "updatedAt",
+    sortKey: "updated_at",
   });
   await client.close();
 
@@ -443,12 +443,11 @@ async function cmdJobs(opts: Options) {
     const enriched = resp.data.map((t) => ({
       shortId: reverseMap.get(t.id) ?? null,
       threadId: t.id,
-      status: t.status.type,
-      model: t.modelProvider,
+      status: t.status?.type ?? "unknown",
+      source: t.source,
       cwd: t.cwd,
       createdAt: new Date(t.createdAt * 1000).toISOString(),
       updatedAt: new Date(t.updatedAt * 1000).toISOString(),
-      name: t.name,
     }));
     console.log(JSON.stringify(enriched, null, 2));
   } else {
@@ -458,11 +457,11 @@ async function cmdJobs(opts: Options) {
     }
     for (const t of resp.data) {
       const sid = reverseMap.get(t.id) ?? "????????";
-      const status = t.status.type;
+      const status = t.status?.type ?? t.source ?? "unknown";
       const age = formatAge(t.updatedAt);
-      const name = t.name ? ` "${t.name}"` : "";
+      const preview = t.preview ? ` ${t.preview.slice(0, 40)}` : "";
       console.log(
-        `  ${sid}  ${status.padEnd(10)} ${age.padEnd(8)} ${t.cwd}${name}`,
+        `  ${sid}  ${status.padEnd(10)} ${age.padEnd(8)} ${t.cwd}${preview}`,
       );
     }
   }
@@ -547,10 +546,10 @@ async function cmdModels() {
   await client.close();
 
   for (const m of resp.data) {
-    const effort =
-      m.reasoningEffortOptions?.map((o) => o.name).join(", ") ?? "";
+    const efforts =
+      m.supportedReasoningEfforts?.map((o) => o.reasoningEffort).join(", ") ?? "";
     console.log(
-      `  ${m.modelId.padEnd(30)} ${m.provider.padEnd(12)} ${effort}`,
+      `  ${m.id.padEnd(25)} ${(m.description ?? "").slice(0, 50).padEnd(52)} ${efforts}`,
     );
   }
 }
@@ -670,7 +669,7 @@ async function cmdHealth() {
   try {
     const client = await connect();
     console.log(
-      `  app-server: OK (${client.serverInfo.name} ${client.serverInfo.version})`,
+      `  app-server: OK (${client.userAgent})`,
     );
     await client.close();
   } catch (e) {

@@ -153,15 +153,12 @@ describe("AppServerClient", () => {
     }
   });
 
-  test("connect performs initialize handshake and returns serverInfo", async () => {
+  test("connect performs initialize handshake and returns userAgent", async () => {
     client = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
     });
-    expect(client.serverInfo).toEqual({
-      name: "mock-codex-server",
-      version: "0.1.0",
-    });
+    expect(client.userAgent).toBe("mock-codex-server/0.1.0");
   });
 
   test("close shuts down gracefully", async () => {
@@ -270,7 +267,7 @@ describe("AppServerClient", () => {
               if (msg.id !== undefined && msg.method === "initialize") {
                 process.stdout.write(JSON.stringify({
                   id: msg.id,
-                  result: { serverInfo: { name: "notify-server", version: "0.1.0" } },
+                  result: { userAgent: "notify-server/0.1.0" },
                 }) + "\\n");
               }
               // After receiving "initialized" notification, send a server notification
@@ -333,7 +330,7 @@ describe("AppServerClient", () => {
               if (msg.id !== undefined && msg.method === "initialize") {
                 process.stdout.write(JSON.stringify({
                   id: msg.id,
-                  result: { serverInfo: { name: "approval-server", version: "0.1.0" } },
+                  result: { userAgent: "approval-server/0.1.0" },
                 }) + "\\n");
               }
               // After initialized notification, send a server request

@@ -96,8 +96,8 @@ export interface AppServerClient {
   respond(id: RequestId, result: unknown): void;
   /** Gracefully close: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL. */
   close(): Promise<void>;
-  /** The server info from the initialize handshake. */
-  serverInfo: InitializeResponse["serverInfo"];
+  /** The user-agent string from the initialize handshake. */
+  userAgent: string;
 }
 
 /** Type guard: message is a response (has id + result). */
@@ -377,6 +377,6 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     onRequest,
     respond,
     close,
-    serverInfo: initResult.serverInfo,
+    userAgent: initResult.userAgent,
   };
 }
