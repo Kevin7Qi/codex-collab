@@ -362,7 +362,8 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
   // --- Perform initialize handshake ---
 
   const initParams: InitializeParams = {
-    clientInfo: { name: config.clientName, version: config.clientVersion },
+    clientInfo: { name: config.clientName, title: null, version: config.clientVersion },
+    capabilities: null,
   };
 
   const initResult = await request<InitializeResponse>("initialize", initParams);

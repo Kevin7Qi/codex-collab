@@ -14,8 +14,8 @@ export const config = {
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,
   defaultSandbox: "workspace-write" as const,
 
-  // Approval policies
-  approvalPolicies: ["never", "on-request", "always"] as const,
+  // Approval policies (matches AskForApproval in protocol)
+  approvalPolicies: ["never", "on-request", "on-failure", "untrusted"] as const,
   defaultApprovalPolicy: "never" as const,
 
   // Timeouts

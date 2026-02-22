@@ -275,6 +275,7 @@ async function startOrResumeThread(
       model: opts.model,
       cwd: opts.dir,
       approvalPolicy: opts.approval,
+      persistExtendedHistory: false,
     });
     return { threadId, shortId };
   }
@@ -283,6 +284,8 @@ async function startOrResumeThread(
     model: opts.model,
     cwd: opts.dir,
     approvalPolicy: opts.approval,
+    experimentalRawEvents: false,
+    persistExtendedHistory: false,
     ...extraStartParams,
   };
   const resp = await client.request<{ thread: { id: string } }>(

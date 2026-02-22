@@ -38,11 +38,11 @@ export type JsonRpcMessage =
 // --- Initialize ---
 
 export interface InitializeParams {
-  clientInfo: { name: string; version: string };
-  capabilities?: {
-    experimentalApi?: boolean;
-    optOutNotificationMethods?: string[];
-  };
+  clientInfo: { name: string; title: string | null; version: string };
+  capabilities: {
+    experimentalApi: boolean;
+    optOutNotificationMethods?: string[] | null;
+  } | null;
 }
 
 export interface InitializeResponse {
@@ -59,6 +59,8 @@ export interface ThreadStartParams {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: string | null;
   config?: Record<string, unknown>;
+  experimentalRawEvents: boolean;
+  persistExtendedHistory: boolean;
 }
 
 export interface Thread {
@@ -68,10 +70,11 @@ export interface Thread {
   createdAt: number;
   updatedAt: number;
   status: ThreadStatus;
+  path: string | null;
   cwd: string;
   cliVersion: string;
   source: string;
-  name?: string;
+  name: string | null;
   turns: Turn[];
 }
 
@@ -98,6 +101,7 @@ export interface ThreadResumeParams {
   approvalPolicy?: ApprovalPolicy;
   sandbox?: string | null;
   config?: Record<string, unknown>;
+  persistExtendedHistory: boolean;
 }
 
 export type ThreadResumeResponse = ThreadStartResponse;
@@ -118,7 +122,7 @@ export interface ThreadListResponse {
 
 export interface ThreadReadParams {
   threadId: string;
-  includeTurns?: boolean;
+  includeTurns: boolean;
 }
 
 export interface ThreadReadResponse {
@@ -130,7 +134,7 @@ export interface ThreadReadResponse {
 export interface UserInput {
   type: "text";
   text: string;
-  textElements?: unknown[];
+  text_elements?: unknown[];
 }
 
 export interface TurnStartParams {
@@ -213,10 +217,10 @@ export interface FileChangeItem {
   id: string;
   changes: Array<{
     path: string;
-    kind: { type: "add" } | { type: "delete" } | { type: "update"; movePath?: string | null };
+    kind: { type: "add" } | { type: "delete" } | { type: "update"; move_path: string | null };
     diff: string;
   }>;
-  status: "inProgress" | "completed" | "failed" | "declined";
+  status: "completed" | "failed" | "declined";
 }
 
 export interface McpToolCallItem {
@@ -310,7 +314,7 @@ export interface FileChangeApprovalRequest {
   grantRoot: string | null;
 }
 
-export type ApprovalDecision = "accept" | "decline";
+export type ApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel";
 
 // --- Model list ---
 
