@@ -5,6 +5,7 @@ import type {
   UserInput, TurnStartParams, TurnStartResponse, TurnCompletedParams,
   ReviewTarget, ReviewStartParams, ReviewDelivery,
   TurnResult, ItemStartedParams, ItemCompletedParams, DeltaParams,
+  ErrorNotificationParams,
   CommandApprovalRequest, FileChangeApprovalRequest,
   ApprovalPolicy, ReasoningEffort,
 } from "./types";
@@ -128,9 +129,10 @@ function registerEventHandlers(client: AppServerClient, opts: TurnOptions): Arra
     }),
   );
 
-  // Delta notifications (agent message for output accumulation)
+  // Delta notifications
   for (const method of [
     "item/agentMessage/delta",
+    "item/commandExecution/outputDelta",
   ]) {
     unsubs.push(
       client.on(method, (params) => {
@@ -138,6 +140,13 @@ function registerEventHandlers(client: AppServerClient, opts: TurnOptions): Arra
       }),
     );
   }
+
+  // Mid-turn error notifications (e.g. retryable API errors)
+  unsubs.push(
+    client.on("error", (params) => {
+      dispatcher.handleError(params as ErrorNotificationParams);
+    }),
+  );
 
   // Approval requests (server -> client requests expecting a response).
   // The AppServerClient.onRequest handler returns the result directly;

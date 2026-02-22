@@ -3,6 +3,7 @@
 import { appendFileSync, mkdirSync, existsSync } from "fs";
 import type {
   ItemStartedParams, ItemCompletedParams, DeltaParams,
+  ErrorNotificationParams,
   FileChange, CommandExec,
 } from "./types";
 
@@ -72,6 +73,12 @@ export class EventDispatcher {
       this.accumulatedOutput += params.delta;
     }
     // No per-character logging — accumulated text is logged at flush
+  }
+
+  handleError(params: ErrorNotificationParams): void {
+    const retry = params.willRetry ? " (will retry)" : "";
+    this.progress(`Error: ${params.error.message}${retry}`);
+    this.log(`error: ${params.error.message}${retry}`);
   }
 
   getAccumulatedOutput(): string {

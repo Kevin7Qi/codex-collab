@@ -84,6 +84,22 @@ describe("EventDispatcher", () => {
     expect(dispatcher.getAccumulatedOutput()).toBe("Code looks great");
   });
 
+  test("handles mid-turn error notifications", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-error", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleError({
+      error: { message: "Rate limit exceeded" },
+      willRetry: true,
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toContain("Rate limit exceeded");
+    expect(lines[0]).toContain("will retry");
+  });
+
   test("collects file changes and commands", () => {
     const dispatcher = new EventDispatcher("test5", TEST_LOG_DIR);
 

@@ -169,8 +169,8 @@ export type CodexErrorInfo =
 
 export interface TurnError {
   message: string;
-  codexErrorInfo: CodexErrorInfo | null;
-  additionalDetails: string | null;
+  codexErrorInfo?: CodexErrorInfo | null;
+  additionalDetails?: string | null;
 }
 
 export interface TurnStartResponse {
@@ -187,13 +187,16 @@ export interface TurnInterruptParams {
 export type ThreadItem =
   | UserMessageItem
   | AgentMessageItem
+  | PlanItem
   | ReasoningItem
   | CommandExecutionItem
   | FileChangeItem
   | McpToolCallItem
   | WebSearchItem
+  | ImageViewItem
   | EnteredReviewModeItem
   | ExitedReviewModeItem
+  | ContextCompactionItem
   | GenericItem;
 
 export interface UserMessageItem {
@@ -207,6 +210,12 @@ export interface AgentMessageItem {
   id: string;
   text: string;
   phase?: string | null;
+}
+
+export interface PlanItem {
+  type: "plan";
+  id: string;
+  text: string;
 }
 
 export interface ReasoningItem {
@@ -276,6 +285,17 @@ export interface ExitedReviewModeItem {
   review: string;
 }
 
+export interface ImageViewItem {
+  type: "imageView";
+  id: string;
+  path: string;
+}
+
+export interface ContextCompactionItem {
+  type: "contextCompaction";
+  id: string;
+}
+
 export interface GenericItem {
   type: string;
   id: string;
@@ -308,6 +328,17 @@ export interface TurnCompletedParams {
   turn: Turn;
 }
 
+export interface ErrorNotificationParams {
+  error: {
+    message: string;
+    codexErrorInfo?: CodexErrorInfo | null;
+    additionalDetails?: string | null;
+  };
+  willRetry: boolean;
+  threadId: string;
+  turnId: string;
+}
+
 // --- Review ---
 
 export type ReviewTarget =
@@ -335,10 +366,12 @@ export interface CommandApprovalRequest {
   threadId: string;
   turnId: string;
   itemId: string;
-  approvalId: string | null;
-  reason: string | null;
-  command: string | null;
-  cwd: string | null;
+  approvalId?: string | null;
+  reason?: string | null;
+  command?: string | null;
+  cwd?: string | null;
+  commandActions?: Array<CommandAction> | null;
+  networkApprovalContext?: { host: string; protocol: string } | null;
 }
 
 export interface FileChangeApprovalRequest {
