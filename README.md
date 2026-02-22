@@ -85,7 +85,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--mode <mode>` | Review mode: pr, uncommitted, commit |
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
-| `--approval <policy>` | Approval policy: never, on-request, always (default: never) |
+| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
 | `--content-only` | Strip formatting, return plain text |
 | `--json` | JSON output (`jobs` command) |
 | `--timeout <sec>` | Turn timeout (default: 900) |

@@ -98,10 +98,11 @@ export class EventDispatcher {
     if (this.logBuffer.length === 0) return;
     try {
       appendFileSync(this.logPath, this.logBuffer.join("\n") + "\n");
+      this.logBuffer = [];
     } catch (e) {
       console.error(`[codex] Warning: Failed to write log to ${this.logPath}: ${e instanceof Error ? e.message : e}`);
+      // Keep buffer — will retry on next flush
     }
-    this.logBuffer = [];
   }
 
   private progress(text: string): void {

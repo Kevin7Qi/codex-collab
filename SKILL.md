@@ -103,11 +103,10 @@ codex-collab progress <id>
 Progress lines stream in real-time during execution:
 ```
 [codex] Thread a1b2c3d4 started (gpt-5.3-codex, workspace-write)
-[codex] Reasoning...
+[codex] Turn started
 [codex] Running: npm test
-[codex] Command completed (exit 0, 4.2s)
 [codex] Edited: src/auth.ts (update)
-[codex] Turn completed (2m 14s, 1 files changed)
+[codex] Turn completed (2m 14s, 1 file changed)
 ```
 
 ## Approvals
@@ -190,7 +189,7 @@ codex-collab health                     # Check prerequisites
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
 | `--timeout <sec>` | Turn timeout in seconds (default: 900) |
-| `--approval <policy>` | Approval policy: never, on-request, always (default: never) |
+| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit |
 | `--ref <hash>` | Commit ref for --mode commit |
 | `--json` | JSON output (jobs command) |

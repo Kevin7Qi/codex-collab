@@ -137,6 +137,21 @@ describe("parseMessage", () => {
     const msg = parseMessage("{broken:}");
     expect(msg).toBeNull();
   });
+
+  test("returns null for object with non-string method", () => {
+    const msg = parseMessage('{"method":123}');
+    expect(msg).toBeNull();
+  });
+
+  test("returns null for object with non-string/number id", () => {
+    const msg = parseMessage('{"id":true,"result":"ok"}');
+    expect(msg).toBeNull();
+  });
+
+  test("returns null for object with neither method nor id", () => {
+    const msg = parseMessage('{"foo":"bar"}');
+    expect(msg).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

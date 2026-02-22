@@ -500,14 +500,19 @@ async function cmdKill(positional: string[]) {
         progress(`Interrupted turn ${activeTurn.id}`);
       }
     }
-  } catch {
-    // Thread may not exist on server; continue to archive anyway
+  } catch (e) {
+    // Thread may not exist on server; log unexpected errors for troubleshooting
+    if (e instanceof Error && !e.message.includes("not found")) {
+      console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
+    }
   }
 
   try {
     await client.request("thread/archive", { threadId });
-  } catch {
-    // Already archived or not found
+  } catch (e) {
+    if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
+      console.error(`[codex] Warning: could not archive thread: ${e.message}`);
+    }
   }
 
   await client.close();
@@ -589,8 +594,10 @@ function deleteOldFiles(dir: string, maxAgeMs: number): number {
         unlinkSync(path);
         deleted++;
       }
-    } catch {
-      // skip files we can't stat
+    } catch (e) {
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: could not delete ${path}: ${e.message}`);
+      }
     }
   }
   return deleted;
@@ -644,8 +651,10 @@ async function cmdDelete(positional: string[]) {
     const client = await connect();
     await client.request("thread/archive", { threadId });
     await client.close();
-  } catch {
-    // Server may be unavailable or thread already archived
+  } catch (e) {
+    if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
+      console.error(`[codex] Warning: could not archive on server: ${e.message}`);
+    }
   }
 
   // Delete local files

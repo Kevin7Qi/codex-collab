@@ -255,7 +255,7 @@ describe("runTurn", () => {
                 h({
                   item: {
                     type: "fileChange", id: "fc-1",
-                    changes: [{ path: "src/foo.ts", kind: { type: "update" }, diff: "+1,-1" }],
+                    changes: [{ path: "src/foo.ts", kind: { type: "update", move_path: null }, diff: "+1,-1" }],
                     status: "completed",
                   },
                   threadId: "thr-1",
@@ -368,6 +368,66 @@ describe("runTurn", () => {
     expect(p.model).toBe("gpt-5.3-codex");
     expect(p.effort).toBe("high");
     expect(p.approvalPolicy).toBe("on-request");
+  });
+
+  test("ignores turn/completed for different turnId", async () => {
+    const notificationHandlers = new Map<string, Set<(params: unknown) => void>>();
+
+    const client: AppServerClient = {
+      async request<T>(method: string): Promise<T> {
+        if (method === "turn/start") {
+          // Fire turn/completed for wrong turn first, then correct turn
+          setTimeout(() => {
+            const handlers = notificationHandlers.get("turn/completed");
+            if (handlers) {
+              for (const h of handlers) {
+                h({ threadId: "thr-1", turn: { id: "wrong-turn", items: [], status: "completed" } });
+              }
+            }
+          }, 20);
+
+          setTimeout(() => {
+            const handlers = notificationHandlers.get("turn/completed");
+            if (handlers) {
+              for (const h of handlers) {
+                h({
+                  threadId: "thr-1",
+                  turn: {
+                    id: "turn-1",
+                    items: [{ type: "agentMessage", id: "m1", text: "correct" }],
+                    status: "completed",
+                  },
+                });
+              }
+            }
+          }, 50);
+
+          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+        }
+        throw new Error(`Unexpected method: ${method}`);
+      },
+      notify() {},
+      on(method: string, handler: (params: unknown) => void): () => void {
+        if (!notificationHandlers.has(method)) notificationHandlers.set(method, new Set());
+        notificationHandlers.get(method)!.add(handler);
+        return () => { notificationHandlers.get(method)?.delete(handler); };
+      },
+      onRequest(): () => void { return () => {}; },
+      respond() {},
+      async close() {},
+      userAgent: "mock/1.0",
+    };
+
+    const dispatcher = new EventDispatcher("test-turnid-filter", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toBe("correct");
   });
 });
 

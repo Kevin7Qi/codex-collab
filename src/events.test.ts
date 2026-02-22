@@ -43,7 +43,7 @@ describe("EventDispatcher", () => {
       item: {
         type: "fileChange",
         id: "i1",
-        changes: [{ path: "src/auth.ts", kind: { type: "update" }, diff: "+15,-3" }],
+        changes: [{ path: "src/auth.ts", kind: { type: "update", move_path: null }, diff: "+15,-3" }],
         status: "completed",
       },
       threadId: "t1",
@@ -87,7 +87,7 @@ describe("EventDispatcher", () => {
     dispatcher.handleItemCompleted({
       item: {
         type: "fileChange", id: "i2",
-        changes: [{ path: "src/auth.ts", kind: { type: "update" }, diff: "" }],
+        changes: [{ path: "src/auth.ts", kind: { type: "update", move_path: null }, diff: "" }],
         status: "completed",
       },
       threadId: "t1",

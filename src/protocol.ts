@@ -40,7 +40,15 @@ export function parseMessage(line: string): JsonRpcMessage | null {
   try {
     const raw = JSON.parse(line);
     if (typeof raw !== "object" || raw === null) return null;
-    if (!("method" in raw) && !("id" in raw)) return null;
+
+    const hasMethod = "method" in raw && typeof raw.method === "string";
+    const hasId = "id" in raw && (typeof raw.id === "string" || typeof raw.id === "number");
+
+    if (!hasMethod && !hasId) {
+      console.error(`[codex] Warning: ignoring non-protocol message: ${line.slice(0, 200)}`);
+      return null;
+    }
+
     return raw as JsonRpcMessage;
   } catch {
     console.error(`[codex] Warning: unparseable message from app server: ${line.slice(0, 200)}`);
@@ -102,17 +110,17 @@ export interface AppServerClient {
 
 /** Type guard: message is a response (has id + result). */
 function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
-  return "id" in msg && "result" in msg;
+  return "id" in msg && "result" in msg && !("method" in msg);
 }
 
 /** Type guard: message is an error response (has id + error). */
 function isError(msg: JsonRpcMessage): msg is JsonRpcError {
-  return "id" in msg && "error" in msg;
+  return "id" in msg && "error" in msg && !("method" in msg);
 }
 
 /** Type guard: message is a request (has id + method). */
 function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
-  return "id" in msg && "method" in msg;
+  return "id" in msg && "method" in msg && !("result" in msg) && !("error" in msg);
 }
 
 /** Type guard: message is a notification (has method, no id). */
@@ -143,6 +151,7 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
   const requestHandlers = new Map<string, ServerRequestHandler>();
   let closed = false;
   let exited = false;
+  let connectionNextId = 1;
 
   // Write a string to the child's stdin
   function write(data: string): void {
@@ -154,9 +163,7 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
       if (!exited) {
         console.error(`[codex] Failed to write to app server: ${msg}`);
       }
-      if (msg.includes("EPIPE") || msg.includes("closed")) {
-        rejectAll("App server stdin write failed: " + msg);
-      }
+      rejectAll("App server stdin write failed: " + msg);
     }
   }
 
@@ -200,8 +207,12 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
           .then(
             (res) => write(formatResponse(msg.id, res)),
             (err) => {
-              console.error(`[codex] Error in request handler for "${msg.method}": ${err instanceof Error ? err.message : String(err)}`);
-              write(formatResponse(msg.id, null));
+              const errMsg = err instanceof Error ? err.message : String(err);
+              console.error(`[codex] Error in request handler for "${msg.method}": ${errMsg}`);
+              write(JSON.stringify({
+                id: msg.id,
+                error: { code: -32603, message: `Handler error: ${errMsg}` },
+              }) + "\n");
             },
           );
       } else {
@@ -266,32 +277,44 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     }
   });
 
+  // Drain stderr and log non-empty output
+  (async () => {
+    const reader = proc.stderr.getReader();
+    const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true }).trim();
+        if (text) {
+          console.error(`[codex] app-server stderr: ${text}`);
+        }
+      }
+    } catch {
+      // stderr closed, expected during shutdown
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+
   // --- Build the client object ---
 
   function request<T = unknown>(method: string, params?: unknown): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      if (closed) {
-        reject(new Error("Client is closed"));
-        return;
-      }
-      if (exited) {
-        reject(new Error("App server process exited unexpectedly"));
-        return;
-      }
+      if (closed) { reject(new Error("Client is closed")); return; }
+      if (exited) { reject(new Error("App server process exited unexpectedly")); return; }
 
-      const { line, id } = formatRequest(method, params);
+      const id = connectionNextId++;
+      const msg: Record<string, unknown> = { id, method };
+      if (params !== undefined) msg.params = params;
+      const line = JSON.stringify(msg) + "\n";
 
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new Error(`Request ${method} (id=${id}) timed out after ${requestTimeout}ms`));
       }, requestTimeout);
 
-      pending.set(id, {
-        resolve: resolve as (value: unknown) => void,
-        reject,
-        timer,
-      });
-
+      pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
       write(line);
     });
   }

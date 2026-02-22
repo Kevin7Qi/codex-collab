@@ -7,6 +7,7 @@ import type {
   TurnResult, ItemStartedParams, ItemCompletedParams, DeltaParams,
   CommandApprovalRequest, FileChangeApprovalRequest,
   AgentMessageItem,
+  ApprovalPolicy, ReasoningEffort,
 } from "./types";
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
@@ -17,8 +18,8 @@ export interface TurnOptions {
   timeoutMs: number;
   cwd?: string;
   model?: string;
-  effort?: string;
-  approvalPolicy?: string;
+  effort?: ReasoningEffort;
+  approvalPolicy?: ApprovalPolicy;
 }
 
 export interface ReviewOptions extends TurnOptions {
@@ -81,31 +82,32 @@ async function executeTurn(
 
   const unsubs = registerEventHandlers(client, opts);
 
-  const { turn } = await client.request<TurnStartResponse>(method, params);
+  try {
+    const { turn } = await client.request<TurnStartResponse>(method, params);
+    const completedTurn = await waitForTurnCompletion(client, turn.id, opts.timeoutMs);
 
-  const completedTurn = await waitForTurnCompletion(client, turn.id, opts.timeoutMs);
+    opts.dispatcher.flushOutput();
+    opts.dispatcher.flush();
 
-  for (const unsub of unsubs) unsub();
+    let output = opts.dispatcher.getAccumulatedOutput();
+    if (!output && completedTurn.turn.items) {
+      const agentMsg = completedTurn.turn.items.find(
+        (i): i is AgentMessageItem => i.type === "agentMessage",
+      );
+      if (agentMsg) output = agentMsg.text;
+    }
 
-  opts.dispatcher.flushOutput();
-  opts.dispatcher.flush();
-
-  let output = opts.dispatcher.getAccumulatedOutput();
-  if (!output && completedTurn.turn.items) {
-    const agentMsg = completedTurn.turn.items.find(
-      (i): i is AgentMessageItem => i.type === "agentMessage",
-    );
-    if (agentMsg) output = agentMsg.text;
+    return {
+      status: completedTurn.turn.status as TurnResult["status"],
+      output,
+      filesChanged: opts.dispatcher.getFilesChanged(),
+      commandsRun: opts.dispatcher.getCommandsRun(),
+      error: completedTurn.turn.error?.message,
+      durationMs: Date.now() - startTime,
+    };
+  } finally {
+    for (const unsub of unsubs) unsub();
   }
-
-  return {
-    status: completedTurn.turn.status as TurnResult["status"],
-    output,
-    filesChanged: opts.dispatcher.getFilesChanged(),
-    commandsRun: opts.dispatcher.getCommandsRun(),
-    error: completedTurn.turn.error?.message,
-    durationMs: Date.now() - startTime,
-  };
 }
 
 /**

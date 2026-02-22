@@ -1,4 +1,4 @@
-// src/types.ts — Protocol types for Codex app server JSON-RPC v2
+// src/types.ts — Protocol types for Codex app server (JSON-RPC over stdio)
 
 // --- JSON-RPC primitives ---
 

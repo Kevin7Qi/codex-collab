@@ -36,6 +36,8 @@ export const config = {
   clientVersion: "2.0.0",
 };
 
+Object.freeze(config);
+
 export type ReasoningEffort = (typeof config.reasoningEfforts)[number];
 export type SandboxMode = (typeof config.sandboxModes)[number];
 export type ApprovalPolicy = (typeof config.approvalPolicies)[number];
