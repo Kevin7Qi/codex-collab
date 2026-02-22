@@ -56,8 +56,11 @@ describe("EventDispatcher", () => {
 
   test("writes events to log file", () => {
     const dispatcher = new EventDispatcher("test4", TEST_LOG_DIR);
-    dispatcher.handleItemStarted({
-      item: { type: "reasoning", id: "i1", summary: [], content: [] },
+    dispatcher.handleItemCompleted({
+      item: {
+        type: "commandExecution", id: "i1", command: "echo hello", cwd: "/tmp",
+        status: "completed", exitCode: 0, durationMs: 100,
+      },
       threadId: "t1",
       turnId: "turn1",
     });
@@ -66,7 +69,7 @@ describe("EventDispatcher", () => {
     const logPath = `${TEST_LOG_DIR}/test4.log`;
     expect(existsSync(logPath)).toBe(true);
     const content = readFileSync(logPath, "utf-8");
-    expect(content).toContain("reasoning");
+    expect(content).toContain("echo hello");
   });
 
   test("collects file changes and commands", () => {

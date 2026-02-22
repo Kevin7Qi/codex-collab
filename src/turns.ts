@@ -87,6 +87,7 @@ async function executeTurn(
 
   for (const unsub of unsubs) unsub();
 
+  opts.dispatcher.flushOutput();
   opts.dispatcher.flush();
 
   let output = opts.dispatcher.getAccumulatedOutput();
@@ -128,12 +129,9 @@ function registerEventHandlers(client: AppServerClient, opts: TurnOptions): Arra
     }),
   );
 
-  // Delta notifications
+  // Delta notifications (agent message for output accumulation)
   for (const method of [
     "item/agentMessage/delta",
-    "item/commandExecution/outputDelta",
-    "item/fileChange/outputDelta",
-    "item/reasoning/summaryTextDelta",
   ]) {
     unsubs.push(
       client.on(method, (params) => {

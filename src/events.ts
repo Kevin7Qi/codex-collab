@@ -28,24 +28,14 @@ export class EventDispatcher {
 
   handleItemStarted(params: ItemStartedParams): void {
     const { item } = params;
-    this.log(`item/started: ${item.type} ${item.id}`);
 
-    switch (item.type) {
-      case "reasoning":
-        this.progress("Reasoning...");
-        break;
-      case "commandExecution":
-        this.progress(`Running: ${item.command}`);
-        break;
-      case "agentMessage":
-        this.progress("Agent responding...");
-        break;
+    if (item.type === "commandExecution") {
+      this.progress(`Running: ${item.command}`);
     }
   }
 
   handleItemCompleted(params: ItemCompletedParams): void {
     const { item } = params;
-    this.log(`item/completed: ${item.type} ${item.id}`);
 
     switch (item.type) {
       case "commandExecution": {
@@ -54,10 +44,8 @@ export class EventDispatcher {
           exitCode: item.exitCode ?? null,
           durationMs: item.durationMs ?? null,
         });
-        const duration = item.durationMs ? `${(item.durationMs / 1000).toFixed(1)}s` : "";
-        const exit = item.exitCode !== null && item.exitCode !== undefined ? `exit ${item.exitCode}` : "";
-        const parts = [exit, duration].filter(Boolean).join(", ");
-        this.progress(`Command completed${parts ? ` (${parts})` : ""}`);
+        const exit = item.exitCode ?? "?";
+        this.log(`command: ${item.command} (exit ${exit})`);
         break;
       }
       case "fileChange": {
@@ -75,12 +63,10 @@ export class EventDispatcher {
   }
 
   handleDelta(method: string, params: DeltaParams): void {
-    this.log(`${method}: +${params.delta.length} chars`);
-
     if (method === "item/agentMessage/delta") {
       this.accumulatedOutput += params.delta;
     }
-    // commandExecution/outputDelta and fileChange/outputDelta are logged only
+    // No per-character logging — accumulated text is logged at flush
   }
 
   getAccumulatedOutput(): string {
@@ -99,6 +85,13 @@ export class EventDispatcher {
     this.accumulatedOutput = "";
     this.filesChanged = [];
     this.commandsRun = [];
+  }
+
+  /** Write accumulated agent output to the log (called before final flush). */
+  flushOutput(): void {
+    if (this.accumulatedOutput) {
+      this.log(`agent output:\n${this.accumulatedOutput}`);
+    }
   }
 
   flush(): void {
