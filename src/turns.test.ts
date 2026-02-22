@@ -230,6 +230,54 @@ describe("runTurn", () => {
     expect(result.output).toBe("");
   });
 
+  test("handles instant turn/completed (race condition prevention)", async () => {
+    // Simulates the race: turn/completed fires synchronously during request(),
+    // before waitFor() is called. The buffered awaiter catches it.
+    const notificationHandlers = new Map<string, Set<(params: unknown) => void>>();
+
+    const client: AppServerClient = {
+      async request<T>(method: string): Promise<T> {
+        if (method === "turn/start") {
+          // Fire turn/completed during request() — before the response promise
+          // resolves. Simulates worst case where notification is buffered first.
+          const handlers = notificationHandlers.get("turn/completed");
+          if (handlers) {
+            for (const h of handlers) {
+              h({
+                threadId: "thr-1",
+                turn: { id: "turn-1", items: [], status: "completed", error: null },
+              });
+            }
+          }
+          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+        }
+        throw new Error(`Unexpected method: ${method}`);
+      },
+      notify() {},
+      on(method: string, handler: (params: unknown) => void): () => void {
+        if (!notificationHandlers.has(method)) {
+          notificationHandlers.set(method, new Set());
+        }
+        notificationHandlers.get(method)!.add(handler);
+        return () => { notificationHandlers.get(method)?.delete(handler); };
+      },
+      onRequest(): () => void { return () => {}; },
+      respond() {},
+      async close() {},
+      userAgent: "mock/1.0",
+    };
+
+    const dispatcher = new EventDispatcher("test-instant", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+    });
+
+    expect(result.status).toBe("completed");
+  });
+
   test("times out when turn/completed never fires", async () => {
     // Client that never fires turn/completed
     const client: AppServerClient = {

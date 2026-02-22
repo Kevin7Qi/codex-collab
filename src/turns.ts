@@ -82,9 +82,19 @@ async function executeTurn(
 
   const unsubs = registerEventHandlers(client, opts);
 
+  // Subscribe to turn/completed BEFORE sending the request to prevent
+  // a race where fast turns complete before we call waitFor(). In the
+  // read loop (protocol.ts), a single read() chunk may contain both
+  // the response and turn/completed. The while-loop dispatches them
+  // synchronously, so the notification handler fires during dispatch —
+  // before the response promise resolves (promise continuations are
+  // microtasks). This means waitFor() would be called too late.
+  const completion = createTurnCompletionAwaiter(client, opts.timeoutMs);
+  unsubs.push(completion.unsubscribe);
+
   try {
     const { turn } = await client.request<TurnStartResponse>(method, params);
-    const completedTurn = await waitForTurnCompletion(client, turn.id, opts.timeoutMs);
+    const completedTurn = await completion.waitFor(turn.id);
 
     opts.dispatcher.flushOutput();
     opts.dispatcher.flush();
@@ -179,29 +189,61 @@ function registerEventHandlers(client: AppServerClient, opts: TurnOptions): Arra
 }
 
 /**
- * Wait for a turn/completed notification matching the given turnId.
- * Rejects with a timeout error if the notification doesn't arrive in time.
+ * Create a turn/completed awaiter that buffers events from the moment it's
+ * created. Call waitFor(turnId) after the request to resolve with the matching
+ * completion — even if it arrived before waitFor was called.
+ *
+ * This eliminates the race between client.request() resolving and registering
+ * the turn/completed handler. If turn/completed does not arrive within
+ * timeoutMs, the returned promise rejects with a timeout error.
  */
-function waitForTurnCompletion(
+function createTurnCompletionAwaiter(
   client: AppServerClient,
-  turnId: string,
   timeoutMs: number,
-): Promise<TurnCompletedParams> {
-  return new Promise((resolve, reject) => {
-    let unsub: (() => void) | undefined;
+): {
+  waitFor: (turnId: string) => Promise<TurnCompletedParams>;
+  unsubscribe: () => void;
+} {
+  const buffer: TurnCompletedParams[] = [];
+  let resolver: ((p: TurnCompletedParams) => void) | null = null;
+  let targetId: string | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const timer = setTimeout(() => {
-      if (unsub) unsub();
-      reject(new Error(`Turn timed out after ${Math.round(timeoutMs / 1000)}s`));
-    }, timeoutMs);
-
-    unsub = client.on("turn/completed", (params) => {
-      const p = params as TurnCompletedParams;
-      if (p.turn.id === turnId) {
-        clearTimeout(timer);
-        if (unsub) unsub();
-        resolve(p);
-      }
-    });
+  const unsub = client.on("turn/completed", (params) => {
+    const p = params as TurnCompletedParams;
+    if (targetId !== null && p.turn.id === targetId && resolver) {
+      clearTimeout(timer);
+      resolver(p);
+      resolver = null;
+    } else {
+      buffer.push(p);
+    }
   });
+
+  return {
+    waitFor(turnId: string): Promise<TurnCompletedParams> {
+      const found = buffer.find((p) => p.turn.id === turnId);
+      if (found) return Promise.resolve(found);
+
+      return new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          resolver = null;
+          targetId = null;
+          unsub();
+          reject(new Error(`Turn timed out after ${Math.round(timeoutMs / 1000)}s`));
+        }, timeoutMs);
+        // Set resolver before targetId so the notification handler never
+        // sees targetId set without a resolver to call.
+        resolver = (p) => {
+          clearTimeout(timer);
+          resolve(p);
+        };
+        targetId = turnId;
+      });
+    },
+    unsubscribe() {
+      unsub();
+      clearTimeout(timer);
+    },
+  };
 }

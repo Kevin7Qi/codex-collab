@@ -330,10 +330,7 @@ async function cmdRun(positional: string[], opts: Options) {
   const timeoutMs = opts.timeout * 1000;
 
   const client = await connect();
-  const sandboxOverride = opts.sandbox !== config.defaultSandbox
-    ? { sandbox: opts.sandbox }
-    : undefined;
-  const { threadId, shortId } = await startOrResumeThread(client, opts, sandboxOverride);
+  const { threadId, shortId } = await startOrResumeThread(client, opts, { sandbox: opts.sandbox });
 
   if (!opts.contentOnly) {
     if (opts.resumeId) {
@@ -611,14 +608,26 @@ async function cmdClean() {
   const logsDeleted = deleteOldFiles(config.logsDir, sevenDaysMs);
   const approvalsDeleted = deleteOldFiles(config.approvalsDir, oneDayMs);
 
-  // Clean stale thread mappings
+  // Clean stale thread mappings — use log file mtime as proxy for last
+  // activity so recently-used threads aren't pruned just because they
+  // were created more than 7 days ago.
   const mapping = loadThreadMapping(config.threadsFile);
   let mappingsRemoved = 0;
   const now = Date.now();
   for (const [shortId, entry] of Object.entries(mapping)) {
-    if (now - new Date(entry.createdAt).getTime() > sevenDaysMs) {
-      delete mapping[shortId];
-      mappingsRemoved++;
+    try {
+      let lastActivity = new Date(entry.createdAt).getTime();
+      if (Number.isNaN(lastActivity)) lastActivity = 0;
+      const logPath = `${config.logsDir}/${shortId}.log`;
+      if (existsSync(logPath)) {
+        lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
+      }
+      if (now - lastActivity > sevenDaysMs) {
+        delete mapping[shortId];
+        mappingsRemoved++;
+      }
+    } catch (e) {
+      console.error(`[codex] Warning: skipping mapping ${shortId}: ${e instanceof Error ? e.message : e}`);
     }
   }
   if (mappingsRemoved > 0) {
