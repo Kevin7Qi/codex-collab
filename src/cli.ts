@@ -441,11 +441,15 @@ async function cmdReview(positional: string[], opts: Options) {
 
 async function cmdJobs(opts: Options) {
   const client = await connect();
-  const resp = await client.request<ThreadListResponse>("thread/list", {
-    limit: opts.limit,
-    sortKey: "updated_at",
-  });
-  await client.close();
+  let resp: ThreadListResponse;
+  try {
+    resp = await client.request<ThreadListResponse>("thread/list", {
+      limit: opts.limit,
+      sortKey: "updated_at",
+    });
+  } finally {
+    await client.close();
+  }
 
   const mapping = loadThreadMapping(config.threadsFile);
   const reverseMap = new Map<string, string>();
@@ -563,8 +567,12 @@ async function cmdProgress(positional: string[]) {
 
 async function cmdModels() {
   const client = await connect();
-  const resp = await client.request<ModelListResponse>("model/list", {});
-  await client.close();
+  let resp: ModelListResponse;
+  try {
+    resp = await client.request<ModelListResponse>("model/list", {});
+  } finally {
+    await client.close();
+  }
 
   for (const m of resp.data) {
     const efforts =
