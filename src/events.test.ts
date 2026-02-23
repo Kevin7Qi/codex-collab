@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach } from "bun:test";
 import { EventDispatcher } from "./events";
 import { mkdirSync, rmSync, readFileSync, existsSync } from "fs";
 
-const TEST_LOG_DIR = `${process.env.TMPDIR || "/tmp"}/codex-collab-test-logs`;
+const TEST_LOG_DIR = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-logs`;
 
 beforeEach(() => {
   if (existsSync(TEST_LOG_DIR)) rmSync(TEST_LOG_DIR, { recursive: true });

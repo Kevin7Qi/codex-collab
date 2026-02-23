@@ -1,5 +1,15 @@
 import { describe, expect, test, beforeAll, beforeEach, afterEach } from "bun:test";
-import { parseMessage, formatRequest, formatNotification, formatResponse, resetIdCounter, connect, type AppServerClient } from "./protocol";
+import { parseMessage, formatNotification, formatResponse, connect, type AppServerClient } from "./protocol";
+
+// Test-local formatRequest helper with its own counter (not exported from protocol.ts
+// to avoid ID collisions with AppServerClient's internal counter).
+let testNextId = 1;
+function formatRequest(method: string, params?: unknown): { line: string; id: number } {
+  const id = testNextId++;
+  const msg: Record<string, unknown> = { id, method };
+  if (params !== undefined) msg.params = params;
+  return { line: JSON.stringify(msg) + "\n", id };
+}
 
 const TEST_DIR = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-protocol`;
 const MOCK_SERVER = `${TEST_DIR}/mock-app-server.ts`;
@@ -62,7 +72,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  resetIdCounter();
+  testNextId = 1;
 });
 
 describe("formatRequest", () => {

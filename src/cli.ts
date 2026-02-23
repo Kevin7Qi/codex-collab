@@ -16,6 +16,7 @@ import {
   loadThreadMapping,
   removeThread,
   saveThreadMapping,
+  withThreadLock,
 } from "./threads";
 import { runTurn, runReview } from "./turns";
 import { EventDispatcher } from "./events";
@@ -330,40 +331,45 @@ async function cmdRun(positional: string[], opts: Options) {
   const timeoutMs = opts.timeout * 1000;
 
   const client = await connect();
-  const { threadId, shortId } = await startOrResumeThread(client, opts, { sandbox: opts.sandbox });
+  try {
+    const { threadId, shortId } = await startOrResumeThread(client, opts, { sandbox: opts.sandbox });
 
-  if (!opts.contentOnly) {
-    if (opts.resumeId) {
-      progress(`Resumed thread ${shortId} (${opts.model})`);
-    } else {
-      progress(`Thread ${shortId} started (${opts.model}, ${opts.sandbox})`);
+    if (!opts.contentOnly) {
+      if (opts.resumeId) {
+        progress(`Resumed thread ${shortId} (${opts.model})`);
+      } else {
+        progress(`Thread ${shortId} started (${opts.model}, ${opts.sandbox})`);
+      }
+      progress("Turn started");
     }
-    progress("Turn started");
+
+    const dispatcher = new EventDispatcher(
+      shortId,
+      config.logsDir,
+      opts.contentOnly ? () => {} : progress,
+    );
+
+    const result = await runTurn(
+      client,
+      threadId,
+      [{ type: "text", text: prompt }],
+      {
+        dispatcher,
+        approvalHandler: getApprovalHandler(opts.approval),
+        timeoutMs,
+        cwd: opts.dir,
+        model: opts.model,
+        effort: opts.reasoning,
+        approvalPolicy: opts.approval,
+      },
+    );
+
+    await client.close();
+    printResultAndExit(result, shortId, "Turn", opts.contentOnly);
+  } catch (e) {
+    await client.close();
+    throw e;
   }
-
-  const dispatcher = new EventDispatcher(
-    shortId,
-    config.logsDir,
-    opts.contentOnly ? () => {} : progress,
-  );
-
-  const result = await runTurn(
-    client,
-    threadId,
-    [{ type: "text", text: prompt }],
-    {
-      dispatcher,
-      approvalHandler: getApprovalHandler(opts.approval),
-      timeoutMs,
-      cwd: opts.dir,
-      model: opts.model,
-      effort: opts.reasoning,
-      approvalPolicy: opts.approval,
-    },
-  );
-
-  await client.close();
-  printResultAndExit(result, shortId, "Turn", opts.contentOnly);
 }
 
 async function cmdReview(positional: string[], opts: Options) {
@@ -395,35 +401,42 @@ async function cmdReview(positional: string[], opts: Options) {
   }
 
   const client = await connect();
-  const { threadId, shortId } = await startOrResumeThread(
-    client, opts, { sandbox: "read-only" },
-  );
+  try {
+    const { threadId, shortId } = await startOrResumeThread(
+      client, opts, { sandbox: "read-only" },
+    );
 
-  if (!opts.contentOnly) {
-    if (opts.resumeId) {
-      progress(`Resumed thread ${shortId} for review`);
-    } else {
-      progress(`Thread ${shortId} started for review (${opts.model}, read-only)`);
+    if (!opts.contentOnly) {
+      if (opts.resumeId) {
+        progress(`Resumed thread ${shortId} for review`);
+      } else {
+        progress(`Thread ${shortId} started for review (${opts.model}, read-only)`);
+      }
     }
+
+    const dispatcher = new EventDispatcher(
+      shortId,
+      config.logsDir,
+      opts.contentOnly ? () => {} : progress,
+    );
+
+    // Note: effort (reasoning level) is not forwarded to reviews — the review/start
+    // protocol does not accept an effort parameter (unlike turn/start).
+    const result = await runReview(client, threadId, target, {
+      dispatcher,
+      approvalHandler: getApprovalHandler(opts.approval),
+      timeoutMs,
+      cwd: opts.dir,
+      model: opts.model,
+      approvalPolicy: opts.approval,
+    });
+
+    await client.close();
+    printResultAndExit(result, shortId, "Review", opts.contentOnly);
+  } catch (e) {
+    await client.close();
+    throw e;
   }
-
-  const dispatcher = new EventDispatcher(
-    shortId,
-    config.logsDir,
-    opts.contentOnly ? () => {} : progress,
-  );
-
-  const result = await runReview(client, threadId, target, {
-    dispatcher,
-    approvalHandler: getApprovalHandler(opts.approval),
-    timeoutMs,
-    cwd: opts.dir,
-    model: opts.model,
-    approvalPolicy: opts.approval,
-  });
-
-  await client.close();
-  printResultAndExit(result, shortId, "Review", opts.contentOnly);
 }
 
 async function cmdJobs(opts: Options) {
@@ -505,8 +518,10 @@ async function cmdKill(positional: string[]) {
     }
   }
 
+  let archived = false;
   try {
     await client.request("thread/archive", { threadId });
+    archived = true;
   } catch (e) {
     if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
       console.error(`[codex] Warning: could not archive thread: ${e.message}`);
@@ -514,7 +529,7 @@ async function cmdKill(positional: string[]) {
   }
 
   await client.close();
-  progress(`Archived thread ${id}`);
+  progress(archived ? `Archived thread ${id}` : `Killed thread ${id} (archive failed)`);
 }
 
 /** Resolve a positional ID arg to a log file path, or die with an error. */
@@ -611,28 +626,30 @@ async function cmdClean() {
   // Clean stale thread mappings — use log file mtime as proxy for last
   // activity so recently-used threads aren't pruned just because they
   // were created more than 7 days ago.
-  const mapping = loadThreadMapping(config.threadsFile);
   let mappingsRemoved = 0;
-  const now = Date.now();
-  for (const [shortId, entry] of Object.entries(mapping)) {
-    try {
-      let lastActivity = new Date(entry.createdAt).getTime();
-      if (Number.isNaN(lastActivity)) lastActivity = 0;
-      const logPath = `${config.logsDir}/${shortId}.log`;
-      if (existsSync(logPath)) {
-        lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
+  withThreadLock(config.threadsFile, () => {
+    const mapping = loadThreadMapping(config.threadsFile);
+    const now = Date.now();
+    for (const [shortId, entry] of Object.entries(mapping)) {
+      try {
+        let lastActivity = new Date(entry.createdAt).getTime();
+        if (Number.isNaN(lastActivity)) lastActivity = 0;
+        const logPath = `${config.logsDir}/${shortId}.log`;
+        if (existsSync(logPath)) {
+          lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
+        }
+        if (now - lastActivity > sevenDaysMs) {
+          delete mapping[shortId];
+          mappingsRemoved++;
+        }
+      } catch (e) {
+        console.error(`[codex] Warning: skipping mapping ${shortId}: ${e instanceof Error ? e.message : e}`);
       }
-      if (now - lastActivity > sevenDaysMs) {
-        delete mapping[shortId];
-        mappingsRemoved++;
-      }
-    } catch (e) {
-      console.error(`[codex] Warning: skipping mapping ${shortId}: ${e instanceof Error ? e.message : e}`);
     }
-  }
-  if (mappingsRemoved > 0) {
-    saveThreadMapping(config.threadsFile, mapping);
-  }
+    if (mappingsRemoved > 0) {
+      saveThreadMapping(config.threadsFile, mapping);
+    }
+  });
 
   const parts: string[] = [];
   if (logsDeleted > 0) parts.push(`${logsDeleted} log files deleted`);
@@ -657,14 +674,16 @@ async function cmdDelete(positional: string[]) {
   const shortId = findShortId(config.threadsFile, threadId);
 
   // Archive in Codex
+  let client: AppServerClient | undefined;
   try {
-    const client = await connect();
+    client = await connect();
     await client.request("thread/archive", { threadId });
-    await client.close();
   } catch (e) {
     if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
       console.error(`[codex] Warning: could not archive on server: ${e.message}`);
     }
+  } finally {
+    await client?.close();
   }
 
   // Delete local files

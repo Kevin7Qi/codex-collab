@@ -80,7 +80,9 @@ async function executeTurn(
   const startTime = Date.now();
   opts.dispatcher.reset();
 
-  const unsubs = registerEventHandlers(client, opts);
+  // AbortController for cancelling in-flight approval polls on turn completion/timeout
+  const abortController = new AbortController();
+  const unsubs = registerEventHandlers(client, opts, abortController.signal);
 
   // Subscribe to turn/completed BEFORE sending the request to prevent
   // a race where fast turns complete before we call waitFor(). In the
@@ -114,6 +116,7 @@ async function executeTurn(
       durationMs: Date.now() - startTime,
     };
   } finally {
+    abortController.abort();
     for (const unsub of unsubs) unsub();
   }
 }
@@ -122,7 +125,7 @@ async function executeTurn(
  * Register notification and approval request handlers on the client.
  * Returns an array of unsubscribe functions for cleanup.
  */
-function registerEventHandlers(client: AppServerClient, opts: TurnOptions): Array<() => void> {
+function registerEventHandlers(client: AppServerClient, opts: TurnOptions, signal: AbortSignal): Array<() => void> {
   const { dispatcher, approvalHandler } = opts;
   const unsubs: Array<() => void> = [];
 
@@ -167,6 +170,7 @@ function registerEventHandlers(client: AppServerClient, opts: TurnOptions): Arra
       async (params) => {
         const decision = await approvalHandler.handleCommandApproval(
           params as CommandApprovalRequest,
+          signal,
         );
         return { decision };
       },
@@ -179,6 +183,7 @@ function registerEventHandlers(client: AppServerClient, opts: TurnOptions): Arra
       async (params) => {
         const decision = await approvalHandler.handleFileChangeApproval(
           params as FileChangeApprovalRequest,
+          signal,
         );
         return { decision };
       },

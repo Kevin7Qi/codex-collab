@@ -8,8 +8,8 @@ import type {
 } from "./types";
 
 export interface ApprovalHandler {
-  handleCommandApproval(req: CommandApprovalRequest): Promise<ApprovalDecision>;
-  handleFileChangeApproval(req: FileChangeApprovalRequest): Promise<ApprovalDecision>;
+  handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision>;
+  handleFileChangeApproval(req: FileChangeApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision>;
 }
 
 /** Validate that an ID is safe for use in file paths. */
@@ -41,10 +41,10 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     if (!existsSync(approvalsDir)) mkdirSync(approvalsDir, { recursive: true });
   }
 
-  async handleCommandApproval(req: CommandApprovalRequest): Promise<ApprovalDecision> {
+  async handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
     const id = validateId(req.approvalId ?? req.itemId);
     this.onProgress(`APPROVAL NEEDED`);
-    this.onProgress(`  Command: ${req.command}`);
+    this.onProgress(`  Command: ${req.command ?? "(no command)"}`);
     if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
     this.onProgress(`  Approve: codex-collab approve ${id}`);
     this.onProgress(`  Decline: codex-collab decline ${id}`);
@@ -58,10 +58,10 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
       turnId: req.turnId,
     });
 
-    return this.pollForDecision(id);
+    return this.pollForDecision(id, 3_600_000, signal);
   }
 
-  async handleFileChangeApproval(req: FileChangeApprovalRequest): Promise<ApprovalDecision> {
+  async handleFileChangeApproval(req: FileChangeApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
     const id = validateId(req.itemId);
     this.onProgress(`APPROVAL NEEDED (file change)`);
     if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
@@ -76,7 +76,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
       turnId: req.turnId,
     });
 
-    return this.pollForDecision(id);
+    return this.pollForDecision(id, 3_600_000, signal);
   }
 
   private writeRequestFile(id: string, data: unknown): void {
@@ -88,12 +88,15 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     }
   }
 
-  private async pollForDecision(id: string, timeoutMs = 3_600_000): Promise<ApprovalDecision> {
+  private async pollForDecision(id: string, timeoutMs: number, signal?: AbortSignal): Promise<ApprovalDecision> {
     const decisionPath = `${this.approvalsDir}/${id}.decision`;
     const requestPath = `${this.approvalsDir}/${id}.json`;
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
+      if (signal?.aborted) {
+        throw new Error(`Approval ${id} cancelled`);
+      }
       if (existsSync(decisionPath)) {
         let decision: string;
         try {
@@ -112,7 +115,8 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
             }
           }
         }
-        return decision === "accept" ? "accept" : "decline";
+        const validDecisions = new Set(["accept", "acceptForSession", "decline", "cancel"]);
+        return validDecisions.has(decision) ? (decision as ApprovalDecision) : "decline";
       }
       await new Promise((r) => setTimeout(r, this.pollIntervalMs));
     }

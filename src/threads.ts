@@ -1,6 +1,6 @@
 // src/threads.ts — Thread lifecycle and short ID mapping
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, openSync, closeSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, openSync, closeSync, unlinkSync, statSync } from "fs";
 import { randomBytes } from "crypto";
 import { dirname } from "path";
 import type { ThreadMapping } from "./types";
@@ -8,31 +8,73 @@ import type { ThreadMapping } from "./types";
 /**
  * Acquire an advisory file lock using O_CREAT|O_EXCL on a .lock file.
  * Returns a release function. Spins with short sleeps on contention.
+ *
+ * If the lock cannot be acquired after ~30s, checks the lock file age.
+ * Only force-breaks locks older than 60s (likely orphaned by a crashed process).
  */
 function acquireLock(filePath: string): () => void {
   const lockPath = filePath + ".lock";
-  const maxAttempts = 100;
+  const maxAttempts = 600; // ~30s at 50ms avg sleep
+  const staleLockThresholdMs = 60_000;
   let fd: number | undefined;
 
   for (let i = 0; i < maxAttempts; i++) {
     try {
       fd = openSync(lockPath, "wx");
       break;
-    } catch {
-      // Lock held — wait and retry
-      Bun.sleepSync(10 + Math.random() * 20);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw new Error(`Cannot create lock file ${lockPath}: ${(e as Error).message}`);
+      }
+      Bun.sleepSync(30 + Math.random() * 40);
     }
   }
   if (fd === undefined) {
-    // Stale lock — force acquire
-    try { unlinkSync(lockPath); } catch {}
-    fd = openSync(lockPath, "w");
+    // Check if lock is stale (older than threshold)
+    try {
+      const stat = statSync(lockPath);
+      const ageMs = Date.now() - stat.mtimeMs;
+      if (ageMs < staleLockThresholdMs) {
+        throw new Error(
+          `Cannot acquire lock on ${filePath}: lock held for ${Math.round(ageMs / 1000)}s (not yet stale). ` +
+          `If this persists, manually delete ${lockPath}`,
+        );
+      }
+      // Lock is stale — force acquire with O_EXCL after unlink
+      unlinkSync(lockPath);
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Cannot acquire lock")) throw e;
+      // statSync/unlinkSync failed (e.g. ENOENT race) — retry once with O_EXCL
+    }
+    try {
+      fd = openSync(lockPath, "wx");
+    } catch {
+      throw new Error(`Cannot acquire lock on ${filePath} after ${maxAttempts} attempts`);
+    }
   }
 
   return () => {
-    try { closeSync(fd!); } catch {}
-    try { unlinkSync(lockPath); } catch {}
+    try { closeSync(fd!); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: lock fd close failed: ${(e as Error).message}`);
+      }
+    }
+    try { unlinkSync(lockPath); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: lock cleanup failed: ${(e as Error).message}`);
+      }
+    }
   };
+}
+
+/** Acquire the thread file lock, run fn, then release. */
+export function withThreadLock<T>(threadsFile: string, fn: () => T): T {
+  const release = acquireLock(threadsFile);
+  try {
+    return fn();
+  } finally {
+    release();
+  }
 }
 
 export function generateShortId(): string {
@@ -48,11 +90,21 @@ export function loadThreadMapping(threadsFile: string): ThreadMapping {
     throw new Error(`Cannot read threads file ${threadsFile}: ${e instanceof Error ? e.message : e}`);
   }
   try {
-    return JSON.parse(content);
+    const parsed = JSON.parse(content);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      console.error("[codex] Warning: threads file has invalid structure. Starting fresh.");
+      return {};
+    }
+    return parsed;
   } catch (e) {
     console.error(
       `[codex] Warning: threads file is corrupted (${e instanceof Error ? e.message : e}). Thread history may be incomplete.`,
     );
+    try {
+      renameSync(threadsFile, `${threadsFile}.corrupt.${Date.now()}`);
+    } catch {
+      // Best-effort backup — may fail if file was already moved
+    }
     return {};
   }
 }
@@ -70,8 +122,7 @@ export function registerThread(
   threadId: string,
   meta?: { model?: string; cwd?: string },
 ): ThreadMapping {
-  const release = acquireLock(threadsFile);
-  try {
+  return withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);
     const shortId = generateShortId();
     mapping[shortId] = {
@@ -82,9 +133,7 @@ export function registerThread(
     };
     saveThreadMapping(threadsFile, mapping);
     return mapping;
-  } finally {
-    release();
-  }
+  });
 }
 
 export function resolveThreadId(threadsFile: string, idOrPrefix: string): string {
@@ -114,12 +163,9 @@ export function findShortId(threadsFile: string, threadId: string): string | nul
 }
 
 export function removeThread(threadsFile: string, shortId: string): void {
-  const release = acquireLock(threadsFile);
-  try {
+  withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);
     delete mapping[shortId];
     saveThreadMapping(threadsFile, mapping);
-  } finally {
-    release();
-  }
+  });
 }

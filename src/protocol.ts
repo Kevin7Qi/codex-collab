@@ -13,16 +13,6 @@ import type {
 } from "./types";
 import { config } from "./config";
 
-let nextId = 1;
-
-/** Format a JSON-RPC request (has id, expects response). Returns newline-terminated JSON and the assigned id. */
-export function formatRequest(method: string, params?: unknown): { line: string; id: number } {
-  const id = nextId++;
-  const msg: Record<string, unknown> = { id, method };
-  if (params !== undefined) msg.params = params;
-  return { line: JSON.stringify(msg) + "\n", id };
-}
-
 /** Format a JSON-RPC notification (no id, no response). Returns newline-terminated JSON. */
 export function formatNotification(method: string, params?: unknown): string {
   const msg: Record<string, unknown> = { method };
@@ -54,11 +44,6 @@ export function parseMessage(line: string): JsonRpcMessage | null {
     console.error(`[codex] Warning: unparseable message from app server: ${line.slice(0, 200)}`);
     return null;
   }
-}
-
-/** Reset the request ID counter (for testing). */
-export function resetIdCounter(): void {
-  nextId = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +83,8 @@ export interface AppServerClient {
   notify(method: string, params?: unknown): void;
   /** Register a handler for server-sent notifications. Returns an unsubscribe function. */
   on(method: string, handler: NotificationHandler): () => void;
-  /** Register a handler for server-sent requests (e.g. approval). Returns an unsubscribe function. */
+  /** Register a handler for server-sent requests (e.g. approval). One handler per method;
+   *  new registrations replace previous ones. Returns an unsubscribe function. */
   onRequest(method: string, handler: ServerRequestHandler): () => void;
   /** Send a response to a server-sent request. */
   respond(id: RequestId, result: unknown): void;
@@ -333,7 +319,12 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     };
   }
 
+  /** Register a handler for server-sent requests. Only one handler per method;
+   *  a new registration replaces the previous one (with a warning). */
   function onRequest(method: string, handler: ServerRequestHandler): () => void {
+    if (requestHandlers.has(method)) {
+      console.error(`[codex] Warning: replacing existing request handler for "${method}"`);
+    }
     requestHandlers.set(method, handler);
     return () => {
       // Only delete if this is still our handler
@@ -389,10 +380,14 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     capabilities: null,
   };
 
-  const initResult = await request<InitializeResponse>("initialize", initParams);
-
-  // Send initialized notification to confirm handshake
-  notify("initialized");
+  let initResult: InitializeResponse;
+  try {
+    initResult = await request<InitializeResponse>("initialize", initParams);
+    notify("initialized");
+  } catch (e) {
+    await close();
+    throw e;
+  }
 
   return {
     request,
