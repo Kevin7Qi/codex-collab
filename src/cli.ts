@@ -42,6 +42,19 @@ import type {
 } from "./types";
 
 // ---------------------------------------------------------------------------
+// SIGINT handler — clean up spawned app-server on Ctrl+C
+// ---------------------------------------------------------------------------
+
+let activeClient: AppServerClient | undefined;
+
+process.on("SIGINT", async () => {
+  if (activeClient) {
+    await activeClient.close();
+  }
+  process.exit(130);
+});
+
+// ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
 
@@ -331,6 +344,7 @@ async function cmdRun(positional: string[], opts: Options) {
   const timeoutMs = opts.timeout * 1000;
 
   const client = await connect();
+  activeClient = client;
   try {
     const { threadId, shortId } = await startOrResumeThread(client, opts, { sandbox: opts.sandbox });
 
@@ -365,9 +379,11 @@ async function cmdRun(positional: string[], opts: Options) {
     );
 
     await client.close();
+    activeClient = undefined;
     printResultAndExit(result, shortId, "Turn", opts.contentOnly);
   } catch (e) {
     await client.close();
+    activeClient = undefined;
     throw e;
   }
 }
@@ -401,6 +417,7 @@ async function cmdReview(positional: string[], opts: Options) {
   }
 
   const client = await connect();
+  activeClient = client;
   try {
     const { threadId, shortId } = await startOrResumeThread(
       client, opts, { sandbox: "read-only" },
@@ -432,9 +449,11 @@ async function cmdReview(positional: string[], opts: Options) {
     });
 
     await client.close();
+    activeClient = undefined;
     printResultAndExit(result, shortId, "Review", opts.contentOnly);
   } catch (e) {
     await client.close();
+    activeClient = undefined;
     throw e;
   }
 }
