@@ -435,7 +435,7 @@ async function cmdRun(positional: string[], opts: Options) {
 
   const prompt = positional.join(" ");
 
-  await withClient(async (client) => {
+  const exitCode = await withClient(async (client) => {
     const { threadId, shortId, effective } = await startOrResumeThread(client, opts);
 
     if (!opts.contentOnly) {
@@ -451,20 +451,25 @@ async function cmdRun(positional: string[], opts: Options) {
 
     const dispatcher = createDispatcher(shortId, opts);
 
-    const result = await runTurn(
-      client,
-      threadId,
-      [{ type: "text", text: prompt }],
-      {
-        dispatcher,
-        approvalHandler: getApprovalHandler(effective.approvalPolicy),
-        timeoutMs: opts.timeout * 1000,
-        ...turnOverrides(opts),
-      },
-    );
+    try {
+      const result = await runTurn(
+        client,
+        threadId,
+        [{ type: "text", text: prompt }],
+        {
+          dispatcher,
+          approvalHandler: getApprovalHandler(effective.approvalPolicy),
+          timeoutMs: opts.timeout * 1000,
+          ...turnOverrides(opts),
+        },
+      );
 
-    updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-    return printResult(result, shortId, "Turn", opts.contentOnly);
+      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+      return printResult(result, shortId, "Turn", opts.contentOnly);
+    } catch (e) {
+      updateThreadStatus(config.threadsFile, threadId, "failed");
+      throw e;
+    }
   });
 
   process.exit(exitCode);
@@ -473,7 +478,7 @@ async function cmdRun(positional: string[], opts: Options) {
 async function cmdReview(positional: string[], opts: Options) {
   const target = resolveReviewTarget(positional, opts);
 
-  await withClient(async (client) => {
+  const exitCode = await withClient(async (client) => {
     const { threadId, shortId, effective } = await startOrResumeThread(
       client, opts, { sandbox: "read-only" },
     );
@@ -492,15 +497,20 @@ async function cmdReview(positional: string[], opts: Options) {
 
     // Note: effort (reasoning level) is not forwarded to reviews — the review/start
     // protocol does not accept an effort parameter (unlike turn/start).
-    const result = await runReview(client, threadId, target, {
-      dispatcher,
-      approvalHandler: getApprovalHandler(effective.approvalPolicy),
-      timeoutMs: opts.timeout * 1000,
-      ...turnOverrides(opts),
-    });
+    try {
+      const result = await runReview(client, threadId, target, {
+        dispatcher,
+        approvalHandler: getApprovalHandler(effective.approvalPolicy),
+        timeoutMs: opts.timeout * 1000,
+        ...turnOverrides(opts),
+      });
 
-    updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-    return printResult(result, shortId, "Review", opts.contentOnly);
+      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+      return printResult(result, shortId, "Review", opts.contentOnly);
+    } catch (e) {
+      updateThreadStatus(config.threadsFile, threadId, "failed");
+      throw e;
+    }
   });
 
   process.exit(exitCode);

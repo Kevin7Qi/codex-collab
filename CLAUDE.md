@@ -29,7 +29,6 @@ codex-collab health
 ## Dependencies
 
 - **Runtime**: Bun, codex CLI (`codex app-server`)
-- **NPM**: (none)
 
 ## Architecture Notes
 

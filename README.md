@@ -6,7 +6,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Why
 
-- **Structured communication** — Talks to Codex via JSON-RPC, not screen scraping. Every event is typed and parseable.
+- **Structured communication** — Talks to Codex via JSON-RPC over stdio. Every event is typed and parseable.
 - **Event-driven progress** — Streams progress lines as Codex works, so Claude sees what's happening in real time.
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
 - **Thread reuse** — Resume existing threads to send follow-up prompts, build on previous responses, or steer the work in a new direction.
