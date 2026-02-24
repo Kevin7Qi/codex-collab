@@ -86,9 +86,9 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
-| `--content-only` | Strip formatting, return plain text |
+| `--content-only` | Suppress progress lines; with `output`, return only extracted content |
 | `--json` | JSON output (`jobs` command) |
-| `--timeout <sec>` | Turn timeout (default: 900) |
+| `--timeout <sec>` | Turn timeout (default: 1200) |
 | `--limit <n>` | Limit threads shown |
 
 </details>
