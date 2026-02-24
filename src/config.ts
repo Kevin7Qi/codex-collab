@@ -19,7 +19,7 @@ export const config = {
   defaultApprovalPolicy: "never" as const,
 
   // Timeouts
-  defaultTimeout: 900, // seconds — turn completion (15 min)
+  defaultTimeout: 1200, // seconds — turn completion (20 min)
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
 
   // Data paths

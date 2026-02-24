@@ -38,9 +38,8 @@ import { resolve } from "path";
 import type {
   ReviewTarget,
   Thread,
-  ThreadListResponse,
   ThreadStartResponse,
-  ModelListResponse,
+  Model,
   TurnResult,
 } from "./types";
 
@@ -268,6 +267,65 @@ function getApprovalHandler(policy: ApprovalPolicy): ApprovalHandler {
   return new InteractiveApprovalHandler(config.approvalsDir, progress);
 }
 
+/** Connect to app server, run fn, then close the client (even on error). */
+async function withClient<T>(fn: (client: AppServerClient) => Promise<T>): Promise<T> {
+  const client = await connect();
+  activeClient = client;
+  try {
+    return await fn(client);
+  } finally {
+    await client.close();
+    activeClient = undefined;
+  }
+}
+
+function createDispatcher(shortId: string, opts: Options): EventDispatcher {
+  return new EventDispatcher(
+    shortId,
+    config.logsDir,
+    opts.contentOnly ? () => {} : progress,
+  );
+}
+
+/** Try to archive a thread on the server. Returns true if successful. */
+async function tryArchive(client: AppServerClient, threadId: string): Promise<boolean> {
+  try {
+    await client.request("thread/archive", { threadId });
+    return true;
+  } catch (e) {
+    if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
+      console.error(`[codex] Warning: could not archive thread: ${e.message}`);
+    }
+    return false;
+  }
+}
+
+function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget {
+  const mode = opts.reviewMode ?? "pr";
+
+  if (positional.length > 0) {
+    if (opts.reviewMode !== null && opts.reviewMode !== "custom") {
+      die(`--mode ${opts.reviewMode} does not accept positional arguments.\nUse --mode custom "instructions" for custom reviews.`);
+    }
+    return { type: "custom", instructions: positional.join(" ") };
+  }
+
+  if (mode === "custom") {
+    die('Custom review mode requires instructions.\nUsage: codex-collab review "instructions"');
+  }
+
+  switch (mode) {
+    case "pr":
+      return { type: "baseBranch", branch: "main" };
+    case "uncommitted":
+      return { type: "uncommittedChanges" };
+    case "commit":
+      return { type: "commit", sha: opts.reviewRef ?? "HEAD" };
+    default:
+      die(`Unknown review mode: ${mode}. Use: pr, uncommitted, commit, custom`);
+  }
+}
+
 /** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
 function turnOverrides(opts: Options) {
   if (!opts.resumeId) {
@@ -351,13 +409,13 @@ async function startOrResumeThread(
   return { threadId, shortId, effective };
 }
 
-/** Print turn result and exit with appropriate code. */
-function printResultAndExit(
+/** Print turn result and return the appropriate exit code. */
+function printResult(
   result: TurnResult,
   shortId: string,
   label: string,
   contentOnly: boolean,
-): never {
+): number {
   if (!contentOnly) {
     progress(`${label} ${result.status} (${formatDuration(result.durationMs)}${result.filesChanged.length > 0 ? `, ${pluralize(result.filesChanged.length, "file")} changed` : ""})`);
     if (result.output) console.log("\n--- Result ---");
@@ -367,7 +425,7 @@ function printResultAndExit(
   if (result.error) console.error(`\nError: ${result.error}`);
   if (!contentOnly) console.error(`\nThread: ${shortId}`);
 
-  process.exit(result.status === "completed" ? 0 : 1);
+  return result.status === "completed" ? 0 : 1;
 }
 
 async function cmdRun(positional: string[], opts: Options) {
@@ -376,11 +434,8 @@ async function cmdRun(positional: string[], opts: Options) {
   }
 
   const prompt = positional.join(" ");
-  const timeoutMs = opts.timeout * 1000;
 
-  const client = await connect();
-  activeClient = client;
-  try {
+  await withClient(async (client) => {
     const { threadId, shortId, effective } = await startOrResumeThread(client, opts);
 
     if (!opts.contentOnly) {
@@ -394,11 +449,7 @@ async function cmdRun(positional: string[], opts: Options) {
 
     updateThreadStatus(config.threadsFile, threadId, "running");
 
-    const dispatcher = new EventDispatcher(
-      shortId,
-      config.logsDir,
-      opts.contentOnly ? () => {} : progress,
-    );
+    const dispatcher = createDispatcher(shortId, opts);
 
     const result = await runTurn(
       client,
@@ -407,58 +458,22 @@ async function cmdRun(positional: string[], opts: Options) {
       {
         dispatcher,
         approvalHandler: getApprovalHandler(effective.approvalPolicy),
-        timeoutMs,
+        timeoutMs: opts.timeout * 1000,
         ...turnOverrides(opts),
       },
     );
 
     updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-    await client.close();
-    activeClient = undefined;
-    printResultAndExit(result, shortId, "Turn", opts.contentOnly);
-  } catch (e) {
-    await client.close();
-    activeClient = undefined;
-    throw e;
-  }
+    return printResult(result, shortId, "Turn", opts.contentOnly);
+  });
+
+  process.exit(exitCode);
 }
 
 async function cmdReview(positional: string[], opts: Options) {
-  const mode = opts.reviewMode ?? "pr";
-  const timeoutMs = opts.timeout * 1000;
+  const target = resolveReviewTarget(positional, opts);
 
-  // Custom review: positional args become custom instructions (only when no explicit --mode)
-  let target: ReviewTarget;
-  if (positional.length > 0) {
-    if (opts.reviewMode !== null && opts.reviewMode !== "custom") {
-      die(`--mode ${opts.reviewMode} does not accept positional arguments.\nUse --mode custom "instructions" for custom reviews.`);
-    }
-    target = { type: "custom", instructions: positional.join(" ") };
-  } else if (mode === "custom") {
-    die('Custom review mode requires instructions.\nUsage: codex-collab review "instructions"');
-  } else {
-    switch (mode) {
-      case "pr":
-        target = { type: "baseBranch", branch: "main" };
-        break;
-      case "uncommitted":
-        target = { type: "uncommittedChanges" };
-        break;
-      case "commit":
-        target = { type: "commit", sha: opts.reviewRef ?? "HEAD" };
-        break;
-      default: {
-        const validModes = ["pr", "uncommitted", "commit", "custom"];
-        die(
-          `Unknown review mode: ${mode}. Use: ${validModes.join(", ")}`,
-        );
-      }
-    }
-  }
-
-  const client = await connect();
-  activeClient = client;
-  try {
+  await withClient(async (client) => {
     const { threadId, shortId, effective } = await startOrResumeThread(
       client, opts, { sandbox: "read-only" },
     );
@@ -473,30 +488,40 @@ async function cmdReview(positional: string[], opts: Options) {
 
     updateThreadStatus(config.threadsFile, threadId, "running");
 
-    const dispatcher = new EventDispatcher(
-      shortId,
-      config.logsDir,
-      opts.contentOnly ? () => {} : progress,
-    );
+    const dispatcher = createDispatcher(shortId, opts);
 
     // Note: effort (reasoning level) is not forwarded to reviews — the review/start
     // protocol does not accept an effort parameter (unlike turn/start).
     const result = await runReview(client, threadId, target, {
       dispatcher,
       approvalHandler: getApprovalHandler(effective.approvalPolicy),
-      timeoutMs,
+      timeoutMs: opts.timeout * 1000,
       ...turnOverrides(opts),
     });
 
     updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-    await client.close();
-    activeClient = undefined;
-    printResultAndExit(result, shortId, "Review", opts.contentOnly);
-  } catch (e) {
-    await client.close();
-    activeClient = undefined;
-    throw e;
-  }
+    return printResult(result, shortId, "Review", opts.contentOnly);
+  });
+
+  process.exit(exitCode);
+}
+
+/** Fetch all pages of a paginated endpoint. */
+async function fetchAllPages<T>(
+  client: AppServerClient,
+  method: string,
+  baseParams?: Record<string, unknown>,
+): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  do {
+    const params: Record<string, unknown> = { ...baseParams };
+    if (cursor) params.cursor = cursor;
+    const page = await client.request<{ data: T[]; nextCursor: string | null }>(method, params);
+    items.push(...page.data);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return items;
 }
 
 async function cmdJobs(opts: Options) {
@@ -508,20 +533,9 @@ async function cmdJobs(opts: Options) {
 
   // Fetch all pages from server — we filter to locally-known threads,
   // so a single page could miss local threads buried behind non-local ones.
-  const client = await connect();
-  const allThreads: Thread[] = [];
-  try {
-    let cursor: string | undefined;
-    do {
-      const params: Record<string, unknown> = { sortKey: "updated_at" };
-      if (cursor) params.cursor = cursor;
-      const page = await client.request<ThreadListResponse>("thread/list", params);
-      allThreads.push(...page.data);
-      cursor = page.nextCursor ?? undefined;
-    } while (cursor);
-  } finally {
-    await client.close();
-  }
+  const allThreads = await withClient((client) =>
+    fetchAllPages<Thread>(client, "thread/list", { sortKey: "updated_at" }),
+  );
 
   // Only show threads created by this CLI (those with a local short ID mapping)
   let localThreads = allThreads.filter((t) => reverseMap.has(t.id));
@@ -567,48 +581,39 @@ async function cmdKill(positional: string[]) {
   validateId(id);
 
   const threadId = resolveThreadId(config.threadsFile, id);
-  const client = await connect();
 
-  // Try to read thread status first and interrupt active turn if any
-  try {
-    const { thread } = await client.request<{
-      thread: {
-        id: string;
-        status: { type: string };
-        turns: Array<{ id: string; status: string }>;
-      };
-    }>("thread/read", { threadId, includeTurns: true });
+  const archived = await withClient(async (client) => {
+    // Try to read thread status first and interrupt active turn if any
+    try {
+      const { thread } = await client.request<{
+        thread: {
+          id: string;
+          status: { type: string };
+          turns: Array<{ id: string; status: string }>;
+        };
+      }>("thread/read", { threadId, includeTurns: true });
 
-    if (thread.status.type === "active") {
-      const activeTurn = thread.turns?.find(
-        (t) => t.status === "inProgress",
-      );
-      if (activeTurn) {
-        await client.request("turn/interrupt", {
-          threadId,
-          turnId: activeTurn.id,
-        });
-        progress(`Interrupted turn ${activeTurn.id}`);
+      if (thread.status.type === "active") {
+        const activeTurn = thread.turns?.find(
+          (t) => t.status === "inProgress",
+        );
+        if (activeTurn) {
+          await client.request("turn/interrupt", {
+            threadId,
+            turnId: activeTurn.id,
+          });
+          progress(`Interrupted turn ${activeTurn.id}`);
+        }
+      }
+    } catch (e) {
+      if (e instanceof Error && !e.message.includes("not found")) {
+        console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
       }
     }
-  } catch (e) {
-    // Thread may not exist on server; log unexpected errors for troubleshooting
-    if (e instanceof Error && !e.message.includes("not found")) {
-      console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
-    }
-  }
 
-  let archived = false;
-  try {
-    await client.request("thread/archive", { threadId });
-    archived = true;
-  } catch (e) {
-    if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
-      console.error(`[codex] Warning: could not archive thread: ${e.message}`);
-    }
-  }
+    return tryArchive(client, threadId);
+  });
 
-  await client.close();
   updateThreadStatus(config.threadsFile, threadId, "killed");
   progress(archived ? `Archived thread ${id}` : `Killed thread ${id} (archive failed)`);
 }
@@ -663,20 +668,9 @@ async function cmdProgress(positional: string[]) {
 }
 
 async function cmdModels() {
-  const client = await connect();
-  const allModels: ModelListResponse["data"] = [];
-  try {
-    let cursor: string | undefined;
-    do {
-      const params: Record<string, unknown> = {};
-      if (cursor) params.cursor = cursor;
-      const page = await client.request<ModelListResponse>("model/list", params);
-      allModels.push(...page.data);
-      cursor = page.nextCursor ?? undefined;
-    } while (cursor);
-  } finally {
-    await client.close();
-  }
+  const allModels = await withClient((client) =>
+    fetchAllPages<Model>(client, "model/list"),
+  );
 
   for (const m of allModels) {
     const efforts =
@@ -785,20 +779,14 @@ async function cmdDelete(positional: string[]) {
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
 
-  // Archive in Codex
-  let client: AppServerClient | undefined;
   try {
-    client = await connect();
-    await client.request("thread/archive", { threadId });
+    await withClient((client) => tryArchive(client, threadId));
   } catch (e) {
-    if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
+    if (e instanceof Error && !e.message.includes("not found")) {
       console.error(`[codex] Warning: could not archive on server: ${e.message}`);
     }
-  } finally {
-    await client?.close();
   }
 
-  // Delete local files
   if (shortId) {
     const logPath = `${config.logsDir}/${shortId}.log`;
     if (existsSync(logPath)) unlinkSync(logPath);
@@ -809,7 +797,6 @@ async function cmdDelete(positional: string[]) {
 }
 
 async function cmdHealth() {
-  // Check codex CLI exists
   const which = Bun.spawnSync(["which", "codex"]);
   if (which.exitCode !== 0) {
     die("codex CLI not found. Install: npm install -g @openai/codex");
@@ -818,17 +805,11 @@ async function cmdHealth() {
   console.log(`  bun:   ${Bun.version}`);
   console.log(`  codex: ${which.stdout.toString().trim()}`);
 
-  // Try spawning app server and doing handshake
   try {
-    const client = await connect();
-    console.log(
-      `  app-server: OK (${client.userAgent})`,
-    );
-    await client.close();
+    const userAgent = await withClient(async (client) => client.userAgent);
+    console.log(`  app-server: OK (${userAgent})`);
   } catch (e) {
-    console.log(
-      `  app-server: FAILED (${e instanceof Error ? e.message : e})`,
-    );
+    console.log(`  app-server: FAILED (${e instanceof Error ? e.message : e})`);
     process.exit(1);
   }
 

@@ -188,7 +188,7 @@ codex-collab health                     # Check prerequisites
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
-| `--timeout <sec>` | Turn timeout in seconds (default: 900) |
+| `--timeout <sec>` | Turn timeout in seconds (default: 1200) |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit |
 | `--ref <hash>` | Commit ref for --mode commit |
