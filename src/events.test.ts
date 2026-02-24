@@ -100,6 +100,42 @@ describe("EventDispatcher", () => {
     expect(lines[0]).toContain("will retry");
   });
 
+  test("does not count declined command in commandsRun", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-declined-cmd", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleItemCompleted({
+      item: {
+        type: "commandExecution", id: "i1", command: "rm -rf /",
+        cwd: "/proj", status: "declined", processId: null, commandActions: [],
+      },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    expect(dispatcher.getCommandsRun()).toHaveLength(0);
+    expect(lines.some(l => l.includes("declined"))).toBe(true);
+  });
+
+  test("does not count failed file change in filesChanged", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-failed-fc", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleItemCompleted({
+      item: {
+        type: "fileChange", id: "i1",
+        changes: [{ path: "src/secret.ts", kind: { type: "update", move_path: null }, diff: "" }],
+        status: "failed",
+      },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    expect(dispatcher.getFilesChanged()).toHaveLength(0);
+    expect(lines.some(l => l.includes("failed"))).toBe(true);
+    expect(lines.some(l => l.includes("src/secret.ts"))).toBe(true);
+  });
+
   test("collects file changes and commands", () => {
     const dispatcher = new EventDispatcher("test5", TEST_LOG_DIR);
 

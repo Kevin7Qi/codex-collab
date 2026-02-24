@@ -93,8 +93,21 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     const requestPath = `${this.approvalsDir}/${id}.json`;
     const deadline = Date.now() + timeoutMs;
 
+    const cleanup = () => {
+      for (const path of [decisionPath, requestPath]) {
+        try {
+          unlinkSync(path);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+            console.error(`[codex] Warning: Failed to clean up ${path}: ${(e as Error).message}`);
+          }
+        }
+      }
+    };
+
     while (Date.now() < deadline) {
       if (signal?.aborted) {
+        cleanup();
         throw new Error(`Approval ${id} cancelled`);
       }
       if (existsSync(decisionPath)) {
@@ -105,22 +118,18 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
           if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
           throw e;
         }
-        // Clean up files
-        for (const path of [decisionPath, requestPath]) {
-          try {
-            unlinkSync(path);
-          } catch (e) {
-            if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-              console.error(`[codex] Warning: Failed to clean up ${path}: ${(e as Error).message}`);
-            }
-          }
-        }
+        cleanup();
         const validDecisions = new Set(["accept", "acceptForSession", "decline", "cancel"]);
-        return validDecisions.has(decision) ? (decision as ApprovalDecision) : "decline";
+        if (!validDecisions.has(decision)) {
+          console.error(`[codex] Warning: Invalid decision "${decision}" for approval ${id}, treating as decline`);
+          return "decline";
+        }
+        return decision as ApprovalDecision;
       }
       await new Promise((r) => setTimeout(r, this.pollIntervalMs));
     }
 
+    cleanup();
     throw new Error(`Approval ${id} timed out waiting for decision after ${timeoutMs / 1000}s`);
   }
 }

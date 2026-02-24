@@ -1,5 +1,7 @@
 // src/types.ts — Protocol types for Codex app server (JSON-RPC over stdio)
 
+import type { ApprovalPolicy, SandboxMode, ReasoningEffort } from "./config";
+
 // --- JSON-RPC primitives ---
 
 export type RequestId = string | number;

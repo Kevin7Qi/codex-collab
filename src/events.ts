@@ -5,6 +5,7 @@ import type {
   ItemStartedParams, ItemCompletedParams, DeltaParams,
   ErrorNotificationParams,
   FileChange, CommandExec,
+  CommandExecutionItem, FileChangeItem, ExitedReviewModeItem,
 } from "./types";
 
 type ProgressCallback = (line: string) => void;
@@ -31,26 +32,38 @@ export class EventDispatcher {
     const { item } = params;
 
     if (item.type === "commandExecution") {
-      this.progress(`Running: ${item.command}`);
+      this.progress(`Running: ${(item as CommandExecutionItem).command}`);
     }
   }
 
   handleItemCompleted(params: ItemCompletedParams): void {
     const { item } = params;
 
+    // Type assertions needed: GenericItem's `type: string` prevents discriminated union narrowing
     switch (item.type) {
       case "commandExecution": {
+        const cmd = item as CommandExecutionItem;
+        if (cmd.status !== "completed") {
+          this.progress(`Command ${cmd.status}: ${cmd.command}`);
+          break;
+        }
         this.commandsRun.push({
-          command: item.command,
-          exitCode: item.exitCode ?? null,
-          durationMs: item.durationMs ?? null,
+          command: cmd.command,
+          exitCode: cmd.exitCode ?? null,
+          durationMs: cmd.durationMs ?? null,
         });
-        const exit = item.exitCode ?? "?";
-        this.log(`command: ${item.command} (exit ${exit})`);
+        const exit = cmd.exitCode ?? "?";
+        this.log(`command: ${cmd.command} (exit ${exit})`);
         break;
       }
       case "fileChange": {
-        for (const change of item.changes) {
+        const fc = item as FileChangeItem;
+        if (fc.status !== "completed") {
+          const paths = fc.changes.map(c => c.path).join(", ");
+          this.progress(`File change ${fc.status}: ${paths || "(no paths)"}`);
+          break;
+        }
+        for (const change of fc.changes) {
           this.filesChanged.push({
             path: change.path,
             kind: change.kind.type,
@@ -61,8 +74,9 @@ export class EventDispatcher {
         break;
       }
       case "exitedReviewMode": {
-        this.accumulatedOutput = item.review;
-        this.log(`review output (${item.review.length} chars)`);
+        const review = item as ExitedReviewModeItem;
+        this.accumulatedOutput = review.review;
+        this.log(`review output (${review.review.length} chars)`);
         break;
       }
     }

@@ -153,6 +153,20 @@ describe("InteractiveApprovalHandler", () => {
     expect(lines.some((l) => l.includes("network access"))).toBe(true);
   });
 
+  test("cleans up request file on abort", async () => {
+    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
+    const controller = new AbortController();
+
+    // Abort after request file is written
+    setTimeout(() => controller.abort(), 200);
+
+    await expect(
+      handler.handleCommandApproval(mockCommandRequest, controller.signal),
+    ).rejects.toThrow("cancelled");
+
+    expect(existsSync(`${TEST_APPROVALS_DIR}/appr-001.json`)).toBe(false);
+  });
+
   test("treats unknown decision text as decline", async () => {
     const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
 

@@ -103,7 +103,7 @@ describe("runTurn", () => {
             }
           }, 50);
 
-          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+          return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
         }
         throw new Error(`Unexpected method: ${method}`);
       },
@@ -170,7 +170,7 @@ describe("runTurn", () => {
             }
           }, 50);
 
-          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+          return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
         }
         throw new Error(`Unexpected method: ${method}`);
       },
@@ -204,7 +204,7 @@ describe("runTurn", () => {
     const client = createMockClient({
       startMethod: "turn/start",
       startResponse: {
-        turn: { id: "turn-1", items: [], status: "inProgress" },
+        turn: { id: "turn-1", items: [], status: "inProgress", error: null },
       },
       completionParams: {
         threadId: "thr-1",
@@ -249,7 +249,7 @@ describe("runTurn", () => {
               });
             }
           }
-          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+          return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
         }
         throw new Error(`Unexpected method: ${method}`);
       },
@@ -282,7 +282,7 @@ describe("runTurn", () => {
     // Client that never fires turn/completed
     const client: AppServerClient = {
       async request<T>(): Promise<T> {
-        return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+        return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
       },
       notify() {},
       on(): () => void { return () => {}; },
@@ -356,7 +356,7 @@ describe("runTurn", () => {
             }
           }, 50);
 
-          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+          return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
         }
         throw new Error(`Unexpected method: ${method}`);
       },
@@ -411,7 +411,7 @@ describe("runTurn", () => {
               }
             }
           }, 20);
-          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+          return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
         }
         throw new Error(`Unexpected method: ${method}`);
       },
@@ -487,7 +487,7 @@ describe("runTurn", () => {
             }
           }, 50);
 
-          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+          return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
         }
         throw new Error(`Unexpected method: ${method}`);
       },
@@ -550,7 +550,7 @@ describe("runReview", () => {
           }, 50);
 
           return {
-            turn: { id: "review-turn-1", items: [], status: "inProgress" },
+            turn: { id: "review-turn-1", items: [], status: "inProgress", error: null },
             reviewThreadId: "review-thr-1",
           } as T;
         }
@@ -591,7 +591,7 @@ describe("runReview", () => {
     const client = createMockClient({
       startMethod: "review/start",
       startResponse: {
-        turn: { id: "review-turn-2", items: [], status: "inProgress" },
+        turn: { id: "review-turn-2", items: [], status: "inProgress", error: null },
         reviewThreadId: "review-thr-2",
       } as ReviewStartResponse,
       completionParams: {
@@ -667,7 +667,7 @@ describe("review output via exitedReviewMode", () => {
           }, 50);
 
           return {
-            turn: { id: "review-turn-1", items: [], status: "inProgress" },
+            turn: { id: "review-turn-1", items: [], status: "inProgress", error: null },
             reviewThreadId: "review-thr-1",
           } as T;
         }
@@ -757,7 +757,7 @@ describe("approval wiring", () => {
             }
           }, 50);
 
-          return { turn: { id: "turn-1", items: [], status: "inProgress" } } as T;
+          return { turn: { id: "turn-1", items: [], status: "inProgress", error: null } } as T;
         }
         throw new Error(`Unexpected method: ${method}`);
       },
