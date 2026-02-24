@@ -51,8 +51,12 @@ import type {
 let activeClient: AppServerClient | undefined;
 
 process.on("SIGINT", async () => {
-  if (activeClient) {
-    await activeClient.close();
+  try {
+    if (activeClient) {
+      await activeClient.close();
+    }
+  } catch (e) {
+    console.error(`[codex] Warning: cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   process.exit(130);
 });

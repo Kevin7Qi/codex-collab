@@ -276,8 +276,10 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
           console.error(`[codex] app-server stderr: ${text}`);
         }
       }
-    } catch {
-      // stderr closed, expected during shutdown
+    } catch (e) {
+      if (!closed && !exited) {
+        console.error(`[codex] Warning: stderr reader failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
     } finally {
       reader.releaseLock();
     }
