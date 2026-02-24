@@ -16,6 +16,7 @@ import {
   loadThreadMapping,
   removeThread,
   saveThreadMapping,
+  updateThreadStatus,
   withThreadLock,
 } from "./threads";
 import { runTurn, runReview } from "./turns";
@@ -36,7 +37,9 @@ import {
 import { resolve } from "path";
 import type {
   ReviewTarget,
+  Thread,
   ThreadListResponse,
+  ThreadStartResponse,
   ModelListResponse,
   TurnResult,
 } from "./types";
@@ -79,6 +82,8 @@ interface Options {
   reviewMode: string | null;
   reviewRef: string | null;
   resumeId: string | null;
+  /** Flags explicitly provided on the command line. */
+  explicit: Set<string>;
 }
 
 function parseArgs(args: string[]): ParsedArgs {
@@ -95,6 +100,7 @@ function parseArgs(args: string[]): ParsedArgs {
     reviewMode: null,
     reviewRef: null,
     resumeId: null,
+    explicit: new Set<string>(),
   };
 
   const positional: string[] = [];
@@ -120,6 +126,7 @@ function parseArgs(args: string[]): ParsedArgs {
         process.exit(1);
       }
       options.reasoning = level;
+      options.explicit.add("reasoning");
     } else if (arg === "-m" || arg === "--model") {
       if (i + 1 >= args.length) {
         console.error("Error: --model requires a value");
@@ -131,6 +138,7 @@ function parseArgs(args: string[]): ParsedArgs {
         process.exit(1);
       }
       options.model = model;
+      options.explicit.add("model");
     } else if (arg === "-s" || arg === "--sandbox") {
       if (i + 1 >= args.length) {
         console.error("Error: --sandbox requires a value");
@@ -145,6 +153,7 @@ function parseArgs(args: string[]): ParsedArgs {
         process.exit(1);
       }
       options.sandbox = mode;
+      options.explicit.add("sandbox");
     } else if (arg === "--approval") {
       if (i + 1 >= args.length) {
         console.error("Error: --approval requires a value");
@@ -159,12 +168,14 @@ function parseArgs(args: string[]): ParsedArgs {
         process.exit(1);
       }
       options.approval = policy;
+      options.explicit.add("approval");
     } else if (arg === "-d" || arg === "--dir") {
       if (i + 1 >= args.length) {
         console.error("Error: --dir requires a value");
         process.exit(1);
       }
       options.dir = resolve(args[++i]);
+      options.explicit.add("dir");
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
@@ -209,6 +220,8 @@ function parseArgs(args: string[]): ParsedArgs {
         process.exit(1);
       }
       options.resumeId = args[++i];
+    } else if (arg === "--all") {
+      options.limit = Infinity;
     } else if (arg.startsWith("-")) {
       console.error(`Error: Unknown option: ${arg}`);
       console.error("Run codex-collab --help for usage");
@@ -251,6 +264,19 @@ function getApprovalHandler(policy: ApprovalPolicy): ApprovalHandler {
   return new InteractiveApprovalHandler(config.approvalsDir, progress);
 }
 
+/** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
+function turnOverrides(opts: Options) {
+  if (!opts.resumeId) {
+    return { cwd: opts.dir, model: opts.model, effort: opts.reasoning, approvalPolicy: opts.approval };
+  }
+  const o: Record<string, unknown> = {};
+  if (opts.explicit.has("dir")) o.cwd = opts.dir;
+  if (opts.explicit.has("model")) o.model = opts.model;
+  if (opts.explicit.has("reasoning")) o.effort = opts.reasoning;
+  if (opts.explicit.has("approval")) o.approvalPolicy = opts.approval;
+  return o;
+}
+
 function formatDuration(ms: number): string {
   const sec = Math.round(ms / 1000);
   if (sec < 60) return `${sec}s`;
@@ -275,45 +301,50 @@ function pluralize(n: number, word: string): string {
 // Commands
 // ---------------------------------------------------------------------------
 
-/** Start or resume a thread, returning threadId and shortId. */
+/** Start or resume a thread, returning threadId, shortId, and effective config. */
 async function startOrResumeThread(
   client: AppServerClient,
   opts: Options,
   extraStartParams?: Record<string, unknown>,
-): Promise<{ threadId: string; shortId: string }> {
+): Promise<{ threadId: string; shortId: string; effective: ThreadStartResponse }> {
   if (opts.resumeId) {
     const threadId = resolveThreadId(config.threadsFile, opts.resumeId);
     const shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
-    await client.request("thread/resume", {
+    const resumeParams: Record<string, unknown> = {
       threadId,
-      model: opts.model,
-      cwd: opts.dir,
-      approvalPolicy: opts.approval,
       persistExtendedHistory: false,
-      ...extraStartParams,
-    });
-    return { threadId, shortId };
+    };
+    // Only forward flags that were explicitly provided on the command line
+    if (opts.explicit.has("model")) resumeParams.model = opts.model;
+    if (opts.explicit.has("dir")) resumeParams.cwd = opts.dir;
+    if (opts.explicit.has("approval")) resumeParams.approvalPolicy = opts.approval;
+    if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
+    // Forced overrides from caller (e.g., review forces sandbox to read-only)
+    if (extraStartParams) Object.assign(resumeParams, extraStartParams);
+    const effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+    return { threadId, shortId, effective };
   }
 
   const startParams: Record<string, unknown> = {
     model: opts.model,
     cwd: opts.dir,
     approvalPolicy: opts.approval,
+    sandbox: opts.sandbox,
     experimentalRawEvents: false,
     persistExtendedHistory: false,
     ...extraStartParams,
   };
-  const resp = await client.request<{ thread: { id: string } }>(
+  const effective = await client.request<ThreadStartResponse>(
     "thread/start",
     startParams,
   );
-  const threadId = resp.thread.id;
+  const threadId = effective.thread.id;
   registerThread(config.threadsFile, threadId, {
     model: opts.model,
     cwd: opts.dir,
   });
   const shortId = findShortId(config.threadsFile, threadId) ?? "unknown";
-  return { threadId, shortId };
+  return { threadId, shortId, effective };
 }
 
 /** Print turn result and exit with appropriate code. */
@@ -346,16 +377,18 @@ async function cmdRun(positional: string[], opts: Options) {
   const client = await connect();
   activeClient = client;
   try {
-    const { threadId, shortId } = await startOrResumeThread(client, opts, { sandbox: opts.sandbox });
+    const { threadId, shortId, effective } = await startOrResumeThread(client, opts);
 
     if (!opts.contentOnly) {
       if (opts.resumeId) {
-        progress(`Resumed thread ${shortId} (${opts.model})`);
+        progress(`Resumed thread ${shortId} (${effective.model})`);
       } else {
-        progress(`Thread ${shortId} started (${opts.model}, ${opts.sandbox})`);
+        progress(`Thread ${shortId} started (${effective.model}, ${opts.sandbox})`);
       }
       progress("Turn started");
     }
+
+    updateThreadStatus(config.threadsFile, threadId, "running");
 
     const dispatcher = new EventDispatcher(
       shortId,
@@ -369,15 +402,13 @@ async function cmdRun(positional: string[], opts: Options) {
       [{ type: "text", text: prompt }],
       {
         dispatcher,
-        approvalHandler: getApprovalHandler(opts.approval),
+        approvalHandler: getApprovalHandler(effective.approvalPolicy),
         timeoutMs,
-        cwd: opts.dir,
-        model: opts.model,
-        effort: opts.reasoning,
-        approvalPolicy: opts.approval,
+        ...turnOverrides(opts),
       },
     );
 
+    updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
     await client.close();
     activeClient = undefined;
     printResultAndExit(result, shortId, "Turn", opts.contentOnly);
@@ -392,10 +423,15 @@ async function cmdReview(positional: string[], opts: Options) {
   const mode = opts.reviewMode ?? "pr";
   const timeoutMs = opts.timeout * 1000;
 
-  // Custom review: positional args become custom instructions
+  // Custom review: positional args become custom instructions (only when no explicit --mode)
   let target: ReviewTarget;
   if (positional.length > 0) {
+    if (opts.reviewMode !== null && opts.reviewMode !== "custom") {
+      die(`--mode ${opts.reviewMode} does not accept positional arguments.\nUse --mode custom "instructions" for custom reviews.`);
+    }
     target = { type: "custom", instructions: positional.join(" ") };
+  } else if (mode === "custom") {
+    die('Custom review mode requires instructions.\nUsage: codex-collab review "instructions"');
   } else {
     switch (mode) {
       case "pr":
@@ -408,7 +444,7 @@ async function cmdReview(positional: string[], opts: Options) {
         target = { type: "commit", sha: opts.reviewRef ?? "HEAD" };
         break;
       default: {
-        const validModes = ["pr", "uncommitted", "commit"];
+        const validModes = ["pr", "uncommitted", "commit", "custom"];
         die(
           `Unknown review mode: ${mode}. Use: ${validModes.join(", ")}`,
         );
@@ -419,7 +455,7 @@ async function cmdReview(positional: string[], opts: Options) {
   const client = await connect();
   activeClient = client;
   try {
-    const { threadId, shortId } = await startOrResumeThread(
+    const { threadId, shortId, effective } = await startOrResumeThread(
       client, opts, { sandbox: "read-only" },
     );
 
@@ -427,9 +463,11 @@ async function cmdReview(positional: string[], opts: Options) {
       if (opts.resumeId) {
         progress(`Resumed thread ${shortId} for review`);
       } else {
-        progress(`Thread ${shortId} started for review (${opts.model}, read-only)`);
+        progress(`Thread ${shortId} started for review (${effective.model}, read-only)`);
       }
     }
+
+    updateThreadStatus(config.threadsFile, threadId, "running");
 
     const dispatcher = new EventDispatcher(
       shortId,
@@ -441,13 +479,12 @@ async function cmdReview(positional: string[], opts: Options) {
     // protocol does not accept an effort parameter (unlike turn/start).
     const result = await runReview(client, threadId, target, {
       dispatcher,
-      approvalHandler: getApprovalHandler(opts.approval),
+      approvalHandler: getApprovalHandler(effective.approvalPolicy),
       timeoutMs,
-      cwd: opts.dir,
-      model: opts.model,
-      approvalPolicy: opts.approval,
+      ...turnOverrides(opts),
     });
 
+    updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
     await client.close();
     activeClient = undefined;
     printResultAndExit(result, shortId, "Review", opts.contentOnly);
@@ -459,46 +496,62 @@ async function cmdReview(positional: string[], opts: Options) {
 }
 
 async function cmdJobs(opts: Options) {
-  const client = await connect();
-  let resp: ThreadListResponse;
-  try {
-    resp = await client.request<ThreadListResponse>("thread/list", {
-      limit: opts.limit,
-      sortKey: "updated_at",
-    });
-  } finally {
-    await client.close();
-  }
-
   const mapping = loadThreadMapping(config.threadsFile);
   const reverseMap = new Map<string, string>();
   for (const [shortId, entry] of Object.entries(mapping)) {
     reverseMap.set(entry.threadId, shortId);
   }
 
+  // Fetch all pages from server — we filter to locally-known threads,
+  // so a single page could miss local threads buried behind non-local ones.
+  const client = await connect();
+  const allThreads: Thread[] = [];
+  try {
+    let cursor: string | undefined;
+    do {
+      const params: Record<string, unknown> = { sortKey: "updated_at" };
+      if (cursor) params.cursor = cursor;
+      const page = await client.request<ThreadListResponse>("thread/list", params);
+      allThreads.push(...page.data);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+  } finally {
+    await client.close();
+  }
+
+  // Only show threads created by this CLI (those with a local short ID mapping)
+  let localThreads = allThreads.filter((t) => reverseMap.has(t.id));
+  if (opts.limit !== Infinity) localThreads = localThreads.slice(0, opts.limit);
+
   if (opts.json) {
-    const enriched = resp.data.map((t) => ({
-      shortId: reverseMap.get(t.id) ?? null,
-      threadId: t.id,
-      status: t.status?.type ?? "unknown",
-      source: t.source,
-      cwd: t.cwd,
-      createdAt: new Date(t.createdAt * 1000).toISOString(),
-      updatedAt: new Date(t.updatedAt * 1000).toISOString(),
-    }));
+    const enriched = localThreads.map((t) => {
+      const sid = reverseMap.get(t.id)!;
+      const entry = mapping[sid];
+      return {
+        shortId: sid,
+        threadId: t.id,
+        status: entry.lastStatus ?? "unknown",
+        modelProvider: t.modelProvider,
+        cwd: t.cwd,
+        preview: t.preview || null,
+        createdAt: new Date(t.createdAt * 1000).toISOString(),
+        updatedAt: new Date(t.updatedAt * 1000).toISOString(),
+      };
+    });
     console.log(JSON.stringify(enriched, null, 2));
   } else {
-    if (resp.data.length === 0) {
+    if (localThreads.length === 0) {
       console.log("No threads found.");
       return;
     }
-    for (const t of resp.data) {
-      const sid = reverseMap.get(t.id) ?? "????????";
-      const status = t.status?.type ?? t.source ?? "unknown";
+    for (const t of localThreads) {
+      const sid = reverseMap.get(t.id)!;
+      const entry = mapping[sid];
+      const status = entry.lastStatus ?? "idle";
       const age = formatAge(t.updatedAt);
-      const preview = t.preview ? ` ${t.preview.slice(0, 40)}` : "";
+      const preview = t.preview ? ` ${t.preview.slice(0, 50)}` : "";
       console.log(
-        `  ${sid}  ${status.padEnd(10)} ${age.padEnd(8)} ${t.cwd}${preview}`,
+        `  ${sid}  ${status.padEnd(12)} ${age.padEnd(8)} ${t.cwd}${preview}`,
       );
     }
   }
@@ -552,6 +605,7 @@ async function cmdKill(positional: string[]) {
   }
 
   await client.close();
+  updateThreadStatus(config.threadsFile, threadId, "killed");
   progress(archived ? `Archived thread ${id}` : `Killed thread ${id} (archive failed)`);
 }
 
@@ -566,10 +620,30 @@ function resolveLogPath(positional: string[], usage: string): string {
   return `${config.logsDir}/${shortId}.log`;
 }
 
-async function cmdOutput(positional: string[]) {
+async function cmdOutput(positional: string[], opts: Options) {
   const logPath = resolveLogPath(positional, "Usage: codex-collab output <id>");
   if (!existsSync(logPath)) die(`No log file for thread`);
-  console.log(readFileSync(logPath, "utf-8"));
+  const content = readFileSync(logPath, "utf-8");
+  if (opts.contentOnly) {
+    // Extract agent output blocks from the log.
+    // Log format: "<ISO-timestamp> agent output:\n<content lines>\n<ISO-timestamp> ..."
+    // Each timestamped line (28+ char ISO prefix) marks a new log entry.
+    const tsPrefix = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+    const lines = content.split("\n");
+    let inAgentOutput = false;
+    for (const line of lines) {
+      if (tsPrefix.test(line)) {
+        // This is a log entry header line
+        inAgentOutput = line.includes(" agent output:");
+        continue;
+      }
+      if (inAgentOutput) {
+        console.log(line);
+      }
+    }
+  } else {
+    console.log(content);
+  }
 }
 
 async function cmdProgress(positional: string[]) {
@@ -586,14 +660,21 @@ async function cmdProgress(positional: string[]) {
 
 async function cmdModels() {
   const client = await connect();
-  let resp: ModelListResponse;
+  const allModels: ModelListResponse["data"] = [];
   try {
-    resp = await client.request<ModelListResponse>("model/list", {});
+    let cursor: string | undefined;
+    do {
+      const params: Record<string, unknown> = {};
+      if (cursor) params.cursor = cursor;
+      const page = await client.request<ModelListResponse>("model/list", params);
+      allModels.push(...page.data);
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
   } finally {
     await client.close();
   }
 
-  for (const m of resp.data) {
+  for (const m of allModels) {
     const efforts =
       m.supportedReasoningEfforts?.map((o) => o.reasoningEffort).join(", ") ?? "";
     console.log(
@@ -822,7 +903,7 @@ async function main() {
 
   // Create data directories for commands that need them
   // Commands that don't need data directories. "" = no command (shows help).
-  const noDataDirCommands = new Set(["health", ""]);
+  const noDataDirCommands = new Set(["health", "models", ""]);
   if (!noDataDirCommands.has(command)) {
     ensureDataDirs();
   }
@@ -837,7 +918,7 @@ async function main() {
     case "kill":
       return cmdKill(positional);
     case "output":
-      return cmdOutput(positional);
+      return cmdOutput(positional, options);
     case "progress":
       return cmdProgress(positional);
     case "models":
@@ -860,6 +941,10 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(`Fatal: ${e instanceof Error ? e.message : e}`);
+  const msg = e instanceof Error ? e.message : String(e);
+  console.error(`Fatal: ${msg}`);
+  if (msg.includes("timed out")) {
+    console.error("Tip: Resume with --resume <id> or increase --timeout");
+  }
   process.exit(1);
 });

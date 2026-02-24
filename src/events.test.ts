@@ -136,6 +136,23 @@ describe("EventDispatcher", () => {
     expect(lines.some(l => l.includes("src/secret.ts"))).toBe(true);
   });
 
+  test("progress events auto-flush to log file", () => {
+    const dispatcher = new EventDispatcher("test-autoflush", TEST_LOG_DIR);
+    const logPath = `${TEST_LOG_DIR}/test-autoflush.log`;
+
+    // Trigger a progress event (command started) — should auto-flush without explicit flush() call
+    dispatcher.handleItemStarted({
+      item: { type: "commandExecution", id: "i1", command: "echo flush-test", cwd: "/proj", status: "inProgress", processId: null, commandActions: [] },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    // Log file should exist immediately due to auto-flush in progress()
+    expect(existsSync(logPath)).toBe(true);
+    const content = readFileSync(logPath, "utf-8");
+    expect(content).toContain("echo flush-test");
+  });
+
   test("collects file changes and commands", () => {
     const dispatcher = new EventDispatcher("test5", TEST_LOG_DIR);
 

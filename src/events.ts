@@ -134,6 +134,7 @@ export class EventDispatcher {
   private progress(text: string): void {
     this.onProgress(text);
     this.log(`[codex] ${text}`);
+    this.flush();
   }
 
   private log(entry: string): void {

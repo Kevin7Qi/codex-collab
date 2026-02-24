@@ -124,7 +124,8 @@ export function registerThread(
 ): ThreadMapping {
   return withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);
-    const shortId = generateShortId();
+    let shortId = generateShortId();
+    while (shortId in mapping) shortId = generateShortId();
     mapping[shortId] = {
       threadId,
       createdAt: new Date().toISOString(),
@@ -160,6 +161,24 @@ export function findShortId(threadsFile: string, threadId: string): string | nul
     if (entry.threadId === threadId) return shortId;
   }
   return null;
+}
+
+export function updateThreadStatus(
+  threadsFile: string,
+  threadId: string,
+  status: "running" | "completed" | "failed" | "interrupted" | "killed",
+): void {
+  withThreadLock(threadsFile, () => {
+    const mapping = loadThreadMapping(threadsFile);
+    for (const entry of Object.values(mapping)) {
+      if (entry.threadId === threadId) {
+        entry.lastStatus = status;
+        entry.updatedAt = new Date().toISOString();
+        break;
+      }
+    }
+    saveThreadMapping(threadsFile, mapping);
+  });
 }
 
 export function removeThread(threadsFile: string, shortId: string): void {

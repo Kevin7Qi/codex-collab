@@ -67,7 +67,7 @@ codex-collab review --resume <id> -d /path/to/project --content-only
 
 Review modes: `pr` (default), `uncommitted`, `commit`
 
-**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 5-15 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
+**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 10-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
 
 ## Context Efficiency
 

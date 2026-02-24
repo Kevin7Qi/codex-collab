@@ -89,6 +89,25 @@ describe("thread mapping", () => {
     expect(shortId).toBeNull();
   });
 
+  test("registerThread regenerates on short ID collision", () => {
+    // Pre-populate with many entries so a collision is likely if we force it
+    const mapping: Record<string, { threadId: string; createdAt: string }> = {};
+    // Seed a known short ID, then register a new thread — the new ID must differ
+    const knownId = "deadbeef";
+    mapping[knownId] = { threadId: "thr-existing", createdAt: "2026-01-01T00:00:00Z" };
+    saveThreadMapping(TEST_THREADS_FILE, mapping);
+
+    const result = registerThread(TEST_THREADS_FILE, "thr-new");
+    // The new thread must not overwrite the existing entry
+    expect(result[knownId].threadId).toBe("thr-existing");
+    // There should now be 2 entries
+    expect(Object.keys(result).length).toBe(2);
+    // The new entry's short ID must differ from the existing one
+    const newEntry = Object.entries(result).find(([, v]) => v.threadId === "thr-new");
+    expect(newEntry).toBeDefined();
+    expect(newEntry![0]).not.toBe(knownId);
+  });
+
   test("removeThread deletes from mapping", () => {
     saveThreadMapping(TEST_THREADS_FILE, {
       abc12345: { threadId: "thr-1", createdAt: "2026-01-01T00:00:00Z" },

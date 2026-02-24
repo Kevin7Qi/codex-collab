@@ -71,14 +71,15 @@ export interface Thread {
   modelProvider: string;
   createdAt: number;
   updatedAt: number;
-  status: ThreadStatus;
+  // status is only populated on thread/read, not on thread/list
+  status?: ThreadStatus;
   path: string | null;
   cwd: string;
   cliVersion: string;
   source: string;
-  name: string | null;
-  agentNickname: string | null;
-  agentRole: string | null;
+  name?: string | null;
+  agentNickname?: string | null;
+  agentRole?: string | null;
   gitInfo: { sha: string | null; branch: string | null; originUrl: string | null } | null;
   turns: Turn[];
 }
@@ -438,11 +439,15 @@ export interface TurnResult {
 
 // --- Short ID mapping ---
 
+export interface ThreadMappingEntry {
+  threadId: string;
+  createdAt: string;
+  model?: string;
+  cwd?: string;
+  lastStatus?: "running" | "completed" | "failed" | "interrupted" | "killed";
+  updatedAt?: string;
+}
+
 export interface ThreadMapping {
-  [shortId: string]: {
-    threadId: string;
-    createdAt: string;
-    model?: string;
-    cwd?: string;
-  };
+  [shortId: string]: ThreadMappingEntry;
 }

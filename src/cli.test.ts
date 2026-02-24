@@ -46,6 +46,25 @@ describe("CLI valid commands", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Flag parsing
+// ---------------------------------------------------------------------------
+
+describe("CLI flag parsing", () => {
+  it("--all does not error", () => {
+    // --all should be accepted by the parser (jobs command needs server, so we just check parse doesn't error)
+    // We can't test jobs without a server, but we can verify --all isn't "Unknown option"
+    const { stderr, exitCode } = run("run", "test", "--all");
+    // Should fail because codex isn't available, not because --all is unknown
+    expect(stderr).not.toContain("Unknown option");
+  });
+
+  it("--content-only does not error", () => {
+    const { stderr } = run("run", "test", "--content-only");
+    expect(stderr).not.toContain("Unknown option");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Invalid inputs
 // ---------------------------------------------------------------------------
 
