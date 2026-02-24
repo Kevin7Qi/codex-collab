@@ -1,154 +1,109 @@
 #!/usr/bin/env bun
 
-// codex-collab CLI — Claude + Codex collaboration bridge
+// src/cli.ts — codex-collab CLI (app server protocol)
 
-import { config, ReasoningEffort, SandboxMode } from "./config.ts";
 import {
-  startInteractiveJob,
-  loadJob,
-  listJobs,
-  killJob,
-  refreshJobStatus,
-  cleanupOldJobs,
-  deleteJob,
-  sendToJob,
-  sendKeysToJob,
-  getJobOutput,
-  getJobFullOutput,
-  getAttachCommand,
-  waitForJob,
-  resetJob,
-  runReview,
-  runPrompt,
-  Job,
-  getJobsJson,
-  type ReviewMode,
-} from "./jobs.ts";
-import { isTmuxAvailable } from "./tmux.ts";
-import { resolve, basename } from "path";
+  config,
+  type ReasoningEffort,
+  type SandboxMode,
+  type ApprovalPolicy,
+} from "./config";
+import { connect, type AppServerClient } from "./protocol";
 import {
-  stripAnsiCodes,
-  extractContent,
-  wrapLine,
-  formatDuration,
-  processOutput,
-} from "./utils.ts";
+  registerThread,
+  resolveThreadId,
+  findShortId,
+  loadThreadMapping,
+  removeThread,
+  saveThreadMapping,
+  updateThreadStatus,
+  withThreadLock,
+} from "./threads";
+import { runTurn, runReview } from "./turns";
+import { EventDispatcher } from "./events";
+import {
+  autoApproveHandler,
+  InteractiveApprovalHandler,
+  type ApprovalHandler,
+} from "./approvals";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
+import { resolve } from "path";
+import type {
+  ReviewTarget,
+  Thread,
+  ThreadStartResponse,
+  Model,
+  TurnResult,
+} from "./types";
 
-const HELP = `
-codex-collab — Manage interactive Codex TUI sessions in tmux
+// ---------------------------------------------------------------------------
+// SIGINT handler — clean up spawned app-server on Ctrl+C
+// ---------------------------------------------------------------------------
 
-Usage:
-  codex-collab run "prompt" [options]          Run a prompt and wait for output
-  codex-collab run --resume <id> "prompt"      Resume existing session
-  codex-collab review [options]               Code review (PR-style by default)
-  codex-collab review "instructions" [options] Custom review with specific focus
-  codex-collab start [options]                Start an interactive Codex session (TUI mode)
-  codex-collab send <id> "message"            Send text + Enter to a session
-  codex-collab send-keys <id> <key>           Send raw keystrokes (Down, Up, Enter, 1, Escape, etc.)
-  codex-collab capture <id> [lines]           Capture recent screen output (default: 50 lines)
-  codex-collab output <id>                    Full session output
-  codex-collab wait <id>                      Wait for codex to finish (poll-based)
-  codex-collab reset <id>                     Send /new to clear session context
-  codex-collab jobs [--json]                  List jobs
-  codex-collab status <id>                    Job status
-  codex-collab attach <id>                    Print tmux attach command
-  codex-collab delete <id>                    Delete a job and its files
-  codex-collab kill <id>                      Kill a running job
-  codex-collab clean                          Remove old completed jobs
-  codex-collab health                         Check tmux + codex availability
+let activeClient: AppServerClient | undefined;
 
-Options:
-  -r, --reasoning <level>    Reasoning effort: low, medium, high, xhigh (default: xhigh)
-  -m, --model <model>        Model name (default: ${config.model})
-  -s, --sandbox <mode>       Sandbox: read-only, workspace-write, danger-full-access
-                             (default: workspace-write; review always uses read-only)
-  -d, --dir <path>           Working directory (default: cwd)
-  --strip-ansi               Remove ANSI escape codes from output
-  --content-only             Strip TUI chrome (banner, tips, shortcuts) from output
-                             (implies --strip-ansi)
-  --json                     Output JSON (jobs command only)
-  --timeout <seconds>        Wait timeout in seconds (default: 900)
-  --interval <seconds>       Wait poll interval in seconds (default: 30)
-  --mode <mode>              Review mode: pr, uncommitted, commit, custom (default: pr)
-  --ref <hash>               Commit ref for --mode commit
-  --resume <id>              Resume an existing session (run and review)
-  --limit <n>                Limit jobs shown
-  --all                      Show all jobs
-  -h, --help                 Show this help
+process.on("SIGINT", async () => {
+  try {
+    if (activeClient) {
+      await activeClient.close();
+    }
+  } catch (e) {
+    console.error(`[codex] Warning: cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  process.exit(130);
+});
 
-Examples:
-  # Run a prompt (starts session, waits, prints output)
-  codex-collab run "what does this project do?" -s read-only --content-only
+// ---------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------
 
-  # Resume an existing session
-  codex-collab run --resume abc123 "now summarize the key files" --content-only
+const rawArgs = process.argv.slice(2);
 
-  # Code review (PR-style against main)
-  codex-collab review -d /path/to/project --content-only
-
-  # Review uncommitted changes
-  codex-collab review --mode uncommitted -d /path/to/project --content-only
-
-  # Review a specific commit
-  codex-collab review --mode commit --ref abc1234 -d /path/to/project --content-only
-
-  # Custom review focus
-  codex-collab review "Focus on security issues" -d /path/to/project --content-only
-
-  # Resume an existing session
-  codex-collab review --resume abc123 "Check error handling" --content-only
-
-  # Reset a session (clear context with /new)
-  codex-collab reset abc123
-
-  # Start an interactive session
-  codex-collab start -d /path/to/project
-
-  # See what Codex is showing (clean output)
-  codex-collab capture abc123 --content-only
-
-  # Wait for completion, then read results separately
-  codex-collab wait abc123
-  codex-collab output abc123 --content-only
-`;
+interface ParsedArgs {
+  command: string;
+  positional: string[];
+  options: Options;
+}
 
 interface Options {
   reasoning: ReasoningEffort;
   model: string;
   sandbox: SandboxMode;
+  approval: ApprovalPolicy;
   dir: string;
-  stripAnsi: boolean;
   contentOnly: boolean;
   json: boolean;
   timeout: number;
-  interval: number;
-  jobsLimit: number | null;
-  jobsAll: boolean;
-  reviewMode: ReviewMode | null;
+  limit: number;
+  reviewMode: string | null;
   reviewRef: string | null;
-  resumeJobId: string | null;
+  resumeId: string | null;
+  /** Flags explicitly provided on the command line. */
+  explicit: Set<string>;
 }
 
-function parseArgs(args: string[]): {
-  command: string;
-  positional: string[];
-  options: Options;
-} {
+function parseArgs(args: string[]): ParsedArgs {
   const options: Options = {
     reasoning: config.defaultReasoningEffort,
     model: config.model,
     sandbox: config.defaultSandbox,
+    approval: config.defaultApprovalPolicy,
     dir: process.cwd(),
-    stripAnsi: false,
     contentOnly: false,
     json: false,
-    timeout: 900,
-    interval: 30,
-    jobsLimit: config.jobsListLimit,
-    jobsAll: false,
+    timeout: config.defaultTimeout,
+    limit: config.jobsListLimit,
     reviewMode: null,
     reviewRef: null,
-    resumeJobId: null,
+    resumeId: null,
+    explicit: new Set<string>(),
   };
 
   const positional: string[] = [];
@@ -158,95 +113,120 @@ function parseArgs(args: string[]): {
     const arg = args[i];
 
     if (arg === "-h" || arg === "--help") {
-      console.log(HELP);
+      showHelp();
       process.exit(0);
     } else if (arg === "-r" || arg === "--reasoning") {
-      if (i + 1 >= args.length) { console.error("--reasoning requires a value"); process.exit(1); }
+      if (i + 1 >= args.length) {
+        console.error("Error: --reasoning requires a value");
+        process.exit(1);
+      }
       const level = args[++i] as ReasoningEffort;
-      if (config.reasoningEfforts.includes(level)) {
-        options.reasoning = level;
-      } else {
-        console.error(`Invalid reasoning level: ${level}`);
+      if (!config.reasoningEfforts.includes(level)) {
+        console.error(`Error: Invalid reasoning level: ${level}`);
         console.error(
           `Valid options: ${config.reasoningEfforts.join(", ")}`
         );
         process.exit(1);
       }
+      options.reasoning = level;
+      options.explicit.add("reasoning");
     } else if (arg === "-m" || arg === "--model") {
-      if (i + 1 >= args.length) { console.error("--model requires a value"); process.exit(1); }
+      if (i + 1 >= args.length) {
+        console.error("Error: --model requires a value");
+        process.exit(1);
+      }
       const model = args[++i];
       if (/[^a-zA-Z0-9._\-\/:]/.test(model)) {
-        console.error(`Invalid model name: ${model}`);
+        console.error(`Error: Invalid model name: ${model}`);
         process.exit(1);
       }
       options.model = model;
+      options.explicit.add("model");
     } else if (arg === "-s" || arg === "--sandbox") {
-      if (i + 1 >= args.length) { console.error("--sandbox requires a value"); process.exit(1); }
+      if (i + 1 >= args.length) {
+        console.error("Error: --sandbox requires a value");
+        process.exit(1);
+      }
       const mode = args[++i] as SandboxMode;
-      if (config.sandboxModes.includes(mode)) {
-        options.sandbox = mode;
-      } else {
-        console.error(`Invalid sandbox mode: ${mode}`);
+      if (!config.sandboxModes.includes(mode)) {
+        console.error(`Error: Invalid sandbox mode: ${mode}`);
         console.error(
           `Valid options: ${config.sandboxModes.join(", ")}`
         );
         process.exit(1);
       }
+      options.sandbox = mode;
+      options.explicit.add("sandbox");
+    } else if (arg === "--approval") {
+      if (i + 1 >= args.length) {
+        console.error("Error: --approval requires a value");
+        process.exit(1);
+      }
+      const policy = args[++i] as ApprovalPolicy;
+      if (!config.approvalPolicies.includes(policy)) {
+        console.error(`Error: Invalid approval policy: ${policy}`);
+        console.error(
+          `Valid options: ${config.approvalPolicies.join(", ")}`
+        );
+        process.exit(1);
+      }
+      options.approval = policy;
+      options.explicit.add("approval");
     } else if (arg === "-d" || arg === "--dir") {
-      if (i + 1 >= args.length) { console.error("--dir requires a value"); process.exit(1); }
+      if (i + 1 >= args.length) {
+        console.error("Error: --dir requires a value");
+        process.exit(1);
+      }
       options.dir = resolve(args[++i]);
-    } else if (arg === "--strip-ansi") {
-      options.stripAnsi = true;
+      options.explicit.add("dir");
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
       options.json = true;
     } else if (arg === "--timeout") {
-      if (i + 1 >= args.length) { console.error("--timeout requires a value"); process.exit(1); }
+      if (i + 1 >= args.length) {
+        console.error("Error: --timeout requires a value");
+        process.exit(1);
+      }
       const val = Number(args[++i]);
       if (!Number.isFinite(val) || val <= 0) {
-        console.error(`Invalid timeout: ${args[i]}`);
+        console.error(`Error: Invalid timeout: ${args[i]}`);
         process.exit(1);
       }
       options.timeout = val;
-    } else if (arg === "--interval") {
-      if (i + 1 >= args.length) { console.error("--interval requires a value"); process.exit(1); }
-      const val = Number(args[++i]);
-      if (!Number.isFinite(val) || val <= 0) {
-        console.error(`Invalid interval: ${args[i]}`);
-        process.exit(1);
-      }
-      options.interval = val;
     } else if (arg === "--limit") {
-      if (i + 1 >= args.length) { console.error("--limit requires a value"); process.exit(1); }
-      const raw = args[++i];
-      const parsed = Number(raw);
-      if (!Number.isFinite(parsed) || parsed < 1) {
-        console.error(`Invalid limit: ${raw}`);
+      if (i + 1 >= args.length) {
+        console.error("Error: --limit requires a value");
         process.exit(1);
       }
-      options.jobsLimit = Math.floor(parsed);
-    } else if (arg === "--all") {
-      options.jobsAll = true;
+      const val = Number(args[++i]);
+      if (!Number.isFinite(val) || val < 1) {
+        console.error(`Error: Invalid limit: ${args[i]}`);
+        process.exit(1);
+      }
+      options.limit = Math.floor(val);
     } else if (arg === "--mode") {
-      if (i + 1 >= args.length) { console.error("--mode requires a value"); process.exit(1); }
-      const mode = args[++i] as ReviewMode;
-      const validModes: ReviewMode[] = ["pr", "uncommitted", "commit", "custom"];
-      if (validModes.includes(mode)) {
-        options.reviewMode = mode;
-      } else {
-        console.error(`Invalid review mode: ${mode}`);
-        console.error(`Valid options: ${validModes.join(", ")}`);
+      if (i + 1 >= args.length) {
+        console.error("Error: --mode requires a value");
         process.exit(1);
       }
+      options.reviewMode = args[++i];
     } else if (arg === "--ref") {
-      if (i + 1 >= args.length) { console.error("--ref requires a value"); process.exit(1); }
+      if (i + 1 >= args.length) {
+        console.error("Error: --ref requires a value");
+        process.exit(1);
+      }
       options.reviewRef = args[++i];
     } else if (arg === "--resume") {
-      if (i + 1 >= args.length) { console.error("--resume requires a value"); process.exit(1); }
-      options.resumeJobId = args[++i];
+      if (i + 1 >= args.length) {
+        console.error("Error: --resume requires a value");
+        process.exit(1);
+      }
+      options.resumeId = args[++i];
+    } else if (arg === "--all") {
+      options.limit = Infinity;
     } else if (arg.startsWith("-")) {
-      console.error(`Unknown option: ${arg}`);
+      console.error(`Error: Unknown option: ${arg}`);
       console.error("Run codex-collab --help for usage");
       process.exit(1);
     } else {
@@ -261,453 +241,705 @@ function parseArgs(args: string[]): {
   return { command, positional, options };
 }
 
-function requireTmux(): void {
-  if (!isTmuxAvailable()) {
-    console.error("Error: tmux is required but not installed");
-    process.exit(1);
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function die(msg: string): never {
+  console.error(`Error: ${msg}`);
+  process.exit(1);
+}
+
+/** Validate that an ID is safe for use in file paths. */
+function validateId(id: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    die(`Invalid ID: "${id}"`);
+  }
+  return id;
+}
+
+function progress(text: string): void {
+  console.log(`[codex] ${text}`);
+}
+
+function getApprovalHandler(policy: ApprovalPolicy): ApprovalHandler {
+  if (policy === "never") return autoApproveHandler;
+  return new InteractiveApprovalHandler(config.approvalsDir, progress);
+}
+
+/** Connect to app server, run fn, then close the client (even on error). */
+async function withClient<T>(fn: (client: AppServerClient) => Promise<T>): Promise<T> {
+  const client = await connect();
+  activeClient = client;
+  try {
+    return await fn(client);
+  } finally {
+    await client.close();
+    activeClient = undefined;
   }
 }
 
-function requireJobId(positional: string[]): string {
+function createDispatcher(shortId: string, opts: Options): EventDispatcher {
+  return new EventDispatcher(
+    shortId,
+    config.logsDir,
+    opts.contentOnly ? () => {} : progress,
+  );
+}
+
+/** Try to archive a thread on the server. Returns true if successful. */
+async function tryArchive(client: AppServerClient, threadId: string): Promise<boolean> {
+  try {
+    await client.request("thread/archive", { threadId });
+    return true;
+  } catch (e) {
+    if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
+      console.error(`[codex] Warning: could not archive thread: ${e.message}`);
+    }
+    return false;
+  }
+}
+
+function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget {
+  const mode = opts.reviewMode ?? "pr";
+
+  if (positional.length > 0) {
+    if (opts.reviewMode !== null && opts.reviewMode !== "custom") {
+      die(`--mode ${opts.reviewMode} does not accept positional arguments.\nUse --mode custom "instructions" for custom reviews.`);
+    }
+    return { type: "custom", instructions: positional.join(" ") };
+  }
+
+  if (mode === "custom") {
+    die('Custom review mode requires instructions.\nUsage: codex-collab review "instructions"');
+  }
+
+  switch (mode) {
+    case "pr":
+      return { type: "baseBranch", branch: "main" };
+    case "uncommitted":
+      return { type: "uncommittedChanges" };
+    case "commit":
+      return { type: "commit", sha: opts.reviewRef ?? "HEAD" };
+    default:
+      die(`Unknown review mode: ${mode}. Use: pr, uncommitted, commit, custom`);
+  }
+}
+
+/** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
+function turnOverrides(opts: Options) {
+  if (!opts.resumeId) {
+    return { cwd: opts.dir, model: opts.model, effort: opts.reasoning, approvalPolicy: opts.approval };
+  }
+  const o: Record<string, unknown> = {};
+  if (opts.explicit.has("dir")) o.cwd = opts.dir;
+  if (opts.explicit.has("model")) o.model = opts.model;
+  if (opts.explicit.has("reasoning")) o.effort = opts.reasoning;
+  if (opts.explicit.has("approval")) o.approvalPolicy = opts.approval;
+  return o;
+}
+
+function formatDuration(ms: number): string {
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const rem = sec % 60;
+  return `${min}m ${rem}s`;
+}
+
+function formatAge(unixTimestamp: number): string {
+  const seconds = Math.round(Date.now() / 1000 - unixTimestamp);
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
+function pluralize(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+/** Start or resume a thread, returning threadId, shortId, and effective config. */
+async function startOrResumeThread(
+  client: AppServerClient,
+  opts: Options,
+  extraStartParams?: Record<string, unknown>,
+): Promise<{ threadId: string; shortId: string; effective: ThreadStartResponse }> {
+  if (opts.resumeId) {
+    const threadId = resolveThreadId(config.threadsFile, opts.resumeId);
+    const shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
+    const resumeParams: Record<string, unknown> = {
+      threadId,
+      persistExtendedHistory: false,
+    };
+    // Only forward flags that were explicitly provided on the command line
+    if (opts.explicit.has("model")) resumeParams.model = opts.model;
+    if (opts.explicit.has("dir")) resumeParams.cwd = opts.dir;
+    if (opts.explicit.has("approval")) resumeParams.approvalPolicy = opts.approval;
+    if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
+    // Forced overrides from caller (e.g., review forces sandbox to read-only)
+    if (extraStartParams) Object.assign(resumeParams, extraStartParams);
+    const effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+    return { threadId, shortId, effective };
+  }
+
+  const startParams: Record<string, unknown> = {
+    model: opts.model,
+    cwd: opts.dir,
+    approvalPolicy: opts.approval,
+    sandbox: opts.sandbox,
+    experimentalRawEvents: false,
+    persistExtendedHistory: false,
+    ...extraStartParams,
+  };
+  const effective = await client.request<ThreadStartResponse>(
+    "thread/start",
+    startParams,
+  );
+  const threadId = effective.thread.id;
+  registerThread(config.threadsFile, threadId, {
+    model: opts.model,
+    cwd: opts.dir,
+  });
+  const shortId = findShortId(config.threadsFile, threadId) ?? "unknown";
+  return { threadId, shortId, effective };
+}
+
+/** Print turn result and return the appropriate exit code. */
+function printResult(
+  result: TurnResult,
+  shortId: string,
+  label: string,
+  contentOnly: boolean,
+): number {
+  if (!contentOnly) {
+    progress(`${label} ${result.status} (${formatDuration(result.durationMs)}${result.filesChanged.length > 0 ? `, ${pluralize(result.filesChanged.length, "file")} changed` : ""})`);
+    if (result.output) console.log("\n--- Result ---");
+  }
+
+  if (result.output) console.log(result.output);
+  if (result.error) console.error(`\nError: ${result.error}`);
+  if (!contentOnly) console.error(`\nThread: ${shortId}`);
+
+  return result.status === "completed" ? 0 : 1;
+}
+
+async function cmdRun(positional: string[], opts: Options) {
   if (positional.length === 0) {
-    console.error("Error: No job ID provided");
+    die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
+  }
+
+  const prompt = positional.join(" ");
+
+  const exitCode = await withClient(async (client) => {
+    const { threadId, shortId, effective } = await startOrResumeThread(client, opts);
+
+    if (!opts.contentOnly) {
+      if (opts.resumeId) {
+        progress(`Resumed thread ${shortId} (${effective.model})`);
+      } else {
+        progress(`Thread ${shortId} started (${effective.model}, ${opts.sandbox})`);
+      }
+      progress("Turn started");
+    }
+
+    updateThreadStatus(config.threadsFile, threadId, "running");
+
+    const dispatcher = createDispatcher(shortId, opts);
+
+    try {
+      const result = await runTurn(
+        client,
+        threadId,
+        [{ type: "text", text: prompt }],
+        {
+          dispatcher,
+          approvalHandler: getApprovalHandler(effective.approvalPolicy),
+          timeoutMs: opts.timeout * 1000,
+          ...turnOverrides(opts),
+        },
+      );
+
+      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+      return printResult(result, shortId, "Turn", opts.contentOnly);
+    } catch (e) {
+      updateThreadStatus(config.threadsFile, threadId, "failed");
+      throw e;
+    }
+  });
+
+  process.exit(exitCode);
+}
+
+async function cmdReview(positional: string[], opts: Options) {
+  const target = resolveReviewTarget(positional, opts);
+
+  const exitCode = await withClient(async (client) => {
+    const { threadId, shortId, effective } = await startOrResumeThread(
+      client, opts, { sandbox: "read-only" },
+    );
+
+    if (!opts.contentOnly) {
+      if (opts.resumeId) {
+        progress(`Resumed thread ${shortId} for review`);
+      } else {
+        progress(`Thread ${shortId} started for review (${effective.model}, read-only)`);
+      }
+    }
+
+    updateThreadStatus(config.threadsFile, threadId, "running");
+
+    const dispatcher = createDispatcher(shortId, opts);
+
+    // Note: effort (reasoning level) is not forwarded to reviews — the review/start
+    // protocol does not accept an effort parameter (unlike turn/start).
+    try {
+      const result = await runReview(client, threadId, target, {
+        dispatcher,
+        approvalHandler: getApprovalHandler(effective.approvalPolicy),
+        timeoutMs: opts.timeout * 1000,
+        ...turnOverrides(opts),
+      });
+
+      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+      return printResult(result, shortId, "Review", opts.contentOnly);
+    } catch (e) {
+      updateThreadStatus(config.threadsFile, threadId, "failed");
+      throw e;
+    }
+  });
+
+  process.exit(exitCode);
+}
+
+/** Fetch all pages of a paginated endpoint. */
+async function fetchAllPages<T>(
+  client: AppServerClient,
+  method: string,
+  baseParams?: Record<string, unknown>,
+): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | undefined;
+  do {
+    const params: Record<string, unknown> = { ...baseParams };
+    if (cursor) params.cursor = cursor;
+    const page = await client.request<{ data: T[]; nextCursor: string | null }>(method, params);
+    items.push(...page.data);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return items;
+}
+
+async function cmdJobs(opts: Options) {
+  const mapping = loadThreadMapping(config.threadsFile);
+  const reverseMap = new Map<string, string>();
+  for (const [shortId, entry] of Object.entries(mapping)) {
+    reverseMap.set(entry.threadId, shortId);
+  }
+
+  // Fetch all pages from server — we filter to locally-known threads,
+  // so a single page could miss local threads buried behind non-local ones.
+  const allThreads = await withClient((client) =>
+    fetchAllPages<Thread>(client, "thread/list", { sortKey: "updated_at" }),
+  );
+
+  // Only show threads created by this CLI (those with a local short ID mapping)
+  let localThreads = allThreads.filter((t) => reverseMap.has(t.id));
+  if (opts.limit !== Infinity) localThreads = localThreads.slice(0, opts.limit);
+
+  if (opts.json) {
+    const enriched = localThreads.map((t) => {
+      const sid = reverseMap.get(t.id)!;
+      const entry = mapping[sid];
+      return {
+        shortId: sid,
+        threadId: t.id,
+        status: entry.lastStatus ?? "unknown",
+        modelProvider: t.modelProvider,
+        cwd: t.cwd,
+        preview: t.preview || null,
+        createdAt: new Date(t.createdAt * 1000).toISOString(),
+        updatedAt: new Date(t.updatedAt * 1000).toISOString(),
+      };
+    });
+    console.log(JSON.stringify(enriched, null, 2));
+  } else {
+    if (localThreads.length === 0) {
+      console.log("No threads found.");
+      return;
+    }
+    for (const t of localThreads) {
+      const sid = reverseMap.get(t.id)!;
+      const entry = mapping[sid];
+      const status = entry.lastStatus ?? "idle";
+      const age = formatAge(t.updatedAt);
+      const preview = t.preview ? ` ${t.preview.slice(0, 50)}` : "";
+      console.log(
+        `  ${sid}  ${status.padEnd(12)} ${age.padEnd(8)} ${t.cwd}${preview}`,
+      );
+    }
+  }
+}
+
+async function cmdKill(positional: string[]) {
+  const id = positional[0];
+  if (!id) die("Usage: codex-collab kill <id>");
+  validateId(id);
+
+  const threadId = resolveThreadId(config.threadsFile, id);
+
+  const archived = await withClient(async (client) => {
+    // Try to read thread status first and interrupt active turn if any
+    try {
+      const { thread } = await client.request<{
+        thread: {
+          id: string;
+          status: { type: string };
+          turns: Array<{ id: string; status: string }>;
+        };
+      }>("thread/read", { threadId, includeTurns: true });
+
+      if (thread.status.type === "active") {
+        const activeTurn = thread.turns?.find(
+          (t) => t.status === "inProgress",
+        );
+        if (activeTurn) {
+          await client.request("turn/interrupt", {
+            threadId,
+            turnId: activeTurn.id,
+          });
+          progress(`Interrupted turn ${activeTurn.id}`);
+        }
+      }
+    } catch (e) {
+      if (e instanceof Error && !e.message.includes("not found")) {
+        console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
+      }
+    }
+
+    return tryArchive(client, threadId);
+  });
+
+  updateThreadStatus(config.threadsFile, threadId, "killed");
+  progress(archived ? `Archived thread ${id}` : `Killed thread ${id} (archive failed)`);
+}
+
+/** Resolve a positional ID arg to a log file path, or die with an error. */
+function resolveLogPath(positional: string[], usage: string): string {
+  const id = positional[0];
+  if (!id) die(usage);
+  validateId(id);
+  const threadId = resolveThreadId(config.threadsFile, id);
+  const shortId = findShortId(config.threadsFile, threadId);
+  if (!shortId) die(`Thread not found: ${id}`);
+  return `${config.logsDir}/${shortId}.log`;
+}
+
+async function cmdOutput(positional: string[], opts: Options) {
+  const logPath = resolveLogPath(positional, "Usage: codex-collab output <id>");
+  if (!existsSync(logPath)) die(`No log file for thread`);
+  const content = readFileSync(logPath, "utf-8");
+  if (opts.contentOnly) {
+    // Extract agent output blocks from the log.
+    // Log format: "<ISO-timestamp> agent output:\n<content lines>\n<ISO-timestamp> ..."
+    // Each timestamped line (28+ char ISO prefix) marks a new log entry.
+    const tsPrefix = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+    const lines = content.split("\n");
+    let inAgentOutput = false;
+    for (const line of lines) {
+      if (tsPrefix.test(line)) {
+        // This is a log entry header line
+        inAgentOutput = line.includes(" agent output:");
+        continue;
+      }
+      if (inAgentOutput) {
+        console.log(line);
+      }
+    }
+  } else {
+    console.log(content);
+  }
+}
+
+async function cmdProgress(positional: string[]) {
+  const logPath = resolveLogPath(positional, "Usage: codex-collab progress <id>");
+  if (!existsSync(logPath)) {
+    console.log("No activity yet.");
+    return;
+  }
+
+  // Show last 20 lines
+  const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+  console.log(lines.slice(-20).join("\n"));
+}
+
+async function cmdModels() {
+  const allModels = await withClient((client) =>
+    fetchAllPages<Model>(client, "model/list"),
+  );
+
+  for (const m of allModels) {
+    const efforts =
+      m.supportedReasoningEfforts?.map((o) => o.reasoningEffort).join(", ") ?? "";
+    console.log(
+      `  ${m.id.padEnd(25)} ${(m.description ?? "").slice(0, 50).padEnd(52)} ${efforts}`,
+    );
+  }
+}
+
+async function cmdApproveOrDecline(
+  decision: "accept" | "decline",
+  positional: string[],
+) {
+  const approvalId = positional[0];
+  const verb = decision === "accept" ? "approve" : "decline";
+  if (!approvalId) die(`Usage: codex-collab ${verb} <approval-id>`);
+  validateId(approvalId);
+
+  const requestPath = `${config.approvalsDir}/${approvalId}.json`;
+  if (!existsSync(requestPath))
+    die(`No pending approval: ${approvalId}`);
+
+  const decisionPath = `${config.approvalsDir}/${approvalId}.decision`;
+  writeFileSync(decisionPath, decision);
+  console.log(
+    `${decision === "accept" ? "Approved" : "Declined"}: ${approvalId}`,
+  );
+}
+
+/** Delete files older than maxAgeMs in the given directory. Returns count deleted. */
+function deleteOldFiles(dir: string, maxAgeMs: number): number {
+  if (!existsSync(dir)) return 0;
+  const now = Date.now();
+  let deleted = 0;
+  for (const file of readdirSync(dir)) {
+    const path = `${dir}/${file}`;
+    try {
+      if (now - Bun.file(path).lastModified > maxAgeMs) {
+        unlinkSync(path);
+        deleted++;
+      }
+    } catch (e) {
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: could not delete ${path}: ${e.message}`);
+      }
+    }
+  }
+  return deleted;
+}
+
+async function cmdClean() {
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  const oneDayMs = 24 * 60 * 60 * 1000;
+
+  const logsDeleted = deleteOldFiles(config.logsDir, sevenDaysMs);
+  const approvalsDeleted = deleteOldFiles(config.approvalsDir, oneDayMs);
+
+  // Clean stale thread mappings — use log file mtime as proxy for last
+  // activity so recently-used threads aren't pruned just because they
+  // were created more than 7 days ago.
+  let mappingsRemoved = 0;
+  withThreadLock(config.threadsFile, () => {
+    const mapping = loadThreadMapping(config.threadsFile);
+    const now = Date.now();
+    for (const [shortId, entry] of Object.entries(mapping)) {
+      try {
+        let lastActivity = new Date(entry.createdAt).getTime();
+        if (Number.isNaN(lastActivity)) lastActivity = 0;
+        const logPath = `${config.logsDir}/${shortId}.log`;
+        if (existsSync(logPath)) {
+          lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
+        }
+        if (now - lastActivity > sevenDaysMs) {
+          delete mapping[shortId];
+          mappingsRemoved++;
+        }
+      } catch (e) {
+        console.error(`[codex] Warning: skipping mapping ${shortId}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    if (mappingsRemoved > 0) {
+      saveThreadMapping(config.threadsFile, mapping);
+    }
+  });
+
+  const parts: string[] = [];
+  if (logsDeleted > 0) parts.push(`${logsDeleted} log files deleted`);
+  if (approvalsDeleted > 0)
+    parts.push(`${approvalsDeleted} approval files deleted`);
+  if (mappingsRemoved > 0)
+    parts.push(`${mappingsRemoved} stale mappings removed`);
+
+  if (parts.length === 0) {
+    console.log("Nothing to clean.");
+  } else {
+    console.log(`Cleaned: ${parts.join(", ")}.`);
+  }
+}
+
+async function cmdDelete(positional: string[]) {
+  const id = positional[0];
+  if (!id) die("Usage: codex-collab delete <id>");
+  validateId(id);
+
+  const threadId = resolveThreadId(config.threadsFile, id);
+  const shortId = findShortId(config.threadsFile, threadId);
+
+  try {
+    await withClient((client) => tryArchive(client, threadId));
+  } catch (e) {
+    if (e instanceof Error && !e.message.includes("not found")) {
+      console.error(`[codex] Warning: could not archive on server: ${e.message}`);
+    }
+  }
+
+  if (shortId) {
+    const logPath = `${config.logsDir}/${shortId}.log`;
+    if (existsSync(logPath)) unlinkSync(logPath);
+    removeThread(config.threadsFile, shortId);
+  }
+
+  progress(`Deleted thread ${id}`);
+}
+
+async function cmdHealth() {
+  const which = Bun.spawnSync(["which", "codex"]);
+  if (which.exitCode !== 0) {
+    die("codex CLI not found. Install: npm install -g @openai/codex");
+  }
+
+  console.log(`  bun:   ${Bun.version}`);
+  console.log(`  codex: ${which.stdout.toString().trim()}`);
+
+  try {
+    const userAgent = await withClient(async (client) => client.userAgent);
+    console.log(`  app-server: OK (${userAgent})`);
+  } catch (e) {
+    console.log(`  app-server: FAILED (${e instanceof Error ? e.message : e})`);
     process.exit(1);
   }
-  return positional[0];
+
+  console.log("\nHealth check passed.");
 }
 
-function formatJobStatus(job: Job): string {
-  const elapsed = job.startedAt
-    ? formatDuration(
-        (job.completedAt
-          ? new Date(job.completedAt).getTime()
-          : Date.now()) - new Date(job.startedAt).getTime()
-      )
-    : "-";
+// ---------------------------------------------------------------------------
+// Help text
+// ---------------------------------------------------------------------------
 
-  const status = job.status.toUpperCase().padEnd(10);
-  const dir = basename(job.cwd).slice(0, 20).padEnd(20);
-  const promptPreview =
-    job.prompt.slice(0, 50) + (job.prompt.length > 50 ? "..." : "");
+function showHelp() {
+  console.log(`codex-collab — Claude + Codex collaboration tool
 
-  return `${job.id}  ${status}  ${elapsed.padEnd(8)}  ${job.reasoningEffort.padEnd(6)}  ${dir}  ${promptPreview}`;
+Usage: codex-collab <command> [options]
+
+Commands:
+  run "prompt" [opts]     Send prompt, wait for result, print output
+  run --resume <id> "p"   Resume existing thread with new prompt
+  review [opts]           Run code review (PR-style by default)
+  review "instructions"   Custom review with specific focus
+  jobs [--json]           List threads
+  kill <id>               Interrupt and archive thread
+  output <id>             Read full log for thread
+  progress <id>           Show recent activity for thread
+  models                  List available models
+  approve <id>            Approve a pending request
+  decline <id>            Decline a pending request
+  clean                   Delete old logs and stale mappings
+  delete <id>             Archive thread, delete local files
+  health                  Check prerequisites
+
+Options:
+  -m, --model <model>     Model name (default: ${config.model})
+  -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: ${config.defaultReasoningEffort})
+  -s, --sandbox <mode>    Sandbox: ${config.sandboxModes.join(", ")}
+                          (default: ${config.defaultSandbox})
+  -d, --dir <path>        Working directory (default: cwd)
+  --resume <id>           Resume existing thread
+  --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout})
+  --approval <policy>     Approval: ${config.approvalPolicies.join(", ")} (default: ${config.defaultApprovalPolicy})
+  --mode <mode>           Review mode: pr, uncommitted, commit
+  --ref <hash>            Commit ref for --mode commit
+  --json                  JSON output (jobs command)
+  --content-only          Print only result text (no progress lines)
+  --limit <n>             Limit items shown
+
+Examples:
+  codex-collab run "what does this project do?" -s read-only --content-only
+  codex-collab run --resume abc123 "now summarize the key files" --content-only
+  codex-collab review -d /path/to/project --content-only
+  codex-collab review --mode uncommitted -d /path/to/project --content-only
+  codex-collab review "Focus on security issues" --content-only
+  codex-collab jobs --json
+  codex-collab kill abc123
+  codex-collab health
+`);
 }
 
-function refreshJobsForDisplay(jobs: Job[]): Job[] {
-  return jobs.map((job) => {
-    if (job.status !== "running") return job;
-    const refreshed = refreshJobStatus(job.id);
-    return refreshed ?? job;
-  });
-}
+// ---------------------------------------------------------------------------
+// Main dispatch
+// ---------------------------------------------------------------------------
 
-/** Sort jobs by date (newest first), with running/pending pinned to the top. */
-function sortJobs<T extends { status: Job["status"] }>(
-  items: T[],
-  getDate: (item: T) => string
-): T[] {
-  return [...items].sort((a, b) => {
-    const aActive = a.status === "running" || a.status === "pending" ? 1 : 0;
-    const bActive = b.status === "running" || b.status === "pending" ? 1 : 0;
-    if (aActive !== bActive) return bActive - aActive;
-    return new Date(getDate(b)).getTime() - new Date(getDate(a)).getTime();
-  });
-}
-
-function applyJobsLimit<T>(jobs: T[], limit: number | null): T[] {
-  if (!limit || limit <= 0) return jobs;
-  return jobs.slice(0, limit);
+/** Ensure data directories exist (called only for commands that need them). */
+function ensureDataDirs(): void {
+  mkdirSync(config.logsDir, { recursive: true });
+  mkdirSync(config.approvalsDir, { recursive: true });
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-
-  if (args.length === 0) {
-    console.log(HELP);
+  if (rawArgs.length === 0) {
+    showHelp();
     process.exit(0);
   }
 
-  const { command, positional, options } = parseArgs(args);
+  const { command, positional, options } = parseArgs(rawArgs);
 
-  try {
-    switch (command) {
-      case "health": {
-        if (!isTmuxAvailable()) {
-          console.error("tmux not found");
-          console.error("Install with: sudo apt install tmux");
-          process.exit(1);
-        }
-        console.log("tmux: OK");
+  // Create data directories for commands that need them
+  // Commands that don't need data directories. "" = no command (shows help).
+  const noDataDirCommands = new Set(["health", "models", ""]);
+  if (!noDataDirCommands.has(command)) {
+    ensureDataDirs();
+  }
 
-        const { execSync } = await import("child_process");
-        try {
-          const version = execSync("codex --version", {
-            encoding: "utf-8",
-          }).trim();
-          console.log(`codex: ${version}`);
-        } catch {
-          console.error("codex CLI not found");
-          console.error("Install with: npm install -g @openai/codex");
-          process.exit(1);
-        }
-
-        console.log("Status: Ready");
-        break;
-      }
-
-      case "start": {
-        if (positional.length > 0) {
-          console.error("Error: start does not accept a prompt argument");
-          console.error("Use 'codex-collab run \"prompt\"' for prompted tasks");
-          process.exit(1);
-        }
-
-        requireTmux();
-
-        const job = startInteractiveJob({
-          model: options.model,
-          reasoningEffort: options.reasoning,
-          sandbox: options.sandbox,
-          cwd: options.dir,
-        });
-
-        console.log(`Session started: ${job.id}`);
-        console.log(`Model: ${job.model} (${job.reasoningEffort})`);
-        console.log(`Working dir: ${job.cwd}`);
-        console.log(`tmux session: ${job.tmuxSession}`);
-        console.log("");
-        console.log("Commands:");
-        console.log(
-          `  See screen:      codex-collab capture ${job.id}`
-        );
-        console.log(
-          `  Send message:    codex-collab send ${job.id} "message"`
-        );
-        console.log(
-          `  Send keystroke:  codex-collab send-keys ${job.id} Enter`
-        );
-        console.log(
-          `  Attach session:  tmux attach -t ${job.tmuxSession}`
-        );
-        break;
-      }
-
-      case "status": {
-        const jobId = requireJobId(positional);
-        const job = refreshJobStatus(jobId);
-        if (!job) {
-          console.error(`Job ${jobId} not found`);
-          process.exit(1);
-        }
-
-        console.log(`Job: ${job.id}`);
-        console.log(`Status: ${job.status}`);
-        console.log(`Model: ${job.model} (${job.reasoningEffort})`);
-        console.log(`Sandbox: ${job.sandbox}`);
-        console.log(`Created: ${job.createdAt}`);
-        if (job.startedAt) console.log(`Started: ${job.startedAt}`);
-        if (job.completedAt)
-          console.log(`Completed: ${job.completedAt}`);
-        if (job.tmuxSession)
-          console.log(`tmux session: ${job.tmuxSession}`);
-        if (job.error) console.log(`Error: ${job.error}`);
-        break;
-      }
-
-      case "send": {
-        if (positional.length < 2) {
-          console.error(
-            'Error: Usage: codex-collab send <id> "message"'
-          );
-          process.exit(1);
-        }
-
-        const jobId = positional[0];
-        const message = positional.slice(1).join(" ");
-
-        if (sendToJob(jobId, message)) {
-          console.log(`Sent to ${jobId}: ${message}`);
-        } else {
-          console.error(`Could not send to job ${jobId}`);
-          console.error(
-            "Job may not be running or tmux session not found"
-          );
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "send-keys": {
-        if (positional.length < 2) {
-          console.error(
-            "Error: Usage: codex-collab send-keys <id> <key>"
-          );
-          process.exit(1);
-        }
-
-        const jobId = positional[0];
-        const keys = positional.slice(1).join(" ");
-
-        if (sendKeysToJob(jobId, keys)) {
-          console.log(`Sent keys to ${jobId}: ${keys}`);
-        } else {
-          console.error(`Could not send keys to job ${jobId}`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "capture": {
-        const jobId = requireJobId(positional);
-        const lines = positional[1] ? parseInt(positional[1], 10) : 50;
-        const output = getJobOutput(jobId, lines);
-
-        if (output) {
-          console.log(processOutput(output, options));
-        } else {
-          console.error(`Could not capture output for job ${jobId}`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "wait": {
-        const jobId = requireJobId(positional);
-        const job = loadJob(jobId);
-        if (!job) {
-          console.error(`Job ${jobId} not found`);
-          process.exit(1);
-        }
-
-        console.error(
-          `Waiting for job ${jobId} to finish (timeout: ${options.timeout}s, poll interval: ${options.interval}s)...`
-        );
-
-        const waitStart = Date.now();
-        const result = waitForJob(jobId, {
-          timeoutSec: options.timeout,
-          intervalSec: options.interval,
-        });
-        const elapsed = Date.now() - waitStart;
-
-        if (result.done) {
-          console.error(`Done in ${formatDuration(elapsed)}`);
-        } else {
-          console.error(`Timed out after ${formatDuration(elapsed)}`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "output": {
-        const jobId = requireJobId(positional);
-        const output = getJobFullOutput(jobId);
-        if (output) {
-          console.log(processOutput(output, options));
-        } else {
-          console.error(`Could not get output for job ${jobId}`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "attach": {
-        const jobId = requireJobId(positional);
-        const attachCmd = getAttachCommand(jobId);
-        if (attachCmd) {
-          console.log(attachCmd);
-        } else {
-          console.error(`Job ${jobId} not found or no tmux session`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "jobs": {
-        if (options.json) {
-          const payload = getJobsJson();
-          const limit = options.jobsAll ? null : options.jobsLimit;
-          payload.jobs = applyJobsLimit(
-            sortJobs(payload.jobs, (j) => j.created_at),
-            limit
-          );
-          console.log(JSON.stringify(payload, null, 2));
-          break;
-        }
-
-        const limit = options.jobsAll ? null : options.jobsLimit;
-        const allJobs = refreshJobsForDisplay(listJobs());
-        const jobs = applyJobsLimit(
-          sortJobs(allJobs, (j) => j.createdAt),
-          limit
-        );
-        if (jobs.length === 0) {
-          console.log("No jobs");
-        } else {
-          console.log(
-            "ID        STATUS      ELAPSED   EFFORT  DIR                   PROMPT"
-          );
-          console.log("-".repeat(100));
-          for (const job of jobs) {
-            console.log(formatJobStatus(job));
-          }
-        }
-        break;
-      }
-
-      case "kill": {
-        const jobId = requireJobId(positional);
-        if (killJob(jobId)) {
-          console.log(`Killed job: ${jobId}`);
-        } else {
-          console.error(`Could not kill job: ${jobId}`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "clean": {
-        const cleaned = cleanupOldJobs(7);
-        if (cleaned.sessions > 0) console.log(`Killed ${cleaned.sessions} stale sessions`);
-        if (cleaned.deleted > 0) console.log(`Deleted ${cleaned.deleted} old jobs`);
-        if (cleaned.sessions === 0 && cleaned.deleted === 0) console.log("Nothing to clean");
-        break;
-      }
-
-      case "delete": {
-        const jobId = requireJobId(positional);
-        if (deleteJob(jobId)) {
-          console.log(`Deleted job: ${jobId}`);
-        } else {
-          console.error(`Could not delete job: ${jobId}`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "review": {
-        requireTmux();
-
-        // Resolve review mode: null means not explicitly set (default to pr)
-        let mode: ReviewMode = options.reviewMode ?? "pr";
-        let instructions: string | undefined;
-
-        if (positional.length > 0) {
-          if (mode === "custom" || options.reviewMode === null) {
-            // Infer custom mode from positional args (or explicit --mode custom)
-            mode = "custom";
-            instructions = positional.join(" ");
-          } else {
-            // Explicit non-custom mode + positional args = error
-            console.error(`Error: --mode ${mode} does not accept positional arguments`);
-            console.error('Use --mode custom "instructions" for custom reviews');
-            process.exit(1);
-          }
-        } else if (mode === "custom") {
-          console.error("Error: Custom review mode requires instructions");
-          console.error('Usage: codex-collab review "instructions"');
-          process.exit(1);
-        }
-
-        console.error(`Starting ${mode} review in ${options.dir}...`);
-
-        const reviewResult = runReview({
-          mode,
-          instructions,
-          ref: options.reviewRef ?? undefined,
-          cwd: options.dir,
-          model: options.model,
-          reasoningEffort: options.reasoning,
-          timeoutSec: options.timeout,
-          intervalSec: options.interval,
-          resumeJobId: options.resumeJobId ?? undefined,
-        });
-
-        if (reviewResult.error) {
-          console.error(`Error: ${reviewResult.error}`);
-          process.exit(1);
-        }
-
-        console.error(`Job: ${reviewResult.jobId}`);
-
-        if (reviewResult.done) {
-          console.error("Review complete.");
-          if (reviewResult.output) {
-            console.log(processOutput(reviewResult.output, options));
-          }
-        } else {
-          console.error("Review timed out. Check output with:");
-          console.error(`  codex-collab output ${reviewResult.jobId} --content-only`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "reset": {
-        const jobId = requireJobId(positional);
-        if (resetJob(jobId)) {
-          console.log(`Reset job: ${jobId} (sent /new)`);
-        } else {
-          console.error(`Could not reset job: ${jobId}`);
-          console.error("Job may not be running or tmux session not found");
-          process.exit(1);
-        }
-        break;
-      }
-
-      case "run": {
-        requireTmux();
-
-        if (positional.length === 0) {
-          console.error("Error: No prompt provided");
-          console.error("Usage: codex-collab run \"prompt\" [options]");
-          process.exit(1);
-        }
-
-        const prompt = positional.join(" ");
-
-        console.error(`Running prompt in ${options.dir}...`);
-
-        const runResult = runPrompt({
-          prompt,
-          cwd: options.dir,
-          model: options.model,
-          reasoningEffort: options.reasoning,
-          sandbox: options.sandbox,
-          timeoutSec: options.timeout,
-          intervalSec: options.interval,
-          resumeJobId: options.resumeJobId ?? undefined,
-        });
-
-        if (runResult.error) {
-          console.error(`Error: ${runResult.error}`);
-          process.exit(1);
-        }
-
-        console.error(`Job: ${runResult.jobId}`);
-
-        if (runResult.done) {
-          console.error("Done.");
-          if (runResult.output) {
-            console.log(processOutput(runResult.output, options));
-          }
-        } else {
-          console.error("Timed out. Check output with:");
-          console.error(`  codex-collab output ${runResult.jobId} --content-only`);
-          process.exit(1);
-        }
-        break;
-      }
-
-      default:
-        console.error(`Unknown command: ${command}`);
-        console.error("Run codex-collab --help for usage");
-        process.exit(1);
-    }
-  } catch (err) {
-    console.error("Error:", (err as Error).message);
-    process.exit(1);
+  switch (command) {
+    case "run":
+      return cmdRun(positional, options);
+    case "review":
+      return cmdReview(positional, options);
+    case "jobs":
+      return cmdJobs(options);
+    case "kill":
+      return cmdKill(positional);
+    case "output":
+      return cmdOutput(positional, options);
+    case "progress":
+      return cmdProgress(positional);
+    case "models":
+      return cmdModels();
+    case "approve":
+      return cmdApproveOrDecline("accept", positional);
+    case "decline":
+      return cmdApproveOrDecline("decline", positional);
+    case "clean":
+      return cmdClean();
+    case "delete":
+      return cmdDelete(positional);
+    case "health":
+      return cmdHealth();
+    default:
+      console.error(`Error: Unknown command: ${command}`);
+      console.error("Run codex-collab --help for usage");
+      process.exit(1);
   }
 }
 
-main();
+main().catch((e) => {
+  const msg = e instanceof Error ? e.message : String(e);
+  console.error(`Fatal: ${msg}`);
+  if (msg.includes("timed out")) {
+    console.error("Tip: Resume with --resume <id> or increase --timeout");
+  }
+  process.exit(1);
+});

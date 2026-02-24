@@ -1,8 +1,8 @@
 # codex-collab
 
-CLI tool for Claude + Codex collaboration via tmux sessions.
+CLI tool for Claude + Codex collaboration via the Codex app server JSON-RPC protocol.
 
-**Stack**: TypeScript, Bun, tmux, OpenAI Codex CLI
+**Stack**: TypeScript, Bun, OpenAI Codex CLI (app server protocol)
 
 ## Development
 
@@ -17,24 +17,25 @@ codex-collab health
 | File | Purpose |
 |------|---------|
 | `src/cli.ts` | CLI commands, argument parsing, output formatting |
-| `src/jobs.ts` | Job lifecycle, persistence, polling, run/review orchestration |
-| `src/tmux.ts` | tmux session management (all via spawnSync, no shell) |
+| `src/protocol.ts` | JSON-RPC client for Codex app server (spawn, handshake, request routing) |
+| `src/threads.ts` | Thread lifecycle, short ID mapping |
+| `src/turns.ts` | Turn lifecycle (runTurn, runReview), event wiring |
+| `src/events.ts` | Event dispatcher (progress lines, log writer, output accumulator) |
+| `src/approvals.ts` | Approval handler abstraction (auto-approve, interactive IPC) |
+| `src/types.ts` | Protocol types (JSON-RPC, threads, turns, items, approvals) |
 | `src/config.ts` | Configuration constants |
-| `src/session-parser.ts` | Parse Codex session files for metadata |
 | `SKILL.md` | Claude Code skill definition |
 
 ## Dependencies
 
-- **Runtime**: Bun, tmux, codex CLI
-- **NPM**: (none)
+- **Runtime**: Bun, codex CLI (`codex app-server`)
 
 ## Architecture Notes
 
-- Jobs stored in `~/.codex-collab/jobs/` as JSON + `.log` files
-- Uses `script` command for output logging
-- All tmux interaction goes through `spawnSync` argument arrays (no shell interpolation)
-- tmux sessions use 220x50 pane size so Codex spinner lines aren't truncated
-- `waitForJob` detects completion via screen stability (2 consecutive unchanged captures)
-- Job IDs are validated (`/^[0-9a-f]{8}$/`) before use in file paths
+- Communicates with Codex via `codex app-server` JSON-RPC protocol over stdio
+- Threads stored in `~/.codex-collab/threads.json` as short ID → full ID mapping
+- Logs stored in `~/.codex-collab/logs/` per thread
+- Approval requests use file-based IPC in `~/.codex-collab/approvals/`
+- Short IDs are 8-char hex, support prefix resolution
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running
 - Skill installed to `~/.claude/skills/codex-collab/` via `install.sh` (build + copy; `--dev` for symlinks)

@@ -28,13 +28,11 @@ fi
 # Check prerequisites
 missing=()
 command -v bun  >/dev/null 2>&1 || missing+=(bun)
-command -v tmux >/dev/null 2>&1 || missing+=(tmux)
 command -v codex >/dev/null 2>&1 || missing+=(codex)
 
 if [ ${#missing[@]} -gt 0 ]; then
   echo "Missing prerequisites: ${missing[*]}"
   echo "  bun:   https://bun.sh/"
-  echo "  tmux:  sudo apt install tmux"
   echo "  codex: npm install -g @openai/codex"
   exit 1
 fi
