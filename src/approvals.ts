@@ -6,18 +6,11 @@ import type {
   CommandApprovalRequest,
   FileChangeApprovalRequest,
 } from "./types";
+import { validateId } from "./config";
 
 export interface ApprovalHandler {
   handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision>;
   handleFileChangeApproval(req: FileChangeApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision>;
-}
-
-/** Validate that an ID is safe for use in file paths. */
-function validateId(id: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
-    throw new Error(`Invalid approval ID: "${id}"`);
-  }
-  return id;
 }
 
 /** Auto-approve all requests immediately. */
@@ -81,7 +74,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
 
   private writeRequestFile(id: string, data: unknown): void {
     try {
-      writeFileSync(`${this.approvalsDir}/${id}.json`, JSON.stringify(data, null, 2));
+      writeFileSync(`${this.approvalsDir}/${id}.json`, JSON.stringify(data, null, 2), { mode: 0o600 });
     } catch (e) {
       console.error(`[codex] Failed to write approval request: ${e instanceof Error ? e.message : e}`);
       throw e;

@@ -1,9 +1,23 @@
 {
   "name": "codex-collab",
   "version": "1.0.0",
+  "description": "Claude + Codex collaboration via the Codex app server JSON-RPC protocol",
   "type": "module",
+  "license": "MIT",
+  "author": "Kevin Qi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kevin7Qi/codex-collab.git"
+  },
+  "homepage": "https://github.com/Kevin7Qi/codex-collab",
+  "bugs": {
+    "url": "https://github.com/Kevin7Qi/codex-collab/issues"
+  },
+  "keywords": ["claude", "codex", "claude-code", "skill", "json-rpc", "cli"],
   "scripts": {
-    "build": "bun build src/cli.ts --outfile skill/codex-collab/scripts/codex-collab --target bun"
+    "build": "bun build src/cli.ts --outfile skill/codex-collab/scripts/codex-collab --target bun",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

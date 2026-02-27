@@ -93,6 +93,11 @@ export function loadThreadMapping(threadsFile: string): ThreadMapping {
     const parsed = JSON.parse(content);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
       console.error("[codex] Warning: threads file has invalid structure. Starting fresh.");
+      try {
+        renameSync(threadsFile, `${threadsFile}.corrupt.${Date.now()}`);
+      } catch (backupErr) {
+        console.error(`[codex] Warning: could not back up invalid threads file: ${backupErr instanceof Error ? backupErr.message : backupErr}`);
+      }
       return {};
     }
     return parsed;
@@ -102,8 +107,8 @@ export function loadThreadMapping(threadsFile: string): ThreadMapping {
     );
     try {
       renameSync(threadsFile, `${threadsFile}.corrupt.${Date.now()}`);
-    } catch {
-      // Best-effort backup — may fail if file was already moved
+    } catch (backupErr) {
+      console.error(`[codex] Warning: could not back up corrupt threads file: ${backupErr instanceof Error ? backupErr.message : backupErr}`);
     }
     return {};
   }
@@ -113,7 +118,7 @@ export function saveThreadMapping(threadsFile: string, mapping: ThreadMapping): 
   const dir = dirname(threadsFile);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const tmpPath = threadsFile + ".tmp";
-  writeFileSync(tmpPath, JSON.stringify(mapping, null, 2));
+  writeFileSync(tmpPath, JSON.stringify(mapping, null, 2), { mode: 0o600 });
   renameSync(tmpPath, threadsFile);
 }
 
@@ -170,12 +175,18 @@ export function updateThreadStatus(
 ): void {
   withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);
+    let found = false;
     for (const entry of Object.values(mapping)) {
       if (entry.threadId === threadId) {
         entry.lastStatus = status;
         entry.updatedAt = new Date().toISOString();
+        found = true;
         break;
       }
+    }
+    if (!found) {
+      console.error(`[codex] Warning: cannot update status for unknown thread ${threadId.slice(0, 12)}...`);
+      return;
     }
     saveThreadMapping(threadsFile, mapping);
   });

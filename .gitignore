@@ -23,6 +23,14 @@ bun.lockb
 # Reference projects
 .ref/
 
+# Environment files
+.env
+.env.*
+.env.local
+
+# Internal docs
+docs/
+
 # Sandbox / environment files
 .bash_profile
 .bashrc

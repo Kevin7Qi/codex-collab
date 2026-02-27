@@ -1,6 +1,6 @@
 // src/config.ts — Configuration for codex-collab
 
-const home = process.env.HOME || "/tmp";
+const home = process.env.HOME ?? "";
 
 export const config = {
   // Default model
@@ -22,7 +22,7 @@ export const config = {
   defaultTimeout: 1200, // seconds — turn completion (20 min)
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
 
-  // Data paths
+  // Data paths (require HOME; validated by ensureDataDirs in cli.ts)
   dataDir: `${home}/.codex-collab`,
   threadsFile: `${home}/.codex-collab/threads.json`,
   logsDir: `${home}/.codex-collab/logs`,
@@ -33,7 +33,7 @@ export const config = {
 
   // Client identity (sent during initialize handshake)
   clientName: "codex-collab",
-  clientVersion: "2.0.0",
+  clientVersion: "1.0.0",
 };
 
 Object.freeze(config);
@@ -41,3 +41,11 @@ Object.freeze(config);
 export type ReasoningEffort = (typeof config.reasoningEfforts)[number];
 export type SandboxMode = (typeof config.sandboxModes)[number];
 export type ApprovalPolicy = (typeof config.approvalPolicies)[number];
+
+/** Validate that an ID contains only safe characters for file paths. */
+export function validateId(id: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new Error(`Invalid ID: "${id}"`);
+  }
+  return id;
+}

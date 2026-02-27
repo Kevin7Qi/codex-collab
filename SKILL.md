@@ -1,6 +1,6 @@
 ---
 name: codex-collab
-description: Delegate tasks to Codex — run prompts, code review, research, pair programming, or any collaboration mode. Use when the user asks to use Codex, send work to Codex, have Codex review/investigate/implement something, or collaborate with Codex.
+description: Delegate tasks to Codex — run prompts, code review, research, pair programming, or any collaboration mode. Use when the user asks to use Codex, send work to Codex, have Codex review/investigate/implement something, or collaborate with Codex. Also use proactively when you want external feedback, a second opinion, or a fresh pair of eyes on code, architecture, or decisions.
 ---
 
 # codex-collab
@@ -67,7 +67,7 @@ codex-collab review --resume <id> -d /path/to/project --content-only
 
 Review modes: `pr` (default), `uncommitted`, `commit`
 
-**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 10-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
+**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 5-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
 
 ## Context Efficiency
 

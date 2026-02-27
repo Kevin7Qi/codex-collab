@@ -17,7 +17,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 Tested on Linux (Ubuntu 22.04). Both must be installed and on your PATH.
 
 - [Bun](https://bun.sh/) >= 1.0 — runs the CLI
-- [Codex CLI](https://github.com/openai/codex) with `app-server` support — the agent being orchestrated (`npm install -g @openai/codex`)
+- [Codex CLI](https://github.com/openai/codex) — must support `codex app-server` (tested with 0.106.0; `npm install -g @openai/codex`)
 
 ## Installation
 
@@ -54,7 +54,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 |---------|-------------|
 | `run "prompt" [opts]` | Start thread, send prompt, wait, print output |
 | `review [opts]` | Code review (PR, uncommitted, commit) |
-| `jobs [--json]` | List threads |
+| `jobs [--json] [--all]` | List threads (`--limit <n>` to cap) |
 | `kill <id>` | Interrupt running thread |
 | `output <id>` | Full log for thread |
 | `progress <id>` | Recent activity (tail of log) |
@@ -87,9 +87,8 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
-| `--json` | JSON output (`jobs` command) |
 | `--timeout <sec>` | Turn timeout (default: 1200) |
-| `--limit <n>` | Limit threads shown |
+| `--base <branch>` | Base branch for PR review (default: main) |
 
 </details>
 

@@ -4,6 +4,7 @@
 
 import {
   config,
+  validateId,
   type ReasoningEffort,
   type SandboxMode,
   type ApprovalPolicy,
@@ -48,8 +49,14 @@ import type {
 // ---------------------------------------------------------------------------
 
 let activeClient: AppServerClient | undefined;
+let shuttingDown = false;
 
 process.on("SIGINT", async () => {
+  if (shuttingDown) {
+    process.exit(130);
+  }
+  shuttingDown = true;
+  console.error("[codex] Shutting down...");
   try {
     if (activeClient) {
       await activeClient.close();
@@ -84,6 +91,7 @@ interface Options {
   limit: number;
   reviewMode: string | null;
   reviewRef: string | null;
+  base: string;
   resumeId: string | null;
   /** Flags explicitly provided on the command line. */
   explicit: Set<string>;
@@ -102,6 +110,7 @@ function parseArgs(args: string[]): ParsedArgs {
     limit: config.jobsListLimit,
     reviewMode: null,
     reviewRef: null,
+    base: "main",
     resumeId: null,
     explicit: new Set<string>(),
   };
@@ -217,6 +226,12 @@ function parseArgs(args: string[]): ParsedArgs {
         process.exit(1);
       }
       options.reviewRef = args[++i];
+    } else if (arg === "--base") {
+      if (i + 1 >= args.length) {
+        console.error("Error: --base requires a value");
+        process.exit(1);
+      }
+      options.base = args[++i];
     } else if (arg === "--resume") {
       if (i + 1 >= args.length) {
         console.error("Error: --resume requires a value");
@@ -250,12 +265,13 @@ function die(msg: string): never {
   process.exit(1);
 }
 
-/** Validate that an ID is safe for use in file paths. */
-function validateId(id: string): string {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+/** Validate ID, using die() for CLI-friendly error output. */
+function validateIdOrDie(id: string): string {
+  try {
+    return validateId(id);
+  } catch {
     die(`Invalid ID: "${id}"`);
   }
-  return id;
 }
 
 function progress(text: string): void {
@@ -274,7 +290,11 @@ async function withClient<T>(fn: (client: AppServerClient) => Promise<T>): Promi
   try {
     return await fn(client);
   } finally {
-    await client.close();
+    try {
+      await client.close();
+    } catch (e) {
+      console.error(`[codex] Warning: cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     activeClient = undefined;
   }
 }
@@ -316,7 +336,7 @@ function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget 
 
   switch (mode) {
     case "pr":
-      return { type: "baseBranch", branch: "main" };
+      return { type: "baseBranch", branch: opts.base };
     case "uncommitted":
       return { type: "uncommittedChanges" };
     case "commit":
@@ -405,7 +425,8 @@ async function startOrResumeThread(
     model: opts.model,
     cwd: opts.dir,
   });
-  const shortId = findShortId(config.threadsFile, threadId) ?? "unknown";
+  const shortId = findShortId(config.threadsFile, threadId);
+  if (!shortId) die(`Internal error: thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
   return { threadId, shortId, effective };
 }
 
@@ -588,7 +609,7 @@ async function cmdJobs(opts: Options) {
 async function cmdKill(positional: string[]) {
   const id = positional[0];
   if (!id) die("Usage: codex-collab kill <id>");
-  validateId(id);
+  validateIdOrDie(id);
 
   const threadId = resolveThreadId(config.threadsFile, id);
 
@@ -632,7 +653,7 @@ async function cmdKill(positional: string[]) {
 function resolveLogPath(positional: string[], usage: string): string {
   const id = positional[0];
   if (!id) die(usage);
-  validateId(id);
+  validateIdOrDie(id);
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
@@ -698,14 +719,14 @@ async function cmdApproveOrDecline(
   const approvalId = positional[0];
   const verb = decision === "accept" ? "approve" : "decline";
   if (!approvalId) die(`Usage: codex-collab ${verb} <approval-id>`);
-  validateId(approvalId);
+  validateIdOrDie(approvalId);
 
   const requestPath = `${config.approvalsDir}/${approvalId}.json`;
   if (!existsSync(requestPath))
     die(`No pending approval: ${approvalId}`);
 
   const decisionPath = `${config.approvalsDir}/${approvalId}.decision`;
-  writeFileSync(decisionPath, decision);
+  writeFileSync(decisionPath, decision, { mode: 0o600 });
   console.log(
     `${decision === "accept" ? "Approved" : "Declined"}: ${approvalId}`,
   );
@@ -784,7 +805,7 @@ async function cmdClean() {
 async function cmdDelete(positional: string[]) {
   const id = positional[0];
   if (!id) die("Usage: codex-collab delete <id>");
-  validateId(id);
+  validateIdOrDie(id);
 
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
@@ -840,7 +861,7 @@ Commands:
   run --resume <id> "p"   Resume existing thread with new prompt
   review [opts]           Run code review (PR-style by default)
   review "instructions"   Custom review with specific focus
-  jobs [--json]           List threads
+  jobs [--json] [--all]   List threads (--limit <n> to cap)
   kill <id>               Interrupt and archive thread
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
@@ -862,9 +883,8 @@ Options:
   --approval <policy>     Approval: ${config.approvalPolicies.join(", ")} (default: ${config.defaultApprovalPolicy})
   --mode <mode>           Review mode: pr, uncommitted, commit
   --ref <hash>            Commit ref for --mode commit
-  --json                  JSON output (jobs command)
+  --base <branch>         Base branch for PR review (default: main)
   --content-only          Print only result text (no progress lines)
-  --limit <n>             Limit items shown
 
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
@@ -884,6 +904,9 @@ Examples:
 
 /** Ensure data directories exist (called only for commands that need them). */
 function ensureDataDirs(): void {
+  if (!process.env.HOME) {
+    die("HOME environment variable is not set. Cannot determine data directory.");
+  }
   mkdirSync(config.logsDir, { recursive: true });
   mkdirSync(config.approvalsDir, { recursive: true });
 }
