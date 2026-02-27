@@ -12,8 +12,8 @@ skill/
 .DS_Store
 
 # Editor
-.vscode/
-.idea/
+.vscode
+.idea
 *.swp
 *.swo
 
@@ -22,3 +22,22 @@ bun.lockb
 
 # Reference projects
 .ref/
+
+# Sandbox / environment files
+.bash_profile
+.bashrc
+.zshrc
+.zprofile
+.profile
+.gitconfig
+.gitmodules
+.ripgreprc
+.mcp.json
+.claude/
+
+# Bare git repo artifacts
+HEAD
+config
+hooks
+objects
+refs
