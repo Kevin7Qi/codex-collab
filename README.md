@@ -2,6 +2,8 @@
 
 Collaborate with [Codex](https://github.com/openai/codex) from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Run tasks, get code reviews, do parallel research, all without leaving your Claude session.
 
+![demo](.github/assets/demo.png)
+
 codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) that drives Codex through its app server JSON-RPC protocol. It manages threads, streams structured events, handles tool-call approvals, and lets you resume conversations — all without leaving your Claude session.
 
 ## Why
@@ -14,7 +16,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Prerequisites
 
-Tested on Linux (Ubuntu 22.04). Both must be installed and on your PATH.
+Tested on Linux (Ubuntu 22.04) and macOS. Both must be installed and on your PATH.
 
 - [Bun](https://bun.sh/) >= 1.0 — runs the CLI
 - [Codex CLI](https://github.com/openai/codex) — must support `codex app-server` (tested with 0.106.0; `npm install -g @openai/codex`)
