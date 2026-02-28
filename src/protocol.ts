@@ -13,7 +13,8 @@ import type {
 } from "./types";
 import { config } from "./config";
 
-/** Format a JSON-RPC notification (no id, no response). Returns newline-terminated JSON. */
+/** Format a JSON-RPC-style notification (no id, no response). Returns newline-terminated JSON.
+ *  Note: Codex app server protocol omits the standard `jsonrpc: "2.0"` field. */
 export function formatNotification(method: string, params?: unknown): string {
   const msg: Record<string, unknown> = { method };
   if (params !== undefined) msg.params = params;
@@ -123,13 +124,23 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
   const requestTimeout = opts?.requestTimeout ?? config.requestTimeout;
 
   // Spawn the child process
-  const proc = spawn(command, {
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-    cwd: opts?.cwd,
-    env: opts?.env ? { ...process.env, ...opts.env } : undefined,
-  });
+  const proc = (() => {
+    try {
+      return spawn(command, {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        cwd: opts?.cwd,
+        env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new Error(
+        `Failed to start app server (${command.join(" ")}): ${msg}\n` +
+        `Ensure codex CLI is installed: npm install -g @openai/codex`,
+      );
+    }
+  })();
 
   // Internal state
   const pending = new Map<RequestId, PendingRequest>();

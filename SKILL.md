@@ -32,7 +32,7 @@ codex-collab run --resume <id> "now check the error handling" --content-only
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
 ```
 
-**IMPORTANT: Always use `run_in_background=true`** — tasks take minutes. You will be notified automatically when the command finishes. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
+**IMPORTANT: Always use `run_in_background=true` and `dangerouslyDisableSandbox=true`** for all `codex-collab` Bash commands. Tasks take minutes, and the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist. You will be notified automatically when the command finishes. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
 
 If the user asks about progress mid-task, use `progress` to check the recent activity:
 
@@ -67,7 +67,7 @@ codex-collab review --resume <id> -d /path/to/project --content-only
 
 Review modes: `pr` (default), `uncommitted`, `commit`
 
-**IMPORTANT: Always use `run_in_background=true`** — reviews typically take 5-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
+**IMPORTANT: Always use `run_in_background=true` and `dangerouslyDisableSandbox=true`** — reviews typically take 5-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
 
 ## Context Efficiency
 

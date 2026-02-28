@@ -1,12 +1,14 @@
 // src/integration.test.ts — Integration smoke tests against a real codex app-server process
-// These tests are skipped if the codex CLI is not available on PATH.
+// Skipped unless RUN_INTEGRATION=1 is set (requires codex CLI on PATH and valid credentials).
 
 import { describe, expect, test } from "bun:test";
 import { connect } from "./protocol";
 
-const hasCodex = Bun.spawnSync(["which", "codex"]).exitCode === 0;
+const runIntegration =
+  process.env.RUN_INTEGRATION === "1" &&
+  Bun.spawnSync(["which", "codex"]).exitCode === 0;
 
-describe.skipIf(!hasCodex)("integration", () => {
+describe.skipIf(!runIntegration)("integration", () => {
   test("connect and list models", async () => {
     const client = await connect();
     try {

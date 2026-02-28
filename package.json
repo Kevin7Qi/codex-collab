@@ -13,6 +13,9 @@
   "bugs": {
     "url": "https://github.com/Kevin7Qi/codex-collab/issues"
   },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "keywords": ["claude", "codex", "claude-code", "skill", "json-rpc", "cli"],
   "scripts": {
     "build": "bun build src/cli.ts --outfile skill/codex-collab/scripts/codex-collab --target bun",

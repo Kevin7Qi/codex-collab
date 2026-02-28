@@ -82,7 +82,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `-m, --model <model>` | Model name |
 | `-r, --reasoning <level>` | low, medium, high, xhigh (default: xhigh) |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
-| `--mode <mode>` | Review mode: pr, uncommitted, commit |
+| `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
@@ -92,6 +92,10 @@ codex-collab run --resume <id> "now check error handling" --content-only
 
 </details>
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md) code of conduct.
+
 ## See also
 
-For single-prompt Codex calls, the official [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk) is simpler. codex-collab exists because you need persistent threads, structured event streaming, or approval control.
+For simpler interactions, you can also check out the official [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk). codex-collab is designed as a Claude Code skill, with built-in support for code review, thread management, and real-time progress streaming.

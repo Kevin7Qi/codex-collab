@@ -116,14 +116,14 @@ export class EventDispatcher {
   /** Write accumulated agent output to the log (called before final flush). */
   flushOutput(): void {
     if (this.accumulatedOutput) {
-      this.log(`agent output:\n${this.accumulatedOutput}`);
+      this.log(`agent output:\n${this.accumulatedOutput}\n<<END_AGENT_OUTPUT>>`);
     }
   }
 
   flush(): void {
     if (this.logBuffer.length === 0) return;
     try {
-      appendFileSync(this.logPath, this.logBuffer.join("\n") + "\n");
+      appendFileSync(this.logPath, this.logBuffer.join("\n") + "\n", { mode: 0o600 });
       this.logBuffer = [];
     } catch (e) {
       console.error(`[codex] Warning: Failed to write log to ${this.logPath}: ${e instanceof Error ? e.message : e}`);

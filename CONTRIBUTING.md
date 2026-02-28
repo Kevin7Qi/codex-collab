@@ -17,11 +17,17 @@ bun install
 ## Running Tests
 
 ```bash
-bun test              # run all tests
+bun test              # run all tests (integration tests are skipped by default)
 bun run typecheck     # type checking
+
+RUN_INTEGRATION=1 bun test   # include integration tests (requires codex CLI + credentials)
 ```
 
 All tests must pass and type checking must be clean before submitting a PR.
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md) code of conduct.
 
 ## Architecture
 

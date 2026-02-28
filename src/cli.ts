@@ -219,19 +219,25 @@ function parseArgs(args: string[]): ParsedArgs {
         console.error("Error: --mode requires a value");
         process.exit(1);
       }
-      options.reviewMode = args[++i];
+      const mode = args[++i];
+      if (!VALID_REVIEW_MODES.includes(mode as any)) {
+        console.error(`Error: Invalid review mode: ${mode}`);
+        console.error(`Valid options: ${VALID_REVIEW_MODES.join(", ")}`);
+        process.exit(1);
+      }
+      options.reviewMode = mode;
     } else if (arg === "--ref") {
       if (i + 1 >= args.length) {
         console.error("Error: --ref requires a value");
         process.exit(1);
       }
-      options.reviewRef = args[++i];
+      options.reviewRef = validateGitRef(args[++i], "ref");
     } else if (arg === "--base") {
       if (i + 1 >= args.length) {
         console.error("Error: --base requires a value");
         process.exit(1);
       }
-      options.base = args[++i];
+      options.base = validateGitRef(args[++i], "base branch");
     } else if (arg === "--resume") {
       if (i + 1 >= args.length) {
         console.error("Error: --resume requires a value");
@@ -260,9 +266,20 @@ function parseArgs(args: string[]): ParsedArgs {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Valid review modes for --mode flag. */
+const VALID_REVIEW_MODES = ["pr", "uncommitted", "commit", "custom"] as const;
+
+/** Shell metacharacters that must not appear in git refs. */
+const UNSAFE_REF_CHARS = /[;|&`$()<>\\'"{\s]/;
+
 function die(msg: string): never {
   console.error(`Error: ${msg}`);
   process.exit(1);
+}
+
+function validateGitRef(value: string, label: string): string {
+  if (UNSAFE_REF_CHARS.test(value)) die(`Invalid ${label}: ${value}`);
+  return value;
 }
 
 /** Validate ID, using die() for CLI-friendly error output. */
@@ -307,16 +324,17 @@ function createDispatcher(shortId: string, opts: Options): EventDispatcher {
   );
 }
 
-/** Try to archive a thread on the server. Returns true if successful. */
-async function tryArchive(client: AppServerClient, threadId: string): Promise<boolean> {
+/** Try to archive a thread on the server. Returns status string. */
+async function tryArchive(client: AppServerClient, threadId: string): Promise<"archived" | "already_done" | "failed"> {
   try {
     await client.request("thread/archive", { threadId });
-    return true;
+    return "archived";
   } catch (e) {
-    if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
-      console.error(`[codex] Warning: could not archive thread: ${e.message}`);
+    if (e instanceof Error && (e.message.includes("not found") || e.message.includes("archived"))) {
+      return "already_done";
     }
-    return false;
+    console.error(`[codex] Warning: could not archive thread: ${e instanceof Error ? e.message : String(e)}`);
+    return "failed";
   }
 }
 
@@ -342,7 +360,7 @@ function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget 
     case "commit":
       return { type: "commit", sha: opts.reviewRef ?? "HEAD" };
     default:
-      die(`Unknown review mode: ${mode}. Use: pr, uncommitted, commit, custom`);
+      die(`Unknown review mode: ${mode}. Use: ${VALID_REVIEW_MODES.join(", ")}`);
   }
 }
 
@@ -459,7 +477,9 @@ async function cmdRun(positional: string[], opts: Options) {
   const exitCode = await withClient(async (client) => {
     const { threadId, shortId, effective } = await startOrResumeThread(client, opts);
 
-    if (!opts.contentOnly) {
+    if (opts.contentOnly) {
+      console.error(`[codex] Running (thread ${shortId})...`);
+    } else {
       if (opts.resumeId) {
         progress(`Resumed thread ${shortId} (${effective.model})`);
       } else {
@@ -504,7 +524,9 @@ async function cmdReview(positional: string[], opts: Options) {
       client, opts, { sandbox: "read-only" },
     );
 
-    if (!opts.contentOnly) {
+    if (opts.contentOnly) {
+      console.error(`[codex] Reviewing (thread ${shortId})...`);
+    } else {
       if (opts.resumeId) {
         progress(`Resumed thread ${shortId} for review`);
       } else {
@@ -646,7 +668,11 @@ async function cmdKill(positional: string[]) {
   });
 
   updateThreadStatus(config.threadsFile, threadId, "killed");
-  progress(archived ? `Archived thread ${id}` : `Killed thread ${id} (archive failed)`);
+  if (archived === "failed") {
+    progress(`Killed thread ${id} (server archive failed)`);
+  } else {
+    progress(`Killed thread ${id}`);
+  }
 }
 
 /** Resolve a positional ID arg to a log file path, or die with an error. */
@@ -666,14 +692,17 @@ async function cmdOutput(positional: string[], opts: Options) {
   const content = readFileSync(logPath, "utf-8");
   if (opts.contentOnly) {
     // Extract agent output blocks from the log.
-    // Log format: "<ISO-timestamp> agent output:\n<content lines>\n<ISO-timestamp> ..."
-    // Each timestamped line (28+ char ISO prefix) marks a new log entry.
+    // Log format: "<ISO-timestamp> agent output:\n<content>\n<<END_AGENT_OUTPUT>>"
+    // Using an explicit end marker avoids false positives when model output contains timestamps.
     const tsPrefix = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
     const lines = content.split("\n");
     let inAgentOutput = false;
     for (const line of lines) {
+      if (line === "<<END_AGENT_OUTPUT>>") {
+        inAgentOutput = false;
+        continue;
+      }
       if (tsPrefix.test(line)) {
-        // This is a log entry header line
         inAgentOutput = line.includes(" agent output:");
         continue;
       }
@@ -726,7 +755,11 @@ async function cmdApproveOrDecline(
     die(`No pending approval: ${approvalId}`);
 
   const decisionPath = `${config.approvalsDir}/${approvalId}.decision`;
-  writeFileSync(decisionPath, decision, { mode: 0o600 });
+  try {
+    writeFileSync(decisionPath, decision, { mode: 0o600 });
+  } catch (e) {
+    die(`Failed to write approval decision: ${e instanceof Error ? e.message : String(e)}`);
+  }
   console.log(
     `${decision === "accept" ? "Approved" : "Declined"}: ${approvalId}`,
   );
@@ -810,8 +843,9 @@ async function cmdDelete(positional: string[]) {
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
 
+  let archiveResult: "archived" | "already_done" | "failed" = "failed";
   try {
-    await withClient((client) => tryArchive(client, threadId));
+    archiveResult = await withClient((client) => tryArchive(client, threadId));
   } catch (e) {
     if (e instanceof Error && !e.message.includes("not found")) {
       console.error(`[codex] Warning: could not archive on server: ${e.message}`);
@@ -824,7 +858,11 @@ async function cmdDelete(positional: string[]) {
     removeThread(config.threadsFile, shortId);
   }
 
-  progress(`Deleted thread ${id}`);
+  if (archiveResult === "failed") {
+    progress(`Deleted local data for thread ${id} (server archive failed)`);
+  } else {
+    progress(`Deleted thread ${id}`);
+  }
 }
 
 async function cmdHealth() {
@@ -881,7 +919,7 @@ Options:
   --resume <id>           Resume existing thread
   --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout})
   --approval <policy>     Approval: ${config.approvalPolicies.join(", ")} (default: ${config.defaultApprovalPolicy})
-  --mode <mode>           Review mode: pr, uncommitted, commit
+  --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: main)
   --content-only          Print only result text (no progress lines)
@@ -902,11 +940,9 @@ Examples:
 // Main dispatch
 // ---------------------------------------------------------------------------
 
-/** Ensure data directories exist (called only for commands that need them). */
+/** Ensure data directories exist (called only for commands that need them).
+ *  Config getters throw if HOME is unset, producing a clear error. */
 function ensureDataDirs(): void {
-  if (!process.env.HOME) {
-    die("HOME environment variable is not set. Cannot determine data directory.");
-  }
   mkdirSync(config.logsDir, { recursive: true });
   mkdirSync(config.approvalsDir, { recursive: true });
 }
@@ -919,9 +955,20 @@ async function main() {
 
   const { command, positional, options } = parseArgs(rawArgs);
 
+  // Validate command before setting up data directories.
+  // Keep in sync with the switch below.
+  const knownCommands = new Set([
+    "run", "review", "jobs", "kill", "output", "progress",
+    "models", "approve", "decline", "clean", "delete", "health",
+  ]);
+  if (!knownCommands.has(command)) {
+    console.error(`Error: Unknown command: ${command}`);
+    console.error("Run codex-collab --help for usage");
+    process.exit(1);
+  }
+
   // Create data directories for commands that need them
-  // Commands that don't need data directories. "" = no command (shows help).
-  const noDataDirCommands = new Set(["health", "models", ""]);
+  const noDataDirCommands = new Set(["health", "models"]);
   if (!noDataDirCommands.has(command)) {
     ensureDataDirs();
   }
@@ -951,10 +998,6 @@ async function main() {
       return cmdDelete(positional);
     case "health":
       return cmdHealth();
-    default:
-      console.error(`Error: Unknown command: ${command}`);
-      console.error("Run codex-collab --help for usage");
-      process.exit(1);
   }
 }
 

@@ -23,6 +23,9 @@ export const autoApproveHandler: ApprovalHandler = {
   },
 };
 
+/** Max time to wait for a human approval decision before giving up. */
+const APPROVAL_TIMEOUT_MS = 3_600_000; // 1 hour
+
 /** File-based IPC approval handler. Writes a .json request file, then polls for
  *  a .decision file created by `codex-collab approve/decline` in a separate process. */
 export class InteractiveApprovalHandler implements ApprovalHandler {
@@ -51,7 +54,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
       turnId: req.turnId,
     });
 
-    return this.pollForDecision(id, 3_600_000, signal);
+    return this.pollForDecision(id, APPROVAL_TIMEOUT_MS, signal);
   }
 
   async handleFileChangeApproval(req: FileChangeApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
@@ -69,7 +72,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
       turnId: req.turnId,
     });
 
-    return this.pollForDecision(id, 3_600_000, signal);
+    return this.pollForDecision(id, APPROVAL_TIMEOUT_MS, signal);
   }
 
   private writeRequestFile(id: string, data: unknown): void {

@@ -418,7 +418,7 @@ export interface ModelListResponse {
 
 export interface FileChange {
   path: string;
-  kind: string;
+  kind: "add" | "delete" | "update";
   diff: string;
 }
 
