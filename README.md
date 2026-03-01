@@ -21,44 +21,45 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 - **Thread reuse** — Resume existing threads to send follow-up prompts, build on previous responses, or steer the work in a new direction.
 - **Approval control** — Configurable approval policies for tool calls: auto-approve, interactive, or deny.
 
-## Prerequisites
-
-Tested on Linux (Ubuntu 22.04), macOS, and Windows 10+. The following must be installed and on your PATH:
-
-- [Bun](https://bun.sh/) >= 1.0 — runs the CLI
-- [Codex CLI](https://github.com/openai/codex) — must support `codex app-server` (tested with 0.106.0; `npm install -g @openai/codex`)
-
 ## Installation
+
+Requires [Bun](https://bun.sh/) >= 1.0 and [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) on your PATH. Tested on Linux (Ubuntu 22.04), macOS, and Windows 10.
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
 cd codex-collab
-./install.sh
 ```
 
-The install script builds a self-contained bundle, copies it to `~/.claude/skills/codex-collab/`, and symlinks the binary. Once installed, Claude discovers the skill automatically and can invoke it without explicit prompting.
-
-For development (live-reloading source changes):
+### Linux / macOS
 
 ```bash
-./install.sh --dev
+./install.sh
 ```
 
 ### Windows
 
 ```powershell
-git clone https://github.com/Kevin7Qi/codex-collab.git
-cd codex-collab
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-For development:
+After installation, **reopen your terminal** so the updated PATH takes effect, then run `codex-collab health` to verify.
 
-```powershell
+The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and adds a binary shim to your PATH. Once installed, Claude discovers the skill automatically.
+
+<details>
+<summary>Development mode</summary>
+
+Use `--dev` to symlink source files for live-reloading instead of building a bundle:
+
+```bash
+# Linux / macOS
+./install.sh --dev
+
+# Windows (may require Developer Mode or an elevated terminal for symlinks)
 powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 ```
 
-> **Note:** Dev mode uses symlinks, which may require [Developer Mode](https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-for-development) or an elevated terminal on Windows.
+</details>
 
 ## Quick Start
 

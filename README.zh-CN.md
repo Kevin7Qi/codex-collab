@@ -21,44 +21,45 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 - **会话复用** — 接续先前的会话继续对话，在既有上下文基础上推进，不必从头开始。
 - **审批控制** — 按需配置工具调用的审批策略：自动批准、交互确认或拒绝。
 
-## 环境要求
-
-在 Linux (Ubuntu 22.04)、macOS 与 Windows 10+ 上测试通过。请确保以下工具已安装并加入 PATH：
-
-- [Bun](https://bun.sh/) >= 1.0 — 用于运行 CLI
-- [Codex CLI](https://github.com/openai/codex) — 须支持 `codex app-server` 子命令（已测试 0.106.0；`npm install -g @openai/codex`）
-
 ## 安装
+
+需要 [Bun](https://bun.sh/) >= 1.0 和 [Codex CLI](https://github.com/openai/codex)（`npm install -g @openai/codex`）并加入 PATH。已在 Linux (Ubuntu 22.04)、macOS 与 Windows 10 上测试通过。
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
 cd codex-collab
-./install.sh
 ```
 
-运行后会自动构建独立 bundle 并部署到 `~/.claude/skills/codex-collab/`。完成后 Claude 即可自动发现该技能，无需额外配置。
-
-开发模式（源码变更实时生效）：
+### Linux / macOS
 
 ```bash
-./install.sh --dev
+./install.sh
 ```
 
 ### Windows
 
 ```powershell
-git clone https://github.com/Kevin7Qi/codex-collab.git
-cd codex-collab
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-开发模式：
+安装完成后，**重新打开终端**以使 PATH 生效，然后运行 `codex-collab health` 验证安装。
 
-```powershell
+安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并添加可执行文件到 PATH。完成后 Claude 即可自动发现该技能。
+
+<details>
+<summary>开发模式</summary>
+
+使用 `--dev` 以符号链接方式安装，源码变更实时生效：
+
+```bash
+# Linux / macOS
+./install.sh --dev
+
+# Windows（可能需要启用开发者模式或使用管理员终端以创建符号链接）
 powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 ```
 
-> **注意：** 开发模式使用符号链接，Windows 上可能需要启用[开发者模式](https://learn.microsoft.com/zh-cn/windows/apps/get-started/enable-your-device-for-development)或使用管理员终端。
+</details>
 
 ## 快速开始
 
