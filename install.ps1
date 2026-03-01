@@ -147,22 +147,12 @@ if ($env:Path -notlike "*$BinDir*") {
 
 # Verify and health check
 Write-Host ""
-if (Get-Command codex-collab -ErrorAction SilentlyContinue) {
-    codex-collab health
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error: 'codex-collab health' failed. The installation may be broken."
-        exit 1
-    }
-} elseif (Get-Command codex-collab.cmd -ErrorAction SilentlyContinue) {
-    codex-collab.cmd health
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error: 'codex-collab health' failed. The installation may be broken."
-        exit 1
-    }
-} else {
-    Write-Host "Note: codex-collab not found in current PATH. Close and reopen your terminal, then run 'codex-collab health' to verify."
+codex-collab health
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Error: 'codex-collab health' failed. The installation may be broken."
+    exit 1
 }
 
 $mode = if ($Dev) { "dev" } else { "build" }
 Write-Host ""
-Write-Host "Done ($mode mode). Run 'codex-collab --help' to get started."
+Write-Host "Done ($mode mode). Open a new terminal, then run 'codex-collab --help' to get started."

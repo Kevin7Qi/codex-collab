@@ -28,15 +28,31 @@ jobs:
       - name: Run tests
         run: bun test
 
+      - name: Install codex CLI
+        run: npm install -g @openai/codex
+
       - name: Smoke-test installer (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           ./install.sh
           codex-collab --help
+          codex-collab health
 
       - name: Smoke-test installer (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File install.ps1
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          .\install.ps1
           codex-collab --help
+          codex-collab health
+
+      - name: Smoke-test .cmd shim from CMD (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          REM Simulate new terminal: reload PATH from registry, keep session PATH for bun/node
+          for /f "delims=" %%i in ('powershell -Command "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')"') do set "PATH=%%i;%PATH%"
+          codex-collab --help
+          codex-collab health
+
