@@ -393,7 +393,7 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
         try {
           const { spawnSync: ss } = await import("child_process");
           const r = ss("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000 });
-          if (r.status !== 0 && r.status !== 128) {
+          if (r.status !== 0 && r.status !== null && r.status !== 128) {
             const msg = r.stderr?.toString().trim();
             console.error(`[codex] Warning: taskkill exited ${r.status}${msg ? ": " + msg : ""}`);
           }
