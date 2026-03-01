@@ -6,7 +6,7 @@ import { connect } from "./protocol";
 
 const runIntegration =
   process.env.RUN_INTEGRATION === "1" &&
-  Bun.spawnSync(["which", "codex"]).exitCode === 0;
+  Bun.spawnSync([process.platform === "win32" ? "where" : "which", "codex"]).exitCode === 0;
 
 describe.skipIf(!runIntegration)("integration", () => {
   test("connect and list models", async () => {

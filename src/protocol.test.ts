@@ -1,5 +1,7 @@
 import { describe, expect, test, beforeAll, beforeEach, afterEach } from "bun:test";
 import { parseMessage, formatNotification, formatResponse, connect, type AppServerClient } from "./protocol";
+import { join } from "path";
+import { tmpdir } from "os";
 
 // Test-local formatRequest helper with its own counter (not exported from protocol.ts
 // to avoid ID collisions with AppServerClient's internal counter).
@@ -11,8 +13,8 @@ function formatRequest(method: string, params?: unknown): { line: string; id: nu
   return { line: JSON.stringify(msg) + "\n", id };
 }
 
-const TEST_DIR = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-protocol`;
-const MOCK_SERVER = `${TEST_DIR}/mock-app-server.ts`;
+const TEST_DIR = join(tmpdir(), "codex-collab-test-protocol");
+const MOCK_SERVER = join(TEST_DIR, "mock-app-server.ts");
 
 const MOCK_SERVER_SOURCE = `#!/usr/bin/env bun
 const decoder = new TextDecoder();
@@ -367,7 +369,7 @@ describe("AppServerClient", () => {
       main();
     `;
 
-    const serverPath = `${TEST_DIR}/mock-notify-server.ts`;
+    const serverPath = join(TEST_DIR, "mock-notify-server.ts");
     await Bun.write(serverPath, notifyServer);
 
     const received: unknown[] = [];
@@ -439,7 +441,7 @@ describe("AppServerClient", () => {
       main();
     `;
 
-    const serverPath = `${TEST_DIR}/mock-approval-server.ts`;
+    const serverPath = join(TEST_DIR, "mock-approval-server.ts");
     await Bun.write(serverPath, approvalServer);
 
     client = await connect({
