@@ -91,7 +91,7 @@ if ($Dev) {
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
     Set-Content -Path $cmdShim -Value "@bun `"$repoRel\src\cli.ts`" %*" -Encoding ASCII
     $bashShim = Join-Path $BinDir "codex-collab"
-    Set-Content -Path $bashShim -Value "#!/usr/bin/env bun`nexec bun `"$(Join-Path $RepoDir 'src\cli.ts')`" `"`$@`"" -Encoding UTF8 -NoNewline
+    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bun`nexec bun `"$(Join-Path $RepoDir 'src\cli.ts')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
     Write-Host "Created binary shims at $BinDir"
 
 } else {
@@ -112,7 +112,7 @@ if ($Dev) {
     # Prepend shebang if missing (needed for Unix execution; harmless on Windows with Bun)
     $content = Get-Content $built -Raw
     if (-not $content.StartsWith("#!/")) {
-        Set-Content -Path $built -Value ("#!/usr/bin/env bun`n" + $content) -NoNewline -Encoding UTF8
+        [System.IO.File]::WriteAllText($built, "#!/usr/bin/env bun`n" + $content, [System.Text.UTF8Encoding]::new($false))
     }
 
     # Copy SKILL.md and LICENSE
@@ -132,7 +132,7 @@ if ($Dev) {
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
     Set-Content -Path $cmdShim -Value "@bun `"$skillRel\scripts\codex-collab`" %*" -Encoding ASCII
     $bashShim = Join-Path $BinDir "codex-collab"
-    Set-Content -Path $bashShim -Value "#!/usr/bin/env bun`nexec bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" `"`$@`"" -Encoding UTF8 -NoNewline
+    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bun`nexec bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
     Write-Host "Created binary shims at $BinDir"
 }
 

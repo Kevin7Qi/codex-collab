@@ -13,6 +13,15 @@ function formatRequest(method: string, params?: unknown): { line: string; id: nu
   return { line: JSON.stringify(msg) + "\n", id };
 }
 
+async function captureErrorMessage(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise;
+    return "";
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
 const TEST_DIR = join(tmpdir(), "codex-collab-test-protocol");
 const MOCK_SERVER = join(TEST_DIR, "mock-app-server.ts");
 
@@ -279,9 +288,12 @@ describe("AppServerClient", () => {
       env: { MOCK_ERROR_RESPONSE: "1" },
     });
     try {
-      await expect(
+      const error = await captureErrorMessage(
         c.request("thread/start", { model: "bad-model" }),
-      ).rejects.toThrow("JSON-RPC error -32603: Internal error: model not available");
+      );
+      expect(error).toContain(
+        "JSON-RPC error -32603: Internal error: model not available",
+      );
     } finally {
       await c.close();
     }
@@ -293,9 +305,8 @@ describe("AppServerClient", () => {
       requestTimeout: 5000,
     });
     try {
-      await expect(
-        c.request("unknown/method"),
-      ).rejects.toThrow("Method not found: unknown/method");
+      const error = await captureErrorMessage(c.request("unknown/method"));
+      expect(error).toContain("Method not found: unknown/method");
     } finally {
       await c.close();
     }
@@ -310,7 +321,8 @@ describe("AppServerClient", () => {
     try {
       // The mock server exits after initialize, so the next request should fail
       await new Promise((r) => setTimeout(r, 100));
-      await expect(c.request("thread/start")).rejects.toThrow();
+      const error = await captureErrorMessage(c.request("thread/start"));
+      expect(error.length).toBeGreaterThan(0);
     } finally {
       await c.close();
     }
@@ -323,9 +335,8 @@ describe("AppServerClient", () => {
     });
     await c.close();
 
-    await expect(
-      c.request("thread/start"),
-    ).rejects.toThrow("Client is closed");
+    const error = await captureErrorMessage(c.request("thread/start"));
+    expect(error).toContain("Client is closed");
   });
 
   test("notification handlers receive server notifications", async () => {
