@@ -44,7 +44,15 @@ if ($missing.Count -gt 0) {
 # Install dependencies
 Write-Host "Installing dependencies..."
 Push-Location $RepoDir
-try { bun install } finally { Pop-Location }
+try {
+    bun install
+    if ($LASTEXITCODE -ne 0) { throw "'bun install' failed with exit code $LASTEXITCODE" }
+} catch {
+    Write-Host "Error: $_"
+    exit 1
+} finally {
+    Pop-Location
+}
 
 if ($Dev) {
     Write-Host "Installing in dev mode (symlinks)..."
@@ -69,7 +77,7 @@ if ($Dev) {
     # Create .cmd shim
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    Set-Content -Path $cmdShim -Value "@bun `"$(Join-Path $RepoDir 'src\cli.ts')`" %*"
+    Set-Content -Path $cmdShim -Value "@bun `"$(Join-Path $RepoDir 'src\cli.ts')`" %*" -Encoding OEM
     Write-Host "Created binary shim at $BinDir\codex-collab.cmd"
 
 } else {
@@ -82,11 +90,15 @@ if ($Dev) {
 
     $built = Join-Path $skillBuild "scripts\codex-collab"
     bun build (Join-Path $RepoDir "src\cli.ts") --outfile $built --target bun
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error: 'bun build' failed with exit code $LASTEXITCODE"
+        exit 1
+    }
 
-    # Prepend shebang if missing
+    # Prepend shebang if missing (needed for Unix execution; harmless on Windows with Bun)
     $content = Get-Content $built -Raw
     if (-not $content.StartsWith("#!/")) {
-        Set-Content -Path $built -Value ("#!/usr/bin/env bun`n" + $content) -NoNewline
+        Set-Content -Path $built -Value ("#!/usr/bin/env bun`n" + $content) -NoNewline -Encoding UTF8
     }
 
     # Copy SKILL.md and LICENSE
@@ -102,7 +114,7 @@ if ($Dev) {
     # Create .cmd shim
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    Set-Content -Path $cmdShim -Value "@bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" %*"
+    Set-Content -Path $cmdShim -Value "@bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" %*" -Encoding OEM
     Write-Host "Created binary shim at $BinDir\codex-collab.cmd"
 }
 
@@ -119,12 +131,18 @@ if ($env:Path -notlike "*$BinDir*") {
 
 # Verify and health check
 Write-Host ""
+$healthPassed = $false
 if (Get-Command codex-collab -ErrorAction SilentlyContinue) {
     codex-collab health
+    $healthPassed = ($LASTEXITCODE -eq 0)
 } elseif (Get-Command codex-collab.cmd -ErrorAction SilentlyContinue) {
     codex-collab.cmd health
+    $healthPassed = ($LASTEXITCODE -eq 0)
 } else {
     Write-Host "Warning: codex-collab not found on PATH."
+}
+
+if (-not $healthPassed) {
     Write-Host "Close and reopen your terminal, then run 'codex-collab health' to verify."
 }
 

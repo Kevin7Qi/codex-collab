@@ -89,7 +89,8 @@ export interface AppServerClient {
   onRequest(method: string, handler: ServerRequestHandler): () => void;
   /** Send a response to a server-sent request. */
   respond(id: RequestId, result: unknown): void;
-  /** Gracefully close: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL. */
+  /** Gracefully close: close stdin -> wait 5s -> terminate.
+   *  On Unix: SIGTERM -> wait 3s -> SIGKILL. On Windows: TerminateProcess (immediate). */
   close(): Promise<void>;
   /** The user-agent string from the initialize handshake. */
   userAgent: string;

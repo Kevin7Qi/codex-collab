@@ -23,7 +23,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 
 ## 环境要求
 
-在 Linux (Ubuntu 22.04) 与 macOS 上测试通过。请确保以下工具已安装并加入 PATH：
+在 Linux (Ubuntu 22.04)、macOS 与 Windows 10+ 上测试通过。请确保以下工具已安装并加入 PATH：
 
 - [Bun](https://bun.sh/) >= 1.0 — 用于运行 CLI
 - [Codex CLI](https://github.com/openai/codex) — 须支持 `codex app-server` 子命令（已测试 0.106.0；`npm install -g @openai/codex`）
@@ -43,6 +43,22 @@ cd codex-collab
 ```bash
 ./install.sh --dev
 ```
+
+### Windows
+
+```powershell
+git clone https://github.com/Kevin7Qi/codex-collab.git
+cd codex-collab
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+开发模式：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
+```
+
+> **注意：** 开发模式使用符号链接，Windows 上可能需要启用[开发者模式](https://learn.microsoft.com/zh-cn/windows/apps/get-started/enable-your-device-for-development)或使用管理员终端。
 
 ## 快速开始
 

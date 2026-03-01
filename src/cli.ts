@@ -942,7 +942,7 @@ Examples:
 // ---------------------------------------------------------------------------
 
 /** Ensure data directories exist (called only for commands that need them).
- *  Config getters throw if HOME is unset, producing a clear error. */
+ *  Config getters throw if the home directory cannot be determined, producing a clear error. */
 function ensureDataDirs(): void {
   mkdirSync(config.logsDir, { recursive: true });
   mkdirSync(config.approvalsDir, { recursive: true });

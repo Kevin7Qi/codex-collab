@@ -30,7 +30,7 @@ export const config = {
   defaultTimeout: 1200, // seconds — turn completion (20 min)
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
 
-  // Data paths — lazy via getters so HOME is validated at point of use, not import time.
+  // Data paths — lazy via getters so the home directory is validated at point of use, not import time.
   // Validated by ensureDataDirs() in cli.ts before any file operations.
   get dataDir() { return join(getHome(), ".codex-collab"); },
   get threadsFile() { return join(this.dataDir, "threads.json"); },
