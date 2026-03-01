@@ -5,11 +5,9 @@ import { join } from "path";
 import pkg from "../package.json";
 
 function getHome(): string {
-  try {
-    return homedir();
-  } catch {
-    throw new Error("Cannot determine home directory");
-  }
+  const home = homedir();
+  if (!home) throw new Error("Cannot determine home directory");
+  return home;
 }
 
 export const config = {
