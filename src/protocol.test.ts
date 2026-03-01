@@ -14,12 +14,17 @@ function formatRequest(method: string, params?: unknown): { line: string; id: nu
 }
 
 async function captureErrorMessage(promise: Promise<unknown>): Promise<string> {
+  // Workaround: bun test on Windows doesn't flush .rejects properly, so we
+  // capture the rejection message manually instead of using .rejects.toThrow().
+  let resolved = false;
   try {
     await promise;
-    return "";
+    resolved = true;
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
+  if (resolved) throw new Error("Expected promise to reject, but it resolved");
+  return ""; // unreachable
 }
 
 const TEST_DIR = join(tmpdir(), "codex-collab-test-protocol");

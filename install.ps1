@@ -103,9 +103,11 @@ if ($Dev) {
     New-Item -ItemType Directory -Path (Join-Path $skillBuild "scripts") -Force | Out-Null
 
     $built = Join-Path $skillBuild "scripts\codex-collab"
-    bun build (Join-Path $RepoDir "src\cli.ts") --outfile $built --target bun
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Error: 'bun build' failed with exit code $LASTEXITCODE"
+    try {
+        bun build (Join-Path $RepoDir "src\cli.ts") --outfile $built --target bun
+        if ($LASTEXITCODE -ne 0) { throw "'bun build' failed with exit code $LASTEXITCODE" }
+    } catch {
+        Write-Host "Error: $_"
         exit 1
     }
 
@@ -149,19 +151,20 @@ if ($env:Path -notlike "*$BinDir*") {
 
 # Verify and health check
 Write-Host ""
-$healthPassed = $false
 if (Get-Command codex-collab -ErrorAction SilentlyContinue) {
     codex-collab health
-    $healthPassed = ($LASTEXITCODE -eq 0)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error: 'codex-collab health' failed. The installation may be broken."
+        exit 1
+    }
 } elseif (Get-Command codex-collab.cmd -ErrorAction SilentlyContinue) {
     codex-collab.cmd health
-    $healthPassed = ($LASTEXITCODE -eq 0)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error: 'codex-collab health' failed. The installation may be broken."
+        exit 1
+    }
 } else {
-    Write-Host "Warning: codex-collab not found on PATH."
-}
-
-if (-not $healthPassed) {
-    Write-Host "Close and reopen your terminal, then run 'codex-collab health' to verify."
+    Write-Host "Note: codex-collab not found in current PATH. Close and reopen your terminal, then run 'codex-collab health' to verify."
 }
 
 $mode = if ($Dev) { "dev" } else { "build" }

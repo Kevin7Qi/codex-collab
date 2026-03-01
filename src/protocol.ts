@@ -91,7 +91,8 @@ export interface AppServerClient {
   respond(id: RequestId, result: unknown): void;
   /** Close the connection and terminate the server process.
    *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL.
-   *  On Windows: close stdin + TerminateProcess (immediate, no graceful wait). */
+   *  On Windows: close stdin, then immediately terminate the process tree
+   *  (no timed grace period, unlike Unix). */
   close(): Promise<void>;
   /** The user-agent string from the initialize handshake. */
   userAgent: string;
@@ -366,7 +367,7 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     closed = true;
     rejectAll("Client closed");
 
-    // Step 1: Close stdin to signal the server to exit
+    // Close stdin to signal the server to exit
     try {
       proc.stdin.end();
     } catch (e) {
@@ -376,15 +377,29 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     }
 
     if (process.platform === "win32") {
-      // Windows: no graceful signal — TerminateProcess is always immediate.
+      // Windows: no SIGTERM equivalent — process termination is immediate.
       // proc.kill() kills the direct child; taskkill /T /F kills the entire
       // process tree (including any grandchildren from codex app-server).
-      try { proc.kill(); } catch {}
+      // Note: we intentionally do NOT await readLoop/proc.exited here because
+      // Bun's test runner on Windows doesn't fully await async finally blocks,
+      // and the extra latency causes inter-test process races. The process is
+      // already dead after kill+taskkill, so the dangling promise is benign.
+      try { proc.kill(); } catch (e) {
+        if (!exited) {
+          console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       if (proc.pid) {
         try {
           const { spawnSync: ss } = await import("child_process");
-          ss("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "ignore", timeout: 5000 });
-        } catch {}
+          const r = ss("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000 });
+          if (r.status !== 0 && r.status !== 128) {
+            const msg = r.stderr?.toString().trim();
+            console.error(`[codex] Warning: taskkill exited ${r.status}${msg ? ": " + msg : ""}`);
+          }
+        } catch (e) {
+          console.error(`[codex] Warning: process tree cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
       return;
     }
