@@ -23,7 +23,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Prerequisites
 
-Tested on Linux (Ubuntu 22.04) and macOS. Both must be installed and on your PATH.
+Tested on Linux (Ubuntu 22.04), macOS, and Windows 10+. Both must be installed and on your PATH.
 
 - [Bun](https://bun.sh/) >= 1.0 — runs the CLI
 - [Codex CLI](https://github.com/openai/codex) — must support `codex app-server` (tested with 0.106.0; `npm install -g @openai/codex`)
@@ -43,6 +43,22 @@ For development (live-reloading source changes):
 ```bash
 ./install.sh --dev
 ```
+
+### Windows
+
+```powershell
+git clone https://github.com/Kevin7Qi/codex-collab.git
+cd codex-collab
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+For development:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
+```
+
+> **Note:** Dev mode uses symlinks, which may require [Developer Mode](https://learn.microsoft.com/en-us/windows/apps/get-started/enable-your-device-for-development) or an elevated terminal on Windows.
 
 ## Quick Start
 
