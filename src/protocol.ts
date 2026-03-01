@@ -89,8 +89,9 @@ export interface AppServerClient {
   onRequest(method: string, handler: ServerRequestHandler): () => void;
   /** Send a response to a server-sent request. */
   respond(id: RequestId, result: unknown): void;
-  /** Gracefully close: close stdin -> wait 5s -> terminate.
-   *  On Unix: SIGTERM -> wait 3s -> SIGKILL. On Windows: TerminateProcess (immediate). */
+  /** Close the connection and terminate the server process.
+   *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL.
+   *  On Windows: close stdin + TerminateProcess (immediate, no graceful wait). */
   close(): Promise<void>;
   /** The user-agent string from the initialize handshake. */
   userAgent: string;
@@ -374,19 +375,25 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
       }
     }
 
-    // Step 2: Wait up to 5s for graceful exit
-    if (await waitForExit(5000)) { await readLoop; return; }
-
-    // Step 3: Terminate the process
     if (process.platform === "win32") {
-      // Windows: proc.kill() calls TerminateProcess (no graceful signal distinction)
-      proc.kill();
-    } else {
-      // Unix: SIGTERM for graceful shutdown, escalate to SIGKILL
-      proc.kill("SIGTERM");
-      if (await waitForExit(3000)) { await readLoop; return; }
-      proc.kill("SIGKILL");
+      // Windows: no graceful signal — TerminateProcess is always immediate.
+      // proc.kill() kills the direct child; taskkill /T /F kills the entire
+      // process tree (including any grandchildren from codex app-server).
+      try { proc.kill(); } catch {}
+      if (proc.pid) {
+        try {
+          const { spawnSync: ss } = await import("child_process");
+          ss("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "ignore", timeout: 5000 });
+        } catch {}
+      }
+      return;
     }
+
+    // Unix: wait for graceful exit, then escalate
+    if (await waitForExit(5000)) { await readLoop; return; }
+    proc.kill("SIGTERM");
+    if (await waitForExit(3000)) { await readLoop; return; }
+    proc.kill("SIGKILL");
     await proc.exited;
     await readLoop;
   }

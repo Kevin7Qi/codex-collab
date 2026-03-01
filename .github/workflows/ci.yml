@@ -27,3 +27,16 @@ jobs:
 
       - name: Run tests
         run: bun test
+
+      - name: Smoke-test installer (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          ./install.sh
+          codex-collab --help
+
+      - name: Smoke-test installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File install.ps1
+          codex-collab --help

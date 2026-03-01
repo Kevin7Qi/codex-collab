@@ -873,7 +873,8 @@ async function cmdHealth() {
   }
 
   console.log(`  bun:   ${Bun.version}`);
-  console.log(`  codex: ${which.stdout.toString().trim()}`);
+  // `where` on Windows returns multiple matches; show only the first
+  console.log(`  codex: ${which.stdout.toString().trim().split("\n")[0].trim()}`);
 
   try {
     const userAgent = await withClient(async (client) => client.userAgent);

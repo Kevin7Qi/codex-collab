@@ -17,54 +17,48 @@ const TEST_DIR = join(tmpdir(), "codex-collab-test-protocol");
 const MOCK_SERVER = join(TEST_DIR, "mock-app-server.ts");
 
 const MOCK_SERVER_SOURCE = `#!/usr/bin/env bun
-const decoder = new TextDecoder();
 function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 const exitEarly = process.env.MOCK_EXIT_EARLY === "1";
 const errorResponse = process.env.MOCK_ERROR_RESPONSE === "1";
-async function main() {
-  const reader = Bun.stdin.stream().getReader();
-  let buffer = "";
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buffer.indexOf("\\n")) !== -1) {
-        const line = buffer.slice(0, idx).trim();
-        buffer = buffer.slice(idx + 1);
-        if (!line) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch { continue; }
-        if (msg.id !== undefined && msg.method) {
-          switch (msg.method) {
-            case "initialize":
-              respond({ id: msg.id, result: { userAgent: "mock-codex-server/0.1.0" } });
-              if (exitEarly) setTimeout(() => process.exit(0), 50);
-              break;
-            case "thread/start":
-              if (errorResponse) {
-                respond({ id: msg.id, error: { code: -32603, message: "Internal error: model not available" } });
-              } else {
-                respond({ id: msg.id, result: {
-                  thread: { id: "thread-mock-001", preview: "", modelProvider: "openai",
-                    createdAt: Date.now(), updatedAt: Date.now(), status: { type: "idle" },
-                    path: null, cwd: "/tmp", cliVersion: "0.1.0", source: "mock", name: null,
-                    agentNickname: null, agentRole: null, gitInfo: null, turns: [] },
-                  model: msg.params?.model || "gpt-5.3-codex", modelProvider: "openai",
-                  cwd: "/tmp", approvalPolicy: "never", sandbox: null,
-                }});
-              }
-              break;
-            default:
-              respond({ id: msg.id, error: { code: -32601, message: "Method not found: " + msg.method } });
+let buffer = "";
+process.stdin.setEncoding("utf-8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let idx;
+  while ((idx = buffer.indexOf("\\n")) !== -1) {
+    const line = buffer.slice(0, idx).trim();
+    buffer = buffer.slice(idx + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.id !== undefined && msg.method) {
+      switch (msg.method) {
+        case "initialize":
+          respond({ id: msg.id, result: { userAgent: "mock-codex-server/0.1.0" } });
+          if (exitEarly) setTimeout(() => process.exit(0), 50);
+          break;
+        case "thread/start":
+          if (errorResponse) {
+            respond({ id: msg.id, error: { code: -32603, message: "Internal error: model not available" } });
+          } else {
+            respond({ id: msg.id, result: {
+              thread: { id: "thread-mock-001", preview: "", modelProvider: "openai",
+                createdAt: Date.now(), updatedAt: Date.now(), status: { type: "idle" },
+                path: null, cwd: "/tmp", cliVersion: "0.1.0", source: "mock", name: null,
+                agentNickname: null, agentRole: null, gitInfo: null, turns: [] },
+              model: msg.params?.model || "gpt-5.3-codex", modelProvider: "openai",
+              cwd: "/tmp", approvalPolicy: "never", sandbox: null,
+            }});
           }
-        }
+          break;
+        default:
+          respond({ id: msg.id, error: { code: -32601, message: "Method not found: " + msg.method } });
       }
     }
-  } catch {}
-}
-main();
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+process.stdin.on("error", () => process.exit(1));
 `;
 
 beforeAll(async () => {
@@ -228,98 +222,101 @@ describe("parseMessage", () => {
 // AppServerClient integration tests (using mock server)
 // ---------------------------------------------------------------------------
 
+// Each test manages its own client lifecycle to avoid dangling-process races
+// when bun runs tests concurrently within a describe block.
 describe("AppServerClient", () => {
-  let client: AppServerClient | null = null;
-
+  // On Windows, bun's test runner doesn't fully await async finally blocks before moving
+  // to the next test. close() takes ~400ms on Windows (dominated by taskkill process tree
+  // cleanup). This delay ensures close() completes before the next test spawns a mock server.
   afterEach(async () => {
-    if (client) {
-      await client.close();
-      client = null;
+    if (process.platform === "win32") {
+      await new Promise((r) => setTimeout(r, 1000));
     }
   });
 
   test("connect performs initialize handshake and returns userAgent", async () => {
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
     });
-    expect(client.userAgent).toBe("mock-codex-server/0.1.0");
+    try {
+      expect(c.userAgent).toBe("mock-codex-server/0.1.0");
+    } finally {
+      await c.close();
+    }
   });
 
   test("close shuts down gracefully", async () => {
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
     });
-    await client.close();
-    client = null;
+    await c.close();
     // No error means success — process exited cleanly
   });
 
   test("request sends and receives response", async () => {
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
     });
-
-    const result = await client.request<{ thread: { id: string }; model: string }>(
-      "thread/start",
-      { model: "gpt-5.3-codex" },
-    );
-
-    expect(result.thread.id).toBe("thread-mock-001");
-    expect(result.model).toBe("gpt-5.3-codex");
+    try {
+      const result = await c.request<{ thread: { id: string }; model: string }>(
+        "thread/start",
+        { model: "gpt-5.3-codex" },
+      );
+      expect(result.thread.id).toBe("thread-mock-001");
+      expect(result.model).toBe("gpt-5.3-codex");
+    } finally {
+      await c.close();
+    }
   });
 
   test("request rejects with descriptive error on JSON-RPC error response", async () => {
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
       env: { MOCK_ERROR_RESPONSE: "1" },
     });
-
-    await expect(
-      client.request("thread/start", { model: "bad-model" }),
-    ).rejects.toThrow("JSON-RPC error -32603: Internal error: model not available");
+    try {
+      await expect(
+        c.request("thread/start", { model: "bad-model" }),
+      ).rejects.toThrow("JSON-RPC error -32603: Internal error: model not available");
+    } finally {
+      await c.close();
+    }
   });
 
   test("request rejects with error for unknown method", async () => {
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
     });
-
-    await expect(
-      client.request("unknown/method"),
-    ).rejects.toThrow("Method not found: unknown/method");
+    try {
+      await expect(
+        c.request("unknown/method"),
+      ).rejects.toThrow("Method not found: unknown/method");
+    } finally {
+      await c.close();
+    }
   });
 
   test("request rejects when process exits unexpectedly", async () => {
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
       env: { MOCK_EXIT_EARLY: "1" },
     });
-
-    // The mock server exits after initialize, so the next request should fail
-    // Give a tiny delay for the process to actually exit
-    await new Promise((r) => setTimeout(r, 100));
-
-    await expect(
-      client.request("thread/start"),
-    ).rejects.toThrow();
+    try {
+      // The mock server exits after initialize, so the next request should fail
+      await new Promise((r) => setTimeout(r, 100));
+      await expect(c.request("thread/start")).rejects.toThrow();
+    } finally {
+      await c.close();
+    }
   });
 
   test("request rejects after client is closed", async () => {
-    client = await connect({
-      command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
-    });
-
-    await client.close();
-    client = null;
-
-    // We need a fresh reference but close has been called, so we reconnect then close then try
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
@@ -334,154 +331,151 @@ describe("AppServerClient", () => {
   test("notification handlers receive server notifications", async () => {
     // For this test we use a custom inline mock that sends a notification
     const notifyServer = `
-      const decoder = new TextDecoder();
-      async function main() {
-        const reader = Bun.stdin.stream().getReader();
-        let buffer = "";
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buffer.indexOf("\\n")) !== -1) {
-              const line = buffer.slice(0, idx).trim();
-              buffer = buffer.slice(idx + 1);
-              if (!line) continue;
-              const msg = JSON.parse(line);
-              if (msg.id !== undefined && msg.method === "initialize") {
-                process.stdout.write(JSON.stringify({
-                  id: msg.id,
-                  result: { userAgent: "notify-server/0.1.0" },
-                }) + "\\n");
-              }
-              // After receiving "initialized" notification, send a server notification
-              if (!msg.id && msg.method === "initialized") {
-                process.stdout.write(JSON.stringify({
-                  method: "item/started",
-                  params: { item: { type: "agentMessage", id: "item-1", text: "" }, threadId: "t1", turnId: "turn-1" },
-                }) + "\\n");
-              }
-            }
+      let buffer = "";
+      process.stdin.setEncoding("utf-8");
+      process.stdin.on("data", (chunk) => {
+        buffer += chunk;
+        let idx;
+        while ((idx = buffer.indexOf("\\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          const msg = JSON.parse(line);
+          if (msg.id !== undefined && msg.method === "initialize") {
+            process.stdout.write(JSON.stringify({
+              id: msg.id,
+              result: { userAgent: "notify-server/0.1.0" },
+            }) + "\\n");
           }
-        } catch {}
-      }
-      main();
+          if (!msg.id && msg.method === "initialized") {
+            process.stdout.write(JSON.stringify({
+              method: "item/started",
+              params: { item: { type: "agentMessage", id: "item-1", text: "" }, threadId: "t1", turnId: "turn-1" },
+            }) + "\\n");
+          }
+        }
+      });
+      process.stdin.on("end", () => process.exit(0));
+      process.stdin.on("error", () => process.exit(1));
     `;
 
     const serverPath = join(TEST_DIR, "mock-notify-server.ts");
     await Bun.write(serverPath, notifyServer);
 
     const received: unknown[] = [];
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", serverPath],
       requestTimeout: 5000,
     });
 
-    client.on("item/started", (params) => {
-      received.push(params);
-    });
+    try {
+      c.on("item/started", (params) => {
+        received.push(params);
+      });
 
-    // Give time for the notification to arrive
-    await new Promise((r) => setTimeout(r, 200));
+      // Give time for the notification to arrive
+      await new Promise((r) => setTimeout(r, 200));
 
-    expect(received.length).toBe(1);
-    expect(received[0]).toEqual({
-      item: { type: "agentMessage", id: "item-1", text: "" },
-      threadId: "t1",
-      turnId: "turn-1",
-    });
+      expect(received.length).toBe(1);
+      expect(received[0]).toEqual({
+        item: { type: "agentMessage", id: "item-1", text: "" },
+        threadId: "t1",
+        turnId: "turn-1",
+      });
+    } finally {
+      await c.close();
+    }
   });
 
   test("onRequest handler responds to server requests", async () => {
     // Mock server that sends a server request after initialize
     const approvalServer = `
-      const decoder = new TextDecoder();
       let sentApproval = false;
-      async function main() {
-        const reader = Bun.stdin.stream().getReader();
-        let buffer = "";
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            let idx;
-            while ((idx = buffer.indexOf("\\n")) !== -1) {
-              const line = buffer.slice(0, idx).trim();
-              buffer = buffer.slice(idx + 1);
-              if (!line) continue;
-              const msg = JSON.parse(line);
-              if (msg.id !== undefined && msg.method === "initialize") {
-                process.stdout.write(JSON.stringify({
-                  id: msg.id,
-                  result: { userAgent: "approval-server/0.1.0" },
-                }) + "\\n");
-              }
-              // After initialized notification, send a server request
-              if (!msg.id && msg.method === "initialized" && !sentApproval) {
-                sentApproval = true;
-                process.stdout.write(JSON.stringify({
-                  id: "srv-1",
-                  method: "item/commandExecution/requestApproval",
-                  params: { command: "rm -rf /", threadId: "t1", turnId: "turn-1", itemId: "item-1" },
-                }) + "\\n");
-              }
-              // When we get back our response, send a verification notification
-              if (msg.id === "srv-1" && msg.result) {
-                process.stdout.write(JSON.stringify({
-                  method: "test/approvalReceived",
-                  params: { decision: msg.result.decision },
-                }) + "\\n");
-              }
-            }
+      let buffer = "";
+      process.stdin.setEncoding("utf-8");
+      process.stdin.on("data", (chunk) => {
+        buffer += chunk;
+        let idx;
+        while ((idx = buffer.indexOf("\\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          const msg = JSON.parse(line);
+          if (msg.id !== undefined && msg.method === "initialize") {
+            process.stdout.write(JSON.stringify({
+              id: msg.id,
+              result: { userAgent: "approval-server/0.1.0" },
+            }) + "\\n");
           }
-        } catch {}
-      }
-      main();
+          if (!msg.id && msg.method === "initialized" && !sentApproval) {
+            sentApproval = true;
+            process.stdout.write(JSON.stringify({
+              id: "srv-1",
+              method: "item/commandExecution/requestApproval",
+              params: { command: "rm -rf /", threadId: "t1", turnId: "turn-1", itemId: "item-1" },
+            }) + "\\n");
+          }
+          if (msg.id === "srv-1" && msg.result) {
+            process.stdout.write(JSON.stringify({
+              method: "test/approvalReceived",
+              params: { decision: msg.result.decision },
+            }) + "\\n");
+          }
+        }
+      });
+      process.stdin.on("end", () => process.exit(0));
+      process.stdin.on("error", () => process.exit(1));
     `;
 
     const serverPath = join(TEST_DIR, "mock-approval-server.ts");
     await Bun.write(serverPath, approvalServer);
 
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", serverPath],
       requestTimeout: 5000,
     });
 
-    // Register handler for approval requests
-    client.onRequest("item/commandExecution/requestApproval", (params: any) => {
-      return { decision: "accept" };
-    });
+    try {
+      // Register handler for approval requests
+      c.onRequest("item/commandExecution/requestApproval", (params: any) => {
+        return { decision: "accept" };
+      });
 
-    // Wait for the round-trip
-    const received: unknown[] = [];
-    client.on("test/approvalReceived", (params) => {
-      received.push(params);
-    });
+      // Wait for the round-trip
+      const received: unknown[] = [];
+      c.on("test/approvalReceived", (params) => {
+        received.push(params);
+      });
 
-    await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 300));
 
-    expect(received.length).toBe(1);
-    expect(received[0]).toEqual({ decision: "accept" });
+      expect(received.length).toBe(1);
+      expect(received[0]).toEqual({ decision: "accept" });
+    } finally {
+      await c.close();
+    }
   });
 
   test("on returns unsubscribe function", async () => {
-    client = await connect({
+    const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 5000,
     });
 
-    const received: unknown[] = [];
-    const unsub = client.on("test/event", (params) => {
-      received.push(params);
-    });
+    try {
+      const received: unknown[] = [];
+      const unsub = c.on("test/event", (params) => {
+        received.push(params);
+      });
 
-    // Unsubscribe immediately
-    unsub();
+      // Unsubscribe immediately
+      unsub();
 
-    // Even if a notification arrived, handler should not fire
-    // (no notification is sent by the basic mock, but this verifies the unsub mechanism)
-    expect(received.length).toBe(0);
+      // Even if a notification arrived, handler should not fire
+      // (no notification is sent by the basic mock, but this verifies the unsub mechanism)
+      expect(received.length).toBe(0);
+    } finally {
+      await c.close();
+    }
   });
 });

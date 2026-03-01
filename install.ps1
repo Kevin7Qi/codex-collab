@@ -61,7 +61,7 @@ if ($Dev) {
     # Create skill directory
     New-Item -ItemType Directory -Path (Join-Path $SkillDir "scripts") -Force | Out-Null
 
-    # Symlink skill files
+    # Symlink skill files (requires Developer Mode or elevated privileges)
     $links = @(
         @{ Path = (Join-Path $SkillDir "SKILL.md"); Target = (Join-Path $RepoDir "SKILL.md") }
         @{ Path = (Join-Path $SkillDir "scripts\codex-collab"); Target = (Join-Path $RepoDir "src\cli.ts") }
@@ -70,15 +70,29 @@ if ($Dev) {
 
     foreach ($link in $links) {
         if (Test-Path $link.Path) { Remove-Item $link.Path -Force }
-        New-Item -ItemType SymbolicLink -Path $link.Path -Target $link.Target -Force | Out-Null
+        try {
+            New-Item -ItemType SymbolicLink -Path $link.Path -Target $link.Target -Force | Out-Null
+        } catch {
+            Write-Host ""
+            Write-Host "Error: Cannot create symlinks. Dev mode requires one of:"
+            Write-Host "  1. Enable Developer Mode: Settings > Update & Security > For developers"
+            Write-Host "  2. Run this script in an elevated (Administrator) terminal"
+            Write-Host ""
+            Write-Host "Alternatively, use build mode (without -Dev) which does not need symlinks."
+            exit 1
+        }
     }
     Write-Host "Linked skill to $SkillDir"
 
-    # Create .cmd shim
+    # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
+    # Use %USERPROFILE% so the .cmd file stays pure ASCII (locale-safe)
+    $repoRel = $RepoDir.Replace($env:USERPROFILE, "%USERPROFILE%")
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    Set-Content -Path $cmdShim -Value "@bun `"$(Join-Path $RepoDir 'src\cli.ts')`" %*" -Encoding OEM
-    Write-Host "Created binary shim at $BinDir\codex-collab.cmd"
+    Set-Content -Path $cmdShim -Value "@bun `"$repoRel\src\cli.ts`" %*" -Encoding ASCII
+    $bashShim = Join-Path $BinDir "codex-collab"
+    Set-Content -Path $bashShim -Value "#!/usr/bin/env bun`nexec bun `"$(Join-Path $RepoDir 'src\cli.ts')`" `"`$@`"" -Encoding UTF8 -NoNewline
+    Write-Host "Created binary shims at $BinDir"
 
 } else {
     Write-Host "Building..."
@@ -111,11 +125,15 @@ if ($Dev) {
     Copy-Item $skillBuild $SkillDir -Recurse
     Write-Host "Installed skill to $SkillDir"
 
-    # Create .cmd shim
+    # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
+    # Use %USERPROFILE% so the .cmd file stays pure ASCII (locale-safe)
+    $skillRel = $SkillDir.Replace($env:USERPROFILE, "%USERPROFILE%")
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    Set-Content -Path $cmdShim -Value "@bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" %*" -Encoding OEM
-    Write-Host "Created binary shim at $BinDir\codex-collab.cmd"
+    Set-Content -Path $cmdShim -Value "@bun `"$skillRel\scripts\codex-collab`" %*" -Encoding ASCII
+    $bashShim = Join-Path $BinDir "codex-collab"
+    Set-Content -Path $bashShim -Value "#!/usr/bin/env bun`nexec bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" `"`$@`"" -Encoding UTF8 -NoNewline
+    Write-Host "Created binary shims at $BinDir"
 }
 
 # Add bin dir to user PATH if not already present
