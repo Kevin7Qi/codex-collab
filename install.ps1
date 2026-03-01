@@ -85,11 +85,9 @@ if ($Dev) {
     Write-Host "Linked skill to $SkillDir"
 
     # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
-    # Use %USERPROFILE% so the .cmd file stays pure ASCII (locale-safe)
-    $repoRel = $RepoDir.Replace($env:USERPROFILE, "%USERPROFILE%")
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    Set-Content -Path $cmdShim -Value "@bun `"$repoRel\src\cli.ts`" %*" -Encoding ASCII
+    [System.IO.File]::WriteAllText($cmdShim, "@bun `"$RepoDir\src\cli.ts`" %*`r`n", [System.Text.UTF8Encoding]::new($false))
     $bashShim = Join-Path $BinDir "codex-collab"
     [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$(Join-Path $RepoDir 'src\cli.ts')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
     Write-Host "Created binary shims at $BinDir"
@@ -128,11 +126,9 @@ if ($Dev) {
     Write-Host "Installed skill to $SkillDir"
 
     # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
-    # Use %USERPROFILE% so the .cmd file stays pure ASCII (locale-safe)
-    $skillRel = $SkillDir.Replace($env:USERPROFILE, "%USERPROFILE%")
     New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    Set-Content -Path $cmdShim -Value "@bun `"$skillRel\scripts\codex-collab`" %*" -Encoding ASCII
+    [System.IO.File]::WriteAllText($cmdShim, "@bun `"$SkillDir\scripts\codex-collab`" %*`r`n", [System.Text.UTF8Encoding]::new($false))
     $bashShim = Join-Path $BinDir "codex-collab"
     [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
     Write-Host "Created binary shims at $BinDir"

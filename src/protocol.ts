@@ -378,17 +378,14 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
 
     if (process.platform === "win32") {
       // Windows: no SIGTERM equivalent — process termination is immediate.
-      // proc.kill() kills the direct child; taskkill /T /F kills the entire
-      // process tree (including any grandchildren from codex app-server).
+      // Kill the process tree first via taskkill /T /F, then fall back to
+      // proc.kill(). This order matters: if codex is a .cmd wrapper, killing
+      // the direct child first removes the PID that taskkill needs to traverse
+      // the tree, potentially leaving the real app-server alive.
       // Note: we intentionally do NOT await readLoop/proc.exited here because
       // Bun's test runner on Windows doesn't fully await async finally blocks,
       // and the extra latency causes inter-test process races. The process is
-      // already dead after kill+taskkill, so the dangling promise is benign.
-      try { proc.kill(); } catch (e) {
-        if (!exited) {
-          console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
+      // already dead after taskkill+kill, so the dangling promise is benign.
       if (proc.pid) {
         try {
           const { spawnSync: ss } = await import("child_process");
@@ -399,6 +396,11 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
           }
         } catch (e) {
           console.error(`[codex] Warning: process tree cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      try { proc.kill(); } catch (e) {
+        if (!exited) {
+          console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
       return;
