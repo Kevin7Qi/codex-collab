@@ -91,7 +91,7 @@ if ($Dev) {
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
     Set-Content -Path $cmdShim -Value "@bun `"$repoRel\src\cli.ts`" %*" -Encoding ASCII
     $bashShim = Join-Path $BinDir "codex-collab"
-    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bun`nexec bun `"$(Join-Path $RepoDir 'src\cli.ts')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$(Join-Path $RepoDir 'src\cli.ts')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
     Write-Host "Created binary shims at $BinDir"
 
 } else {
@@ -132,7 +132,7 @@ if ($Dev) {
     $cmdShim = Join-Path $BinDir "codex-collab.cmd"
     Set-Content -Path $cmdShim -Value "@bun `"$skillRel\scripts\codex-collab`" %*" -Encoding ASCII
     $bashShim = Join-Path $BinDir "codex-collab"
-    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bun`nexec bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
     Write-Host "Created binary shims at $BinDir"
 }
 
