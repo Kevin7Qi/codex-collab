@@ -1,6 +1,7 @@
 // src/events.ts — Event dispatcher for app server notifications
 
 import { appendFileSync, mkdirSync, existsSync } from "fs";
+import { join } from "path";
 import type {
   ItemStartedParams, ItemCompletedParams, DeltaParams,
   ErrorNotificationParams,
@@ -24,7 +25,7 @@ export class EventDispatcher {
     onProgress?: ProgressCallback,
   ) {
     if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
-    this.logPath = `${logsDir}/${shortId}.log`;
+    this.logPath = join(logsDir, `${shortId}.log`);
     this.onProgress = onProgress ?? ((line) => process.stderr.write(line + "\n"));
   }
 

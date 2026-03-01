@@ -376,12 +376,16 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     // Step 2: Wait up to 5s for graceful exit
     if (await waitForExit(5000)) { await readLoop; return; }
 
-    // Step 3: SIGTERM, wait 3s
-    proc.kill("SIGTERM");
-    if (await waitForExit(3000)) { await readLoop; return; }
-
-    // Step 4: SIGKILL
-    proc.kill("SIGKILL");
+    // Step 3: Terminate the process
+    if (process.platform === "win32") {
+      // Windows: proc.kill() calls TerminateProcess (no graceful signal distinction)
+      proc.kill();
+    } else {
+      // Unix: SIGTERM for graceful shutdown, escalate to SIGKILL
+      proc.kill("SIGTERM");
+      if (await waitForExit(3000)) { await readLoop; return; }
+      proc.kill("SIGKILL");
+    }
     await proc.exited;
     await readLoop;
   }
