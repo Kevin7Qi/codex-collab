@@ -8,7 +8,7 @@ import type {
   TurnCompletedParams, TurnStartResponse,
   ReviewStartResponse,
 } from "./types";
-import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, existsSync, writeFileSync, utimesSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import {
@@ -526,8 +526,12 @@ describe("kill signal", () => {
   });
 
   test("stale signal cleared at turn start — turn completes normally", async () => {
-    // Pre-write a stale signal file (simulates leftover from a previous kill)
-    writeFileSync(join(TEST_KILL_DIR, "thr-1"), "", { mode: 0o600 });
+    // Pre-write a stale signal file (simulates leftover from a previous kill).
+    // Backdate its mtime so it looks like it predates the current process.
+    const stalePath = join(TEST_KILL_DIR, "thr-1");
+    writeFileSync(stalePath, "", { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(stalePath, old, old);
 
     const { client, emit } = buildMockClient((method) => {
       if (method === "turn/start") {

@@ -436,17 +436,28 @@ function removePidFile(shortId: string): void {
   }
 }
 
-/** Check if the process that owns a thread is still alive. */
+/** Check if the process that owns a thread is still alive.
+ *  Returns true (assume alive) when the PID file is missing — the thread may
+ *  have been started before PID tracking existed, or PID file write may have
+ *  failed.  Only returns false when we have a PID and can confirm the process
+ *  is gone (ESRCH). */
 function isProcessAlive(shortId: string): boolean {
   const pidPath = join(config.pidsDir, shortId);
+  let pid: number;
   try {
-    const pid = Number(readFileSync(pidPath, "utf-8").trim());
-    if (!Number.isFinite(pid) || pid <= 0) return false;
+    pid = Number(readFileSync(pidPath, "utf-8").trim());
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // no PID file → assume alive
+    console.error(`[codex] Warning: could not read PID file for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);
+    return true;
+  }
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
     process.kill(pid, 0); // signal 0 = existence check
     return true;
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ESRCH" || code === "ENOENT") return false;
+    if (code === "ESRCH") return false; // process confirmed dead
     if (code === "EPERM") return true; // process exists but we can't signal it
     // Unexpected error — assume alive to avoid incorrectly marking live threads as dead
     console.error(`[codex] Warning: could not check process for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);

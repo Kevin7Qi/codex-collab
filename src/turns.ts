@@ -1,6 +1,6 @@
 // src/turns.ts — Turn lifecycle (runTurn, runReview)
 
-import { existsSync, unlinkSync } from "fs";
+import { existsSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
 import type { AppServerClient } from "./protocol";
 import type {
@@ -115,11 +115,16 @@ async function executeTurn(
   // the turn completes normally or on timeout so the poll interval stops.
   const killAbort = new AbortController();
 
-  // Clear stale signal file immediately before starting the poll to minimize
-  // the TOCTOU window between cleanup and detection.
-  try { unlinkSync(signalPath); } catch (e) {
+  // Remove signal files left over from a previous (crashed) run, but preserve
+  // fresh signals written by a concurrent `kill` targeting this thread.
+  // Heuristic: files created before this process started are stale.
+  const processStartMs = Date.now() - process.uptime() * 1000;
+  try {
+    const st = statSync(signalPath);
+    if (st.mtimeMs < processStartMs) unlinkSync(signalPath);
+  } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.error(`[codex] Warning: could not remove stale kill signal: ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`[codex] Warning: could not check/remove stale kill signal: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
