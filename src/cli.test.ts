@@ -87,10 +87,10 @@ describe("CLI invalid inputs", () => {
     expect(stderr).toContain("Invalid sandbox mode");
   });
 
-  it("run without prompt exits non-zero", () => {
-    // exitCode is 1 (missing prompt) or null (killed by timeout if codex is installed)
-    const { exitCode } = run("run");
-    expect(exitCode).not.toBe(0);
+  it("run without prompt exits with error message", () => {
+    const { stderr, exitCode } = run("run");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("No prompt provided");
   });
 
   it("unknown option exits 1", () => {

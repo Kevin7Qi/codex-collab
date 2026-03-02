@@ -1,6 +1,7 @@
 // src/protocol.ts — JSON-RPC client for Codex app server
 
 import { spawn } from "bun";
+import { spawnSync } from "child_process";
 import type {
   JsonRpcMessage,
   JsonRpcRequest,
@@ -388,8 +389,8 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
       // already dead after taskkill+kill, so the dangling promise is benign.
       if (proc.pid) {
         try {
-          const { spawnSync: ss } = await import("child_process");
-          const r = ss("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000 });
+          const r = spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000 });
+          // status 128: process already exited; null: spawnSync timed out
           if (r.status !== 0 && r.status !== null && r.status !== 128) {
             const msg = r.stderr?.toString().trim();
             console.error(`[codex] Warning: taskkill exited ${r.status}${msg ? ": " + msg : ""}`);

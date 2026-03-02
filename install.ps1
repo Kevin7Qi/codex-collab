@@ -84,13 +84,7 @@ if ($Dev) {
     }
     Write-Host "Linked skill to $SkillDir"
 
-    # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
-    New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-    $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    [System.IO.File]::WriteAllText($cmdShim, "@bun `"$RepoDir\src\cli.ts`" %*`r`n", [System.Text.UTF8Encoding]::new($false))
-    $bashShim = Join-Path $BinDir "codex-collab"
-    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$(Join-Path $RepoDir 'src\cli.ts')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
-    Write-Host "Created binary shims at $BinDir"
+    $shimTarget = Join-Path $RepoDir "src\cli.ts"
 
 } else {
     Write-Host "Building..."
@@ -125,14 +119,16 @@ if ($Dev) {
     Copy-Item $skillBuild $SkillDir -Recurse
     Write-Host "Installed skill to $SkillDir"
 
-    # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
-    New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
-    $cmdShim = Join-Path $BinDir "codex-collab.cmd"
-    [System.IO.File]::WriteAllText($cmdShim, "@bun `"$SkillDir\scripts\codex-collab`" %*`r`n", [System.Text.UTF8Encoding]::new($false))
-    $bashShim = Join-Path $BinDir "codex-collab"
-    [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$(Join-Path $SkillDir 'scripts\codex-collab')`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
-    Write-Host "Created binary shims at $BinDir"
+    $shimTarget = Join-Path $SkillDir "scripts\codex-collab"
 }
+
+# Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
+New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+$cmdShim = Join-Path $BinDir "codex-collab.cmd"
+[System.IO.File]::WriteAllText($cmdShim, "@bun `"$shimTarget`" %*`r`n", [System.Text.UTF8Encoding]::new($false))
+$bashShim = Join-Path $BinDir "codex-collab"
+[System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$shimTarget`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
+Write-Host "Created binary shims at $BinDir"
 
 # Add bin dir to user PATH if not already present
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
