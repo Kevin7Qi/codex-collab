@@ -789,12 +789,12 @@ async function cmdKill(positional: string[]) {
     }
   });
 
-  updateThreadStatus(config.threadsFile, threadId, "interrupted");
-  if (shortId) removePidFile(shortId);
   if (killSignalWritten || serverInterrupted) {
+    updateThreadStatus(config.threadsFile, threadId, "interrupted");
+    if (shortId) removePidFile(shortId);
     progress(`Stopped thread ${id}`);
   } else {
-    progress(`Marked thread ${id} as interrupted, but could not signal the running process`);
+    progress(`Could not signal thread ${id} — try again.`);
   }
 }
 
