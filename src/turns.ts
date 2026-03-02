@@ -295,8 +295,8 @@ function createKillSignalAwaiter(
           reject(new KillSignalError(threadId));
         }
       } catch (e) {
-        clearInterval(timer);
-        console.error(`[codex] Warning: kill signal polling failed: ${e instanceof Error ? e.message : String(e)}`);
+        // Log but keep polling — the error may be transient (e.g. momentary EACCES).
+        console.error(`[codex] Warning: kill signal poll error (will retry): ${e instanceof Error ? e.message : String(e)}`);
       }
     }, pollIntervalMs);
 

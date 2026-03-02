@@ -527,11 +527,11 @@ describe("kill signal", () => {
 
   test("stale signal cleared at turn start — turn completes normally", async () => {
     // Pre-write a stale signal file (simulates leftover from a previous kill).
-    // Backdate its mtime so it looks like it predates the current process.
+    // Backdate its mtime to before process start so it's treated as stale.
     const stalePath = join(TEST_KILL_DIR, "thr-1");
     writeFileSync(stalePath, "", { mode: 0o600 });
-    const old = new Date(Date.now() - 60_000);
-    utimesSync(stalePath, old, old);
+    const beforeProcessStart = new Date(Date.now() - process.uptime() * 1000 - 10_000);
+    utimesSync(stalePath, beforeProcessStart, beforeProcessStart);
 
     const { client, emit } = buildMockClient((method) => {
       if (method === "turn/start") {
@@ -551,6 +551,32 @@ describe("kill signal", () => {
     });
 
     expect(result.status).toBe("completed");
+  });
+
+  test("fresh signal NOT cleared at turn start — turn is interrupted", async () => {
+    // Write a signal file with current mtime (simulates a concurrent kill).
+    // No backdating — mtime is after process start, so it should be preserved.
+    writeFileSync(join(TEST_KILL_DIR, "thr-1"), "", { mode: 0o600 });
+
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-fresh-kill", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("interrupted");
+    expect(result.error).toBe("Thread killed by user");
   });
 
   test("normal completion wins race — no kill signal", async () => {

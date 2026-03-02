@@ -451,7 +451,10 @@ function isProcessAlive(shortId: string): boolean {
     console.error(`[codex] Warning: could not read PID file for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);
     return true;
   }
-  if (!Number.isFinite(pid) || pid <= 0) return false;
+  if (!Number.isFinite(pid) || pid <= 0) {
+    console.error(`[codex] Warning: PID file for ${shortId} contains invalid value`);
+    return false;
+  }
   try {
     process.kill(pid, 0); // signal 0 = existence check
     return true;
