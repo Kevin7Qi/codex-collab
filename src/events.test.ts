@@ -1,8 +1,10 @@
 import { describe, expect, test, beforeEach } from "bun:test";
 import { EventDispatcher } from "./events";
 import { mkdirSync, rmSync, readFileSync, existsSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
-const TEST_LOG_DIR = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-logs`;
+const TEST_LOG_DIR = join(tmpdir(), "codex-collab-test-logs");
 
 beforeEach(() => {
   if (existsSync(TEST_LOG_DIR)) rmSync(TEST_LOG_DIR, { recursive: true });
@@ -66,7 +68,7 @@ describe("EventDispatcher", () => {
     });
     dispatcher.flush();
 
-    const logPath = `${TEST_LOG_DIR}/test4.log`;
+    const logPath = join(TEST_LOG_DIR, "test4.log");
     expect(existsSync(logPath)).toBe(true);
     const content = readFileSync(logPath, "utf-8");
     expect(content).toContain("echo hello");
@@ -138,7 +140,7 @@ describe("EventDispatcher", () => {
 
   test("progress events auto-flush to log file", () => {
     const dispatcher = new EventDispatcher("test-autoflush", TEST_LOG_DIR);
-    const logPath = `${TEST_LOG_DIR}/test-autoflush.log`;
+    const logPath = join(TEST_LOG_DIR, "test-autoflush.log");
 
     // Trigger a progress event (command started) — should auto-flush without explicit flush() call
     dispatcher.handleItemStarted({

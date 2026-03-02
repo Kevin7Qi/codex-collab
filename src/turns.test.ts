@@ -9,8 +9,10 @@ import type {
   ReviewStartResponse,
 } from "./types";
 import { mkdirSync, rmSync, existsSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
-const TEST_LOG_DIR = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-turns`;
+const TEST_LOG_DIR = join(tmpdir(), "codex-collab-test-turns");
 
 beforeEach(() => {
   if (existsSync(TEST_LOG_DIR)) rmSync(TEST_LOG_DIR, { recursive: true });

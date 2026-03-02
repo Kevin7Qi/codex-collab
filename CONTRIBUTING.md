@@ -14,6 +14,12 @@ bun install
 ./install.sh --dev    # symlink for live iteration
 ```
 
+On Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
+```
+
 ## Running Tests
 
 ```bash

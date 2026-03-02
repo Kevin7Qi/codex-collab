@@ -1,10 +1,12 @@
 // src/config.ts — Configuration for codex-collab
 
+import { homedir } from "os";
+import { join } from "path";
 import pkg from "../package.json";
 
 function getHome(): string {
-  const home = process.env.HOME;
-  if (!home) throw new Error("HOME environment variable is not set");
+  const home = homedir();
+  if (!home) throw new Error("Cannot determine home directory");
   return home;
 }
 
@@ -28,12 +30,12 @@ export const config = {
   defaultTimeout: 1200, // seconds — turn completion (20 min)
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
 
-  // Data paths — lazy via getters so HOME is validated at point of use, not import time.
+  // Data paths — lazy via getters so the home directory is validated at point of use, not import time.
   // Validated by ensureDataDirs() in cli.ts before any file operations.
-  get dataDir() { return `${getHome()}/.codex-collab`; },
-  get threadsFile() { return `${this.dataDir}/threads.json`; },
-  get logsDir() { return `${this.dataDir}/logs`; },
-  get approvalsDir() { return `${this.dataDir}/approvals`; },
+  get dataDir() { return join(getHome(), ".codex-collab"); },
+  get threadsFile() { return join(this.dataDir, "threads.json"); },
+  get logsDir() { return join(this.dataDir, "logs"); },
+  get approvalsDir() { return join(this.dataDir, "approvals"); },
 
   // Display
   jobsListLimit: 20,
