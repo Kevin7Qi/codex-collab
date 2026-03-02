@@ -635,6 +635,16 @@ async function cmdKill(positional: string[]) {
 
   const threadId = resolveThreadId(config.threadsFile, id);
 
+  // Check local status — skip server operations if already killed
+  const mapping = loadThreadMapping(config.threadsFile);
+  const shortId = findShortId(config.threadsFile, threadId);
+  const localStatus = shortId ? mapping[shortId]?.lastStatus : undefined;
+
+  if (localStatus === "killed") {
+    progress(`Thread ${id} is already killed`);
+    return;
+  }
+
   const archived = await withClient(async (client) => {
     // Try to read thread status first and interrupt active turn if any
     try {
