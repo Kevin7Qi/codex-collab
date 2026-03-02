@@ -40,9 +40,10 @@ describe("CLI valid commands", () => {
   });
 
   it("health command runs without crashing", () => {
-    // May fail if codex not installed, but should not crash with unhandled exception
+    // May fail if codex not installed, but should not crash with unhandled exception.
+    // Exit code 143 = SIGTERM during app-server cleanup (our signal handler).
     const { exitCode } = run("health");
-    expect([0, 1]).toContain(exitCode);
+    expect([0, 1, 143]).toContain(exitCode);
   });
 });
 

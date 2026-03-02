@@ -383,10 +383,6 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
       // proc.kill(). This order matters: if codex is a .cmd wrapper, killing
       // the direct child first removes the PID that taskkill needs to traverse
       // the tree, potentially leaving the real app-server alive.
-      // Note: we intentionally do NOT await readLoop/proc.exited here because
-      // Bun's test runner on Windows doesn't fully await async finally blocks,
-      // and the extra latency causes inter-test process races. The process is
-      // already dead after taskkill+kill, so the dangling promise is benign.
       if (proc.pid) {
         try {
           const r = spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000 });
@@ -404,6 +400,10 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
           console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
+      // Wait for the process to fully exit so dangling readLoop / proc.exited
+      // promises don't keep the event loop alive (which blocks background tasks
+      // from reporting completion).
+      if (await waitForExit(3000)) { await readLoop; }
       return;
     }
 

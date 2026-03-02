@@ -239,14 +239,8 @@ describe("parseMessage", () => {
 // Each test manages its own client lifecycle to avoid dangling-process races
 // when bun runs tests concurrently within a describe block.
 describe("AppServerClient", () => {
-  // On Windows, bun's test runner doesn't fully await async finally blocks before moving
-  // to the next test. close() takes ~400ms on Windows (dominated by taskkill process tree
-  // cleanup). This delay ensures close() completes before the next test spawns a mock server.
-  afterEach(async () => {
-    if (process.platform === "win32") {
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  });
+  // close() now properly awaits process exit on all platforms, so no
+  // inter-test delay is needed.
 
   test("connect performs initialize handshake and returns userAgent", async () => {
     const c = await connect({

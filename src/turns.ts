@@ -1,5 +1,7 @@
 // src/turns.ts — Turn lifecycle (runTurn, runReview)
 
+import { existsSync, statSync, unlinkSync } from "fs";
+import { join } from "path";
 import type { AppServerClient } from "./protocol";
 import type {
   UserInput, TurnStartParams, TurnStartResponse, TurnCompletedParams,
@@ -11,6 +13,7 @@ import type {
 } from "./types";
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
+import { config } from "./config";
 
 export interface TurnOptions {
   dispatcher: EventDispatcher;
@@ -20,6 +23,8 @@ export interface TurnOptions {
   model?: string;
   effort?: ReasoningEffort;
   approvalPolicy?: ApprovalPolicy;
+  /** Directory for kill signal files. Defaults to config.killSignalsDir. */
+  killSignalsDir?: string;
 }
 
 export interface ReviewOptions extends TurnOptions {
@@ -67,6 +72,14 @@ export async function runReview(
   return executeTurn(client, "review/start", params, opts);
 }
 
+/** Error thrown when a kill signal file is detected during turn execution. */
+class KillSignalError extends Error {
+  constructor(public readonly threadId: string) {
+    super(`Thread ${threadId} killed by user`);
+    this.name = "KillSignalError";
+  }
+}
+
 /**
  * Shared turn lifecycle: register handlers, send the start request,
  * wait for completion, collect results, and clean up.
@@ -79,6 +92,10 @@ async function executeTurn(
 ): Promise<TurnResult> {
   const startTime = Date.now();
   opts.dispatcher.reset();
+
+  const signalsDir = opts.killSignalsDir ?? config.killSignalsDir;
+  const threadId = params.threadId;
+  const signalPath = join(signalsDir, threadId);
 
   // AbortController for cancelling in-flight approval polls on turn completion/timeout
   const abortController = new AbortController();
@@ -94,9 +111,44 @@ async function executeTurn(
   const completion = createTurnCompletionAwaiter(client, opts.timeoutMs);
   unsubs.push(completion.unsubscribe);
 
+  // AbortController specifically for kill signal polling — aborted when
+  // the turn completes normally or on timeout so the poll interval stops.
+  const killAbort = new AbortController();
+
+  // Remove signal files left over from a previous (crashed) run, but preserve
+  // fresh signals written by a concurrent `kill` targeting this thread.
+  // Heuristic: files created before this process started are stale.
+  const processStartMs = Date.now() - process.uptime() * 1000;
   try {
-    const { turn } = await client.request<TurnStartResponse>(method, params);
-    const completedTurn = await completion.waitFor(turn.id);
+    const st = statSync(signalPath);
+    if (st.mtimeMs < processStartMs) unlinkSync(signalPath);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[codex] Warning: could not check/remove stale kill signal: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Start kill signal polling before the request so kills are detected even
+  // if turn/start is slow or stuck.
+  const killSignal = createKillSignalAwaiter(
+    threadId, signalsDir, 500, killAbort.signal,
+  );
+  killSignal.catch((e) => {
+    if (!(e instanceof KillSignalError)) {
+      console.error(`[codex] Unexpected error in kill signal awaiter: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  });
+
+  try {
+    const { turn } = await Promise.race([
+      client.request<TurnStartResponse>(method, params),
+      killSignal,
+    ]);
+
+    const completedTurn = await Promise.race([
+      completion.waitFor(turn.id),
+      killSignal,
+    ]);
 
     opts.dispatcher.flushOutput();
     opts.dispatcher.flush();
@@ -115,9 +167,30 @@ async function executeTurn(
       error: completedTurn.turn.error?.message,
       durationMs: Date.now() - startTime,
     };
+  } catch (e) {
+    if (e instanceof KillSignalError) {
+      opts.dispatcher.flushOutput();
+      opts.dispatcher.flush();
+      return {
+        status: "interrupted",
+        output: opts.dispatcher.getAccumulatedOutput(),
+        filesChanged: opts.dispatcher.getFilesChanged(),
+        commandsRun: opts.dispatcher.getCommandsRun(),
+        error: "Thread killed by user",
+        durationMs: Date.now() - startTime,
+      };
+    }
+    throw e;
   } finally {
+    killAbort.abort();
     abortController.abort();
     for (const unsub of unsubs) unsub();
+    // Clean up signal file
+    try { unlinkSync(signalPath); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: could not clean up kill signal: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   }
 }
 
@@ -191,6 +264,44 @@ function registerEventHandlers(client: AppServerClient, opts: TurnOptions, signa
   );
 
   return unsubs;
+}
+
+/**
+ * Create a promise that rejects with KillSignalError when a kill signal file
+ * appears for the given thread. Polls the filesystem at the given interval.
+ * Stops polling when the provided AbortSignal fires (i.e. when the turn finishes for any reason).
+ */
+function createKillSignalAwaiter(
+  threadId: string,
+  signalsDir: string,
+  pollIntervalMs: number,
+  signal: AbortSignal,
+): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    // Check immediately
+    if (existsSync(join(signalsDir, threadId))) {
+      reject(new KillSignalError(threadId));
+      return;
+    }
+
+    const timer = setInterval(() => {
+      try {
+        if (signal.aborted) {
+          clearInterval(timer);
+          return;
+        }
+        if (existsSync(join(signalsDir, threadId))) {
+          clearInterval(timer);
+          reject(new KillSignalError(threadId));
+        }
+      } catch (e) {
+        // Log but keep polling — the error may be transient (e.g. momentary EACCES).
+        console.error(`[codex] Warning: kill signal poll error (will retry): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }, pollIntervalMs);
+
+    signal.addEventListener("abort", () => clearInterval(timer), { once: true });
+  });
 }
 
 /**

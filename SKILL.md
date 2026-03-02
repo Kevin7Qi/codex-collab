@@ -32,7 +32,11 @@ codex-collab run --resume <id> "now check the error handling" --content-only
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
 ```
 
-**IMPORTANT: Always use `run_in_background=true` and `dangerouslyDisableSandbox=true`** for all `codex-collab` Bash commands. Tasks take minutes, and the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist. You will be notified automatically when the command finishes. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
+**IMPORTANT: Always use `dangerouslyDisableSandbox=true`** for all `codex-collab` Bash commands — the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist.
+
+For **`run` and `review`** commands, also use `run_in_background=true` — these take minutes. You will be notified automatically when the command finishes. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
+
+For **all other commands** (`kill`, `jobs`, `progress`, `output`, `approve`, `decline`, `clean`, `delete`, `models`, `health`), run in the **foreground** — they complete in seconds.
 
 If the user asks about progress mid-task, use `progress` to check the recent activity:
 
@@ -67,7 +71,7 @@ codex-collab review --resume <id> -d /path/to/project --content-only
 
 Review modes: `pr` (default), `uncommitted`, `commit`
 
-**IMPORTANT: Always use `run_in_background=true` and `dangerouslyDisableSandbox=true`** — reviews typically take 5-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
+**IMPORTANT: Use `run_in_background=true` and `dangerouslyDisableSandbox=true`** — reviews typically take 5-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically.
 
 ## Context Efficiency
 
@@ -165,7 +169,7 @@ codex-collab progress <id>              # Recent activity (tail of log)
 ```bash
 codex-collab jobs                       # List threads
 codex-collab jobs --json                # List threads (JSON)
-codex-collab kill <id>                  # Interrupt and archive thread
+codex-collab kill <id>                  # Stop a running thread
 codex-collab delete <id>               # Archive thread, delete local files
 codex-collab clean                      # Delete old logs and stale mappings
 ```

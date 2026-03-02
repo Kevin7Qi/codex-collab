@@ -45,18 +45,34 @@ import type {
 } from "./types";
 
 // ---------------------------------------------------------------------------
-// SIGINT handler — clean up spawned app-server on Ctrl+C
+// Signal handlers — clean up spawned app-server and update thread status
 // ---------------------------------------------------------------------------
 
 let activeClient: AppServerClient | undefined;
+let activeThreadId: string | undefined;
+let activeShortId: string | undefined;
 let shuttingDown = false;
 
-process.on("SIGINT", async () => {
+async function handleShutdownSignal(exitCode: number): Promise<void> {
   if (shuttingDown) {
-    process.exit(130);
+    process.exit(exitCode);
   }
   shuttingDown = true;
   console.error("[codex] Shutting down...");
+
+  // Update thread status and clean up PID file synchronously before async
+  // cleanup — ensures the mapping is written even if client.close() hangs.
+  if (activeThreadId) {
+    try {
+      updateThreadStatus(config.threadsFile, activeThreadId, "interrupted");
+    } catch (e) {
+      console.error(`[codex] Warning: could not update thread status during shutdown: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  if (activeShortId) {
+    removePidFile(activeShortId);
+  }
+
   try {
     if (activeClient) {
       await activeClient.close();
@@ -64,8 +80,11 @@ process.on("SIGINT", async () => {
   } catch (e) {
     console.error(`[codex] Warning: cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
   }
-  process.exit(130);
-});
+  process.exit(exitCode);
+}
+
+process.on("SIGINT", () => handleShutdownSignal(130));
+process.on("SIGTERM", () => handleShutdownSignal(143));
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -397,6 +416,58 @@ function pluralize(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+/** Write a PID file for the current process so cmdJobs can detect stale "running" status. */
+function writePidFile(shortId: string): void {
+  try {
+    writeFileSync(join(config.pidsDir, shortId), String(process.pid), { mode: 0o600 });
+  } catch (e) {
+    console.error(`[codex] Warning: could not write PID file: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** Remove the PID file for a thread. */
+function removePidFile(shortId: string): void {
+  try {
+    unlinkSync(join(config.pidsDir, shortId));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[codex] Warning: could not remove PID file: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
+/** Check if the process that owns a thread is still alive.
+ *  Returns true (assume alive) when the PID file is missing — the thread may
+ *  have been started before PID tracking existed, or PID file write may have
+ *  failed.  Only returns false when we have a PID and can confirm the process
+ *  is gone (ESRCH). */
+function isProcessAlive(shortId: string): boolean {
+  const pidPath = join(config.pidsDir, shortId);
+  let pid: number;
+  try {
+    pid = Number(readFileSync(pidPath, "utf-8").trim());
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // no PID file → assume alive
+    console.error(`[codex] Warning: could not read PID file for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);
+    return true;
+  }
+  if (!Number.isFinite(pid) || pid <= 0) {
+    console.error(`[codex] Warning: PID file for ${shortId} contains invalid value`);
+    return false;
+  }
+  try {
+    process.kill(pid, 0); // signal 0 = existence check
+    return true;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false; // process confirmed dead
+    if (code === "EPERM") return true; // process exists but we can't signal it
+    // Unexpected error — assume alive to avoid incorrectly marking live threads as dead
+    console.error(`[codex] Warning: could not check process for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);
+    return true;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -489,6 +560,9 @@ async function cmdRun(positional: string[], opts: Options) {
     }
 
     updateThreadStatus(config.threadsFile, threadId, "running");
+    activeThreadId = threadId;
+    activeShortId = shortId;
+    writePidFile(shortId);
 
     const dispatcher = createDispatcher(shortId, opts);
 
@@ -510,6 +584,10 @@ async function cmdRun(positional: string[], opts: Options) {
     } catch (e) {
       updateThreadStatus(config.threadsFile, threadId, "failed");
       throw e;
+    } finally {
+      activeThreadId = undefined;
+      activeShortId = undefined;
+      removePidFile(shortId);
     }
   });
 
@@ -535,6 +613,9 @@ async function cmdReview(positional: string[], opts: Options) {
     }
 
     updateThreadStatus(config.threadsFile, threadId, "running");
+    activeThreadId = threadId;
+    activeShortId = shortId;
+    writePidFile(shortId);
 
     const dispatcher = createDispatcher(shortId, opts);
 
@@ -553,6 +634,10 @@ async function cmdReview(positional: string[], opts: Options) {
     } catch (e) {
       updateThreadStatus(config.threadsFile, threadId, "failed");
       throw e;
+    } finally {
+      activeThreadId = undefined;
+      activeShortId = undefined;
+      removePidFile(shortId);
     }
   });
 
@@ -592,6 +677,18 @@ async function cmdJobs(opts: Options) {
 
   // Only show threads created by this CLI (those with a local short ID mapping)
   let localThreads = allThreads.filter((t) => reverseMap.has(t.id));
+
+  // Detect stale "running" status: if the owning process is dead, mark as interrupted.
+  for (const t of localThreads) {
+    const sid = reverseMap.get(t.id)!;
+    const entry = mapping[sid];
+    if (entry?.lastStatus === "running" && !isProcessAlive(sid)) {
+      updateThreadStatus(config.threadsFile, t.id, "interrupted");
+      entry.lastStatus = "interrupted";
+      removePidFile(sid);
+    }
+  }
+
   if (opts.limit !== Infinity) localThreads = localThreads.slice(0, opts.limit);
 
   if (opts.json) {
@@ -634,19 +731,35 @@ async function cmdKill(positional: string[]) {
   validateIdOrDie(id);
 
   const threadId = resolveThreadId(config.threadsFile, id);
-
-  // Check local status — skip server operations if already killed
-  const mapping = loadThreadMapping(config.threadsFile);
   const shortId = findShortId(config.threadsFile, threadId);
-  const localStatus = shortId ? mapping[shortId]?.lastStatus : undefined;
 
-  if (localStatus === "killed") {
-    progress(`Thread ${id} is already killed`);
-    return;
+  // Skip kill for threads that have already reached a terminal status
+  if (shortId) {
+    const mapping = loadThreadMapping(config.threadsFile);
+    const localStatus = mapping[shortId]?.lastStatus;
+    if (localStatus && localStatus !== "running") {
+      progress(`Thread ${id} is already ${localStatus}`);
+      return;
+    }
   }
 
-  const archived = await withClient(async (client) => {
-    // Try to read thread status first and interrupt active turn if any
+  // Write kill signal file so the running process can detect the kill
+  let killSignalWritten = false;
+  const signalPath = join(config.killSignalsDir, threadId);
+  try {
+    writeFileSync(signalPath, "", { mode: 0o600 });
+    killSignalWritten = true;
+  } catch (e) {
+    console.error(
+      `[codex] Warning: could not write kill signal: ${e instanceof Error ? e.message : String(e)}. ` +
+      `The running process may not detect the kill.`,
+    );
+  }
+
+  // Try to interrupt the active turn on the server (immediate effect).
+  // The kill signal file handles the case where the run process is polling.
+  let serverInterrupted = false;
+  await withClient(async (client) => {
     try {
       const { thread } = await client.request<{
         thread: {
@@ -665,6 +778,7 @@ async function cmdKill(positional: string[]) {
             threadId,
             turnId: activeTurn.id,
           });
+          serverInterrupted = true;
           progress(`Interrupted turn ${activeTurn.id}`);
         }
       }
@@ -673,15 +787,14 @@ async function cmdKill(positional: string[]) {
         console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
       }
     }
-
-    return tryArchive(client, threadId);
   });
 
-  updateThreadStatus(config.threadsFile, threadId, "killed");
-  if (archived === "failed") {
-    progress(`Killed thread ${id} (server archive failed)`);
+  if (killSignalWritten || serverInterrupted) {
+    updateThreadStatus(config.threadsFile, threadId, "interrupted");
+    if (shortId) removePidFile(shortId);
+    progress(`Stopped thread ${id}`);
   } else {
-    progress(`Killed thread ${id}`);
+    progress(`Could not signal thread ${id} — try again.`);
   }
 }
 
@@ -802,6 +915,8 @@ async function cmdClean() {
 
   const logsDeleted = deleteOldFiles(config.logsDir, sevenDaysMs);
   const approvalsDeleted = deleteOldFiles(config.approvalsDir, oneDayMs);
+  const killSignalsDeleted = deleteOldFiles(config.killSignalsDir, oneDayMs);
+  const pidsDeleted = deleteOldFiles(config.pidsDir, oneDayMs);
 
   // Clean stale thread mappings — use log file mtime as proxy for last
   // activity so recently-used threads aren't pruned just because they
@@ -835,6 +950,10 @@ async function cmdClean() {
   if (logsDeleted > 0) parts.push(`${logsDeleted} log files deleted`);
   if (approvalsDeleted > 0)
     parts.push(`${approvalsDeleted} approval files deleted`);
+  if (killSignalsDeleted > 0)
+    parts.push(`${killSignalsDeleted} kill signal files deleted`);
+  if (pidsDeleted > 0)
+    parts.push(`${pidsDeleted} stale PID files deleted`);
   if (mappingsRemoved > 0)
     parts.push(`${mappingsRemoved} stale mappings removed`);
 
@@ -853,9 +972,54 @@ async function cmdDelete(positional: string[]) {
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
 
+  // If the thread is currently running, stop it first before archiving
+  const localStatus = shortId ? loadThreadMapping(config.threadsFile)[shortId]?.lastStatus : undefined;
+  if (localStatus === "running") {
+    const signalPath = join(config.killSignalsDir, threadId);
+    try {
+      writeFileSync(signalPath, "", { mode: 0o600 });
+    } catch (e) {
+      console.error(
+        `[codex] Warning: could not write kill signal: ${e instanceof Error ? e.message : String(e)}. ` +
+        `The running process may not detect the delete.`,
+      );
+    }
+  }
+
   let archiveResult: "archived" | "already_done" | "failed" = "failed";
   try {
-    archiveResult = await withClient((client) => tryArchive(client, threadId));
+    archiveResult = await withClient(async (client) => {
+      // Interrupt active turn before archiving (only if running)
+      if (localStatus === "running") {
+        try {
+          const { thread } = await client.request<{
+            thread: {
+              id: string;
+              status: { type: string };
+              turns: Array<{ id: string; status: string }>;
+            };
+          }>("thread/read", { threadId, includeTurns: true });
+
+          if (thread.status.type === "active") {
+            const activeTurn = thread.turns?.find(
+              (t) => t.status === "inProgress",
+            );
+            if (activeTurn) {
+              await client.request("turn/interrupt", {
+                threadId,
+                turnId: activeTurn.id,
+              });
+            }
+          }
+        } catch (e) {
+          if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
+            console.error(`[codex] Warning: could not read/interrupt thread during delete: ${e.message}`);
+          }
+        }
+      }
+
+      return tryArchive(client, threadId);
+    });
   } catch (e) {
     if (e instanceof Error && !e.message.includes("not found")) {
       console.error(`[codex] Warning: could not archive on server: ${e.message}`);
@@ -863,6 +1027,7 @@ async function cmdDelete(positional: string[]) {
   }
 
   if (shortId) {
+    removePidFile(shortId);
     const logPath = join(config.logsDir, `${shortId}.log`);
     if (existsSync(logPath)) unlinkSync(logPath);
     removeThread(config.threadsFile, shortId);
@@ -912,7 +1077,7 @@ Commands:
   review [opts]           Run code review (PR-style by default)
   review "instructions"   Custom review with specific focus
   jobs [--json] [--all]   List threads (--limit <n> to cap)
-  kill <id>               Interrupt and archive thread
+  kill <id>               Stop a running thread
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
   models                  List available models
@@ -957,6 +1122,8 @@ Examples:
 function ensureDataDirs(): void {
   mkdirSync(config.logsDir, { recursive: true });
   mkdirSync(config.approvalsDir, { recursive: true });
+  mkdirSync(config.killSignalsDir, { recursive: true });
+  mkdirSync(config.pidsDir, { recursive: true });
 }
 
 async function main() {
