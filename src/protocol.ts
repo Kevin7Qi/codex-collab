@@ -1,6 +1,7 @@
 // src/protocol.ts — JSON-RPC client for Codex app server
 
 import { spawn } from "bun";
+import { spawnSync } from "child_process";
 import type {
   JsonRpcMessage,
   JsonRpcRequest,
@@ -89,7 +90,10 @@ export interface AppServerClient {
   onRequest(method: string, handler: ServerRequestHandler): () => void;
   /** Send a response to a server-sent request. */
   respond(id: RequestId, result: unknown): void;
-  /** Gracefully close: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL. */
+  /** Close the connection and terminate the server process.
+   *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL.
+   *  On Windows: close stdin, then immediately terminate the process tree
+   *  (no timed grace period, unlike Unix). */
   close(): Promise<void>;
   /** The user-agent string from the initialize handshake. */
   userAgent: string;
@@ -364,7 +368,7 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     closed = true;
     rejectAll("Client closed");
 
-    // Step 1: Close stdin to signal the server to exit
+    // Close stdin to signal the server to exit
     try {
       proc.stdin.end();
     } catch (e) {
@@ -373,14 +377,40 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
       }
     }
 
-    // Step 2: Wait up to 5s for graceful exit
-    if (await waitForExit(5000)) { await readLoop; return; }
+    if (process.platform === "win32") {
+      // Windows: no SIGTERM equivalent — process termination is immediate.
+      // Kill the process tree first via taskkill /T /F, then fall back to
+      // proc.kill(). This order matters: if codex is a .cmd wrapper, killing
+      // the direct child first removes the PID that taskkill needs to traverse
+      // the tree, potentially leaving the real app-server alive.
+      // Note: we intentionally do NOT await readLoop/proc.exited here because
+      // Bun's test runner on Windows doesn't fully await async finally blocks,
+      // and the extra latency causes inter-test process races. The process is
+      // already dead after taskkill+kill, so the dangling promise is benign.
+      if (proc.pid) {
+        try {
+          const r = spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000 });
+          // status 128: process already exited; null: spawnSync timed out
+          if (r.status !== 0 && r.status !== null && r.status !== 128) {
+            const msg = r.stderr?.toString().trim();
+            console.error(`[codex] Warning: taskkill exited ${r.status}${msg ? ": " + msg : ""}`);
+          }
+        } catch (e) {
+          console.error(`[codex] Warning: process tree cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      try { proc.kill(); } catch (e) {
+        if (!exited) {
+          console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      return;
+    }
 
-    // Step 3: SIGTERM, wait 3s
+    // Unix: wait for graceful exit, then escalate
+    if (await waitForExit(5000)) { await readLoop; return; }
     proc.kill("SIGTERM");
     if (await waitForExit(3000)) { await readLoop; return; }
-
-    // Step 4: SIGKILL
     proc.kill("SIGKILL");
     await proc.exited;
     await readLoop;

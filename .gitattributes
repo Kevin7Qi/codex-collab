@@ -1,0 +1,7 @@
+# Normalize all text files to LF in the repo
+* text=auto eol=lf
+
+# Windows scripts use CRLF (required by CMD/BAT; conventional for .ps1)
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf

@@ -1,9 +1,11 @@
 import { describe, expect, test, beforeEach } from "bun:test";
 import { autoApproveHandler, InteractiveApprovalHandler } from "./approvals";
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import type { CommandApprovalRequest, FileChangeApprovalRequest } from "./types";
 
-const TEST_APPROVALS_DIR = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-approvals`;
+const TEST_APPROVALS_DIR = join(tmpdir(), "codex-collab-test-approvals");
 
 beforeEach(() => {
   if (existsSync(TEST_APPROVALS_DIR)) rmSync(TEST_APPROVALS_DIR, { recursive: true });
@@ -51,23 +53,23 @@ describe("InteractiveApprovalHandler", () => {
 
     // Write decision file after a short delay
     setTimeout(() => {
-      writeFileSync(`${TEST_APPROVALS_DIR}/appr-001.decision`, "accept");
+      writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "accept");
     }, 200);
 
     const decision = await handler.handleCommandApproval(mockCommandRequest);
     expect(decision).toBe("accept");
     expect(lines.some((l) => l.includes("APPROVAL NEEDED"))).toBe(true);
     // Request file should be cleaned up
-    expect(existsSync(`${TEST_APPROVALS_DIR}/appr-001.json`)).toBe(false);
+    expect(existsSync(join(TEST_APPROVALS_DIR, "appr-001.json"))).toBe(false);
     // Decision file should be cleaned up
-    expect(existsSync(`${TEST_APPROVALS_DIR}/appr-001.decision`)).toBe(false);
+    expect(existsSync(join(TEST_APPROVALS_DIR, "appr-001.decision"))).toBe(false);
   });
 
   test("returns decline when decision file says decline", async () => {
     const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
 
     setTimeout(() => {
-      writeFileSync(`${TEST_APPROVALS_DIR}/appr-001.decision`, "decline");
+      writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "decline");
     }, 200);
 
     const decision = await handler.handleCommandApproval(mockCommandRequest);
@@ -83,14 +85,14 @@ describe("InteractiveApprovalHandler", () => {
     );
 
     setTimeout(() => {
-      writeFileSync(`${TEST_APPROVALS_DIR}/item2.decision`, "accept");
+      writeFileSync(join(TEST_APPROVALS_DIR, "item2.decision"), "accept");
     }, 200);
 
     const decision = await handler.handleFileChangeApproval(mockFileChangeRequest);
     expect(decision).toBe("accept");
     expect(lines.some((l) => l.includes("file change"))).toBe(true);
     // Cleanup happened
-    expect(existsSync(`${TEST_APPROVALS_DIR}/item2.json`)).toBe(false);
+    expect(existsSync(join(TEST_APPROVALS_DIR, "item2.json"))).toBe(false);
   });
 
   test("uses itemId as fallback when approvalId is null", async () => {
@@ -102,7 +104,7 @@ describe("InteractiveApprovalHandler", () => {
     };
 
     setTimeout(() => {
-      writeFileSync(`${TEST_APPROVALS_DIR}/item1.decision`, "accept");
+      writeFileSync(join(TEST_APPROVALS_DIR, "item1.decision"), "accept");
     }, 200);
 
     const decision = await handler.handleCommandApproval(reqWithNullApprovalId);
@@ -114,7 +116,7 @@ describe("InteractiveApprovalHandler", () => {
 
     // Start the approval but write decision after verifying request file
     setTimeout(() => {
-      const requestPath = `${TEST_APPROVALS_DIR}/appr-001.json`;
+      const requestPath = join(TEST_APPROVALS_DIR, "appr-001.json");
       expect(existsSync(requestPath)).toBe(true);
       const content = JSON.parse(readFileSync(requestPath, "utf-8"));
       expect(content.type).toBe("commandExecution");
@@ -123,14 +125,14 @@ describe("InteractiveApprovalHandler", () => {
       expect(content.reason).toBe("network access");
       expect(content.threadId).toBe("t1");
       expect(content.turnId).toBe("turn1");
-      writeFileSync(`${TEST_APPROVALS_DIR}/appr-001.decision`, "accept");
+      writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "accept");
     }, 150);
 
     await handler.handleCommandApproval(mockCommandRequest);
   });
 
   test("creates approvalsDir if it does not exist", async () => {
-    const nestedDir = `${TEST_APPROVALS_DIR}/nested/deep`;
+    const nestedDir = join(TEST_APPROVALS_DIR, "nested", "deep");
     const handler = new InteractiveApprovalHandler(nestedDir, () => {}, 100);
 
     expect(existsSync(nestedDir)).toBe(true);
@@ -145,7 +147,7 @@ describe("InteractiveApprovalHandler", () => {
     );
 
     setTimeout(() => {
-      writeFileSync(`${TEST_APPROVALS_DIR}/appr-001.decision`, "accept");
+      writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "accept");
     }, 200);
 
     await handler.handleCommandApproval(mockCommandRequest);
@@ -164,14 +166,14 @@ describe("InteractiveApprovalHandler", () => {
       handler.handleCommandApproval(mockCommandRequest, controller.signal),
     ).rejects.toThrow("cancelled");
 
-    expect(existsSync(`${TEST_APPROVALS_DIR}/appr-001.json`)).toBe(false);
+    expect(existsSync(join(TEST_APPROVALS_DIR, "appr-001.json"))).toBe(false);
   });
 
   test("treats unknown decision text as decline", async () => {
     const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
 
     setTimeout(() => {
-      writeFileSync(`${TEST_APPROVALS_DIR}/appr-001.decision`, "garbage");
+      writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "garbage");
     }, 200);
 
     const decision = await handler.handleCommandApproval(mockCommandRequest);

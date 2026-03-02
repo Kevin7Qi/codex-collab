@@ -4,8 +4,10 @@ import {
   resolveThreadId, registerThread, findShortId, removeThread,
 } from "./threads";
 import { rmSync, existsSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
-const TEST_THREADS_FILE = `${process.env.TMPDIR || "/tmp/claude-1000"}/codex-collab-test-threads.json`;
+const TEST_THREADS_FILE = join(tmpdir(), "codex-collab-test-threads.json");
 
 beforeEach(() => {
   if (existsSync(TEST_THREADS_FILE)) rmSync(TEST_THREADS_FILE);

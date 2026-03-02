@@ -35,7 +35,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { resolve } from "path";
+import { resolve, join } from "path";
 import type {
   ReviewTarget,
   Thread,
@@ -635,6 +635,16 @@ async function cmdKill(positional: string[]) {
 
   const threadId = resolveThreadId(config.threadsFile, id);
 
+  // Check local status — skip server operations if already killed
+  const mapping = loadThreadMapping(config.threadsFile);
+  const shortId = findShortId(config.threadsFile, threadId);
+  const localStatus = shortId ? mapping[shortId]?.lastStatus : undefined;
+
+  if (localStatus === "killed") {
+    progress(`Thread ${id} is already killed`);
+    return;
+  }
+
   const archived = await withClient(async (client) => {
     // Try to read thread status first and interrupt active turn if any
     try {
@@ -683,7 +693,7 @@ function resolveLogPath(positional: string[], usage: string): string {
   const threadId = resolveThreadId(config.threadsFile, id);
   const shortId = findShortId(config.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
-  return `${config.logsDir}/${shortId}.log`;
+  return join(config.logsDir, `${shortId}.log`);
 }
 
 async function cmdOutput(positional: string[], opts: Options) {
@@ -750,11 +760,11 @@ async function cmdApproveOrDecline(
   if (!approvalId) die(`Usage: codex-collab ${verb} <approval-id>`);
   validateIdOrDie(approvalId);
 
-  const requestPath = `${config.approvalsDir}/${approvalId}.json`;
+  const requestPath = join(config.approvalsDir, `${approvalId}.json`);
   if (!existsSync(requestPath))
     die(`No pending approval: ${approvalId}`);
 
-  const decisionPath = `${config.approvalsDir}/${approvalId}.decision`;
+  const decisionPath = join(config.approvalsDir, `${approvalId}.decision`);
   try {
     writeFileSync(decisionPath, decision, { mode: 0o600 });
   } catch (e) {
@@ -771,7 +781,7 @@ function deleteOldFiles(dir: string, maxAgeMs: number): number {
   const now = Date.now();
   let deleted = 0;
   for (const file of readdirSync(dir)) {
-    const path = `${dir}/${file}`;
+    const path = join(dir, file);
     try {
       if (now - Bun.file(path).lastModified > maxAgeMs) {
         unlinkSync(path);
@@ -804,7 +814,7 @@ async function cmdClean() {
       try {
         let lastActivity = new Date(entry.createdAt).getTime();
         if (Number.isNaN(lastActivity)) lastActivity = 0;
-        const logPath = `${config.logsDir}/${shortId}.log`;
+        const logPath = join(config.logsDir, `${shortId}.log`);
         if (existsSync(logPath)) {
           lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
         }
@@ -853,7 +863,7 @@ async function cmdDelete(positional: string[]) {
   }
 
   if (shortId) {
-    const logPath = `${config.logsDir}/${shortId}.log`;
+    const logPath = join(config.logsDir, `${shortId}.log`);
     if (existsSync(logPath)) unlinkSync(logPath);
     removeThread(config.threadsFile, shortId);
   }
@@ -866,13 +876,15 @@ async function cmdDelete(positional: string[]) {
 }
 
 async function cmdHealth() {
-  const which = Bun.spawnSync(["which", "codex"]);
+  const findCmd = process.platform === "win32" ? "where" : "which";
+  const which = Bun.spawnSync([findCmd, "codex"]);
   if (which.exitCode !== 0) {
     die("codex CLI not found. Install: npm install -g @openai/codex");
   }
 
   console.log(`  bun:   ${Bun.version}`);
-  console.log(`  codex: ${which.stdout.toString().trim()}`);
+  // `where` on Windows returns multiple matches; show only the first
+  console.log(`  codex: ${which.stdout.toString().trim().split("\n")[0].trim()}`);
 
   try {
     const userAgent = await withClient(async (client) => client.userAgent);
@@ -941,7 +953,7 @@ Examples:
 // ---------------------------------------------------------------------------
 
 /** Ensure data directories exist (called only for commands that need them).
- *  Config getters throw if HOME is unset, producing a clear error. */
+ *  Config getters throw if the home directory cannot be determined, producing a clear error. */
 function ensureDataDirs(): void {
   mkdirSync(config.logsDir, { recursive: true });
   mkdirSync(config.approvalsDir, { recursive: true });

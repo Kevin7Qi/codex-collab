@@ -1,6 +1,7 @@
 // src/approvals.ts — Approval handler abstraction
 
 import { writeFileSync, readFileSync, unlinkSync, existsSync, mkdirSync } from "fs";
+import { join } from "path";
 import type {
   ApprovalDecision,
   CommandApprovalRequest,
@@ -77,7 +78,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
 
   private writeRequestFile(id: string, data: unknown): void {
     try {
-      writeFileSync(`${this.approvalsDir}/${id}.json`, JSON.stringify(data, null, 2), { mode: 0o600 });
+      writeFileSync(join(this.approvalsDir, `${id}.json`), JSON.stringify(data, null, 2), { mode: 0o600 });
     } catch (e) {
       console.error(`[codex] Failed to write approval request: ${e instanceof Error ? e.message : e}`);
       throw e;
@@ -85,8 +86,8 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
   }
 
   private async pollForDecision(id: string, timeoutMs: number, signal?: AbortSignal): Promise<ApprovalDecision> {
-    const decisionPath = `${this.approvalsDir}/${id}.decision`;
-    const requestPath = `${this.approvalsDir}/${id}.json`;
+    const decisionPath = join(this.approvalsDir, `${id}.decision`);
+    const requestPath = join(this.approvalsDir, `${id}.json`);
     const deadline = Date.now() + timeoutMs;
 
     const cleanup = () => {
