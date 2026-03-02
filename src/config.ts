@@ -36,6 +36,8 @@ export const config = {
   get threadsFile() { return join(this.dataDir, "threads.json"); },
   get logsDir() { return join(this.dataDir, "logs"); },
   get approvalsDir() { return join(this.dataDir, "approvals"); },
+  get killSignalsDir() { return join(this.dataDir, "kill-signals"); },
+  get pidsDir() { return join(this.dataDir, "pids"); },
 
   // Display
   jobsListLimit: 20,

@@ -8,15 +8,23 @@ import type {
   TurnCompletedParams, TurnStartResponse,
   ReviewStartResponse,
 } from "./types";
-import { mkdirSync, rmSync, existsSync } from "fs";
+import { mkdirSync, rmSync, existsSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import {
+  updateThreadStatus,
+  loadThreadMapping,
+  saveThreadMapping,
+} from "./threads";
 
 const TEST_LOG_DIR = join(tmpdir(), "codex-collab-test-turns");
+const TEST_KILL_DIR = join(tmpdir(), "codex-collab-test-kill-signals");
 
 beforeEach(() => {
   if (existsSync(TEST_LOG_DIR)) rmSync(TEST_LOG_DIR, { recursive: true });
   mkdirSync(TEST_LOG_DIR, { recursive: true });
+  if (existsSync(TEST_KILL_DIR)) rmSync(TEST_KILL_DIR, { recursive: true });
+  mkdirSync(TEST_KILL_DIR, { recursive: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -132,6 +140,7 @@ describe("runTurn", () => {
       dispatcher,
       approvalHandler: autoApproveHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
     });
 
     expect(result.status).toBe("completed");
@@ -158,6 +167,7 @@ describe("runTurn", () => {
       dispatcher,
       approvalHandler: autoApproveHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
     });
 
     expect(result.status).toBe("completed");
@@ -177,6 +187,7 @@ describe("runTurn", () => {
       dispatcher,
       approvalHandler: autoApproveHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
     });
 
     expect(result.status).toBe("failed");
@@ -202,6 +213,7 @@ describe("runTurn", () => {
       dispatcher,
       approvalHandler: autoApproveHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
     });
 
     expect(result.status).toBe("completed");
@@ -218,6 +230,7 @@ describe("runTurn", () => {
         dispatcher,
         approvalHandler: autoApproveHandler,
         timeoutMs: 200,
+        killSignalsDir: TEST_KILL_DIR,
       });
       expect(true).toBe(false); // should not reach here
     } catch (e) {
@@ -262,6 +275,7 @@ describe("runTurn", () => {
       dispatcher,
       approvalHandler: autoApproveHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
     });
 
     expect(result.status).toBe("completed");
@@ -291,6 +305,7 @@ describe("runTurn", () => {
       dispatcher,
       approvalHandler: autoApproveHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
       cwd: "/my/project",
       model: "gpt-5.3-codex",
       effort: "high",
@@ -327,6 +342,7 @@ describe("runTurn", () => {
       dispatcher,
       approvalHandler: autoApproveHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
     });
 
     expect(result.status).toBe("completed");
@@ -364,6 +380,7 @@ describe("runReview", () => {
         dispatcher,
         approvalHandler: autoApproveHandler,
         timeoutMs: 5000,
+        killSignalsDir: TEST_KILL_DIR,
       },
     );
 
@@ -391,6 +408,7 @@ describe("runReview", () => {
         dispatcher,
         approvalHandler: autoApproveHandler,
         timeoutMs: 5000,
+        killSignalsDir: TEST_KILL_DIR,
       },
     );
 
@@ -434,11 +452,209 @@ describe("review output via exitedReviewMode", () => {
         dispatcher,
         approvalHandler: autoApproveHandler,
         timeoutMs: 5000,
+        killSignalsDir: TEST_KILL_DIR,
       },
     );
 
     expect(result.status).toBe("completed");
     expect(result.output).toBe("Full review text");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Kill signal tests
+// ---------------------------------------------------------------------------
+
+describe("kill signal", () => {
+
+  test("kill signal during slow turn/start returns interrupted result", async () => {
+    const { client } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        // Simulate a slow/stuck turn/start — resolves after 2s
+        return new Promise((resolve) =>
+          setTimeout(() => resolve(inProgressTurn("turn-1")), 2000),
+        );
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    // Kill signal arrives after 100ms — should win race 1 against the 2s request
+    setTimeout(() => {
+      writeFileSync(join(TEST_KILL_DIR, "thr-1"), "", { mode: 0o600 });
+    }, 100);
+
+    const dispatcher = new EventDispatcher("test-kill-request", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 10_000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("interrupted");
+    expect(result.error).toBe("Thread killed by user");
+    expect(existsSync(join(TEST_KILL_DIR, "thr-1"))).toBe(false);
+  });
+
+  test("kill signal during turn returns interrupted result", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        // Write the kill signal file after a short delay (simulates `codex-collab kill`)
+        setTimeout(() => {
+          writeFileSync(join(TEST_KILL_DIR, "thr-1"), "", { mode: 0o600 });
+        }, 100);
+        // Never fire turn/completed — the kill signal should end the turn
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-kill", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 10_000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("interrupted");
+    expect(result.error).toBe("Thread killed by user");
+    // Signal file should be cleaned up in finally block
+    expect(existsSync(join(TEST_KILL_DIR, "thr-1"))).toBe(false);
+  });
+
+  test("stale signal cleared at turn start — turn completes normally", async () => {
+    // Pre-write a stale signal file (simulates leftover from a previous kill)
+    writeFileSync(join(TEST_KILL_DIR, "thr-1"), "", { mode: 0o600 });
+
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-stale-kill", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+  });
+
+  test("normal completion wins race — no kill signal", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-no-kill", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+  });
+
+  test("signal file cleaned up on normal completion", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-cleanup", TEST_LOG_DIR, () => {});
+
+    await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    // unlinkSync in finally should not error when no signal exists
+    expect(existsSync(join(TEST_KILL_DIR, "thr-1"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Non-kill error propagation
+// ---------------------------------------------------------------------------
+
+describe("error propagation", () => {
+  test("non-kill errors propagate through the catch block", async () => {
+    const { client } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        throw new Error("Server exploded");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-propagate", TEST_LOG_DIR, () => {});
+
+    await expect(
+      runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+        dispatcher,
+        approvalHandler: autoApproveHandler,
+        timeoutMs: 5000,
+        killSignalsDir: TEST_KILL_DIR,
+      }),
+    ).rejects.toThrow("Server exploded");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// updateThreadStatus
+// ---------------------------------------------------------------------------
+
+const TEST_THREADS_FILE = join(tmpdir(), "codex-collab-test-threads", "threads.json");
+
+describe("updateThreadStatus", () => {
+  beforeEach(() => {
+    const dir = join(tmpdir(), "codex-collab-test-threads");
+    if (existsSync(dir)) rmSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true });
+  });
+
+  test("updates status and timestamp", () => {
+    saveThreadMapping(TEST_THREADS_FILE, {
+      abc12345: {
+        threadId: "thr-1",
+        createdAt: "2026-01-01T00:00:00Z",
+        lastStatus: "running",
+      },
+    });
+
+    updateThreadStatus(TEST_THREADS_FILE, "thr-1", "completed");
+    const loaded = loadThreadMapping(TEST_THREADS_FILE);
+    expect(loaded.abc12345.lastStatus).toBe("completed");
+    expect(loaded.abc12345.updatedAt).toBeDefined();
+  });
+
+  test("warns on unknown thread", () => {
+    saveThreadMapping(TEST_THREADS_FILE, {});
+    const warnings: string[] = [];
+    const origError = console.error;
+    console.error = (msg: string) => warnings.push(msg);
+    updateThreadStatus(TEST_THREADS_FILE, "thr-unknown", "running");
+    console.error = origError;
+    expect(warnings.some((w) => w.includes("unknown thread"))).toBe(true);
   });
 });
 
@@ -488,6 +704,7 @@ describe("approval wiring", () => {
       dispatcher,
       approvalHandler: mockApprovalHandler,
       timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
     });
 
     expect(approvalCalls).toContain("cmd:sudo rm -rf");

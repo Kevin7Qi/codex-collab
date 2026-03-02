@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, openSync, closeSync, unlinkSync, statSync } from "fs";
 import { randomBytes } from "crypto";
 import { dirname } from "path";
+import { validateId } from "./config";
 import type { ThreadMapping } from "./types";
 
 /**
@@ -127,6 +128,7 @@ export function registerThread(
   threadId: string,
   meta?: { model?: string; cwd?: string },
 ): ThreadMapping {
+  validateId(threadId); // ensure safe for use as filename (kill signals, etc.)
   return withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);
     let shortId = generateShortId();
@@ -171,16 +173,16 @@ export function findShortId(threadsFile: string, threadId: string): string | nul
 export function updateThreadStatus(
   threadsFile: string,
   threadId: string,
-  status: "running" | "completed" | "failed" | "interrupted" | "killed",
+  status: "running" | "completed" | "failed" | "interrupted",
 ): void {
   withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);
     let found = false;
     for (const entry of Object.values(mapping)) {
       if (entry.threadId === threadId) {
+        found = true;
         entry.lastStatus = status;
         entry.updatedAt = new Date().toISOString();
-        found = true;
         break;
       }
     }
