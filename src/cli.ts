@@ -439,8 +439,10 @@ function createDispatcher(shortId: string, opts: Options): EventDispatcher {
  *  Does NOT filter hidden models — some latest models (e.g. -codex variants)
  *  may be hidden in the catalog but still usable via the API. */
 function pickBestModel(models: Model[]): string {
-  // Models with no upgrade are the latest generation
-  const latest = models.filter(m => m.upgrade === null);
+  // Models with no upgrade are the latest generation; sort descending by ID
+  // so higher version numbers (e.g. gpt-5.4 > gpt-5.3) are preferred
+  const latest = models.filter(m => m.upgrade === null)
+    .sort((a, b) => b.id.localeCompare(a.id));
   if (latest.length > 0) {
     const codex = latest.find(m => m.id.endsWith("-codex"));
     if (codex) return codex.id;
