@@ -185,8 +185,8 @@ interface ParsedArgs {
 }
 
 interface Options {
-  reasoning: ReasoningEffort;
-  model: string;
+  reasoning: ReasoningEffort | undefined;
+  model: string | undefined;
   sandbox: SandboxMode;
   approval: ApprovalPolicy;
   dir: string;
@@ -206,8 +206,8 @@ interface Options {
 
 function parseArgs(args: string[]): ParsedArgs {
   const options: Options = {
-    reasoning: config.defaultReasoningEffort,
-    model: config.fallbackModel,
+    reasoning: undefined,
+    model: undefined,
     sandbox: config.defaultSandbox,
     approval: config.defaultApprovalPolicy,
     dir: process.cwd(),
@@ -438,7 +438,7 @@ function createDispatcher(shortId: string, opts: Options): EventDispatcher {
 /** Pick the best model from a list: latest (no upgrade), prefer -codex variant.
  *  Does NOT filter hidden models — some latest models (e.g. -codex variants)
  *  may be hidden in the catalog but still usable via the API. */
-function pickBestModel(models: Model[]): string {
+function pickBestModel(models: Model[]): string | undefined {
   // Models with no upgrade are the latest generation; sort descending by ID
   // so higher version numbers (e.g. gpt-5.4 > gpt-5.3) are preferred
   const latest = models.filter(m => m.upgrade === null)
@@ -453,18 +453,16 @@ function pickBestModel(models: Model[]): string {
   const serverDefault = models.find(m => m.isDefault);
   if (serverDefault) return serverDefault.id;
 
-  console.error(`[codex] Warning: no latest or default model found in catalog. Using fallback: ${config.fallbackModel}`);
-  return config.fallbackModel;
+  return undefined;
 }
 
 /** Pick the highest reasoning effort a model supports. */
-function pickHighestEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort {
+function pickHighestEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
   const available = new Set(supported.map(s => s.reasoningEffort));
   for (let i = config.reasoningEfforts.length - 1; i >= 0; i--) {
     if (available.has(config.reasoningEfforts[i])) return config.reasoningEfforts[i];
   }
-  console.error(`[codex] Warning: model supports [${[...available].join(", ")}] but none match known levels. Defaulting to ${config.defaultReasoningEffort}.`);
-  return config.defaultReasoningEffort;
+  return undefined;
 }
 
 /** Auto-resolve model and/or reasoning effort when not set by CLI or config. */
@@ -476,7 +474,7 @@ async function resolveDefaults(client: AppServerClient, opts: Options): Promise<
 
   let models: Model[];
   try {
-    models = await fetchAllPages<Model>(client, "model/list");
+    models = await fetchAllPages<Model>(client, "model/list", { includeHidden: true });
   } catch (e) {
     console.error(`[codex] Warning: could not fetch model list (${e instanceof Error ? e.message : String(e)}). Using defaults.`);
     return;
@@ -541,7 +539,10 @@ function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget 
 /** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
 function turnOverrides(opts: Options) {
   if (!opts.resumeId) {
-    return { cwd: opts.dir, model: opts.model, effort: opts.reasoning, approvalPolicy: opts.approval };
+    const o: Record<string, unknown> = { cwd: opts.dir, approvalPolicy: opts.approval };
+    if (opts.model) o.model = opts.model;
+    if (opts.reasoning) o.effort = opts.reasoning;
+    return o;
   }
   const o: Record<string, unknown> = {};
   if (opts.explicit.has("dir")) o.cwd = opts.dir;
@@ -653,7 +654,6 @@ async function startOrResumeThread(
   }
 
   const startParams: Record<string, unknown> = {
-    model: opts.model,
     cwd: opts.dir,
     approvalPolicy: opts.approval,
     sandbox: opts.sandbox,
@@ -661,13 +661,14 @@ async function startOrResumeThread(
     persistExtendedHistory: false,
     ...extraStartParams,
   };
+  if (opts.model) startParams.model = opts.model;
   const effective = await client.request<ThreadStartResponse>(
     "thread/start",
     startParams,
   );
   const threadId = effective.thread.id;
   registerThread(config.threadsFile, threadId, {
-    model: opts.model,
+    model: effective.model,
     cwd: opts.dir,
     preview,
   });
@@ -1006,7 +1007,7 @@ async function cmdProgress(positional: string[]) {
 
 async function cmdModels() {
   const allModels = await withClient((client) =>
-    fetchAllPages<Model>(client, "model/list"),
+    fetchAllPages<Model>(client, "model/list", { includeHidden: true }),
   );
 
   for (const m of allModels) {

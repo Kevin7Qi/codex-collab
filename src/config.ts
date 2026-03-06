@@ -11,12 +11,8 @@ function getHome(): string {
 }
 
 export const config = {
-  // Fallback model — used only when auto-detection fails (server unreachable, no models returned)
-  fallbackModel: "gpt-5.4",
-
   // Reasoning effort levels
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
-  defaultReasoningEffort: "xhigh" as const,
 
   // Sandbox modes
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,
