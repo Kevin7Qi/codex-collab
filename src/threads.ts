@@ -126,7 +126,7 @@ export function saveThreadMapping(threadsFile: string, mapping: ThreadMapping): 
 export function registerThread(
   threadsFile: string,
   threadId: string,
-  meta?: { model?: string; cwd?: string },
+  meta?: { model?: string; cwd?: string; preview?: string },
 ): ThreadMapping {
   validateId(threadId); // ensure safe for use as filename (kill signals, etc.)
   return withThreadLock(threadsFile, () => {
@@ -138,6 +138,7 @@ export function registerThread(
       createdAt: new Date().toISOString(),
       model: meta?.model,
       cwd: meta?.cwd,
+      preview: meta?.preview,
     };
     saveThreadMapping(threadsFile, mapping);
     return mapping;
