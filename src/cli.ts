@@ -483,11 +483,11 @@ async function resolveDefaults(client: AppServerClient, opts: Options): Promise<
   try {
     models = await fetchAllPages<Model>(client, "model/list", { includeHidden: true });
   } catch (e) {
-    console.error(`[codex] Warning: could not fetch model list (${e instanceof Error ? e.message : String(e)}). Using defaults.`);
+    console.error(`[codex] Warning: could not fetch model list (${e instanceof Error ? e.message : String(e)}). Model and reasoning will be determined by the server.`);
     return;
   }
   if (models.length === 0) {
-    console.error(`[codex] Warning: server returned no models. Using defaults.`);
+    console.error(`[codex] Warning: server returned no models. Model and reasoning will be determined by the server.`);
     return;
   }
 
@@ -773,9 +773,13 @@ async function cmdReview(positional: string[], opts: Options) {
   const exitCode = await withClient(async (client) => {
     await resolveDefaults(client, opts);
 
-    const reviewPreview = target.type === "custom"
-      ? target.instructions
-      : `Review ${target.type === "baseBranch" ? `PR (base: ${target.branch})` : target.type === "uncommittedChanges" ? "uncommitted changes" : `commit ${target.sha}`}`;
+    let reviewPreview: string;
+    switch (target.type) {
+      case "custom": reviewPreview = target.instructions; break;
+      case "baseBranch": reviewPreview = `Review PR (base: ${target.branch})`; break;
+      case "uncommittedChanges": reviewPreview = "Review uncommitted changes"; break;
+      case "commit": reviewPreview = `Review commit ${target.sha}`; break;
+    }
     const { threadId, shortId, effective } = await startOrResumeThread(
       client, opts, { sandbox: "read-only" }, reviewPreview,
     );

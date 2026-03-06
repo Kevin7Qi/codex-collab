@@ -212,6 +212,7 @@ export function updateThreadMeta(
         return;
       }
     }
+    console.error(`[codex] Warning: cannot update metadata for unknown thread ${threadId.slice(0, 12)}...`);
   });
 }
 
