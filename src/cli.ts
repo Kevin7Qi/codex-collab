@@ -17,6 +17,7 @@ import {
   loadThreadMapping,
   removeThread,
   saveThreadMapping,
+  updateThreadMeta,
   updateThreadStatus,
   withThreadLock,
 } from "./threads";
@@ -435,25 +436,31 @@ function createDispatcher(shortId: string, opts: Options): EventDispatcher {
   );
 }
 
-/** Pick the best model from a list: latest (no upgrade), prefer -codex variant.
- *  Does NOT filter hidden models — some latest models (e.g. -codex variants)
- *  may be hidden in the catalog but still usable via the API. */
+/** Pick the best model by following the upgrade chain from the server default,
+ *  then preferring a -codex variant if one exists at the latest generation. */
 function pickBestModel(models: Model[]): string | undefined {
-  // Models with no upgrade are the latest generation; sort descending by ID
-  // so higher version numbers (e.g. gpt-5.4 > gpt-5.3) are preferred
-  const latest = models.filter(m => m.upgrade === null)
-    .sort((a, b) => b.id.localeCompare(a.id));
-  if (latest.length > 0) {
-    const codex = latest.find(m => m.id.endsWith("-codex"));
-    if (codex) return codex.id;
-    return latest[0].id;
+  const byId = new Map(models.map(m => [m.id, m]));
+
+  // Start from the server's default model
+  let current = models.find(m => m.isDefault);
+  if (!current) return undefined;
+
+  // Follow the upgrade chain to the latest generation
+  const visited = new Set<string>();
+  while (current.upgrade && !visited.has(current.id)) {
+    visited.add(current.id);
+    const next = byId.get(current.upgrade);
+    if (!next) break; // upgrade target not in the list
+    current = next;
   }
 
-  // Fall back to server default
-  const serverDefault = models.find(m => m.isDefault);
-  if (serverDefault) return serverDefault.id;
+  // Prefer -codex variant if available at this generation
+  if (!current.id.endsWith("-codex")) {
+    const codexVariant = byId.get(current.id + "-codex");
+    if (codexVariant && codexVariant.upgrade === null) return codexVariant.id;
+  }
 
-  return undefined;
+  return current.id;
 }
 
 /** Pick the highest reasoning effort a model supports. */
@@ -650,6 +657,12 @@ async function startOrResumeThread(
     // Forced overrides from caller (e.g., review forces sandbox to read-only)
     if (extraStartParams) Object.assign(resumeParams, extraStartParams);
     const effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+    // Refresh stored metadata so `jobs` stays accurate after resume
+    updateThreadMeta(config.threadsFile, threadId, {
+      model: effective.model,
+      ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
+      ...(preview ? { preview } : {}),
+    });
     return { threadId, shortId, effective };
   }
 

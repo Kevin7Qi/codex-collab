@@ -195,6 +195,26 @@ export function updateThreadStatus(
   });
 }
 
+export function updateThreadMeta(
+  threadsFile: string,
+  threadId: string,
+  meta: { model?: string; cwd?: string; preview?: string },
+): void {
+  withThreadLock(threadsFile, () => {
+    const mapping = loadThreadMapping(threadsFile);
+    for (const entry of Object.values(mapping)) {
+      if (entry.threadId === threadId) {
+        if (meta.model !== undefined) entry.model = meta.model;
+        if (meta.cwd !== undefined) entry.cwd = meta.cwd;
+        if (meta.preview !== undefined) entry.preview = meta.preview;
+        entry.updatedAt = new Date().toISOString();
+        saveThreadMapping(threadsFile, mapping);
+        return;
+      }
+    }
+  });
+}
+
 export function removeThread(threadsFile: string, shortId: string): void {
   withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);

@@ -128,7 +128,8 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 codex-collab config                     # 查看当前配置
 codex-collab config model gpt-5.3-codex # 设置默认模型
 codex-collab config reasoning high      # 设置默认推理级别
-codex-collab config model --unset       # 取消设置（恢复自动检测）
+codex-collab config model --unset       # 取消单个设置（恢复自动检测）
+codex-collab config --unset             # 取消所有设置
 ```
 
 可配置项: `model`、`reasoning`、`sandbox`、`approval`、`timeout`

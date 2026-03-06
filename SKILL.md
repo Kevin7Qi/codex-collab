@@ -179,7 +179,8 @@ codex-collab clean                      # Delete old logs and stale mappings
 ```bash
 codex-collab config                     # Show persistent defaults
 codex-collab config model gpt-5.3-codex # Set default model
-codex-collab config model --unset       # Unset (return to auto)
+codex-collab config model --unset       # Unset a key (return to auto)
+codex-collab config --unset             # Unset all keys (return to auto)
 codex-collab models                     # List available models
 codex-collab approve <id>              # Approve a pending request
 codex-collab decline <id>              # Decline a pending request

@@ -134,8 +134,11 @@ codex-collab config model gpt-5.3-codex
 # Set default reasoning effort
 codex-collab config reasoning high
 
-# Unset (return to auto-detection)
+# Unset a key (return to auto-detection)
 codex-collab config model --unset
+
+# Unset all keys
+codex-collab config --unset
 ```
 
 Available keys: `model`, `reasoning`, `sandbox`, `approval`, `timeout`
