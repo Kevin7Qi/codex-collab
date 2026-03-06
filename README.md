@@ -105,8 +105,8 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | Flag | Description |
 |------|-------------|
 | `-d, --dir <path>` | Working directory |
-| `-m, --model <model>` | Model name |
-| `-r, --reasoning <level>` | low, medium, high, xhigh (default: xhigh) |
+| `-m, --model <model>` | Model name (default: auto — latest available) |
+| `-r, --reasoning <level>` | low, medium, high, xhigh (default: auto — highest for model) |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
@@ -117,6 +117,39 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--base <branch>` | Base branch for PR review (default: main) |
 
 </details>
+
+## Defaults & Configuration
+
+By default, codex-collab auto-selects the **latest model** (preferring `-codex` variants) and the **highest reasoning effort** supported by that model. No configuration needed — it stays current as new models are released.
+
+To override defaults persistently, use `codex-collab config`:
+
+```bash
+# Show current config
+codex-collab config
+
+# Set a preferred model
+codex-collab config model gpt-5.3-codex
+
+# Set default reasoning effort
+codex-collab config reasoning high
+
+# Unset a key (return to auto-detection)
+codex-collab config model --unset
+
+# Unset all keys
+codex-collab config --unset
+```
+
+Available keys: `model`, `reasoning`, `sandbox`, `approval`, `timeout`
+
+CLI flags always take precedence over config, and config takes precedence over auto-detection:
+
+```
+CLI flag  >  config file  >  auto-detected
+```
+
+Config is stored in `~/.codex-collab/config.json`.
 
 ## Contributing
 

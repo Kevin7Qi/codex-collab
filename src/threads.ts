@@ -126,7 +126,7 @@ export function saveThreadMapping(threadsFile: string, mapping: ThreadMapping): 
 export function registerThread(
   threadsFile: string,
   threadId: string,
-  meta?: { model?: string; cwd?: string },
+  meta?: { model?: string; cwd?: string; preview?: string },
 ): ThreadMapping {
   validateId(threadId); // ensure safe for use as filename (kill signals, etc.)
   return withThreadLock(threadsFile, () => {
@@ -138,6 +138,7 @@ export function registerThread(
       createdAt: new Date().toISOString(),
       model: meta?.model,
       cwd: meta?.cwd,
+      preview: meta?.preview,
     };
     saveThreadMapping(threadsFile, mapping);
     return mapping;
@@ -191,6 +192,27 @@ export function updateThreadStatus(
       return;
     }
     saveThreadMapping(threadsFile, mapping);
+  });
+}
+
+export function updateThreadMeta(
+  threadsFile: string,
+  threadId: string,
+  meta: { model?: string; cwd?: string; preview?: string },
+): void {
+  withThreadLock(threadsFile, () => {
+    const mapping = loadThreadMapping(threadsFile);
+    for (const entry of Object.values(mapping)) {
+      if (entry.threadId === threadId) {
+        if (meta.model !== undefined) entry.model = meta.model;
+        if (meta.cwd !== undefined) entry.cwd = meta.cwd;
+        if (meta.preview !== undefined) entry.preview = meta.preview;
+        entry.updatedAt = new Date().toISOString();
+        saveThreadMapping(threadsFile, mapping);
+        return;
+      }
+    }
+    console.error(`[codex] Warning: cannot update metadata for unknown thread ${threadId.slice(0, 12)}...`);
   });
 }
 

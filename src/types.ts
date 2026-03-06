@@ -444,6 +444,7 @@ export interface ThreadMappingEntry {
   createdAt: string;
   model?: string;
   cwd?: string;
+  preview?: string;
   lastStatus?: "running" | "completed" | "failed" | "interrupted";
   updatedAt?: string;
 }

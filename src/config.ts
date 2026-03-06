@@ -11,12 +11,8 @@ function getHome(): string {
 }
 
 export const config = {
-  // Default model
-  model: "gpt-5.3-codex",
-
   // Reasoning effort levels
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
-  defaultReasoningEffort: "xhigh" as const,
 
   // Sandbox modes
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,
@@ -38,6 +34,7 @@ export const config = {
   get approvalsDir() { return join(this.dataDir, "approvals"); },
   get killSignalsDir() { return join(this.dataDir, "kill-signals"); },
   get pidsDir() { return join(this.dataDir, "pids"); },
+  get configFile() { return join(this.dataDir, "config.json"); },
 
   // Display
   jobsListLimit: 20,

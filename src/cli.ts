@@ -17,6 +17,7 @@ import {
   loadThreadMapping,
   removeThread,
   saveThreadMapping,
+  updateThreadMeta,
   updateThreadStatus,
   withThreadLock,
 } from "./threads";
@@ -38,11 +39,97 @@ import {
 import { resolve, join } from "path";
 import type {
   ReviewTarget,
-  Thread,
   ThreadStartResponse,
   Model,
   TurnResult,
 } from "./types";
+
+// ---------------------------------------------------------------------------
+// User config — persistent defaults from ~/.codex-collab/config.json
+// ---------------------------------------------------------------------------
+
+/** Fields users can set in ~/.codex-collab/config.json. */
+interface UserConfig {
+  model?: string;
+  reasoning?: string;
+  sandbox?: string;
+  approval?: string;
+  timeout?: number;
+}
+
+function loadUserConfig(): UserConfig {
+  try {
+    const parsed = JSON.parse(readFileSync(config.configFile, "utf-8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      console.error(`[codex] Warning: config file is not a JSON object — ignoring: ${config.configFile}`);
+      return {};
+    }
+    return parsed as UserConfig;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    if (e instanceof SyntaxError) {
+      console.error(`[codex] Warning: invalid JSON in ${config.configFile} — ignoring config`);
+    } else {
+      console.error(`[codex] Warning: could not read config: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    return {};
+  }
+}
+
+function saveUserConfig(cfg: UserConfig): void {
+  try {
+    writeFileSync(config.configFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+  } catch (e) {
+    die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** Apply user config to parsed options — only for fields not set via CLI flags.
+ *  Config values are added to `configured` (not `explicit`) so they suppress
+ *  auto-detection but are NOT forwarded as overrides on thread resume. */
+function applyUserConfig(options: Options): void {
+  const cfg = loadUserConfig();
+
+  if (!options.explicit.has("model") && typeof cfg.model === "string") {
+    if (/[^a-zA-Z0-9._\-\/:]/.test(cfg.model)) {
+      console.error(`[codex] Warning: ignoring invalid model in config: ${cfg.model}`);
+    } else {
+      options.model = cfg.model;
+      options.configured.add("model");
+    }
+  }
+  if (!options.explicit.has("reasoning") && typeof cfg.reasoning === "string") {
+    if (config.reasoningEfforts.includes(cfg.reasoning as any)) {
+      options.reasoning = cfg.reasoning as ReasoningEffort;
+      options.configured.add("reasoning");
+    } else {
+      console.error(`[codex] Warning: ignoring invalid reasoning in config: ${cfg.reasoning}`);
+    }
+  }
+  if (!options.explicit.has("sandbox") && typeof cfg.sandbox === "string") {
+    if (config.sandboxModes.includes(cfg.sandbox as any)) {
+      options.sandbox = cfg.sandbox as SandboxMode;
+      options.configured.add("sandbox");
+    } else {
+      console.error(`[codex] Warning: ignoring invalid sandbox in config: ${cfg.sandbox}`);
+    }
+  }
+  if (!options.explicit.has("approval") && typeof cfg.approval === "string") {
+    if (config.approvalPolicies.includes(cfg.approval as any)) {
+      options.approval = cfg.approval as ApprovalPolicy;
+      options.configured.add("approval");
+    } else {
+      console.error(`[codex] Warning: ignoring invalid approval in config: ${cfg.approval}`);
+    }
+  }
+  if (!options.explicit.has("timeout") && cfg.timeout !== undefined) {
+    if (typeof cfg.timeout === "number" && Number.isFinite(cfg.timeout) && cfg.timeout > 0) {
+      options.timeout = cfg.timeout;
+    } else {
+      console.error(`[codex] Warning: ignoring invalid timeout in config: ${cfg.timeout}`);
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Signal handlers — clean up spawned app-server and update thread status
@@ -99,8 +186,8 @@ interface ParsedArgs {
 }
 
 interface Options {
-  reasoning: ReasoningEffort;
-  model: string;
+  reasoning: ReasoningEffort | undefined;
+  model: string | undefined;
   sandbox: SandboxMode;
   approval: ApprovalPolicy;
   dir: string;
@@ -112,14 +199,16 @@ interface Options {
   reviewRef: string | null;
   base: string;
   resumeId: string | null;
-  /** Flags explicitly provided on the command line. */
+  /** Flags explicitly provided on the command line (forwarded on resume). */
   explicit: Set<string>;
+  /** Flags set by user config file (suppress auto-detection but NOT forwarded on resume). */
+  configured: Set<string>;
 }
 
 function parseArgs(args: string[]): ParsedArgs {
   const options: Options = {
-    reasoning: config.defaultReasoningEffort,
-    model: config.model,
+    reasoning: undefined,
+    model: undefined,
     sandbox: config.defaultSandbox,
     approval: config.defaultApprovalPolicy,
     dir: process.cwd(),
@@ -132,6 +221,7 @@ function parseArgs(args: string[]): ParsedArgs {
     base: "main",
     resumeId: null,
     explicit: new Set<string>(),
+    configured: new Set<string>(),
   };
 
   const positional: string[] = [];
@@ -222,6 +312,7 @@ function parseArgs(args: string[]): ParsedArgs {
         process.exit(1);
       }
       options.timeout = val;
+      options.explicit.add("timeout");
     } else if (arg === "--limit") {
       if (i + 1 >= args.length) {
         console.error("Error: --limit requires a value");
@@ -265,6 +356,8 @@ function parseArgs(args: string[]): ParsedArgs {
       options.resumeId = args[++i];
     } else if (arg === "--all") {
       options.limit = Infinity;
+    } else if (arg === "--unset") {
+      options.explicit.add("unset");
     } else if (arg.startsWith("-")) {
       console.error(`Error: Unknown option: ${arg}`);
       console.error("Run codex-collab --help for usage");
@@ -343,6 +436,73 @@ function createDispatcher(shortId: string, opts: Options): EventDispatcher {
   );
 }
 
+/** Pick the best model by following the upgrade chain from the server default,
+ *  then preferring a -codex variant if one exists at the latest generation. */
+function pickBestModel(models: Model[]): string | undefined {
+  const byId = new Map(models.map(m => [m.id, m]));
+
+  // Start from the server's default model
+  let current = models.find(m => m.isDefault);
+  if (!current) return undefined;
+
+  // Follow the upgrade chain to the latest generation
+  const visited = new Set<string>();
+  while (current.upgrade && !visited.has(current.id)) {
+    visited.add(current.id);
+    const next = byId.get(current.upgrade);
+    if (!next) break; // upgrade target not in the list
+    current = next;
+  }
+
+  // Prefer -codex variant if available at this generation
+  if (!current.id.endsWith("-codex")) {
+    const codexVariant = byId.get(current.id + "-codex");
+    if (codexVariant && codexVariant.upgrade === null) return codexVariant.id;
+  }
+
+  return current.id;
+}
+
+/** Pick the highest reasoning effort a model supports. */
+function pickHighestEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
+  const available = new Set(supported.map(s => s.reasoningEffort));
+  for (let i = config.reasoningEfforts.length - 1; i >= 0; i--) {
+    if (available.has(config.reasoningEfforts[i])) return config.reasoningEfforts[i];
+  }
+  return undefined;
+}
+
+/** Auto-resolve model and/or reasoning effort when not set by CLI or config. */
+async function resolveDefaults(client: AppServerClient, opts: Options): Promise<void> {
+  const isSet = (key: string) => opts.explicit.has(key) || opts.configured.has(key);
+  const needModel = !isSet("model");
+  const needReasoning = !isSet("reasoning");
+  if (!needModel && !needReasoning) return;
+
+  let models: Model[];
+  try {
+    models = await fetchAllPages<Model>(client, "model/list", { includeHidden: true });
+  } catch (e) {
+    console.error(`[codex] Warning: could not fetch model list (${e instanceof Error ? e.message : String(e)}). Model and reasoning will be determined by the server.`);
+    return;
+  }
+  if (models.length === 0) {
+    console.error(`[codex] Warning: server returned no models. Model and reasoning will be determined by the server.`);
+    return;
+  }
+
+  if (needModel) {
+    opts.model = pickBestModel(models);
+  }
+
+  if (needReasoning) {
+    const modelData = models.find(m => m.id === opts.model);
+    if (modelData?.supportedReasoningEfforts?.length) {
+      opts.reasoning = pickHighestEffort(modelData.supportedReasoningEfforts);
+    }
+  }
+}
+
 /** Try to archive a thread on the server. Returns status string. */
 async function tryArchive(client: AppServerClient, threadId: string): Promise<"archived" | "already_done" | "failed"> {
   try {
@@ -386,7 +546,10 @@ function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget 
 /** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
 function turnOverrides(opts: Options) {
   if (!opts.resumeId) {
-    return { cwd: opts.dir, model: opts.model, effort: opts.reasoning, approvalPolicy: opts.approval };
+    const o: Record<string, unknown> = { cwd: opts.dir, approvalPolicy: opts.approval };
+    if (opts.model) o.model = opts.model;
+    if (opts.reasoning) o.effort = opts.reasoning;
+    return o;
   }
   const o: Record<string, unknown> = {};
   if (opts.explicit.has("dir")) o.cwd = opts.dir;
@@ -477,6 +640,7 @@ async function startOrResumeThread(
   client: AppServerClient,
   opts: Options,
   extraStartParams?: Record<string, unknown>,
+  preview?: string,
 ): Promise<{ threadId: string; shortId: string; effective: ThreadStartResponse }> {
   if (opts.resumeId) {
     const threadId = resolveThreadId(config.threadsFile, opts.resumeId);
@@ -493,11 +657,16 @@ async function startOrResumeThread(
     // Forced overrides from caller (e.g., review forces sandbox to read-only)
     if (extraStartParams) Object.assign(resumeParams, extraStartParams);
     const effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+    // Refresh stored metadata so `jobs` stays accurate after resume
+    updateThreadMeta(config.threadsFile, threadId, {
+      model: effective.model,
+      ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
+      ...(preview ? { preview } : {}),
+    });
     return { threadId, shortId, effective };
   }
 
   const startParams: Record<string, unknown> = {
-    model: opts.model,
     cwd: opts.dir,
     approvalPolicy: opts.approval,
     sandbox: opts.sandbox,
@@ -505,14 +674,16 @@ async function startOrResumeThread(
     persistExtendedHistory: false,
     ...extraStartParams,
   };
+  if (opts.model) startParams.model = opts.model;
   const effective = await client.request<ThreadStartResponse>(
     "thread/start",
     startParams,
   );
   const threadId = effective.thread.id;
   registerThread(config.threadsFile, threadId, {
-    model: opts.model,
+    model: effective.model,
     cwd: opts.dir,
+    preview,
   });
   const shortId = findShortId(config.threadsFile, threadId);
   if (!shortId) die(`Internal error: thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
@@ -546,7 +717,9 @@ async function cmdRun(positional: string[], opts: Options) {
   const prompt = positional.join(" ");
 
   const exitCode = await withClient(async (client) => {
-    const { threadId, shortId, effective } = await startOrResumeThread(client, opts);
+    await resolveDefaults(client, opts);
+
+    const { threadId, shortId, effective } = await startOrResumeThread(client, opts, undefined, prompt);
 
     if (opts.contentOnly) {
       console.error(`[codex] Running (thread ${shortId})...`);
@@ -598,8 +771,17 @@ async function cmdReview(positional: string[], opts: Options) {
   const target = resolveReviewTarget(positional, opts);
 
   const exitCode = await withClient(async (client) => {
+    await resolveDefaults(client, opts);
+
+    let reviewPreview: string;
+    switch (target.type) {
+      case "custom": reviewPreview = target.instructions; break;
+      case "baseBranch": reviewPreview = `Review PR (base: ${target.branch})`; break;
+      case "uncommittedChanges": reviewPreview = "Review uncommitted changes"; break;
+      case "commit": reviewPreview = `Review commit ${target.sha}`; break;
+    }
     const { threadId, shortId, effective } = await startOrResumeThread(
-      client, opts, { sandbox: "read-only" },
+      client, opts, { sandbox: "read-only" }, reviewPreview,
     );
 
     if (opts.contentOnly) {
@@ -664,62 +846,52 @@ async function fetchAllPages<T>(
 
 async function cmdJobs(opts: Options) {
   const mapping = loadThreadMapping(config.threadsFile);
-  const reverseMap = new Map<string, string>();
-  for (const [shortId, entry] of Object.entries(mapping)) {
-    reverseMap.set(entry.threadId, shortId);
-  }
 
-  // Fetch all pages from server — we filter to locally-known threads,
-  // so a single page could miss local threads buried behind non-local ones.
-  const allThreads = await withClient((client) =>
-    fetchAllPages<Thread>(client, "thread/list", { sortKey: "updated_at" }),
-  );
-
-  // Only show threads created by this CLI (those with a local short ID mapping)
-  let localThreads = allThreads.filter((t) => reverseMap.has(t.id));
+  // Build entries sorted by updatedAt (most recent first), falling back to createdAt
+  let entries = Object.entries(mapping)
+    .map(([shortId, entry]) => ({ shortId, ...entry }))
+    .sort((a, b) => {
+      const ta = new Date(a.updatedAt ?? a.createdAt).getTime();
+      const tb = new Date(b.updatedAt ?? b.createdAt).getTime();
+      return tb - ta;
+    });
 
   // Detect stale "running" status: if the owning process is dead, mark as interrupted.
-  for (const t of localThreads) {
-    const sid = reverseMap.get(t.id)!;
-    const entry = mapping[sid];
-    if (entry?.lastStatus === "running" && !isProcessAlive(sid)) {
-      updateThreadStatus(config.threadsFile, t.id, "interrupted");
-      entry.lastStatus = "interrupted";
-      removePidFile(sid);
+  for (const e of entries) {
+    if (e.lastStatus === "running" && !isProcessAlive(e.shortId)) {
+      updateThreadStatus(config.threadsFile, e.threadId, "interrupted");
+      e.lastStatus = "interrupted";
+      removePidFile(e.shortId);
     }
   }
 
-  if (opts.limit !== Infinity) localThreads = localThreads.slice(0, opts.limit);
+  if (opts.limit !== Infinity) entries = entries.slice(0, opts.limit);
 
   if (opts.json) {
-    const enriched = localThreads.map((t) => {
-      const sid = reverseMap.get(t.id)!;
-      const entry = mapping[sid];
-      return {
-        shortId: sid,
-        threadId: t.id,
-        status: entry.lastStatus ?? "unknown",
-        modelProvider: t.modelProvider,
-        cwd: t.cwd,
-        preview: t.preview || null,
-        createdAt: new Date(t.createdAt * 1000).toISOString(),
-        updatedAt: new Date(t.updatedAt * 1000).toISOString(),
-      };
-    });
+    const enriched = entries.map(e => ({
+      shortId: e.shortId,
+      threadId: e.threadId,
+      status: e.lastStatus ?? "unknown",
+      model: e.model ?? null,
+      cwd: e.cwd ?? null,
+      preview: e.preview ?? null,
+      createdAt: e.createdAt,
+      updatedAt: e.updatedAt ?? e.createdAt,
+    }));
     console.log(JSON.stringify(enriched, null, 2));
   } else {
-    if (localThreads.length === 0) {
+    if (entries.length === 0) {
       console.log("No threads found.");
       return;
     }
-    for (const t of localThreads) {
-      const sid = reverseMap.get(t.id)!;
-      const entry = mapping[sid];
-      const status = entry.lastStatus ?? "idle";
-      const age = formatAge(t.updatedAt);
-      const preview = t.preview ? ` ${t.preview.slice(0, 50)}` : "";
+    for (const e of entries) {
+      const status = e.lastStatus ?? "idle";
+      const ts = new Date(e.updatedAt ?? e.createdAt).getTime() / 1000;
+      const age = formatAge(ts);
+      const model = e.model ? ` (${e.model})` : "";
+      const preview = e.preview ? ` ${e.preview.slice(0, 50)}` : "";
       console.log(
-        `  ${sid}  ${status.padEnd(12)} ${age.padEnd(8)} ${t.cwd}${preview}`,
+        `  ${e.shortId}  ${status.padEnd(12)} ${age.padEnd(8)} ${e.cwd ?? ""}${model}${preview}`,
       );
     }
   }
@@ -852,7 +1024,7 @@ async function cmdProgress(positional: string[]) {
 
 async function cmdModels() {
   const allModels = await withClient((client) =>
-    fetchAllPages<Model>(client, "model/list"),
+    fetchAllPages<Model>(client, "model/list", { includeHidden: true }),
   );
 
   for (const m of allModels) {
@@ -1040,6 +1212,76 @@ async function cmdDelete(positional: string[]) {
   }
 }
 
+async function cmdConfig(positional: string[], opts: Options) {
+  const VALID_KEYS: Record<string, { validate: (v: string) => boolean; hint: string }> = {
+    model:     { validate: v => !/[^a-zA-Z0-9._\-\/:]/.test(v), hint: "model name (e.g. gpt-5.4, gpt-5.3-codex)" },
+    reasoning: { validate: v => (config.reasoningEfforts as readonly string[]).includes(v), hint: config.reasoningEfforts.join(", ") },
+    sandbox:   { validate: v => (config.sandboxModes as readonly string[]).includes(v), hint: config.sandboxModes.join(", ") },
+    approval:  { validate: v => (config.approvalPolicies as readonly string[]).includes(v), hint: config.approvalPolicies.join(", ") },
+    timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0; }, hint: "seconds (e.g. 1200)" },
+  };
+
+  const cfg = loadUserConfig();
+
+  // No args → show current config, or --unset to clear all
+  if (positional.length === 0) {
+    if (opts.explicit.has("unset")) {
+      saveUserConfig({});
+      console.log("All config values cleared. Using auto-detected defaults.");
+      return;
+    }
+    if (Object.keys(cfg).length === 0) {
+      console.log("No user config set. Using auto-detected defaults.");
+      console.log(`\nConfig file: ${config.configFile}`);
+      console.log(`\nAvailable keys: ${Object.keys(VALID_KEYS).join(", ")}`);
+      console.log("Set a value:   codex-collab config <key> <value>");
+      console.log("Unset a value: codex-collab config <key> --unset");
+    } else {
+      for (const [k, v] of Object.entries(cfg)) {
+        console.log(`  ${k}: ${v}`);
+      }
+      console.log(`\nConfig file: ${config.configFile}`);
+    }
+    return;
+  }
+
+  const key = positional[0];
+  if (!Object.hasOwn(VALID_KEYS, key)) {
+    die(`Unknown config key: ${key}\nValid keys: ${Object.keys(VALID_KEYS).join(", ")}`);
+  }
+
+  // Unset
+  if (opts.explicit.has("unset")) {
+    delete (cfg as Record<string, unknown>)[key];
+    saveUserConfig(cfg);
+    console.log(`Unset ${key} (will use auto-detected default)`);
+    return;
+  }
+
+  // Key only → show value
+  if (positional.length === 1) {
+    const val = (cfg as Record<string, unknown>)[key];
+    if (val !== undefined) {
+      console.log(`${key}: ${val}`);
+    } else {
+      console.log(`${key}: (not set — auto-detected)`);
+    }
+    return;
+  }
+
+  const value = positional[1];
+
+  // Validate and set
+  const spec = VALID_KEYS[key];
+  if (!spec.validate(value)) {
+    die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
+  }
+
+  (cfg as Record<string, unknown>)[key] = key === "timeout" ? Number(value) : value;
+  saveUserConfig(cfg);
+  console.log(`Set ${key}: ${value}`);
+}
+
 async function cmdHealth() {
   const findCmd = process.platform === "win32" ? "where" : "which";
   const which = Bun.spawnSync([findCmd, "codex"]);
@@ -1080,6 +1322,7 @@ Commands:
   kill <id>               Stop a running thread
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
+  config [key] [value]    Show or set persistent defaults
   models                  List available models
   approve <id>            Approve a pending request
   decline <id>            Decline a pending request
@@ -1088,8 +1331,8 @@ Commands:
   health                  Check prerequisites
 
 Options:
-  -m, --model <model>     Model name (default: ${config.model})
-  -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: ${config.defaultReasoningEffort})
+  -m, --model <model>     Model name (default: auto — latest available)
+  -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: auto — highest available)
   -s, --sandbox <mode>    Sandbox: ${config.sandboxModes.join(", ")}
                           (default: ${config.defaultSandbox})
   -d, --dir <path>        Working directory (default: cwd)
@@ -1138,7 +1381,7 @@ async function main() {
   // Keep in sync with the switch below.
   const knownCommands = new Set([
     "run", "review", "jobs", "kill", "output", "progress",
-    "models", "approve", "decline", "clean", "delete", "health",
+    "config", "models", "approve", "decline", "clean", "delete", "health",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -1150,6 +1393,11 @@ async function main() {
   const noDataDirCommands = new Set(["health", "models"]);
   if (!noDataDirCommands.has(command)) {
     ensureDataDirs();
+  }
+
+  // Apply user config for commands that use options
+  if (command === "run" || command === "review") {
+    applyUserConfig(options);
   }
 
   switch (command) {
@@ -1165,6 +1413,8 @@ async function main() {
       return cmdOutput(positional, options);
     case "progress":
       return cmdProgress(positional);
+    case "config":
+      return cmdConfig(positional, options);
     case "models":
       return cmdModels();
     case "approve":
