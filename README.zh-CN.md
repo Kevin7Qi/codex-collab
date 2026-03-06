@@ -105,8 +105,8 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | 参数 | 说明 |
 |------|------|
 | `-d, --dir <path>` | 工作目录 |
-| `-m, --model <model>` | 模型名称 |
-| `-r, --reasoning <level>` | low, medium, high, xhigh（默认: xhigh） |
+| `-m, --model <model>` | 模型名称（默认: 自动选择最新可用模型） |
+| `-r, --reasoning <level>` | low, medium, high, xhigh（默认: 自动选择模型支持的最高级别） |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access（默认: workspace-write；review 始终使用 read-only） |
 | `--mode <mode>` | 审查模式: pr, uncommitted, commit, custom |
 | `--ref <hash>` | 指定 commit 哈希（配合 `--mode commit`） |
@@ -117,6 +117,25 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | `--base <branch>` | PR 审查的基准分支（默认: main） |
 
 </details>
+
+## 默认值与配置
+
+默认情况下，codex-collab 自动选择**最新模型**（优先选择 `-codex` 变体）及该模型支持的**最高推理级别**。无需配置——新模型发布后自动更新。
+
+使用 `codex-collab config` 持久化覆盖默认值：
+
+```bash
+codex-collab config                     # 查看当前配置
+codex-collab config model gpt-5.3-codex # 设置默认模型
+codex-collab config reasoning high      # 设置默认推理级别
+codex-collab config model --unset       # 取消设置（恢复自动检测）
+```
+
+可配置项: `model`、`reasoning`、`sandbox`、`approval`、`timeout`
+
+优先级: `CLI 参数 > 配置文件 > 自动检测`
+
+配置存储于 `~/.codex-collab/config.json`。
 
 ## 参与贡献
 

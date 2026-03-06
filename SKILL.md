@@ -106,7 +106,7 @@ codex-collab progress <id>
 
 Progress lines stream in real-time during execution:
 ```
-[codex] Thread a1b2c3d4 started (gpt-5.3-codex, workspace-write)
+[codex] Thread a1b2c3d4 started (gpt-5.4, workspace-write)
 [codex] Turn started
 [codex] Running: npm test
 [codex] Edited: src/auth.ts (update)
@@ -177,6 +177,9 @@ codex-collab clean                      # Delete old logs and stale mappings
 ### Utility
 
 ```bash
+codex-collab config                     # Show persistent defaults
+codex-collab config model gpt-5.3-codex # Set default model
+codex-collab config model --unset       # Unset (return to auto)
 codex-collab models                     # List available models
 codex-collab approve <id>              # Approve a pending request
 codex-collab decline <id>              # Decline a pending request
@@ -187,8 +190,8 @@ codex-collab health                     # Check prerequisites
 
 | Flag | Description |
 |------|-------------|
-| `-m, --model <model>` | Model name (default: gpt-5.3-codex) |
-| `-r, --reasoning <level>` | Reasoning effort: low, medium, high, xhigh (default: xhigh) |
+| `-m, --model <model>` | Model name (default: auto — latest available) |
+| `-r, --reasoning <level>` | Reasoning effort: low, medium, high, xhigh (default: auto — highest for model) |
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |

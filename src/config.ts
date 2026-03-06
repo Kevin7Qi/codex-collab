@@ -11,8 +11,8 @@ function getHome(): string {
 }
 
 export const config = {
-  // Default model
-  model: "gpt-5.3-codex",
+  // Fallback model — used only when auto-detection fails (server unreachable, no models returned)
+  fallbackModel: "gpt-5.4",
 
   // Reasoning effort levels
   reasoningEfforts: ["low", "medium", "high", "xhigh"] as const,
@@ -38,6 +38,7 @@ export const config = {
   get approvalsDir() { return join(this.dataDir, "approvals"); },
   get killSignalsDir() { return join(this.dataDir, "kill-signals"); },
   get pidsDir() { return join(this.dataDir, "pids"); },
+  get configFile() { return join(this.dataDir, "config.json"); },
 
   // Display
   jobsListLimit: 20,

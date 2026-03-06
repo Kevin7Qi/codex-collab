@@ -35,6 +35,7 @@ codex-collab health
 - Communicates with Codex via `codex app-server` JSON-RPC protocol over stdio
 - Threads stored in `~/.codex-collab/threads.json` as short ID → full ID mapping
 - Logs stored in `~/.codex-collab/logs/` per thread
+- User defaults stored in `~/.codex-collab/config.json` (model, reasoning, sandbox, approval, timeout)
 - Approval requests use file-based IPC in `~/.codex-collab/approvals/`
 - Short IDs are 8-char hex, support prefix resolution
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running
