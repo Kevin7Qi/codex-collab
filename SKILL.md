@@ -1,6 +1,6 @@
 ---
 name: codex-collab
-description: Delegate tasks to Codex — run prompts, code review, research, pair programming, or any collaboration mode. Use when the user asks to use Codex, send work to Codex, have Codex review/investigate/implement something, or collaborate with Codex. Also use proactively when you want external feedback, a second opinion, or a fresh pair of eyes on code, architecture, or decisions.
+description: Use when the user asks to invoke, delegate to, or collaborate with Codex on any task. Also use PROACTIVELY when an independent, non-Claude perspective from Codex would add value — second opinions on code, plans, architecture, or design decisions.
 ---
 
 # codex-collab
