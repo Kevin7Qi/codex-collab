@@ -11,13 +11,13 @@ import {
 } from "./config";
 import { connect, type AppServerClient } from "./protocol";
 import {
-  registerThread,
-  resolveThreadId,
-  findShortId,
+  legacyRegisterThread as registerThread,
+  legacyResolveThreadId as resolveThreadId,
+  legacyFindShortId as findShortId,
   loadThreadMapping,
-  removeThread,
+  legacyRemoveThread as removeThread,
   saveThreadMapping,
-  updateThreadMeta,
+  legacyUpdateThreadMeta as updateThreadMeta,
   updateThreadStatus,
   withThreadLock,
 } from "./threads";
