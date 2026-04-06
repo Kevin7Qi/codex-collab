@@ -7,6 +7,7 @@ import type {
   ErrorNotificationParams,
   FileChange, CommandExec,
   CommandExecutionItem, FileChangeItem, ExitedReviewModeItem,
+  RunPhase,
 } from "./types";
 
 type ProgressCallback = (line: string) => void;
@@ -18,6 +19,7 @@ export class EventDispatcher {
   private logBuffer: string[] = [];
   private logPath: string;
   private onProgress: ProgressCallback;
+  private lastPhase: Map<string, string> = new Map();
 
   constructor(
     shortId: string,
@@ -108,6 +110,16 @@ export class EventDispatcher {
     return [...this.commandsRun];
   }
 
+  /** Emit progress with optional phase tracking for dedup. */
+  emitProgress(line: string, opts?: { phase?: string; threadId?: string }): void {
+    if (opts?.phase && opts?.threadId) {
+      const prev = this.lastPhase.get(opts.threadId);
+      if (prev === opts.phase) return; // dedup: same phase for same thread
+      this.lastPhase.set(opts.threadId, opts.phase);
+    }
+    this.progress(line);
+  }
+
   reset(): void {
     this.accumulatedOutput = "";
     this.filesChanged = [];
@@ -144,4 +156,29 @@ export class EventDispatcher {
     // Auto-flush every 20 entries
     if (this.logBuffer.length >= 20) this.flush();
   }
+}
+
+// --- Phase inference from log lines ---
+
+const PHASE_PATTERNS: Array<[RegExp, RunPhase]> = [
+  [/\bStarting\b/i, "starting"],
+  [/\bstarted\b/i, "starting"],
+  [/\bReviewing\b/i, "reviewing"],
+  [/\breview\b/i, "reviewing"],
+  [/\bEdit(?:ing|ed)\b/i, "editing"],
+  [/\bVerify(?:ing)?\b/i, "verifying"],
+  [/\bcheck(?:ing)?\b/i, "verifying"],
+  [/\bRunning\b/i, "running"],
+  [/\bExecut(?:ing|e)\b/i, "running"],
+  [/\bInvestigat(?:ing|e)\b/i, "investigating"],
+  [/\bFinaliz(?:ing|e)\b/i, "finalizing"],
+  [/\bcompleted?\b/i, "finalizing"],
+];
+
+/** Infer a RunPhase from a log line by regex matching. Returns null if no match. */
+export function inferPhaseFromLog(line: string): RunPhase | null {
+  for (const [pattern, phase] of PHASE_PATTERNS) {
+    if (pattern.test(line)) return phase;
+  }
+  return null;
 }
