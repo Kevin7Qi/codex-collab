@@ -162,6 +162,7 @@ async function executeTurn(
     return {
       status: completedTurn.turn.status as TurnResult["status"],
       output,
+      reasoning: null,
       filesChanged: opts.dispatcher.getFilesChanged(),
       commandsRun: opts.dispatcher.getCommandsRun(),
       error: completedTurn.turn.error?.message,
@@ -174,6 +175,7 @@ async function executeTurn(
       return {
         status: "interrupted",
         output: opts.dispatcher.getAccumulatedOutput(),
+        reasoning: null,
         filesChanged: opts.dispatcher.getFilesChanged(),
         commandsRun: opts.dispatcher.getCommandsRun(),
         error: "Thread killed by user",
