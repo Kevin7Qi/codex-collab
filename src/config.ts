@@ -135,14 +135,14 @@ export function resolveModel(model: string | undefined): string | undefined {
  * Validate reasoning effort against known levels.
  * Throws on invalid. Returns undefined for undefined input.
  */
-export function validateEffort(effort: string | undefined): string | undefined {
+export function validateEffort(effort: string | undefined): ReasoningEffort | undefined {
   if (effort === undefined) return undefined;
   if (!(VALID_EFFORTS as readonly string[]).includes(effort)) {
     throw new Error(
       `Invalid effort level "${effort}". Valid levels: ${VALID_EFFORTS.join(", ")}`,
     );
   }
-  return effort;
+  return effort as ReasoningEffort;
 }
 
 /**
@@ -150,6 +150,9 @@ export function validateEffort(effort: string | undefined): string | undefined {
  * Default prompts dir is `src/prompts/` relative to this file.
  */
 export function loadTemplate(name: string, promptsDir?: string): string {
+  if (name.includes("/") || name.includes("\\") || name.includes("..")) {
+    throw new Error(`Invalid template name: "${name}"`);
+  }
   const dir = promptsDir ?? join(import.meta.dir, "prompts");
   const filePath = join(dir, `${name}.md`);
   if (!existsSync(filePath)) {

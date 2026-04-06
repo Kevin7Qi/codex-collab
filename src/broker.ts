@@ -13,6 +13,9 @@ import { connectDirect, type AppServerClient } from "./client";
 import { resolveStateDir } from "./config";
 import { terminateProcessTree, isProcessAlive } from "./process";
 
+/** JSON-RPC error code returned when the broker is busy with another request. */
+export const BROKER_BUSY_RPC_CODE = -32001;
+
 // ─── Endpoint abstraction ─────────────────────────────────────────────────
 
 /**

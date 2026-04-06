@@ -507,8 +507,6 @@ export interface ParsedEndpoint {
   path: string;
 }
 
-export const BROKER_BUSY_RPC_CODE = -32001;
-
 // --- Structured review output ---
 
 export type ReviewSeverity = "critical" | "high" | "medium" | "low" | "info";

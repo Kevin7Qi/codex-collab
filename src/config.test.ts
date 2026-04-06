@@ -134,7 +134,7 @@ describe("resolveModel", () => {
 
 describe("validateEffort", () => {
   test("accepts all valid effort levels", () => {
-    for (const level of ["none", "minimal", "low", "medium", "high", "xhigh"]) {
+    for (const level of ["none", "minimal", "low", "medium", "high", "xhigh"] as const) {
       expect(validateEffort(level)).toBe(level);
     }
   });
