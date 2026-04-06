@@ -1,12 +1,12 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { runTurn, runReview } from "./turns";
+import { runTurn, runReview, belongsToTurn, extractReasoning } from "./turns";
 import { EventDispatcher } from "./events";
 import { autoApproveHandler } from "./approvals";
 import type { ApprovalHandler } from "./approvals";
 import type { AppServerClient } from "./protocol";
 import type {
   TurnCompletedParams, TurnStartResponse,
-  ReviewStartResponse,
+  ReviewStartResponse, ReasoningItem,
 } from "./types";
 import { mkdirSync, rmSync, existsSync, writeFileSync, utimesSync } from "fs";
 import { join } from "path";
@@ -739,5 +739,512 @@ describe("approval wiring", () => {
 
     expect(approvalCalls).toContain("cmd:sudo rm -rf");
     expect(approvalCalls).toContain("file:/etc");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// belongsToTurn
+// ---------------------------------------------------------------------------
+
+describe("belongsToTurn", () => {
+  test("matches when threadId and turnId match", () => {
+    expect(belongsToTurn(
+      { threadId: "thr-1", turnId: "turn-1" },
+      "thr-1",
+      "turn-1",
+    )).toBe(true);
+  });
+
+  test("rejects when threadId differs", () => {
+    expect(belongsToTurn(
+      { threadId: "thr-2", turnId: "turn-1" },
+      "thr-1",
+      "turn-1",
+    )).toBe(false);
+  });
+
+  test("rejects when turnId differs", () => {
+    expect(belongsToTurn(
+      { threadId: "thr-1", turnId: "turn-2" },
+      "thr-1",
+      "turn-1",
+    )).toBe(false);
+  });
+
+  test("rejects when both differ", () => {
+    expect(belongsToTurn(
+      { threadId: "thr-2", turnId: "turn-2" },
+      "thr-1",
+      "turn-1",
+    )).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reasoning extraction
+// ---------------------------------------------------------------------------
+
+describe("reasoning extraction", () => {
+  test("extracts reasoning from completed reasoning item", () => {
+    const item: ReasoningItem = {
+      type: "reasoning",
+      id: "r-1",
+      summary: ["The user wants to refactor the code"],
+      content: ["I should start by reading the file", "Then apply changes"],
+    };
+    const result = extractReasoning(item);
+    expect(result).toBe("The user wants to refactor the code\nI should start by reading the file\nThen apply changes");
+  });
+
+  test("deduplicates identical reasoning sections", () => {
+    const item: ReasoningItem = {
+      type: "reasoning",
+      id: "r-2",
+      summary: ["Think about the problem", "Plan the approach"],
+      content: ["Think about the problem", "Execute the plan"],
+    };
+    const result = extractReasoning(item);
+    expect(result).toBe("Think about the problem\nPlan the approach\nExecute the plan");
+  });
+
+  test("returns null when no reasoning content", () => {
+    const item: ReasoningItem = {
+      type: "reasoning",
+      id: "r-3",
+      summary: [],
+      content: [],
+    };
+    expect(extractReasoning(item)).toBeNull();
+  });
+
+  test("handles summary-only reasoning", () => {
+    const item: ReasoningItem = {
+      type: "reasoning",
+      id: "r-4",
+      summary: ["Just a summary"],
+      content: [],
+    };
+    expect(extractReasoning(item)).toBe("Just a summary");
+  });
+
+  test("handles content-only reasoning", () => {
+    const item: ReasoningItem = {
+      type: "reasoning",
+      id: "r-5",
+      summary: [],
+      content: ["Just content"],
+    };
+    expect(extractReasoning(item)).toBe("Just content");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reasoning in turn result (integration)
+// ---------------------------------------------------------------------------
+
+describe("reasoning in turn result", () => {
+  test("captures reasoning from item/completed during turn", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/completed", {
+            item: {
+              type: "reasoning", id: "r-1",
+              summary: ["Analyzing the request"],
+              content: ["Need to check the files first"],
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+          emit("item/agentMessage/delta", {
+            threadId: "thr-1", turnId: "turn-1", itemId: "msg-1",
+            delta: "Here is the answer",
+          });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 80);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-reasoning-capture", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "think hard" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.reasoning).toBe("Analyzing the request\nNeed to check the files first");
+    expect(result.output).toBe("Here is the answer");
+  });
+
+  test("merges multiple reasoning items without duplicates", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/completed", {
+            item: {
+              type: "reasoning", id: "r-1",
+              summary: ["Step one"],
+              content: ["Detail A"],
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+          emit("item/completed", {
+            item: {
+              type: "reasoning", id: "r-2",
+              summary: ["Step one"],
+              content: ["Detail B"],
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 80);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-reasoning-merge", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "think" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.reasoning).toBe("Step one\nDetail A\nDetail B");
+  });
+
+  test("reasoning is null when no reasoning items", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/agentMessage/delta", {
+            threadId: "thr-1", turnId: "turn-1", itemId: "msg-1",
+            delta: "No reasoning here",
+          });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-no-reasoning", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.reasoning).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Notification buffering
+// ---------------------------------------------------------------------------
+
+describe("notification buffering", () => {
+  test("replays buffered item/completed after turnId is known", async () => {
+    // Simulate: item/completed arrives BEFORE the turn/start response resolves.
+    // The mock fires item/completed synchronously during the request handler,
+    // which means it arrives before the turn/start response promise resolves.
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        // Fire item/completed synchronously before returning the response
+        emit("item/completed", {
+          item: {
+            type: "reasoning", id: "r-early",
+            summary: ["Early reasoning"],
+            content: ["Buffered content"],
+          },
+          threadId: "thr-1",
+          turnId: "turn-1",
+        });
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-buffer-replay", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.reasoning).toBe("Early reasoning\nBuffered content");
+  });
+
+  test("buffered notifications for different thread are ignored", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        // Fire item/completed for a different thread
+        emit("item/completed", {
+          item: {
+            type: "reasoning", id: "r-other",
+            summary: ["Other thread reasoning"],
+            content: [],
+          },
+          threadId: "thr-OTHER",
+          turnId: "turn-1",
+        });
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-buffer-other-thread", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.reasoning).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Completion inference
+// ---------------------------------------------------------------------------
+
+describe("completion inference", () => {
+  test("infers completion when turn/completed is lost after agentMessage completes", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/agentMessage/delta", {
+            threadId: "thr-1", turnId: "turn-1", itemId: "msg-1",
+            delta: "Inferred output",
+          });
+          // Fire agentMessage item/completed — triggers inference timer
+          emit("item/completed", {
+            item: { type: "agentMessage", id: "msg-1", text: "Inferred output" },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+          // Never fire turn/completed — inference should kick in after 250ms
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-infer-completion", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toBe("Inferred output");
+  });
+
+  test("normal turn/completed cancels inference timer", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/agentMessage/delta", {
+            threadId: "thr-1", turnId: "turn-1", itemId: "msg-1",
+            delta: "Normal output",
+          });
+          emit("item/completed", {
+            item: { type: "agentMessage", id: "msg-1", text: "Normal output" },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+        }, 20);
+        // turn/completed arrives well within the 250ms inference window
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-normal-beats-inference", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toBe("Normal output");
+  });
+
+  test("new item activity resets inference timer", async () => {
+    // agentMessage completes, then a command starts and completes.
+    // The inference timer should be reset by the command activity.
+    const startMs = Date.now();
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/completed", {
+            item: { type: "agentMessage", id: "msg-1", text: "early" },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+        }, 20);
+        // Command completes 200ms later (resets the 250ms timer)
+        setTimeout(() => {
+          emit("item/completed", {
+            item: {
+              type: "commandExecution", id: "cmd-1",
+              command: "echo hi", cwd: "/", status: "completed",
+              exitCode: 0, durationMs: 50, processId: null, commandActions: [],
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+          // Now fire agentMessage again to trigger final inference
+          emit("item/completed", {
+            item: { type: "agentMessage", id: "msg-2", text: "final" },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+        }, 200);
+        // No turn/completed — inference should resolve ~450ms from start
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-inference-reset", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+    // Should have taken at least ~400ms (200ms delay + 250ms inference timer)
+    expect(result.durationMs).toBeGreaterThanOrEqual(400);
+    // Command should be captured
+    expect(result.commandsRun.length).toBeGreaterThanOrEqual(1);
+    expect(result.commandsRun[0].command).toBe("echo hi");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Structured file/command capture (supplementary)
+// ---------------------------------------------------------------------------
+
+describe("structured capture from item/completed", () => {
+  test("captures files and commands from item/completed notifications", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/completed", {
+            item: {
+              type: "commandExecution", id: "cmd-1",
+              command: "bun test", cwd: "/proj",
+              status: "completed", exitCode: 0, durationMs: 500,
+              processId: null, commandActions: [],
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+          emit("item/completed", {
+            item: {
+              type: "fileChange", id: "fc-1",
+              changes: [{ path: "src/main.ts", kind: { type: "add", move_path: null }, diff: "+10" }],
+              status: "completed",
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 80);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-structured-capture", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "build" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.commandsRun).toHaveLength(1);
+    expect(result.commandsRun[0].command).toBe("bun test");
+    expect(result.commandsRun[0].exitCode).toBe(0);
+    expect(result.filesChanged).toHaveLength(1);
+    expect(result.filesChanged[0].path).toBe("src/main.ts");
+    expect(result.filesChanged[0].kind).toBe("add");
+  });
+
+  test("deduplicates between dispatcher and turn-level capture", async () => {
+    // Both dispatcher and turn-level capture will see the same item/completed,
+    // so result should have exactly 1 command and 1 file (not 2).
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/completed", {
+            item: {
+              type: "commandExecution", id: "cmd-1",
+              command: "npm test", cwd: "/proj",
+              status: "completed", exitCode: 0, durationMs: 1200,
+              processId: null, commandActions: [],
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+          emit("item/completed", {
+            item: {
+              type: "fileChange", id: "fc-1",
+              changes: [{ path: "src/foo.ts", kind: { type: "update", move_path: null }, diff: "+1,-1" }],
+              status: "completed",
+            },
+            threadId: "thr-1",
+            turnId: "turn-1",
+          });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 80);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-dedup-capture", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "run tests" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    // Should be exactly 1 of each, not duplicated
+    expect(result.commandsRun).toHaveLength(1);
+    expect(result.filesChanged).toHaveLength(1);
   });
 });

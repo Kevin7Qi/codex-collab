@@ -422,7 +422,10 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
 
   const initParams: InitializeParams = {
     clientInfo: { name: config.clientName, title: null, version: config.clientVersion },
-    capabilities: null,
+    capabilities: {
+      experimentalApi: false,
+      optOutNotificationMethods: ["item/reasoning/textDelta"],
+    },
   };
 
   let initResult: InitializeResponse;

@@ -10,10 +10,64 @@ import type {
   ErrorNotificationParams,
   CommandApprovalRequest, FileChangeApprovalRequest,
   ApprovalPolicy, ReasoningEffort,
+  ReasoningItem, CommandExecutionItem, FileChangeItem,
+  FileChange, CommandExec,
 } from "./types";
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
 import { config } from "./config";
+
+// ---------------------------------------------------------------------------
+// Pure helpers (exported for testing)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a notification belongs to the current turn.
+ * Both threadId and turnId must match.
+ */
+export function belongsToTurn(
+  params: { threadId: string; turnId: string },
+  expectedThreadId: string,
+  expectedTurnId: string,
+): boolean {
+  return params.threadId === expectedThreadId && params.turnId === expectedTurnId;
+}
+
+/**
+ * Extract a single reasoning string from a completed reasoning item.
+ * Joins summary and content arrays with newlines, deduplicates identical sections.
+ */
+export function extractReasoning(item: ReasoningItem): string | null {
+  const parts: string[] = [];
+  if (item.summary?.length) parts.push(...item.summary);
+  if (item.content?.length) parts.push(...item.content);
+  if (parts.length === 0) return null;
+  // Deduplicate identical sections (preserve order)
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const p of parts) {
+    if (!seen.has(p)) {
+      seen.add(p);
+      unique.push(p);
+    }
+  }
+  return unique.join("\n");
+}
+
+/** Merge multiple reasoning strings, deduplicating identical sections. */
+function mergeReasoningStrings(existing: string | null, addition: string): string {
+  if (!existing) return addition;
+  const allParts = [...existing.split("\n"), ...addition.split("\n")];
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const p of allParts) {
+    if (!seen.has(p)) {
+      seen.add(p);
+      unique.push(p);
+    }
+  }
+  return unique.join("\n");
+}
 
 export interface TurnOptions {
   dispatcher: EventDispatcher;
@@ -83,6 +137,12 @@ class KillSignalError extends Error {
 /**
  * Shared turn lifecycle: register handlers, send the start request,
  * wait for completion, collect results, and clean up.
+ *
+ * Notification buffering: notifications may arrive before turn/start returns
+ * the turnId. We buffer them and replay once the turnId is known.
+ *
+ * Completion inference: if turn/completed is lost, we infer completion 250ms
+ * after the last agentMessage item completes (debounced).
  */
 async function executeTurn(
   client: AppServerClient,
@@ -97,9 +157,103 @@ async function executeTurn(
   const threadId = params.threadId;
   const signalPath = join(signalsDir, threadId);
 
+  // --- Notification buffering ---
+  // Before turnId is known, queue notifications. Once turn/start responds
+  // with the turnId, replay buffered notifications through handlers.
+  type BufferedNotification = { method: string; params: unknown };
+  const notificationBuffer: BufferedNotification[] = [];
+  let turnId: string | null = null;
+
+  // --- Turn-level structured capture (supplementary to dispatcher) ---
+  let turnReasoning: string | null = null;
+  const turnFilesChanged: FileChange[] = [];
+  const turnCommandsRun: CommandExec[] = [];
+
+  // --- Completion inference ---
+  let inferenceTimer: ReturnType<typeof setTimeout> | undefined;
+  let inferenceResolver: (() => void) | null = null;
+
+  function clearInferenceTimer(): void {
+    if (inferenceTimer !== undefined) {
+      clearTimeout(inferenceTimer);
+      inferenceTimer = undefined;
+    }
+  }
+
+  function resetInferenceTimer(): void {
+    clearInferenceTimer();
+    if (inferenceResolver) {
+      inferenceTimer = setTimeout(() => {
+        if (inferenceResolver) inferenceResolver();
+      }, 250);
+    }
+  }
+
+  // Process an item/completed notification for reasoning & structured capture
+  function processItemCompleted(itemParams: ItemCompletedParams): void {
+    const { item } = itemParams;
+    // Reasoning extraction
+    if (item.type === "reasoning") {
+      const reasoningItem = item as ReasoningItem;
+      const extracted = extractReasoning(reasoningItem);
+      if (extracted) {
+        turnReasoning = mergeReasoningStrings(turnReasoning, extracted);
+      }
+    }
+    // Structured file/command capture from item/completed (supplementary)
+    if (item.type === "commandExecution") {
+      const cmd = item as CommandExecutionItem;
+      if (cmd.status === "completed") {
+        turnCommandsRun.push({
+          command: cmd.command,
+          exitCode: cmd.exitCode ?? null,
+          durationMs: cmd.durationMs ?? null,
+        });
+      }
+    }
+    if (item.type === "fileChange") {
+      const fc = item as FileChangeItem;
+      if (fc.status === "completed") {
+        for (const change of fc.changes) {
+          turnFilesChanged.push({
+            path: change.path,
+            kind: change.kind.type,
+            diff: change.diff,
+          });
+        }
+      }
+    }
+    // Completion inference: any item activity resets the timer
+    if (inferenceResolver) {
+      if (item.type === "agentMessage") {
+        // agentMessage completing is the "final_answer" signal — start debounce
+        resetInferenceTimer();
+      } else {
+        // Other item activity — reset (prevents premature inference during active work)
+        resetInferenceTimer();
+      }
+    }
+  }
+
   // AbortController for cancelling in-flight approval polls on turn completion/timeout
   const abortController = new AbortController();
   const unsubs = registerEventHandlers(client, opts, abortController.signal);
+
+  // Wire up item/completed interception for reasoning & structured capture.
+  // This runs alongside the dispatcher's handler (registered in registerEventHandlers).
+  unsubs.push(
+    client.on("item/completed", (params) => {
+      const p = params as ItemCompletedParams;
+      if (turnId !== null) {
+        if (belongsToTurn(p, threadId, turnId)) {
+          processItemCompleted(p);
+        }
+      } else {
+        // Buffer — will be replayed once turnId is known
+        notificationBuffer.push({ method: "item/completed", params });
+      }
+    }),
+  );
 
   // Subscribe to turn/completed BEFORE sending the request to prevent
   // a race where fast turns complete before we call waitFor(). In the
@@ -145,8 +299,37 @@ async function executeTurn(
       killSignal,
     ]);
 
+    // turnId is now known — replay buffered notifications
+    turnId = turn.id;
+    for (const buffered of notificationBuffer) {
+      if (buffered.method === "item/completed") {
+        const p = buffered.params as ItemCompletedParams;
+        if (belongsToTurn(p, threadId, turnId)) {
+          processItemCompleted(p);
+        }
+      }
+    }
+    notificationBuffer.length = 0;
+
+    // Set up completion inference as a safety net for lost turn/completed
+    const inferencePromise = new Promise<void>((resolve) => {
+      inferenceResolver = resolve;
+    });
+
     const completedTurn = await Promise.race([
-      completion.waitFor(turn.id),
+      completion.waitFor(turn.id).then((p) => {
+        // Normal path: turn/completed arrived — cancel inference timer
+        clearInferenceTimer();
+        inferenceResolver = null;
+        return p;
+      }),
+      inferencePromise.then(() => {
+        // Inference path: turn/completed was lost — synthesize result
+        return {
+          threadId,
+          turn: { id: turn.id, items: [], status: "completed" as const, error: null },
+        } as TurnCompletedParams;
+      }),
       killSignal,
     ]);
 
@@ -159,12 +342,19 @@ async function executeTurn(
     // spec — items are only populated on thread/resume or thread/fork.
     const output = opts.dispatcher.getAccumulatedOutput();
 
+    // Merge dispatcher-collected files/commands with turn-level capture.
+    // Deduplicate by command string + exitCode (commands) and path (files).
+    const dispatcherFiles = opts.dispatcher.getFilesChanged();
+    const dispatcherCmds = opts.dispatcher.getCommandsRun();
+    const mergedFiles = mergeFiles(dispatcherFiles, turnFilesChanged);
+    const mergedCmds = mergeCommands(dispatcherCmds, turnCommandsRun);
+
     return {
       status: completedTurn.turn.status as TurnResult["status"],
       output,
-      reasoning: null,
-      filesChanged: opts.dispatcher.getFilesChanged(),
-      commandsRun: opts.dispatcher.getCommandsRun(),
+      reasoning: turnReasoning,
+      filesChanged: mergedFiles,
+      commandsRun: mergedCmds,
       error: completedTurn.turn.error?.message,
       durationMs: Date.now() - startTime,
     };
@@ -172,18 +362,22 @@ async function executeTurn(
     if (e instanceof KillSignalError) {
       opts.dispatcher.flushOutput();
       opts.dispatcher.flush();
+      const dispatcherFiles = opts.dispatcher.getFilesChanged();
+      const dispatcherCmds = opts.dispatcher.getCommandsRun();
       return {
         status: "interrupted",
         output: opts.dispatcher.getAccumulatedOutput(),
-        reasoning: null,
-        filesChanged: opts.dispatcher.getFilesChanged(),
-        commandsRun: opts.dispatcher.getCommandsRun(),
+        reasoning: turnReasoning,
+        filesChanged: mergeFiles(dispatcherFiles, turnFilesChanged),
+        commandsRun: mergeCommands(dispatcherCmds, turnCommandsRun),
         error: "Thread killed by user",
         durationMs: Date.now() - startTime,
       };
     }
     throw e;
   } finally {
+    clearInferenceTimer();
+    inferenceResolver = null;
     killAbort.abort();
     abortController.abort();
     for (const unsub of unsubs) unsub();
@@ -194,6 +388,48 @@ async function executeTurn(
       }
     }
   }
+}
+
+/** Merge file change arrays, deduplicating by path + kind. */
+function mergeFiles(a: FileChange[], b: FileChange[]): FileChange[] {
+  const seen = new Set<string>();
+  const result: FileChange[] = [];
+  for (const f of a) {
+    const key = `${f.path}:${f.kind}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(f);
+    }
+  }
+  for (const f of b) {
+    const key = `${f.path}:${f.kind}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(f);
+    }
+  }
+  return result;
+}
+
+/** Merge command arrays, deduplicating by command + exitCode. */
+function mergeCommands(a: CommandExec[], b: CommandExec[]): CommandExec[] {
+  const seen = new Set<string>();
+  const result: CommandExec[] = [];
+  for (const c of a) {
+    const key = `${c.command}:${c.exitCode}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(c);
+    }
+  }
+  for (const c of b) {
+    const key = `${c.command}:${c.exitCode}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(c);
+    }
+  }
+  return result;
 }
 
 /**
