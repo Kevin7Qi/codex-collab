@@ -317,7 +317,9 @@ async function executeTurn(
     // (for normal turns) or from exitedReviewMode item/completed notification
     // (for reviews). Note: turn/completed Turn.items is always [] per protocol
     // spec — items are only populated on thread/resume or thread/fork.
-    const output = opts.dispatcher.getAccumulatedOutput();
+    // Use final answer output (excludes intermediate planning/status messages).
+    // Falls back to full accumulated output if no final_answer phase was seen.
+    const output = opts.dispatcher.getFinalAnswerOutput();
 
     return {
       status: completedTurn.turn.status as TurnResult["status"],
@@ -334,7 +336,7 @@ async function executeTurn(
       opts.dispatcher.flush();
       return {
         status: "interrupted",
-        output: opts.dispatcher.getAccumulatedOutput(),
+        output: opts.dispatcher.getFinalAnswerOutput(),
         reasoning: turnReasoning,
         filesChanged: opts.dispatcher.getFilesChanged(),
         commandsRun: opts.dispatcher.getCommandsRun(),

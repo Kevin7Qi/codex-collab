@@ -7,6 +7,7 @@ import type {
   ErrorNotificationParams,
   FileChange, CommandExec,
   CommandExecutionItem, FileChangeItem, ExitedReviewModeItem,
+  AgentMessageItem,
   RunPhase,
 } from "./types";
 
@@ -14,12 +15,17 @@ type ProgressCallback = (line: string) => void;
 
 export class EventDispatcher {
   private accumulatedOutput = "";
+  private finalAnswerOutput = "";
   private filesChanged: FileChange[] = [];
   private commandsRun: CommandExec[] = [];
   private logBuffer: string[] = [];
   private logPath: string;
   private onProgress: ProgressCallback;
   private lastPhase: Map<string, string> = new Map();
+  /** Item IDs that the server marked as phase "final_answer". */
+  private finalAnswerItemIds: Set<string> = new Set();
+  /** The item ID currently receiving deltas. */
+  private currentDeltaItemId: string | null = null;
 
   constructor(
     shortId: string,
@@ -38,14 +44,38 @@ export class EventDispatcher {
       this.progress(`Running: ${(item as CommandExecutionItem).command}`);
     }
 
-    // Separate consecutive agent message items with a newline so output is readable
-    if (item.type === "agentMessage" && this.accumulatedOutput.length > 0) {
-      this.accumulatedOutput += "\n";
+    // Track which item is receiving deltas and separate consecutive messages
+    if (item.type === "agentMessage") {
+      this.currentDeltaItemId = item.id;
+      if (this.accumulatedOutput.length > 0) {
+        this.accumulatedOutput += "\n";
+      }
+      if (this.finalAnswerOutput.length > 0 && this.finalAnswerItemIds.has(item.id)) {
+        this.finalAnswerOutput += "\n";
+      }
     }
   }
 
   handleItemCompleted(params: ItemCompletedParams): void {
     const { item } = params;
+
+    // Track agent message phases for output filtering
+    if (item.type === "agentMessage") {
+      const agentMsg = item as AgentMessageItem;
+      if (agentMsg.phase === "final_answer") {
+        // Final answer: capture its text into finalAnswerOutput
+        this.finalAnswerItemIds.add(item.id);
+        if (agentMsg.text) {
+          this.finalAnswerOutput = agentMsg.text;
+        }
+      } else if (agentMsg.text) {
+        // Intermediate agent message (planning/status): show as progress
+        const preview = agentMsg.text.length > 120
+          ? agentMsg.text.slice(0, 117) + "..."
+          : agentMsg.text;
+        this.progress(preview);
+      }
+    }
 
     // Type assertions needed: GenericItem's `type: string` prevents discriminated union narrowing
     switch (item.type) {
@@ -93,6 +123,10 @@ export class EventDispatcher {
   handleDelta(method: string, params: DeltaParams): void {
     if (method === "item/agentMessage/delta") {
       this.accumulatedOutput += params.delta;
+      // If this delta belongs to a final_answer item, also accumulate separately
+      if (this.currentDeltaItemId && this.finalAnswerItemIds.has(this.currentDeltaItemId)) {
+        this.finalAnswerOutput += params.delta;
+      }
     }
     // No per-character logging — accumulated text is logged at flush
   }
@@ -105,6 +139,12 @@ export class EventDispatcher {
 
   getAccumulatedOutput(): string {
     return this.accumulatedOutput;
+  }
+
+  /** Get only the final answer output (agentMessage items with phase "final_answer").
+   *  Falls back to full accumulated output if no final_answer phase was seen. */
+  getFinalAnswerOutput(): string {
+    return this.finalAnswerOutput || this.accumulatedOutput;
   }
 
   getFilesChanged(): FileChange[] {
@@ -127,9 +167,12 @@ export class EventDispatcher {
 
   reset(): void {
     this.accumulatedOutput = "";
+    this.finalAnswerOutput = "";
     this.filesChanged = [];
     this.commandsRun = [];
     this.lastPhase.clear();
+    this.finalAnswerItemIds.clear();
+    this.currentDeltaItemId = null;
   }
 
   /** Write accumulated agent output to the log (called before final flush). */
