@@ -37,6 +37,11 @@ export class EventDispatcher {
     if (item.type === "commandExecution") {
       this.progress(`Running: ${(item as CommandExecutionItem).command}`);
     }
+
+    // Separate consecutive agent message items with a newline so output is readable
+    if (item.type === "agentMessage" && this.accumulatedOutput.length > 0) {
+      this.accumulatedOutput += "\n";
+    }
   }
 
   handleItemCompleted(params: ItemCompletedParams): void {

@@ -1035,9 +1035,9 @@ describe("completion inference", () => {
             threadId: "thr-1", turnId: "turn-1", itemId: "msg-1",
             delta: "Inferred output",
           });
-          // Fire agentMessage item/completed — triggers inference timer
+          // Fire agentMessage item/completed with final_answer phase — triggers inference timer
           emit("item/completed", {
-            item: { type: "agentMessage", id: "msg-1", text: "Inferred output" },
+            item: { type: "agentMessage", id: "msg-1", text: "Inferred output", phase: "final_answer" },
             threadId: "thr-1",
             turnId: "turn-1",
           });
@@ -1119,9 +1119,9 @@ describe("completion inference", () => {
             threadId: "thr-1",
             turnId: "turn-1",
           });
-          // Now fire agentMessage again to trigger final inference
+          // Now fire agentMessage with final_answer to trigger inference
           emit("item/completed", {
-            item: { type: "agentMessage", id: "msg-2", text: "final" },
+            item: { type: "agentMessage", id: "msg-2", text: "final", phase: "final_answer" },
             threadId: "thr-1",
             turnId: "turn-1",
           });
