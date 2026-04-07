@@ -166,12 +166,15 @@ async function main() {
     appClient.on(method, (notifParams) => {
       resetIdleTimer();
       const target = activeRequestSocket ?? activeStreamSocket;
-      if (!target) return;
 
-      const message: Record<string, unknown> = { method, params: notifParams };
-      send(target, message);
+      // Forward the notification to the owning socket (if still connected)
+      if (target) {
+        const message: Record<string, unknown> = { method, params: notifParams };
+        send(target, message);
+      }
 
-      // If turn/completed, release the stream socket
+      // If turn/completed, release the stream ownership — even if the owning
+      // socket has disconnected (orphaned turn completing naturally).
       if (method === "turn/completed") {
         const threadId = (notifParams as Record<string, unknown>)?.threadId;
         // Track completed thread IDs so that a streaming request that is
@@ -180,16 +183,15 @@ async function main() {
         if (typeof threadId === "string") {
           completedStreamThreadIds.add(threadId);
         }
-        if (
-          activeStreamSocket === target &&
-          (!threadId ||
-            typeof threadId !== "string" ||
-            !activeStreamThreadIds ||
-            activeStreamThreadIds.has(threadId))
-        ) {
+        const matchesStream =
+          !threadId ||
+          typeof threadId !== "string" ||
+          !activeStreamThreadIds ||
+          activeStreamThreadIds.has(threadId);
+        if (matchesStream && (activeStreamSocket === target || activeStreamSocket === null)) {
           activeStreamSocket = null;
           activeStreamThreadIds = null;
-          if (activeRequestSocket === target) {
+          if (target && activeRequestSocket === target) {
             activeRequestSocket = null;
           }
         }
@@ -237,7 +239,7 @@ async function main() {
                 return;
               }
             } catch (e) {
-              process.stderr.write(`[broker-server] Warning: could not parse approval response: ${line.slice(0, 200)}\n`);
+              process.stderr.write(`[broker-server] Warning: could not parse approval response (reqId=${reqId}): ${line.slice(0, 200)}\n`);
             }
           }
         };
@@ -265,8 +267,8 @@ async function main() {
     }
     try {
       await appClient.close();
-    } catch {
-      // Best effort
+    } catch (e) {
+      process.stderr.write(`[broker-server] Warning: app-server close failed: ${e instanceof Error ? e.message : String(e)}\n`);
     }
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (listenTarget.kind === "unix") {
@@ -351,11 +353,16 @@ async function main() {
         const isInterrupt =
           typeof message.method === "string" &&
           message.method === "turn/interrupt";
+        const isReadOnly =
+          typeof message.method === "string" &&
+          (message.method === "thread/read" || message.method === "thread/list");
 
-        // Allow interrupt requests through even when another client owns
-        // the stream — but only when there's no pending request.
-        const allowInterruptDuringActiveStream =
-          isInterrupt &&
+        // Allow interrupt and read-only requests through even when another
+        // client owns the stream — but only when there's no pending request.
+        // Read-only methods are needed by `kill` (reads thread to get turn ID)
+        // and `threads` (lists threads while a turn is running).
+        const allowDuringActiveStream =
+          (isInterrupt || isReadOnly) &&
           activeStreamSocket !== null &&
           activeStreamSocket !== socket &&
           activeRequestSocket === null;
@@ -363,7 +370,7 @@ async function main() {
         if (
           ((activeRequestSocket !== null && activeRequestSocket !== socket) ||
             (activeStreamSocket !== null && activeStreamSocket !== socket)) &&
-          !allowInterruptDuringActiveStream
+          !allowDuringActiveStream
         ) {
           send(socket, {
             id: message.id,
@@ -375,8 +382,8 @@ async function main() {
           continue;
         }
 
-        // Forward interrupt during active stream (special path)
-        if (allowInterruptDuringActiveStream) {
+        // Forward interrupt/read-only during active stream (special path)
+        if (allowDuringActiveStream) {
           try {
             const result = await appClient.request(
               message.method as string,
@@ -449,13 +456,27 @@ async function main() {
 
     socket.on("close", () => {
       sockets.delete(socket);
-      clearSocketOwnership(socket);
+      if (activeStreamSocket === socket) {
+        process.stderr.write("[broker-server] Warning: stream-owning client disconnected while turn is active\n");
+        activeStreamSocket = null;
+        // Keep activeStreamThreadIds so turn/completed can still clear the state
+      }
+      if (activeRequestSocket === socket) {
+        activeRequestSocket = null;
+      }
     });
 
     socket.on("error", (err) => {
       process.stderr.write(`[broker-server] Client socket error: ${err.message}\n`);
       sockets.delete(socket);
-      clearSocketOwnership(socket);
+      if (activeStreamSocket === socket) {
+        process.stderr.write("[broker-server] Warning: stream-owning client errored while turn is active\n");
+        activeStreamSocket = null;
+        // Keep activeStreamThreadIds so turn/completed can still clear the state
+      }
+      if (activeRequestSocket === socket) {
+        activeRequestSocket = null;
+      }
     });
   });
 

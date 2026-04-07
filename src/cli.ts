@@ -9,6 +9,7 @@ import {
   activeClient,
   activeThreadId,
   activeShortId,
+  activeTurnId,
   activeWsPaths,
   shuttingDown,
   setShuttingDown,
@@ -38,6 +39,17 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
   }
   if (activeShortId && activeWsPaths) {
     removePidFile(activeWsPaths.pidsDir, activeShortId);
+  }
+
+  // Try to interrupt the active turn before disconnecting (prevents
+  // orphaned turns when using the broker — closing the socket alone
+  // only disconnects from the broker, the turn keeps running).
+  if (activeClient && activeThreadId && activeTurnId) {
+    try {
+      await activeClient.request("turn/interrupt", { threadId: activeThreadId, turnId: activeTurnId });
+    } catch {
+      // Best effort — may fail if turn already completed
+    }
   }
 
   try {

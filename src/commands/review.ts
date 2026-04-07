@@ -22,6 +22,7 @@ import {
   removePidFile,
   setActiveThreadId,
   setActiveShortId,
+  setActiveTurnId,
   setActiveWsPaths,
   VALID_REVIEW_MODES,
   type Options,
@@ -103,6 +104,7 @@ export async function handleReview(args: string[]): Promise<void> {
         approvalHandler: getApprovalHandler(effective.approvalPolicy, ws.approvalsDir),
         timeoutMs: options.timeout * 1000,
         killSignalsDir: ws.killSignalsDir,
+        onTurnId: (id) => setActiveTurnId(id),
         ...turnOverrides(options),
       });
 
@@ -129,6 +131,7 @@ export async function handleReview(args: string[]): Promise<void> {
     } finally {
       setActiveThreadId(undefined);
       setActiveShortId(undefined);
+      setActiveTurnId(undefined);
       setActiveWsPaths(undefined);
       removePidFile(ws.pidsDir, shortId);
     }

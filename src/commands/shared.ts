@@ -407,12 +407,14 @@ export function applyUserConfig(options: Options): void {
 export let activeClient: AppServerClient | undefined;
 export let activeThreadId: string | undefined;
 export let activeShortId: string | undefined;
+export let activeTurnId: string | undefined;
 export let activeWsPaths: WorkspacePaths | undefined;
 export let shuttingDown = false;
 
 export function setActiveClient(client: AppServerClient | undefined): void { activeClient = client; }
 export function setActiveThreadId(id: string | undefined): void { activeThreadId = id; }
 export function setActiveShortId(id: string | undefined): void { activeShortId = id; }
+export function setActiveTurnId(id: string | undefined): void { activeTurnId = id; }
 export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeWsPaths = ws; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
 

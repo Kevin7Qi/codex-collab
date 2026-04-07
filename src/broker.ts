@@ -220,7 +220,8 @@ export function acquireSpawnLock(stateDir: string): (() => void) | null {
     }
     try {
       fd = fs.openSync(lockPath, "wx");
-    } catch {
+    } catch (e) {
+      console.error(`[broker] Warning: lock re-acquire after stale break failed: ${(e as Error).message}`);
       return null;
     }
   }

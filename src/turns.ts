@@ -78,6 +78,9 @@ export interface TurnOptions {
   approvalPolicy?: ApprovalPolicy;
   /** Directory for kill signal files. Defaults to config.killSignalsDir. */
   killSignalsDir?: string;
+  /** Called with the turn ID once the turn/start (or review/start) response arrives.
+   *  Used by the CLI signal handler to send turn/interrupt on Ctrl-C. */
+  onTurnId?: (turnId: string) => void;
 }
 
 export interface ReviewOptions extends TurnOptions {
@@ -276,8 +279,9 @@ async function executeTurn(
       killSignal,
     ]);
 
-    // turnId is now known — replay buffered notifications
+    // turnId is now known — notify caller and replay buffered notifications
     turnId = turn.id;
+    opts.onTurnId?.(turnId);
     for (const buffered of notificationBuffer) {
       if (buffered.method === "item/completed") {
         const p = buffered.params as ItemCompletedParams;

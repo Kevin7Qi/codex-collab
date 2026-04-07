@@ -59,8 +59,8 @@ function acquireLock(filePath: string): () => void {
     }
     try {
       fd = openSync(lockPath, "wx");
-    } catch {
-      throw new Error(`Cannot acquire lock on ${filePath} after ${maxAttempts} attempts`);
+    } catch (e) {
+      throw new Error(`Cannot acquire lock on ${filePath}: ${(e as Error).message}`);
     }
   }
 
