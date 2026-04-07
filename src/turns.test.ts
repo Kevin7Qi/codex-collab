@@ -3,7 +3,7 @@ import { runTurn, runReview, belongsToTurn, extractReasoning } from "./turns";
 import { EventDispatcher } from "./events";
 import { autoApproveHandler } from "./approvals";
 import type { ApprovalHandler } from "./approvals";
-import type { AppServerClient } from "./protocol";
+import type { AppServerClient } from "./client";
 import type {
   TurnCompletedParams, TurnStartResponse,
   ReviewStartResponse, ReasoningItem,

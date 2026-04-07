@@ -34,10 +34,8 @@ describe("config object", () => {
     expect(config.defaultTimeout).toBeGreaterThan(0);
   });
 
-  test("has threadsListLimit (renamed from jobsListLimit)", () => {
+  test("has threadsListLimit", () => {
     expect(config.threadsListLimit).toBe(20);
-    // jobsListLimit should still work as deprecated alias
-    expect(config.jobsListLimit).toBe(20);
   });
 
   test("has new fields", () => {

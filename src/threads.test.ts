@@ -17,9 +17,10 @@ import {
   getLatestRun,
   pruneRuns,
   getResumeCandidate,
+  migrateGlobalState,
 } from "./threads";
-import type { RunRecord } from "./types";
-import { rmSync, existsSync, mkdirSync } from "fs";
+import type { RunRecord, ThreadMapping } from "./types";
+import { rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -489,5 +490,274 @@ describe("getResumeCandidate", () => {
     const result = getResumeCandidate(testDir, null);
     expect(result.available).toBe(true);
     expect(result.name).toBe("My Named Thread");
+  });
+});
+
+// ─── migrateGlobalState ───────────────────────────────────────────────────
+
+/**
+ * Helper: compute the workspace state dir that migrateGlobalState will use.
+ * Mirrors workspaceDirName logic in threads.ts.
+ */
+function computeWsStateDir(globalDataDir: string, cwd: string): string {
+  const { basename, resolve } = require("path");
+  const { createHash } = require("crypto");
+  const { realpathSync, spawnSync } = require("child_process") ? {} as any : {};
+  // Use the same logic as resolveWorkspaceDir: try git, fallback to resolve
+  const { spawnSync: spawn } = require("child_process");
+  const result = spawn("git", ["rev-parse", "--show-toplevel"], {
+    cwd,
+    encoding: "utf-8",
+    timeout: 5000,
+  });
+  const wsRoot = (result.status === 0 && result.stdout) ? result.stdout.trim() : resolve(cwd);
+  let canonical: string;
+  try {
+    canonical = require("fs").realpathSync(wsRoot);
+  } catch {
+    canonical = resolve(wsRoot);
+  }
+  const slug = basename(canonical).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+  const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+  return join(globalDataDir, "workspaces", `${slug}-${hash}`);
+}
+
+function writeGlobalThreads(globalDataDir: string, mapping: ThreadMapping): void {
+  const file = join(globalDataDir, "threads.json");
+  mkdirSync(globalDataDir, { recursive: true });
+  writeFileSync(file, JSON.stringify(mapping, null, 2));
+}
+
+function writeGlobalLog(globalDataDir: string, shortId: string, content: string): void {
+  const logsDir = join(globalDataDir, "logs");
+  mkdirSync(logsDir, { recursive: true });
+  writeFileSync(join(logsDir, `${shortId}.log`), content);
+}
+
+describe("migrateGlobalState", () => {
+  let globalDir: string;
+  let cwdDir: string;
+
+  beforeEach(() => {
+    globalDir = join(tmpdir(), `codex-collab-test-migrate-global-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    cwdDir = join(tmpdir(), `codex-collab-test-migrate-cwd-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(globalDir, { recursive: true });
+    mkdirSync(cwdDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (existsSync(globalDir)) rmSync(globalDir, { recursive: true });
+    if (existsSync(cwdDir)) rmSync(cwdDir, { recursive: true });
+  });
+
+  test("migrates matching entries from global to per-workspace", () => {
+    const wsRoot = cwdDir; // not a git repo, so resolveWorkspaceDir returns resolve(cwd)
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-02T00:00:00Z",
+        model: "gpt-5",
+        cwd: wsRoot,
+        preview: "Do the thing",
+        lastStatus: "completed",
+      },
+      bbb22222: {
+        threadId: "thr_beta",
+        createdAt: "2026-01-03T00:00:00Z",
+        updatedAt: "2026-01-04T00:00:00Z",
+        model: "o3",
+        cwd: wsRoot,
+        lastStatus: "failed",
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const index = loadThreadIndex(wsStateDir);
+    expect(Object.keys(index)).toHaveLength(2);
+    expect(index.aaa11111.threadId).toBe("thr_alpha");
+    expect(index.aaa11111.model).toBe("gpt-5");
+    expect(index.aaa11111.name).toBeNull();
+    expect(index.bbb22222.threadId).toBe("thr_beta");
+    expect(index.bbb22222.model).toBe("o3");
+
+    // Verify synthetic run records exist
+    const runs = listRuns(wsStateDir);
+    expect(runs).toHaveLength(2);
+
+    const alphaRun = runs.find(r => r.shortId === "aaa11111");
+    expect(alphaRun).toBeDefined();
+    expect(alphaRun!.status).toBe("completed");
+    expect(alphaRun!.kind).toBe("task");
+    expect(alphaRun!.prompt).toBe("Do the thing");
+    expect(alphaRun!.model).toBe("gpt-5");
+    expect(alphaRun!.completedAt).toBe("2026-01-02T00:00:00Z");
+
+    const betaRun = runs.find(r => r.shortId === "bbb22222");
+    expect(betaRun).toBeDefined();
+    expect(betaRun!.status).toBe("failed");
+    expect(betaRun!.completedAt).toBe("2026-01-04T00:00:00Z");
+  });
+
+  test("copies log files to per-workspace logs dir", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "completed",
+      },
+    });
+    writeGlobalLog(globalDir, "aaa11111", "line 1\nline 2\n");
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const wsLogFile = join(wsStateDir, "logs", "aaa11111.log");
+    expect(existsSync(wsLogFile)).toBe(true);
+    expect(readFileSync(wsLogFile, "utf-8")).toBe("line 1\nline 2\n");
+
+    // Verify global log file still exists (copy, not move)
+    expect(existsSync(join(globalDir, "logs", "aaa11111.log"))).toBe(true);
+
+    // Verify run record references the log file
+    const runs = listRuns(wsStateDir);
+    expect(runs[0].logFile).toBe(wsLogFile);
+  });
+
+  test("no-ops if per-workspace state already exists", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "completed",
+      },
+    });
+
+    // Pre-create per-workspace state with different content
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    saveThreadIndex(wsStateDir, {
+      existing1: {
+        threadId: "thr_existing",
+        name: "Existing Thread",
+        model: "gpt-5",
+        cwd: wsRoot,
+        createdAt: "2025-01-01T00:00:00Z",
+        updatedAt: "2025-01-01T00:00:00Z",
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    // Verify per-workspace state was NOT overwritten
+    const index = loadThreadIndex(wsStateDir);
+    expect(Object.keys(index)).toHaveLength(1);
+    expect(index.existing1.threadId).toBe("thr_existing");
+    expect(index.aaa11111).toBeUndefined();
+  });
+
+  test("no-ops if global state doesn't exist", () => {
+    // globalDir exists but has no threads.json
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    expect(existsSync(join(wsStateDir, "threads.json"))).toBe(false);
+  });
+
+  test("filters entries by workspace cwd", () => {
+    const wsRoot = cwdDir;
+    const otherDir = join(tmpdir(), `codex-collab-test-other-${Date.now()}`);
+    mkdirSync(otherDir, { recursive: true });
+
+    try {
+      writeGlobalThreads(globalDir, {
+        aaa11111: {
+          threadId: "thr_match",
+          createdAt: "2026-01-01T00:00:00Z",
+          cwd: wsRoot,
+          lastStatus: "completed",
+        },
+        bbb22222: {
+          threadId: "thr_subdir",
+          createdAt: "2026-01-02T00:00:00Z",
+          cwd: join(wsRoot, "subdir"),
+          lastStatus: "completed",
+        },
+        ccc33333: {
+          threadId: "thr_other",
+          createdAt: "2026-01-03T00:00:00Z",
+          cwd: otherDir,
+          lastStatus: "completed",
+        },
+        ddd44444: {
+          threadId: "thr_nocwd",
+          createdAt: "2026-01-04T00:00:00Z",
+          lastStatus: "completed",
+        },
+      });
+
+      migrateGlobalState(cwdDir, globalDir);
+
+      const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+      const index = loadThreadIndex(wsStateDir);
+
+      // Only entries with matching cwd or subdirectory cwd should be migrated
+      expect(Object.keys(index)).toHaveLength(2);
+      expect(index.aaa11111).toBeDefined();
+      expect(index.bbb22222).toBeDefined();
+      expect(index.ccc33333).toBeUndefined();
+      expect(index.ddd44444).toBeUndefined();
+    } finally {
+      if (existsSync(otherDir)) rmSync(otherDir, { recursive: true });
+    }
+  });
+
+  test("maps legacy status values correctly", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_completed",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-02T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "completed",
+      },
+      bbb22222: {
+        threadId: "thr_running",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "running",
+      },
+      ccc33333: {
+        threadId: "thr_interrupted",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-03T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "interrupted",
+      },
+      ddd44444: {
+        threadId: "thr_failed",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-04T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "failed",
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const runs = listRuns(wsStateDir);
+
+    const byShortId = Object.fromEntries(runs.map(r => [r.shortId, r]));
+    expect(byShortId.aaa11111.status).toBe("completed");
+    expect(byShortId.bbb22222.status).toBe("failed");      // stale running -> failed
+    expect(byShortId.ccc33333.status).toBe("cancelled");    // interrupted -> cancelled
+    expect(byShortId.ddd44444.status).toBe("failed");
   });
 });

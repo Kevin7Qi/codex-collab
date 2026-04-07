@@ -1,12 +1,12 @@
 // src/commands/approve.ts — approve + decline command handlers
 
-import { config } from "../config";
 import { existsSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   die,
   parseOptions,
   validateIdOrDie,
+  getWorkspacePaths,
 } from "./shared";
 
 export async function handleApprove(args: string[]): Promise<void> {
@@ -21,17 +21,18 @@ async function handleApproveOrDecline(
   decision: "accept" | "decline",
   args: string[],
 ): Promise<void> {
-  const { positional } = parseOptions(args);
+  const { positional, options } = parseOptions(args);
+  const ws = getWorkspacePaths(options.dir);
   const approvalId = positional[0];
   const verb = decision === "accept" ? "approve" : "decline";
   if (!approvalId) die(`Usage: codex-collab ${verb} <approval-id>`);
   validateIdOrDie(approvalId);
 
-  const requestPath = join(config.approvalsDir, `${approvalId}.json`);
+  const requestPath = join(ws.approvalsDir, `${approvalId}.json`);
   if (!existsSync(requestPath))
     die(`No pending approval: ${approvalId}`);
 
-  const decisionPath = join(config.approvalsDir, `${approvalId}.decision`);
+  const decisionPath = join(ws.approvalsDir, `${approvalId}.decision`);
   try {
     writeFileSync(decisionPath, decision, { mode: 0o600 });
   } catch (e) {

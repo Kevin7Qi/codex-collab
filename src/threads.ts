@@ -7,11 +7,12 @@
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, renameSync,
   openSync, closeSync, unlinkSync, statSync, readdirSync, rmSync,
+  copyFileSync, realpathSync,
 } from "fs";
-import { randomBytes } from "crypto";
-import { dirname, join } from "path";
-import { config, validateId } from "./config";
-import type { ThreadIndex, ThreadIndexEntry, RunRecord, ThreadMapping } from "./types";
+import { randomBytes, createHash } from "crypto";
+import { basename, dirname, join, resolve } from "path";
+import { config, validateId, resolveWorkspaceDir } from "./config";
+import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus, ThreadMapping, ThreadMappingEntry } from "./types";
 
 // ─── Advisory file lock ────────────────────────────────────────────────────
 
@@ -377,27 +378,177 @@ export function getResumeCandidate(
   stateDir: string,
   sessionId: string | null,
 ): { available: boolean; threadId?: string; shortId?: string; name?: string } {
+  // 1. Check run ledger: find latest completed task run
   const allRuns = listRuns(stateDir);
   const completed = allRuns.filter(r => r.kind === "task" && r.status === "completed");
-  if (completed.length === 0) return { available: false };
 
-  // Prefer runs from the current session
-  let candidate: RunRecord | undefined;
-  if (sessionId) {
-    candidate = completed.find(r => r.sessionId === sessionId);
-  }
-  if (!candidate) {
-    candidate = completed[0]; // listRuns returns newest first
+  if (completed.length > 0) {
+    // Prefer runs from the current session
+    let candidate: RunRecord | undefined;
+    if (sessionId) {
+      candidate = completed.find(r => r.sessionId === sessionId);
+    }
+    if (!candidate) {
+      candidate = completed[0]; // listRuns returns newest first
+    }
+
+    const index = loadThreadIndex(stateDir);
+    const entry = index[candidate.shortId];
+    return {
+      available: true,
+      threadId: candidate.threadId,
+      shortId: candidate.shortId,
+      name: entry?.name ?? undefined,
+    };
   }
 
+  // 2. Check thread index for entries with no local runs (e.g., TUI-created
+  //    threads discovered via thread/list). These exist server-side and are
+  //    resumable even though we never ran them locally.
   const index = loadThreadIndex(stateDir);
-  const entry = index[candidate.shortId];
-  return {
-    available: true,
-    threadId: candidate.threadId,
-    shortId: candidate.shortId,
-    name: entry?.name ?? undefined,
-  };
+  const indexEntries = Object.entries(index)
+    .sort((a, b) => new Date(b[1].updatedAt).getTime() - new Date(a[1].updatedAt).getTime());
+
+  for (const [shortId, entry] of indexEntries) {
+    const runs = listRunsForThread(stateDir, shortId);
+    if (runs.length > 0) continue; // already checked in run ledger above
+    return {
+      available: true,
+      threadId: entry.threadId,
+      shortId,
+      name: entry.name ?? undefined,
+    };
+  }
+
+  return { available: false };
+}
+
+// ─── Migration ────────────────────────────────────────────────────────────
+
+/**
+ * Map old thread status values to the new RunStatus type.
+ * "running" is mapped to "failed" since stale running entries are dead.
+ */
+function mapLegacyStatus(lastStatus?: string): RunStatus {
+  switch (lastStatus) {
+    case "completed": return "completed";
+    case "failed": return "failed";
+    case "interrupted": return "cancelled";
+    case "running": return "failed"; // stale — process is gone
+    default: return "failed";
+  }
+}
+
+/**
+ * Compute the workspace-specific slug-hash suffix for a given cwd.
+ * Mirrors the logic in resolveStateDir but returns only the directory name.
+ */
+function workspaceDirName(cwd: string): string {
+  const wsRoot = resolveWorkspaceDir(cwd);
+  let canonical: string;
+  try {
+    canonical = realpathSync(wsRoot);
+  } catch {
+    canonical = resolve(wsRoot);
+  }
+  const slug = basename(canonical).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+  const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+  return `${slug}-${hash}`;
+}
+
+/**
+ * Migrate thread entries and logs from the old global layout to per-workspace layout.
+ * Idempotent — no-ops if per-workspace state already exists or global state doesn't exist.
+ *
+ * @param cwd - The current working directory to migrate state for
+ * @param globalDataDir - Override for the global data directory (for testing). Defaults to config.dataDir.
+ */
+export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
+  const dataDir = globalDataDir ?? config.dataDir;
+  const globalThreadsFile = join(dataDir, "threads.json");
+
+  // 1. Check if global threads.json exists
+  if (!existsSync(globalThreadsFile)) return;
+
+  // 2. Compute per-workspace state dir and check if already migrated
+  const stateDir = join(dataDir, "workspaces", workspaceDirName(cwd));
+  const wsThreadsFile = join(stateDir, "threads.json");
+  if (existsSync(wsThreadsFile)) return;
+
+  // 3. Load the global thread mapping
+  const globalMapping = loadThreadMapping(globalThreadsFile);
+  if (Object.keys(globalMapping).length === 0) return;
+
+  // 4. Filter entries where cwd matches or is within the workspace root
+  const wsRoot = resolveWorkspaceDir(cwd);
+  const matchingEntries: [string, ThreadMappingEntry][] = [];
+  for (const [shortId, entry] of Object.entries(globalMapping)) {
+    if (entry.cwd && (entry.cwd === wsRoot || entry.cwd.startsWith(wsRoot + "/"))) {
+      matchingEntries.push([shortId, entry]);
+    }
+  }
+
+  if (matchingEntries.length === 0) return;
+
+  // 5. Build per-workspace thread index and run records
+  const index: ThreadIndex = {};
+  const globalLogsDir = join(dataDir, "logs");
+  const wsLogsDir = join(stateDir, "logs");
+
+  for (const [shortId, entry] of matchingEntries) {
+    // Create ThreadIndexEntry
+    index[shortId] = {
+      threadId: entry.threadId,
+      name: null,
+      model: entry.model ?? null,
+      cwd: entry.cwd ?? cwd,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt ?? entry.createdAt,
+    };
+
+    // Copy log file if it exists
+    const globalLogFile = join(globalLogsDir, `${shortId}.log`);
+    const wsLogFile = join(wsLogsDir, `${shortId}.log`);
+    let logFile = "";
+    if (existsSync(globalLogFile)) {
+      if (!existsSync(wsLogsDir)) mkdirSync(wsLogsDir, { recursive: true });
+      copyFileSync(globalLogFile, wsLogFile);
+      logFile = wsLogFile;
+    }
+
+    // Determine terminal status
+    const status = mapLegacyStatus(entry.lastStatus);
+    const isTerminal = status === "completed" || status === "failed" || status === "cancelled";
+
+    // Create synthetic RunRecord
+    const record: RunRecord = {
+      runId: generateRunId(),
+      threadId: entry.threadId,
+      shortId,
+      kind: "task",
+      phase: null,
+      status,
+      sessionId: null,
+      logFile,
+      logOffset: 0,
+      prompt: entry.preview ?? null,
+      model: entry.model ?? null,
+      startedAt: entry.createdAt,
+      completedAt: isTerminal && entry.updatedAt ? entry.updatedAt : null,
+      elapsed: null,
+      output: null,
+      filesChanged: null,
+      commandsRun: null,
+      error: null,
+    };
+    createRun(stateDir, record);
+  }
+
+  // 6. Save the per-workspace thread index
+  saveThreadIndex(stateDir, index);
+
+  // 7. Log migration result
+  console.error(`[codex] Migrated ${matchingEntries.length} thread(s) from global state to workspace ${wsRoot}`);
 }
 
 // ─── Legacy API (backward-compatible) ──────────────────────────────────────
@@ -507,16 +658,18 @@ export function updateThreadStatus(
 export function legacyRegisterThread(
   threadsFile: string,
   threadId: string,
-  meta?: { model?: string; cwd?: string; preview?: string },
+  meta?: { model?: string; cwd?: string; preview?: string; createdAt?: string; updatedAt?: string },
 ): ThreadMapping {
   validateId(threadId);
   return withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);
     let shortId = generateShortId();
     while (shortId in mapping) shortId = generateShortId();
+    const now = new Date().toISOString();
     mapping[shortId] = {
       threadId,
-      createdAt: new Date().toISOString(),
+      createdAt: meta?.createdAt ?? now,
+      updatedAt: meta?.updatedAt ?? now,
       model: meta?.model,
       cwd: meta?.cwd,
       preview: meta?.preview,
@@ -533,10 +686,10 @@ export function legacyRegisterThread(
 export function legacyResolveThreadId(threadsFile: string, idOrPrefix: string): string {
   const mapping = loadThreadMapping(threadsFile);
 
-  // Exact match
+  // Exact short ID match
   if (mapping[idOrPrefix]) return mapping[idOrPrefix].threadId;
 
-  // Prefix match
+  // Short ID prefix match
   const matches = Object.entries(mapping).filter(([k]) => k.startsWith(idOrPrefix));
   if (matches.length === 1) return matches[0][1].threadId;
   if (matches.length > 1) {
@@ -544,6 +697,10 @@ export function legacyResolveThreadId(threadsFile: string, idOrPrefix: string): 
       `Ambiguous ID prefix "${idOrPrefix}" — matches: ${matches.map(([k]) => k).join(", ")}`,
     );
   }
+
+  // Full thread ID match (e.g., UUID from Codex TUI handoff)
+  const byThreadId = Object.values(mapping).find(e => e.threadId === idOrPrefix);
+  if (byThreadId) return byThreadId.threadId;
 
   throw new Error(`Thread not found: "${idOrPrefix}"`);
 }

@@ -2,7 +2,7 @@
 
 import { existsSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
-import type { AppServerClient } from "./protocol";
+import type { AppServerClient } from "./client";
 import type {
   UserInput, TurnStartParams, TurnStartResponse, TurnCompletedParams,
   ReviewTarget, ReviewStartParams, ReviewDelivery,
@@ -10,8 +10,7 @@ import type {
   ErrorNotificationParams,
   CommandApprovalRequest, FileChangeApprovalRequest,
   ApprovalPolicy, ReasoningEffort,
-  ReasoningItem, CommandExecutionItem, FileChangeItem,
-  FileChange, CommandExec,
+  ReasoningItem,
 } from "./types";
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
@@ -164,10 +163,8 @@ async function executeTurn(
   const notificationBuffer: BufferedNotification[] = [];
   let turnId: string | null = null;
 
-  // --- Turn-level structured capture (supplementary to dispatcher) ---
+  // --- Turn-level structured capture ---
   let turnReasoning: string | null = null;
-  const turnFilesChanged: FileChange[] = [];
-  const turnCommandsRun: CommandExec[] = [];
 
   // --- Completion inference ---
   let inferenceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -189,7 +186,7 @@ async function executeTurn(
     }
   }
 
-  // Process an item/completed notification for reasoning & structured capture
+  // Process an item/completed notification for reasoning extraction & completion inference
   function processItemCompleted(itemParams: ItemCompletedParams): void {
     const { item } = itemParams;
     // Reasoning extraction
@@ -200,37 +197,16 @@ async function executeTurn(
         turnReasoning = mergeReasoningStrings(turnReasoning, extracted);
       }
     }
-    // Structured file/command capture from item/completed (supplementary)
-    if (item.type === "commandExecution") {
-      const cmd = item as CommandExecutionItem;
-      if (cmd.status === "completed") {
-        turnCommandsRun.push({
-          command: cmd.command,
-          exitCode: cmd.exitCode ?? null,
-          durationMs: cmd.durationMs ?? null,
-        });
-      }
-    }
-    if (item.type === "fileChange") {
-      const fc = item as FileChangeItem;
-      if (fc.status === "completed") {
-        for (const change of fc.changes) {
-          turnFilesChanged.push({
-            path: change.path,
-            kind: change.kind.type,
-            diff: change.diff,
-          });
-        }
-      }
-    }
-    // Completion inference: any item activity resets the timer
+    // Completion inference: only agentMessage completing starts the debounce timer.
+    // Other item types clear the timer (prevent premature inference while the
+    // agent is still doing work like running commands or editing files).
     if (inferenceResolver) {
       if (item.type === "agentMessage") {
         // agentMessage completing is the "final_answer" signal — start debounce
         resetInferenceTimer();
       } else {
-        // Other item activity — reset (prevents premature inference during active work)
-        resetInferenceTimer();
+        // Other item activity — cancel any running timer but don't start a new one
+        clearInferenceTimer();
       }
     }
   }
@@ -257,7 +233,7 @@ async function executeTurn(
 
   // Subscribe to turn/completed BEFORE sending the request to prevent
   // a race where fast turns complete before we call waitFor(). In the
-  // read loop (protocol.ts), a single read() chunk may contain both
+  // read loop (client.ts), a single read() chunk may contain both
   // the response and turn/completed. The while-loop dispatches them
   // synchronously, so the notification handler fires during dispatch —
   // before the response promise resolves (promise continuations are
@@ -342,19 +318,12 @@ async function executeTurn(
     // spec — items are only populated on thread/resume or thread/fork.
     const output = opts.dispatcher.getAccumulatedOutput();
 
-    // Merge dispatcher-collected files/commands with turn-level capture.
-    // Deduplicate by command string + exitCode (commands) and path (files).
-    const dispatcherFiles = opts.dispatcher.getFilesChanged();
-    const dispatcherCmds = opts.dispatcher.getCommandsRun();
-    const mergedFiles = mergeFiles(dispatcherFiles, turnFilesChanged);
-    const mergedCmds = mergeCommands(dispatcherCmds, turnCommandsRun);
-
     return {
       status: completedTurn.turn.status as TurnResult["status"],
       output,
       reasoning: turnReasoning,
-      filesChanged: mergedFiles,
-      commandsRun: mergedCmds,
+      filesChanged: opts.dispatcher.getFilesChanged(),
+      commandsRun: opts.dispatcher.getCommandsRun(),
       error: completedTurn.turn.error?.message,
       durationMs: Date.now() - startTime,
     };
@@ -362,14 +331,12 @@ async function executeTurn(
     if (e instanceof KillSignalError) {
       opts.dispatcher.flushOutput();
       opts.dispatcher.flush();
-      const dispatcherFiles = opts.dispatcher.getFilesChanged();
-      const dispatcherCmds = opts.dispatcher.getCommandsRun();
       return {
         status: "interrupted",
         output: opts.dispatcher.getAccumulatedOutput(),
         reasoning: turnReasoning,
-        filesChanged: mergeFiles(dispatcherFiles, turnFilesChanged),
-        commandsRun: mergeCommands(dispatcherCmds, turnCommandsRun),
+        filesChanged: opts.dispatcher.getFilesChanged(),
+        commandsRun: opts.dispatcher.getCommandsRun(),
         error: "Thread killed by user",
         durationMs: Date.now() - startTime,
       };
@@ -388,48 +355,6 @@ async function executeTurn(
       }
     }
   }
-}
-
-/** Merge file change arrays, deduplicating by path + kind. */
-function mergeFiles(a: FileChange[], b: FileChange[]): FileChange[] {
-  const seen = new Set<string>();
-  const result: FileChange[] = [];
-  for (const f of a) {
-    const key = `${f.path}:${f.kind}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(f);
-    }
-  }
-  for (const f of b) {
-    const key = `${f.path}:${f.kind}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(f);
-    }
-  }
-  return result;
-}
-
-/** Merge command arrays, deduplicating by command + exitCode. */
-function mergeCommands(a: CommandExec[], b: CommandExec[]): CommandExec[] {
-  const seen = new Set<string>();
-  const result: CommandExec[] = [];
-  for (const c of a) {
-    const key = `${c.command}:${c.exitCode}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(c);
-    }
-  }
-  for (const c of b) {
-    const key = `${c.command}:${c.exitCode}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push(c);
-    }
-  }
-  return result;
 }
 
 /**

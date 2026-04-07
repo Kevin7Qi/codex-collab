@@ -12,6 +12,8 @@ import {
   acquireSpawnLock,
   teardownBroker,
 } from "./broker";
+import { connectToBroker } from "./broker-client";
+import net from "node:net";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -279,5 +281,177 @@ describe("teardownBroker", () => {
       startedAt: "2026-01-01T00:00:00Z",
     };
     expect(() => teardownBroker(tempDir, state)).not.toThrow();
+  });
+});
+
+// ─── BrokerClient ────────────────────────────────────────────────────────
+
+// BrokerClient tests require Unix socket creation, which may be restricted
+// in sandboxed environments. Detected at first test run.
+let canCreateSockets: boolean | null = null;
+
+async function checkSocketSupport(): Promise<boolean> {
+  if (canCreateSockets !== null) return canCreateSockets;
+  const checkDir = mkdtempSync(join(tmpdir(), "broker-sock-check-"));
+  const testSock = join(checkDir, "test.sock");
+  try {
+    const srv = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      srv.on("error", reject);
+      srv.listen(testSock, () => { srv.close(); resolve(); });
+    });
+    canCreateSockets = true;
+  } catch {
+    canCreateSockets = false;
+  }
+  try { rmSync(checkDir, { recursive: true, force: true }); } catch {}
+  return canCreateSockets;
+}
+
+describe("BrokerClient", () => {
+  test("connects to a mock broker server and performs handshake", async () => {
+    if (!await checkSocketSupport()) return; // skip in sandboxed environments
+    const sockPath = join(tempDir, "mock-broker.sock");
+
+    // Create a mock broker that responds to initialize
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.method === "initialize" && msg.id !== undefined) {
+              socket.write(JSON.stringify({ id: msg.id, result: { userAgent: "mock-broker" } }) + "\n");
+            } else if (msg.method === "initialized") {
+              // Swallow
+            } else if (msg.method === "test/echo" && msg.id !== undefined) {
+              socket.write(JSON.stringify({ id: msg.id, result: { echo: msg.params } }) + "\n");
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+      expect(client.userAgent).toBe("mock-broker");
+
+      // Test a round-trip request
+      const result = await client.request<{ echo: unknown }>("test/echo", { hello: "world" });
+      expect(result.echo).toEqual({ hello: "world" });
+
+      await client.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      try { rmSync(sockPath); } catch {}
+    }
+  });
+
+  test("receives notifications from broker", async () => {
+    if (!await checkSocketSupport()) return; // skip in sandboxed environments
+    const sockPath = join(tempDir, "mock-notif.sock");
+    let clientSocket: net.Socket | null = null;
+
+    const server = net.createServer((socket) => {
+      clientSocket = socket;
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.method === "initialize" && msg.id !== undefined) {
+              socket.write(JSON.stringify({ id: msg.id, result: { userAgent: "mock-notif" } }) + "\n");
+            }
+          } catch {}
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+
+      // Register notification handler
+      const received: unknown[] = [];
+      client.on("test/event", (params) => {
+        received.push(params);
+      });
+
+      // Send a notification from the server
+      clientSocket!.write(JSON.stringify({ method: "test/event", params: { value: 42 } }) + "\n");
+
+      // Give it a moment to arrive
+      await new Promise((r) => setTimeout(r, 50));
+      expect(received).toEqual([{ value: 42 }]);
+
+      await client.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      try { rmSync(sockPath); } catch {}
+    }
+  });
+
+  test("rejects with error on connection failure", async () => {
+    await expect(
+      connectToBroker({ endpoint: `unix:${tempDir}/nonexistent.sock` }),
+    ).rejects.toThrow(/Failed to connect to broker/);
+  });
+
+  test("request rejects on JSON-RPC error from broker", async () => {
+    if (!await checkSocketSupport()) return; // skip in sandboxed environments
+    const sockPath = join(tempDir, "mock-err.sock");
+
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.method === "initialize" && msg.id !== undefined) {
+              socket.write(JSON.stringify({ id: msg.id, result: { userAgent: "mock" } }) + "\n");
+            } else if (msg.method === "test/fail" && msg.id !== undefined) {
+              socket.write(JSON.stringify({
+                id: msg.id,
+                error: { code: -32001, message: "Broker is busy" },
+              }) + "\n");
+            }
+          } catch {}
+        }
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+      await expect(client.request("test/fail")).rejects.toThrow(/Broker is busy/);
+      await client.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      try { rmSync(sockPath); } catch {}
+    }
   });
 });

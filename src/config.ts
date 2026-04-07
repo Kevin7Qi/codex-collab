@@ -67,8 +67,6 @@ export const config = {
 
   // Display
   threadsListLimit: 20,
-  /** @deprecated Use threadsListLimit instead. */
-  get jobsListLimit() { return this.threadsListLimit; },
 
   // Client identity (sent during initialize handshake)
   clientName: "codex-collab",

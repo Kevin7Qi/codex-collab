@@ -292,29 +292,98 @@ export function getCurrentSessionId(stateDir: string): string | null {
   return session?.sessionId ?? null;
 }
 
+// ─── Broker spawn ────────────────────────────────────────────────────────
+
+/** Resolve the broker-server entry point path. */
+function resolveBrokerServerPath(): string {
+  // Check multiple locations:
+  // 1. Built bundle (same directory as the running script, no extension)
+  const builtNoExt = path.join(import.meta.dir, "broker-server");
+  if (fs.existsSync(builtNoExt)) return builtNoExt;
+  // 2. Source file (relative to this file's directory)
+  const srcPath = path.join(import.meta.dir, "broker-server.ts");
+  if (fs.existsSync(srcPath)) return srcPath;
+  // 3. Source file from project root (when import.meta.dir is src/)
+  const projectSrcPath = path.join(path.dirname(import.meta.dir), "src", "broker-server.ts");
+  if (fs.existsSync(projectSrcPath)) return projectSrcPath;
+  // Fall back — will likely fail at spawn time with a clear error
+  return srcPath;
+}
+
+/**
+ * Spawn the broker-server as a detached process.
+ * Returns the PID of the spawned process.
+ */
+function spawnBrokerServer(
+  endpoint: string,
+  cwd: string,
+  stateDir: string,
+): number {
+  const brokerPath = resolveBrokerServerPath();
+  const args = [
+    "run",
+    brokerPath,
+    "serve",
+    "--endpoint",
+    endpoint,
+    "--cwd",
+    cwd,
+    "--idle-timeout",
+    String(config.defaultBrokerIdleTimeout),
+  ];
+
+  const logPath = path.join(stateDir, "broker.log");
+  const logFd = fs.openSync(logPath, "a");
+
+  const proc = Bun.spawn(["bun", ...args], {
+    stdin: "ignore",
+    stdout: logFd,
+    stderr: logFd,
+    cwd,
+  });
+
+  // Unref so the parent process can exit without waiting for the broker
+  proc.unref();
+
+  fs.closeSync(logFd);
+
+  if (!proc.pid) {
+    throw new Error("Failed to spawn broker server: no PID returned");
+  }
+
+  return proc.pid;
+}
+
+/**
+ * Wait for the broker to become alive by polling the socket.
+ * Returns true if alive within the timeout, false otherwise.
+ */
+async function waitForBrokerReady(
+  endpoint: string,
+  timeoutMs = 10_000,
+  pollMs = 100,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isBrokerAlive(endpoint, 200)) return true;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return false;
+}
+
 // ─── Main connection entry point ──────────────────────────────────────────
 
 /**
  * Ensure a live connection to the Codex app server for the given working directory.
  *
- * Current implementation: each invocation spawns a fresh `connectDirect` connection.
- * Session state is persisted so that runs within a recent session share a session ID.
- *
- * TODO: Full broker multiplexing (single long-lived process serving multiple callers
- * over a Unix/pipe socket) is deferred to a future task. When implemented:
- * - `broker.json` will contain a real endpoint and PID
- * - `isBrokerAlive` will probe the socket
- * - Callers will connect to the shared broker instead of spawning their own process
- *
  * Flow:
  * 1. Resolve state dir from cwd
- * 2. Check if session.json exists and is recent (< broker idle timeout)
- *    - If yes, reuse the session ID
- *    - If no, generate a new session ID
- * 3. Acquire spawn lock
- * 4. Spawn new connection via connectDirect({ cwd })
- * 5. Save broker state (endpoint: null, pid: null) + session state
- * 6. Release lock
+ * 2. Check if a broker is already alive (probe the socket)
+ *    - If yes, connect to it via BrokerClient
+ * 3. If not alive, acquire spawn lock and start a new broker
+ * 4. Connect to the new broker
+ * 5. On busy (-32001) or connection failure, fall back to direct connection
+ * 6. Save broker state and session state
  */
 export async function ensureConnection(cwd: string): Promise<AppServerClient> {
   const stateDir = resolveStateDir(cwd);
@@ -334,36 +403,105 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
     sessionId = randomBytes(16).toString("hex");
   }
 
-  // Try to acquire spawn lock
+  // 1. Check if an existing broker is alive
+  const existingState = loadBrokerState(stateDir);
+  if (existingState?.endpoint) {
+    if (await isBrokerAlive(existingState.endpoint)) {
+      try {
+        const { connectToBroker } = await import("./broker-client");
+        const client = await connectToBroker({ endpoint: existingState.endpoint });
+
+        // Update session state
+        const now = new Date().toISOString();
+        saveSessionState(stateDir, {
+          sessionId,
+          startedAt: existingSession?.startedAt ?? now,
+        });
+
+        return client;
+      } catch (e) {
+        // Connection to existing broker failed — tear it down and spawn fresh
+        console.error(
+          `[broker] Warning: failed to connect to existing broker: ${(e as Error).message}. Spawning new one.`,
+        );
+        teardownBroker(stateDir, existingState);
+      }
+    } else {
+      // Broker is not alive — clean up stale state
+      teardownBroker(stateDir, existingState);
+    }
+  }
+
+  // 2. Acquire spawn lock
   const release = acquireSpawnLock(stateDir);
   if (!release) {
     // Could not acquire lock — another process may be spawning.
-    // Fall back to direct connection without broker tracking.
+    // Fall back to direct connection.
     return connectDirect({ cwd });
   }
 
   try {
-    // Spawn new connection
-    const client = await connectDirect({ cwd });
+    // Re-check after lock acquisition (another process may have spawned while we waited)
+    const freshState = loadBrokerState(stateDir);
+    if (freshState?.endpoint && await isBrokerAlive(freshState.endpoint)) {
+      try {
+        const { connectToBroker } = await import("./broker-client");
+        const client = await connectToBroker({ endpoint: freshState.endpoint });
+        const now = new Date().toISOString();
+        saveSessionState(stateDir, {
+          sessionId,
+          startedAt: existingSession?.startedAt ?? now,
+        });
+        return client;
+      } catch {
+        teardownBroker(stateDir, freshState);
+      }
+    }
 
+    // 3. Spawn a new broker
+    const endpoint = createEndpoint(stateDir);
+    let pid: number;
+    try {
+      pid = spawnBrokerServer(endpoint, cwd, stateDir);
+    } catch (e) {
+      // Broker spawn failed — fall back to direct connection
+      console.error(
+        `[broker] Warning: failed to spawn broker: ${(e as Error).message}. Using direct connection.`,
+      );
+      const client = await connectDirect({ cwd });
+      const now = new Date().toISOString();
+      saveBrokerState(stateDir, { endpoint: null, pid: null, sessionDir: stateDir, startedAt: now });
+      saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+      return client;
+    }
+
+    // 4. Wait for the broker to be ready
+    const ready = await waitForBrokerReady(endpoint);
+    if (!ready) {
+      // Broker didn't start in time — fall back to direct
+      console.error("[broker] Warning: broker did not become ready in time. Using direct connection.");
+      const client = await connectDirect({ cwd });
+      const now = new Date().toISOString();
+      saveBrokerState(stateDir, { endpoint: null, pid, sessionDir: stateDir, startedAt: now });
+      saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+      return client;
+    }
+
+    // 5. Connect to the new broker
     const now = new Date().toISOString();
+    saveBrokerState(stateDir, { endpoint, pid, sessionDir: stateDir, startedAt: now });
+    saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
 
-    // Save broker state with null endpoint and pid — actual broker
-    // multiplexing is deferred (see TODO above)
-    saveBrokerState(stateDir, {
-      endpoint: null,
-      pid: null,
-      sessionDir: stateDir,
-      startedAt: now,
-    });
-
-    // Save/update session state
-    saveSessionState(stateDir, {
-      sessionId,
-      startedAt: existingSession?.startedAt ?? now,
-    });
-
-    return client;
+    try {
+      const { connectToBroker } = await import("./broker-client");
+      return await connectToBroker({ endpoint });
+    } catch (e) {
+      // Broker connection failed after spawn — fall back to direct
+      console.error(
+        `[broker] Warning: failed to connect to new broker: ${(e as Error).message}. Using direct connection.`,
+      );
+      return connectDirect({ cwd });
+    }
   } finally {
     release();
   }

@@ -3,13 +3,13 @@
 // src/cli.ts — codex-collab CLI router
 
 import { config } from "./config";
-import type { AppServerClient } from "./protocol";
+import type { AppServerClient } from "./client";
 import { updateThreadStatus } from "./threads";
 import {
-  ensureDataDirs,
   activeClient,
   activeThreadId,
   activeShortId,
+  activeWsPaths,
   shuttingDown,
   setShuttingDown,
   removePidFile,
@@ -29,15 +29,15 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
 
   // Update thread status and clean up PID file synchronously before async
   // cleanup — ensures the mapping is written even if client.close() hangs.
-  if (activeThreadId) {
+  if (activeThreadId && activeWsPaths) {
     try {
-      updateThreadStatus(config.threadsFile, activeThreadId, "interrupted");
+      updateThreadStatus(activeWsPaths.threadsFile, activeThreadId, "interrupted");
     } catch (e) {
       console.error(`[codex] Warning: could not update thread status during shutdown: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-  if (activeShortId) {
-    removePidFile(activeShortId);
+  if (activeShortId && activeWsPaths) {
+    removePidFile(activeWsPaths.pidsDir, activeShortId);
   }
 
   try {
@@ -67,7 +67,7 @@ Commands:
   run --resume <id> "p"   Resume existing thread with new prompt
   review [opts]           Run code review (PR-style by default)
   review "instructions"   Custom review with specific focus
-  jobs [--json] [--all]   List threads (--limit <n> to cap)
+  threads [--json] [--all] List threads (--limit <n>, --discover)
   kill <id>               Stop a running thread
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
@@ -77,6 +77,7 @@ Commands:
   decline <id>            Decline a pending request
   clean                   Delete old logs and stale mappings
   delete <id>             Archive thread, delete local files
+  resume-candidate --json Find resumable thread
   health                  Check prerequisites
 
 Options:
@@ -99,7 +100,7 @@ Examples:
   codex-collab review -d /path/to/project --content-only
   codex-collab review --mode uncommitted -d /path/to/project --content-only
   codex-collab review "Focus on security issues" --content-only
-  codex-collab jobs --json
+  codex-collab threads --json
   codex-collab kill abc123
   codex-collab health
 `);
@@ -155,17 +156,12 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "output", "progress",
     "config", "models", "approve", "decline", "clean", "delete", "health",
+    "resume-candidate",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
     console.error("Run codex-collab --help for usage");
     process.exit(1);
-  }
-
-  // Create data directories for commands that need them
-  const noDataDirCommands = new Set(["health", "models"]);
-  if (!noDataDirCommands.has(command)) {
-    ensureDataDirs();
   }
 
   switch (command) {
@@ -198,6 +194,8 @@ async function main() {
       return (await import("./commands/threads")).handleDelete(rest);
     case "health":
       return (await import("./commands/config")).handleHealth(rest);
+    case "resume-candidate":
+      return (await import("./commands/threads")).handleResumeCandidate(rest);
   }
 }
 

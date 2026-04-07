@@ -1,6 +1,5 @@
 // src/commands/kill.ts — kill command handler
 
-import { config } from "../config";
 import {
   legacyResolveThreadId as resolveThreadId,
   legacyFindShortId as findShortId,
@@ -16,20 +15,22 @@ import {
   progress,
   withClient,
   removePidFile,
+  getWorkspacePaths,
 } from "./shared";
 
 export async function handleKill(args: string[]): Promise<void> {
-  const { positional } = parseOptions(args);
+  const { positional, options } = parseOptions(args);
+  const ws = getWorkspacePaths(options.dir);
   const id = positional[0];
   if (!id) die("Usage: codex-collab kill <id>");
   validateIdOrDie(id);
 
-  const threadId = resolveThreadId(config.threadsFile, id);
-  const shortId = findShortId(config.threadsFile, threadId);
+  const threadId = resolveThreadId(ws.threadsFile, id);
+  const shortId = findShortId(ws.threadsFile, threadId);
 
   // Skip kill for threads that have already reached a terminal status
   if (shortId) {
-    const mapping = loadThreadMapping(config.threadsFile);
+    const mapping = loadThreadMapping(ws.threadsFile);
     const localStatus = mapping[shortId]?.lastStatus;
     if (localStatus && localStatus !== "running") {
       progress(`Thread ${id} is already ${localStatus}`);
@@ -39,7 +40,7 @@ export async function handleKill(args: string[]): Promise<void> {
 
   // Write kill signal file so the running process can detect the kill
   let killSignalWritten = false;
-  const signalPath = join(config.killSignalsDir, threadId);
+  const signalPath = join(ws.killSignalsDir, threadId);
   try {
     writeFileSync(signalPath, "", { mode: 0o600 });
     killSignalWritten = true;
@@ -84,8 +85,8 @@ export async function handleKill(args: string[]): Promise<void> {
   });
 
   if (killSignalWritten || serverInterrupted) {
-    updateThreadStatus(config.threadsFile, threadId, "interrupted");
-    if (shortId) removePidFile(shortId);
+    updateThreadStatus(ws.threadsFile, threadId, "interrupted");
+    if (shortId) removePidFile(ws.pidsDir, shortId);
     progress(`Stopped thread ${id}`);
   } else {
     progress(`Could not signal thread ${id} — try again.`);

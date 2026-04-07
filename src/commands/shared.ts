@@ -2,18 +2,27 @@
 
 import {
   config,
+  resolveStateDir,
   validateId,
   type ReasoningEffort,
   type SandboxMode,
   type ApprovalPolicy,
 } from "../config";
-import { connect, type AppServerClient } from "../protocol";
+import { type AppServerClient } from "../client";
+import { ensureConnection, getCurrentSessionId } from "../broker";
 import {
   legacyRegisterThread as registerThread,
   legacyResolveThreadId as resolveThreadId,
   legacyFindShortId as findShortId,
   legacyUpdateThreadMeta as updateThreadMeta,
+  legacyRemoveThread as removeThread,
   updateThreadStatus,
+  loadThreadMapping,
+  saveThreadMapping,
+  withThreadLock,
+  generateRunId,
+  createRun,
+  updateRun,
 } from "../threads";
 import { EventDispatcher } from "../events";
 import {
@@ -27,13 +36,50 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
+  statSync,
 } from "fs";
 import { resolve, join } from "path";
 import type {
   ThreadStartResponse,
   Model,
   TurnResult,
+  RunRecord,
 } from "../types";
+
+// ---------------------------------------------------------------------------
+// Per-workspace paths
+// ---------------------------------------------------------------------------
+
+export interface WorkspacePaths {
+  stateDir: string;
+  threadsFile: string;
+  logsDir: string;
+  approvalsDir: string;
+  killSignalsDir: string;
+  pidsDir: string;
+  runsDir: string;
+}
+
+export function getWorkspacePaths(cwd: string): WorkspacePaths {
+  const stateDir = resolveStateDir(cwd);
+  const paths = {
+    stateDir,
+    threadsFile: join(stateDir, "threads.json"),
+    logsDir: join(stateDir, "logs"),
+    approvalsDir: join(stateDir, "approvals"),
+    killSignalsDir: join(stateDir, "kill-signals"),
+    pidsDir: join(stateDir, "pids"),
+    runsDir: join(stateDir, "runs"),
+  };
+  // Lazily ensure workspace directories exist so callers don't need a
+  // separate ensureDataDirs() call.
+  for (const dir of [paths.logsDir, paths.approvalsDir, paths.killSignalsDir, paths.pidsDir, paths.runsDir]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  // Ensure global data dir exists for config.json
+  mkdirSync(config.dataDir, { recursive: true });
+  return paths;
+}
 
 // ---------------------------------------------------------------------------
 // Options interface and argument parsing
@@ -53,6 +99,7 @@ export interface Options {
   reviewRef: string | null;
   base: string;
   resumeId: string | null;
+  discover: boolean;
   /** Flags explicitly provided on the command line (forwarded on resume). */
   explicit: Set<string>;
   /** Flags set by user config file (suppress auto-detection but NOT forwarded on resume). */
@@ -98,11 +145,12 @@ export function defaultOptions(): Options {
     contentOnly: false,
     json: false,
     timeout: config.defaultTimeout,
-    limit: config.jobsListLimit,
+    limit: config.threadsListLimit,
     reviewMode: null,
     reviewRef: null,
     base: "main",
     resumeId: null,
+    discover: false,
     explicit: new Set<string>(),
     configured: new Set<string>(),
   };
@@ -241,6 +289,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.resumeId = args[++i];
     } else if (arg === "--all") {
       options.limit = Infinity;
+    } else if (arg === "--discover") {
+      options.discover = true;
     } else if (arg === "--unset") {
       options.explicit.add("unset");
     } else if (arg.startsWith("-")) {
@@ -350,21 +400,23 @@ export function applyUserConfig(options: Options): void {
 export let activeClient: AppServerClient | undefined;
 export let activeThreadId: string | undefined;
 export let activeShortId: string | undefined;
+export let activeWsPaths: WorkspacePaths | undefined;
 export let shuttingDown = false;
 
 export function setActiveClient(client: AppServerClient | undefined): void { activeClient = client; }
 export function setActiveThreadId(id: string | undefined): void { activeThreadId = id; }
 export function setActiveShortId(id: string | undefined): void { activeShortId = id; }
+export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeWsPaths = ws; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
 
-export function getApprovalHandler(policy: ApprovalPolicy): ApprovalHandler {
+export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string): ApprovalHandler {
   if (policy === "never") return autoApproveHandler;
-  return new InteractiveApprovalHandler(config.approvalsDir, progress);
+  return new InteractiveApprovalHandler(approvalsDir, progress);
 }
 
 /** Connect to app server, run fn, then close the client (even on error). */
-export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>): Promise<T> {
-  const client = await connect();
+export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>, cwd?: string): Promise<T> {
+  const client = await ensureConnection(cwd ?? process.cwd());
   activeClient = client;
   try {
     return await fn(client);
@@ -378,10 +430,10 @@ export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>)
   }
 }
 
-export function createDispatcher(shortId: string, opts: Options): EventDispatcher {
+export function createDispatcher(shortId: string, logsDir: string, opts: Options): EventDispatcher {
   return new EventDispatcher(
     shortId,
-    config.logsDir,
+    logsDir,
     opts.contentOnly ? () => {} : progress,
   );
 }
@@ -479,16 +531,29 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
 // Thread start/resume
 // ---------------------------------------------------------------------------
 
-/** Start or resume a thread, returning threadId, shortId, and effective config. */
+/** Start or resume a thread, returning threadId, shortId, runId, and effective config. */
 export async function startOrResumeThread(
   client: AppServerClient,
   opts: Options,
+  ws: WorkspacePaths,
   extraStartParams?: Record<string, unknown>,
   preview?: string,
-): Promise<{ threadId: string; shortId: string; effective: ThreadStartResponse }> {
+  isReview = false,
+): Promise<{ threadId: string; shortId: string; runId: string; effective: ThreadStartResponse }> {
+  let threadId: string;
+  let shortId: string;
+  let effective: ThreadStartResponse;
+  let isNewThread = false;
+
   if (opts.resumeId) {
-    const threadId = resolveThreadId(config.threadsFile, opts.resumeId);
-    const shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
+    // Try local resolution first; if not found, treat the ID as a full thread ID
+    // and pass it directly to the server (handles TUI-created threads not yet discovered)
+    try {
+      threadId = resolveThreadId(ws.threadsFile, opts.resumeId);
+    } catch {
+      threadId = opts.resumeId;
+    }
+    shortId = findShortId(ws.threadsFile, threadId) ?? opts.resumeId;
     const resumeParams: Record<string, unknown> = {
       threadId,
       persistExtendedHistory: false,
@@ -500,38 +565,91 @@ export async function startOrResumeThread(
     if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
     // Forced overrides from caller (e.g., review forces sandbox to read-only)
     if (extraStartParams) Object.assign(resumeParams, extraStartParams);
-    const effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
-    // Refresh stored metadata so `jobs` stays accurate after resume
-    updateThreadMeta(config.threadsFile, threadId, {
+    effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+    // Ensure the thread is in our local index (may not be if it was created externally)
+    if (!findShortId(ws.threadsFile, threadId)) {
+      registerThread(ws.threadsFile, threadId, {
+        model: effective.model,
+        cwd: opts.dir,
+        preview,
+      });
+      shortId = findShortId(ws.threadsFile, threadId) ?? shortId;
+    } else {
+      // Refresh stored metadata so `threads` stays accurate after resume
+      updateThreadMeta(ws.threadsFile, threadId, {
+        model: effective.model,
+        ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
+        ...(preview ? { preview } : {}),
+      });
+    }
+  } else {
+    const startParams: Record<string, unknown> = {
+      cwd: opts.dir,
+      approvalPolicy: opts.approval,
+      sandbox: opts.sandbox,
+      experimentalRawEvents: false,
+      persistExtendedHistory: false,
+      ephemeral: isReview,
+      serviceName: config.serviceName,
+      ...extraStartParams,
+    };
+    if (opts.model) startParams.model = opts.model;
+    effective = await client.request<ThreadStartResponse>(
+      "thread/start",
+      startParams,
+    );
+    threadId = effective.thread.id;
+    registerThread(ws.threadsFile, threadId, {
       model: effective.model,
-      ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
-      ...(preview ? { preview } : {}),
+      cwd: opts.dir,
+      preview,
     });
-    return { threadId, shortId, effective };
+    const resolvedShortId = findShortId(ws.threadsFile, threadId);
+    if (!resolvedShortId) die(`Internal error: thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
+    shortId = resolvedShortId;
+    isNewThread = true;
   }
 
-  const startParams: Record<string, unknown> = {
-    cwd: opts.dir,
-    approvalPolicy: opts.approval,
-    sandbox: opts.sandbox,
-    experimentalRawEvents: false,
-    persistExtendedHistory: false,
-    ...extraStartParams,
-  };
-  if (opts.model) startParams.model = opts.model;
-  const effective = await client.request<ThreadStartResponse>(
-    "thread/start",
-    startParams,
-  );
-  const threadId = effective.thread.id;
-  registerThread(config.threadsFile, threadId, {
+  // Name new threads (non-fatal on failure)
+  // Name new non-ephemeral threads (reviews are ephemeral — naming would fail)
+  if (isNewThread && !isReview) {
+    const threadName = preview?.slice(0, 100) ?? "codex-collab task";
+    try {
+      await client.request("thread/name/set", { threadId, name: threadName });
+    } catch (e) {
+      console.error(`[codex] Warning: could not name thread: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Create run record (Gap 1 + Gap 5 + Gap 6)
+  const prompt = preview ?? null;
+  const runId = generateRunId();
+  const sessionId = getCurrentSessionId(ws.stateDir);
+  const logPath = join(ws.logsDir, `${shortId}.log`);
+  const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
+
+  createRun(ws.stateDir, {
+    runId,
+    threadId,
+    shortId,
+    kind: isReview ? "review" : "task",
+    phase: "starting",
+    status: "running",
+    sessionId,
+    logFile: `logs/${shortId}.log`,
+    logOffset,
+    prompt,
     model: effective.model,
-    cwd: opts.dir,
-    preview,
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    elapsed: null,
+    output: null,
+    filesChanged: null,
+    commandsRun: null,
+    error: null,
   });
-  const shortId = findShortId(config.threadsFile, threadId);
-  if (!shortId) die(`Internal error: thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
-  return { threadId, shortId, effective };
+
+  return { threadId, shortId, runId, effective };
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +696,7 @@ export function pluralize(n: number, word: string): string {
 export function printResult(
   result: TurnResult,
   shortId: string,
+  threadId: string,
   label: string,
   contentOnly: boolean,
 ): number {
@@ -588,7 +707,11 @@ export function printResult(
 
   if (result.output) console.log(result.output);
   if (result.error) console.error(`\nError: ${result.error}`);
-  if (!contentOnly) console.error(`\nThread: ${shortId}`);
+  if (!contentOnly) {
+    console.error(`\nThread: ${shortId}`);
+    console.error(`Codex session ID: ${threadId}`);
+    console.error(`Resume in Codex: codex resume ${threadId}`);
+  }
 
   return result.status === "completed" ? 0 : 1;
 }
@@ -598,18 +721,18 @@ export function printResult(
 // ---------------------------------------------------------------------------
 
 /** Write a PID file for the current process so threads list can detect stale "running" status. */
-export function writePidFile(shortId: string): void {
+export function writePidFile(pidsDir: string, shortId: string): void {
   try {
-    writeFileSync(join(config.pidsDir, shortId), String(process.pid), { mode: 0o600 });
+    writeFileSync(join(pidsDir, shortId), String(process.pid), { mode: 0o600 });
   } catch (e) {
     console.error(`[codex] Warning: could not write PID file: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
 /** Remove the PID file for a thread. */
-export function removePidFile(shortId: string): void {
+export function removePidFile(pidsDir: string, shortId: string): void {
   try {
-    unlinkSync(join(config.pidsDir, shortId));
+    unlinkSync(join(pidsDir, shortId));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
       console.error(`[codex] Warning: could not remove PID file: ${e instanceof Error ? e.message : String(e)}`);
@@ -622,8 +745,8 @@ export function removePidFile(shortId: string): void {
  *  have been started before PID tracking existed, or PID file write may have
  *  failed.  Only returns false when we have a PID and can confirm the process
  *  is gone (ESRCH). */
-export function isProcessAlive(shortId: string): boolean {
-  const pidPath = join(config.pidsDir, shortId);
+export function isProcessAlive(pidsDir: string, shortId: string): boolean {
+  const pidPath = join(pidsDir, shortId);
   let pid: number;
   try {
     pid = Number(readFileSync(pidPath, "utf-8").trim());
@@ -667,11 +790,17 @@ export async function tryArchive(client: AppServerClient, threadId: string): Pro
 // Data directory setup
 // ---------------------------------------------------------------------------
 
-/** Ensure data directories exist (called only for commands that need them).
+/** Ensure per-workspace data directories exist (called only for commands that need them).
+ *  Also ensures the global data dir exists for config.json.
  *  Config getters throw if the home directory cannot be determined, producing a clear error. */
-export function ensureDataDirs(): void {
-  mkdirSync(config.logsDir, { recursive: true });
-  mkdirSync(config.approvalsDir, { recursive: true });
-  mkdirSync(config.killSignalsDir, { recursive: true });
-  mkdirSync(config.pidsDir, { recursive: true });
+export function ensureDataDirs(cwd?: string): void {
+  const effectiveCwd = cwd ?? process.cwd();
+  const ws = getWorkspacePaths(effectiveCwd);
+  mkdirSync(ws.logsDir, { recursive: true });
+  mkdirSync(ws.approvalsDir, { recursive: true });
+  mkdirSync(ws.killSignalsDir, { recursive: true });
+  mkdirSync(ws.pidsDir, { recursive: true });
+  mkdirSync(ws.runsDir, { recursive: true });
+  // Ensure global data dir exists for config.json
+  mkdirSync(config.dataDir, { recursive: true });
 }

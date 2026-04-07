@@ -11,7 +11,7 @@ codex-collab is a bridge between Claude and Codex. It communicates with Codex vi
 
 - **Run** — Single-command `run` for any prompted task (research, analysis, implementation). Starts a thread, sends prompt, waits for completion, returns output.
 - **Code review** — Single-command `review` for PR-style, uncommitted, or commit-level review.
-- **Parallel work** — You and Codex work on different parts simultaneously. Start multiple jobs.
+- **Parallel work** — You and Codex work on different parts simultaneously. Start multiple threads.
 - **Research** — Spin up a read-only Codex session to investigate something while you continue other work.
 
 ## Run Command (Recommended for Prompted Tasks)
@@ -36,7 +36,7 @@ codex-collab run "investigate the auth module" -d /path/to/project --content-onl
 
 For **`run` and `review`** commands, also use `run_in_background=true` — these take minutes. You will be notified automatically when the command finishes. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically. If other background tasks complete while a Codex task is still running, handle those completed tasks normally — do NOT proactively check on, wait for, or poll the still-running Codex task. It will notify you when it finishes.
 
-For **all other commands** (`kill`, `jobs`, `progress`, `output`, `approve`, `decline`, `clean`, `delete`, `models`, `health`), run in the **foreground** — they complete in seconds.
+For **all other commands** (`kill`, `threads`, `progress`, `output`, `approve`, `decline`, `clean`, `delete`, `models`, `health`), run in the **foreground** — they complete in seconds.
 
 If the user asks about progress mid-task, use `progress` to check the recent activity:
 
@@ -83,6 +83,12 @@ Review modes: `pr` (default), `uncommitted`, `commit`
 
 When consecutive tasks relate to the same project, resume the existing thread. Codex retains the conversation history, so follow-ups like "now fix what you found" or "check the tests too" work better when Codex already has context from the previous exchange. Start a fresh thread when the task is unrelated or targets a different project.
 
+**Before starting a new thread for a follow-up**, run `codex-collab resume-candidate --json` first. If it returns `{ "available": true, "shortId": "...", "name": "..." }`, use `--resume <shortId>` instead of starting fresh. This finds the best resumable thread across the current session, prior sessions, and TUI-created threads.
+
+The `--resume` flag accepts both ID formats:
+- `--resume <short-id>` — 8-char hex short ID (supports prefix matching, e.g., `a1b2`)
+- `--resume <thread-id>` — Full Codex thread ID (UUID, e.g., `019d680c-7b23-7f22-ab99-6584214a2bed`)
+
 | Situation | Action |
 |-----------|--------|
 | Same project, new prompt | `codex-collab run --resume <id> "prompt"` |
@@ -90,7 +96,7 @@ When consecutive tasks relate to the same project, resume the existing thread. C
 | Different project | Start new thread |
 | Thread stuck / errored | `codex-collab kill <id>` then start new |
 
-If you've lost track of the thread ID, use `codex-collab jobs` to find active threads.
+If you've lost track of the thread ID, use `codex-collab threads` to find active threads.
 
 ## Checking Progress
 
@@ -100,7 +106,7 @@ If the user asks about a running task, use `TaskOutput(block=false)` to read the
 codex-collab progress <thread-id>
 ```
 
-Note: `<thread-id>` is the codex-collab thread short ID (8-char hex from the output), not the Claude Code background task ID. If you don't have it, run `codex-collab jobs`.
+Note: `<thread-id>` is the codex-collab thread short ID (8-char hex from the output), not the Claude Code background task ID. If you don't have it, run `codex-collab threads`.
 
 Progress lines stream in real-time during execution:
 ```
@@ -165,12 +171,18 @@ codex-collab progress <id>              # Recent activity (tail of log)
 ### Thread Management
 
 ```bash
-codex-collab jobs                       # List threads
-codex-collab jobs --json                # List threads (JSON)
+codex-collab threads                    # List threads (current session)
+codex-collab threads --all              # List all threads (cross-session)
+codex-collab threads --discover         # Discover threads from Codex server
+codex-collab threads --json             # List threads (JSON)
+codex-collab threads --wait <id>        # Wait for thread to complete
+codex-collab resume-candidate --json    # Find best resumable thread
 codex-collab kill <id>                  # Stop a running thread
 codex-collab delete <id>               # Archive thread, delete local files
 codex-collab clean                      # Delete old logs and stale mappings
 ```
+
+Note: `jobs` still works as a deprecated alias for `threads`.
 
 ### Utility
 
@@ -194,28 +206,42 @@ codex-collab health                     # Check prerequisites
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
-| `--timeout <sec>` | Turn timeout in seconds (default: 1200) |
+| `--timeout <sec>` | Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes. Increase for large reviews or complex tasks. |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit |
 | `--ref <hash>` | Commit ref for --mode commit |
-| `--json` | JSON output (jobs command) |
+| `--all` | List all threads cross-session (threads command) |
+| `--discover` | Query Codex server for threads not in local index (threads command) |
+| `--wait <id>` | Wait for thread to complete (threads command) |
+| `--json` | JSON output (threads, resume-candidate commands) |
 | `--content-only` | Print only result text (no progress lines) |
 | `--limit <n>` | Limit items shown |
+
+## TUI Handoff
+
+After completion, output includes the full Codex session ID:
+```
+Codex session ID: 019d680c-7b23-7f22-ab99-6584214a2bed
+Resume in Codex: codex resume 019d680c-7b23-7f22-ab99-6584214a2bed
+```
+The user can continue the thread in the Codex TUI if they want interactive control.
 
 ## Tips
 
 - **`run --resume` requires a prompt.** `review --resume` works without one (it uses the review workflow), but `run --resume <id>` will error if no prompt is given.
 - **Omit `-d` if already in the project directory** — it defaults to cwd. Only pass `-d` when the target project differs from your current directory.
-- **Multiple concurrent threads** are supported. Each gets its own Codex app-server process and thread ID.
+- **Multiple concurrent threads** are supported. Threads share a per-workspace broker for efficient resource usage.
 - **Validate Codex's findings.** After reading Codex's review or analysis output, verify each finding against the actual source code before presenting to the user. Drop false positives, note which findings you verified.
+- **Per-workspace scoping.** Threads and state are scoped per workspace (git repo root). Different repos have independent thread lists.
+- **First invocation per workspace** may take slightly longer to initialize; subsequent calls in the same session reuse the connection context.
 
 ## Error Recovery
 
 | Symptom | Fix |
 |---------|-----|
 | "codex CLI not found" | Install: `npm install -g @openai/codex` |
-| Turn timed out | Increase `--timeout` or check if the task is too large |
-| Thread not found | Use `codex-collab jobs` to list active threads |
+| Turn timed out | Increase `--timeout` (e.g., `--timeout 1800` for 30 min). Large reviews and complex tasks often need more than the 20-min default. |
+| Thread not found | Use `codex-collab threads` to list active threads |
 | Process crashed mid-task | Resume with `--resume <id>` — thread state is persisted |
 | Approval request hanging | Run `codex-collab approve <id>` or `codex-collab decline <id>` |
 

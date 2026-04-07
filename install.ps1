@@ -65,6 +65,7 @@ if ($Dev) {
     $links = @(
         @{ Path = (Join-Path $SkillDir "SKILL.md"); Target = (Join-Path $RepoDir "SKILL.md") }
         @{ Path = (Join-Path $SkillDir "scripts\codex-collab"); Target = (Join-Path $RepoDir "src\cli.ts") }
+        @{ Path = (Join-Path $SkillDir "scripts\broker-server"); Target = (Join-Path $RepoDir "src\broker-server.ts") }
         @{ Path = (Join-Path $SkillDir "LICENSE.txt"); Target = (Join-Path $RepoDir "LICENSE") }
     )
 
@@ -94,19 +95,25 @@ if ($Dev) {
     if (Test-Path $skillBuild) { Remove-Item $skillBuild -Recurse -Force }
     New-Item -ItemType Directory -Path (Join-Path $skillBuild "scripts") -Force | Out-Null
 
-    $built = Join-Path $skillBuild "scripts\codex-collab"
+    # Build CLI and broker server
+    $cliBuild = Join-Path $skillBuild "scripts\codex-collab"
+    $brokerBuild = Join-Path $skillBuild "scripts\broker-server"
     try {
-        bun build (Join-Path $RepoDir "src\cli.ts") --outfile $built --target bun
-        if ($LASTEXITCODE -ne 0) { throw "'bun build' failed with exit code $LASTEXITCODE" }
+        bun build (Join-Path $RepoDir "src\cli.ts") --outfile $cliBuild --target bun
+        if ($LASTEXITCODE -ne 0) { throw "'bun build cli' failed with exit code $LASTEXITCODE" }
+        bun build (Join-Path $RepoDir "src\broker-server.ts") --outfile $brokerBuild --target bun
+        if ($LASTEXITCODE -ne 0) { throw "'bun build broker-server' failed with exit code $LASTEXITCODE" }
     } catch {
         Write-Host "Error: $_"
         exit 1
     }
 
-    # Prepend shebang if missing (needed for Unix execution; harmless on Windows with Bun)
-    $content = Get-Content $built -Raw
-    if (-not $content.StartsWith("#!/")) {
-        [System.IO.File]::WriteAllText($built, "#!/usr/bin/env bun`n" + $content, [System.Text.UTF8Encoding]::new($false))
+    # Prepend shebangs if missing (needed for Unix execution; harmless on Windows with Bun)
+    foreach ($built in @($cliBuild, $brokerBuild)) {
+        $content = Get-Content $built -Raw
+        if (-not $content.StartsWith("#!/")) {
+            [System.IO.File]::WriteAllText($built, "#!/usr/bin/env bun`n" + $content, [System.Text.UTF8Encoding]::new($false))
+        }
     }
 
     # Copy SKILL.md and LICENSE

@@ -16,14 +16,19 @@ codex-collab health
 
 | File | Purpose |
 |------|---------|
-| `src/cli.ts` | CLI commands, argument parsing, output formatting |
-| `src/protocol.ts` | JSON-RPC client for Codex app server (spawn, handshake, request routing) |
-| `src/threads.ts` | Thread lifecycle, short ID mapping |
+| `src/cli.ts` | CLI router, argument parsing, signal handlers |
+| `src/client.ts` | JSON-RPC client for Codex app server (spawn, handshake, request routing) |
+| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve) |
+| `src/threads.ts` | Thread index, run ledger, short ID mapping |
 | `src/turns.ts` | Turn lifecycle (runTurn, runReview), event wiring |
 | `src/events.ts` | Event dispatcher (progress lines, log writer, output accumulator) |
 | `src/approvals.ts` | Approval handler abstraction (auto-approve, interactive IPC) |
 | `src/types.ts` | Protocol types (JSON-RPC, threads, turns, items, approvals) |
-| `src/config.ts` | Configuration constants |
+| `src/config.ts` | Configuration constants, workspace resolution |
+| `src/broker.ts` | Shared app-server lifecycle (connection pooling) |
+| `src/process.ts` | Process spawn/lifecycle utilities |
+| `src/git.ts` | Git operations (diff, log, status) |
+| `src/reviews.ts` | Review validation, structured output parsing |
 | `SKILL.md` | Claude Code skill definition |
 
 ## Dependencies

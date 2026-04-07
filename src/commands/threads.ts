@@ -1,7 +1,8 @@
 // src/commands/threads.ts — threads, output, progress, delete, clean commands
 
-import { config, validateId } from "../config";
+import { validateId } from "../config";
 import {
+  legacyRegisterThread as registerThread,
   legacyResolveThreadId as resolveThreadId,
   legacyFindShortId as findShortId,
   legacyRemoveThread as removeThread,
@@ -9,7 +10,12 @@ import {
   saveThreadMapping,
   updateThreadStatus,
   withThreadLock,
+  getResumeCandidate,
 } from "../threads";
+import { resolveStateDir } from "../config";
+import { getCurrentSessionId } from "../broker";
+import type { AppServerClient } from "../client";
+import type { Thread } from "../types";
 import {
   existsSync,
   readFileSync,
@@ -28,7 +34,53 @@ import {
   removePidFile,
   withClient,
   tryArchive,
+  getWorkspacePaths,
+  fetchAllPages,
+  type WorkspacePaths,
 } from "./shared";
+
+// ---------------------------------------------------------------------------
+// Thread discovery from app-server
+// ---------------------------------------------------------------------------
+
+/**
+ * Query the app server for threads matching the workspace cwd and register
+ * any that are not already in the local index. Returns the number of newly
+ * discovered threads.
+ */
+/** User-facing source kinds for thread discovery. Excludes internal subagent
+ *  sources which are implementation details of the Codex runtime. */
+const DISCOVERY_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer"];
+
+async function discoverThreads(client: AppServerClient, ws: WorkspacePaths, cwd: string): Promise<number> {
+  const serverThreads = await fetchAllPages<Thread>(client, "thread/list", {
+    cwd,
+    limit: 50,
+    sourceKinds: DISCOVERY_SOURCE_KINDS,
+  });
+  if (serverThreads.length === 0) return 0;
+
+  const mapping = loadThreadMapping(ws.threadsFile);
+  const knownThreadIds = new Set(Object.values(mapping).map(e => e.threadId));
+  let discovered = 0;
+
+  for (const thread of serverThreads) {
+    if (knownThreadIds.has(thread.id)) continue;
+    // Server timestamps are epoch seconds (not milliseconds)
+    const createdAt = thread.createdAt ? new Date(thread.createdAt * 1000).toISOString() : new Date().toISOString();
+    const updatedAt = thread.updatedAt ? new Date(thread.updatedAt * 1000).toISOString() : createdAt;
+    registerThread(ws.threadsFile, thread.id, {
+      model: thread.modelProvider ?? undefined,
+      cwd: thread.cwd ?? cwd,
+      preview: thread.preview ?? thread.name ?? undefined,
+      createdAt,
+      updatedAt,
+    });
+    discovered++;
+  }
+
+  return discovered;
+}
 
 // ---------------------------------------------------------------------------
 // threads (list)
@@ -36,7 +88,24 @@ import {
 
 export async function handleThreads(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
-  const mapping = loadThreadMapping(config.threadsFile);
+  const ws = getWorkspacePaths(options.dir);
+
+  // If --discover, query the app-server and merge server-side threads
+  if (options.discover) {
+    try {
+      await withClient(async (client) => {
+        const count = await discoverThreads(client, ws, options.dir);
+        if (count > 0) {
+          progress(`Discovered ${count} thread(s) from server`);
+        }
+      });
+    } catch (e) {
+      console.error(`[codex] Warning: thread discovery failed: ${e instanceof Error ? e.message : String(e)}`);
+      console.error("[codex] Showing local threads only.");
+    }
+  }
+
+  const mapping = loadThreadMapping(ws.threadsFile);
 
   // Build entries sorted by updatedAt (most recent first), falling back to createdAt
   let entries = Object.entries(mapping)
@@ -49,10 +118,10 @@ export async function handleThreads(args: string[]): Promise<void> {
 
   // Detect stale "running" status: if the owning process is dead, mark as interrupted.
   for (const e of entries) {
-    if (e.lastStatus === "running" && !isProcessAlive(e.shortId)) {
-      updateThreadStatus(config.threadsFile, e.threadId, "interrupted");
+    if (e.lastStatus === "running" && !isProcessAlive(ws.pidsDir, e.shortId)) {
+      updateThreadStatus(ws.threadsFile, e.threadId, "interrupted");
       e.lastStatus = "interrupted";
-      removePidFile(e.shortId);
+      removePidFile(ws.pidsDir, e.shortId);
     }
   }
 
@@ -93,19 +162,20 @@ export async function handleThreads(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** Resolve a positional ID arg to a log file path, or die with an error. */
-function resolveLogPath(positional: string[], usage: string): string {
+function resolveLogPath(positional: string[], usage: string, ws: ReturnType<typeof getWorkspacePaths>): string {
   const id = positional[0];
   if (!id) die(usage);
   validateIdOrDie(id);
-  const threadId = resolveThreadId(config.threadsFile, id);
-  const shortId = findShortId(config.threadsFile, threadId);
+  const threadId = resolveThreadId(ws.threadsFile, id);
+  const shortId = findShortId(ws.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
-  return join(config.logsDir, `${shortId}.log`);
+  return join(ws.logsDir, `${shortId}.log`);
 }
 
 export async function handleOutput(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
-  const logPath = resolveLogPath(positional, "Usage: codex-collab output <id>");
+  const ws = getWorkspacePaths(options.dir);
+  const logPath = resolveLogPath(positional, "Usage: codex-collab output <id>", ws);
   if (!existsSync(logPath)) die(`No log file for thread`);
   const content = readFileSync(logPath, "utf-8");
   if (options.contentOnly) {
@@ -138,8 +208,9 @@ export async function handleOutput(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function handleProgress(args: string[]): Promise<void> {
-  const { positional } = parseOptions(args);
-  const logPath = resolveLogPath(positional, "Usage: codex-collab progress <id>");
+  const { positional, options } = parseOptions(args);
+  const ws = getWorkspacePaths(options.dir);
+  const logPath = resolveLogPath(positional, "Usage: codex-collab progress <id>", ws);
   if (!existsSync(logPath)) {
     console.log("No activity yet.");
     return;
@@ -155,18 +226,19 @@ export async function handleProgress(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function handleDelete(args: string[]): Promise<void> {
-  const { positional } = parseOptions(args);
+  const { positional, options } = parseOptions(args);
+  const ws = getWorkspacePaths(options.dir);
   const id = positional[0];
   if (!id) die("Usage: codex-collab delete <id>");
   validateIdOrDie(id);
 
-  const threadId = resolveThreadId(config.threadsFile, id);
-  const shortId = findShortId(config.threadsFile, threadId);
+  const threadId = resolveThreadId(ws.threadsFile, id);
+  const shortId = findShortId(ws.threadsFile, threadId);
 
   // If the thread is currently running, stop it first before archiving
-  const localStatus = shortId ? loadThreadMapping(config.threadsFile)[shortId]?.lastStatus : undefined;
+  const localStatus = shortId ? loadThreadMapping(ws.threadsFile)[shortId]?.lastStatus : undefined;
   if (localStatus === "running") {
-    const signalPath = join(config.killSignalsDir, threadId);
+    const signalPath = join(ws.killSignalsDir, threadId);
     try {
       writeFileSync(signalPath, "", { mode: 0o600 });
     } catch (e) {
@@ -218,10 +290,10 @@ export async function handleDelete(args: string[]): Promise<void> {
   }
 
   if (shortId) {
-    removePidFile(shortId);
-    const logPath = join(config.logsDir, `${shortId}.log`);
+    removePidFile(ws.pidsDir, shortId);
+    const logPath = join(ws.logsDir, `${shortId}.log`);
     if (existsSync(logPath)) unlinkSync(logPath);
-    removeThread(config.threadsFile, shortId);
+    removeThread(ws.threadsFile, shortId);
   }
 
   if (archiveResult === "failed") {
@@ -256,27 +328,29 @@ function deleteOldFiles(dir: string, maxAgeMs: number): number {
   return deleted;
 }
 
-export async function handleClean(_args: string[]): Promise<void> {
+export async function handleClean(args: string[]): Promise<void> {
+  const { options } = parseOptions(args);
+  const ws = getWorkspacePaths(options.dir);
   const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
   const oneDayMs = 24 * 60 * 60 * 1000;
 
-  const logsDeleted = deleteOldFiles(config.logsDir, sevenDaysMs);
-  const approvalsDeleted = deleteOldFiles(config.approvalsDir, oneDayMs);
-  const killSignalsDeleted = deleteOldFiles(config.killSignalsDir, oneDayMs);
-  const pidsDeleted = deleteOldFiles(config.pidsDir, oneDayMs);
+  const logsDeleted = deleteOldFiles(ws.logsDir, sevenDaysMs);
+  const approvalsDeleted = deleteOldFiles(ws.approvalsDir, oneDayMs);
+  const killSignalsDeleted = deleteOldFiles(ws.killSignalsDir, oneDayMs);
+  const pidsDeleted = deleteOldFiles(ws.pidsDir, oneDayMs);
 
   // Clean stale thread mappings — use log file mtime as proxy for last
   // activity so recently-used threads aren't pruned just because they
   // were created more than 7 days ago.
   let mappingsRemoved = 0;
-  withThreadLock(config.threadsFile, () => {
-    const mapping = loadThreadMapping(config.threadsFile);
+  withThreadLock(ws.threadsFile, () => {
+    const mapping = loadThreadMapping(ws.threadsFile);
     const now = Date.now();
     for (const [shortId, entry] of Object.entries(mapping)) {
       try {
         let lastActivity = new Date(entry.createdAt).getTime();
         if (Number.isNaN(lastActivity)) lastActivity = 0;
-        const logPath = join(config.logsDir, `${shortId}.log`);
+        const logPath = join(ws.logsDir, `${shortId}.log`);
         if (existsSync(logPath)) {
           lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
         }
@@ -289,7 +363,7 @@ export async function handleClean(_args: string[]): Promise<void> {
       }
     }
     if (mappingsRemoved > 0) {
-      saveThreadMapping(config.threadsFile, mapping);
+      saveThreadMapping(ws.threadsFile, mapping);
     }
   });
 
@@ -308,5 +382,45 @@ export async function handleClean(_args: string[]): Promise<void> {
     console.log("Nothing to clean.");
   } else {
     console.log(`Cleaned: ${parts.join(", ")}.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// resume-candidate
+// ---------------------------------------------------------------------------
+
+export async function handleResumeCandidate(args: string[]): Promise<void> {
+  const { options } = parseOptions(args);
+  const jsonFlag = options.json;
+  const cwd = options.dir;
+  const stateDir = resolveStateDir(cwd);
+  const ws = getWorkspacePaths(cwd);
+  const sessionId = getCurrentSessionId(stateDir);
+
+  // Check local first
+  let candidate = getResumeCandidate(stateDir, sessionId);
+
+  // If no local candidate, attempt server discovery
+  if (!candidate.available) {
+    try {
+      await withClient(async (client) => {
+        const count = await discoverThreads(client, ws, cwd);
+        if (count > 0) {
+          candidate = getResumeCandidate(stateDir, sessionId);
+        }
+      });
+    } catch {
+      // Discovery failed — fall through with local-only result
+    }
+  }
+
+  if (jsonFlag) {
+    console.log(JSON.stringify(candidate, null, 2));
+  } else if (candidate.available) {
+    console.log(`Resumable thread: ${candidate.shortId} (${candidate.name ?? "unnamed"})`);
+    console.log(`  Thread ID: ${candidate.threadId}`);
+    console.log(`  Use: codex-collab run --resume ${candidate.shortId} "prompt"`);
+  } else {
+    console.log("No resumable thread found.");
   }
 }

@@ -1,7 +1,6 @@
 // src/commands/review.ts — review command handler
 
-import { config } from "../config";
-import { updateThreadStatus } from "../threads";
+import { updateThreadStatus, updateRun } from "../threads";
 import { runReview } from "../turns";
 import type { ReviewTarget } from "../types";
 import {
@@ -13,13 +12,16 @@ import {
   startOrResumeThread,
   createDispatcher,
   getApprovalHandler,
+  getWorkspacePaths,
   turnOverrides,
   printResult,
   progress,
+  formatDuration,
   writePidFile,
   removePidFile,
   setActiveThreadId,
   setActiveShortId,
+  setActiveWsPaths,
   VALID_REVIEW_MODES,
   type Options,
 } from "./shared";
@@ -55,6 +57,7 @@ export async function handleReview(args: string[]): Promise<void> {
   applyUserConfig(options);
 
   const target = resolveReviewTarget(positional, options);
+  const ws = getWorkspacePaths(options.dir);
 
   const exitCode = await withClient(async (client) => {
     await resolveDefaults(client, options);
@@ -66,8 +69,8 @@ export async function handleReview(args: string[]): Promise<void> {
       case "uncommittedChanges": reviewPreview = "Review uncommitted changes"; break;
       case "commit": reviewPreview = `Review commit ${target.sha}`; break;
     }
-    const { threadId, shortId, effective } = await startOrResumeThread(
-      client, options, { sandbox: "read-only" }, reviewPreview,
+    const { threadId, shortId, runId, effective } = await startOrResumeThread(
+      client, options, ws, { sandbox: "read-only" }, reviewPreview, true,
     );
 
     if (options.contentOnly) {
@@ -80,32 +83,50 @@ export async function handleReview(args: string[]): Promise<void> {
       }
     }
 
-    updateThreadStatus(config.threadsFile, threadId, "running");
+    updateThreadStatus(ws.threadsFile, threadId, "running");
     setActiveThreadId(threadId);
     setActiveShortId(shortId);
-    writePidFile(shortId);
+    setActiveWsPaths(ws);
+    writePidFile(ws.pidsDir, shortId);
 
-    const dispatcher = createDispatcher(shortId, options);
+    const dispatcher = createDispatcher(shortId, ws.logsDir, options);
 
     // Note: effort (reasoning level) is not forwarded to reviews — the review/start
     // protocol does not accept an effort parameter (unlike turn/start).
     try {
       const result = await runReview(client, threadId, target, {
         dispatcher,
-        approvalHandler: getApprovalHandler(effective.approvalPolicy),
+        approvalHandler: getApprovalHandler(effective.approvalPolicy, ws.approvalsDir),
         timeoutMs: options.timeout * 1000,
+        killSignalsDir: ws.killSignalsDir,
         ...turnOverrides(options),
       });
 
-      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-      return printResult(result, shortId, "Review", options.contentOnly);
+      updateThreadStatus(ws.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+      updateRun(ws.stateDir, runId, {
+        status: result.status === "completed" ? "completed" : "failed",
+        phase: "finalizing",
+        completedAt: new Date().toISOString(),
+        elapsed: formatDuration(result.durationMs),
+        output: result.output || null,
+        filesChanged: result.filesChanged,
+        commandsRun: result.commandsRun,
+        error: result.error ?? null,
+      });
+      return printResult(result, shortId, threadId, "Review", options.contentOnly);
     } catch (e) {
-      updateThreadStatus(config.threadsFile, threadId, "failed");
+      updateThreadStatus(ws.threadsFile, threadId, "failed");
+      updateRun(ws.stateDir, runId, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        error: e instanceof Error ? e.message : String(e),
+      });
       throw e;
     } finally {
       setActiveThreadId(undefined);
       setActiveShortId(undefined);
-      removePidFile(shortId);
+      setActiveWsPaths(undefined);
+      removePidFile(ws.pidsDir, shortId);
     }
   });
 

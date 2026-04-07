@@ -1,7 +1,7 @@
 // src/commands/run.ts — run command handler
 
-import { config } from "../config";
 import { updateThreadStatus } from "../threads";
+import { updateRun } from "../threads";
 import { runTurn } from "../turns";
 import {
   die,
@@ -12,13 +12,16 @@ import {
   startOrResumeThread,
   createDispatcher,
   getApprovalHandler,
+  getWorkspacePaths,
   turnOverrides,
   printResult,
   progress,
+  formatDuration,
   writePidFile,
   removePidFile,
   setActiveThreadId,
   setActiveShortId,
+  setActiveWsPaths,
 } from "./shared";
 
 export async function handleRun(args: string[]): Promise<void> {
@@ -30,11 +33,12 @@ export async function handleRun(args: string[]): Promise<void> {
   }
 
   const prompt = positional.join(" ");
+  const ws = getWorkspacePaths(options.dir);
 
   const exitCode = await withClient(async (client) => {
     await resolveDefaults(client, options);
 
-    const { threadId, shortId, effective } = await startOrResumeThread(client, options, undefined, prompt);
+    const { threadId, shortId, runId, effective } = await startOrResumeThread(client, options, ws, undefined, prompt);
 
     if (options.contentOnly) {
       console.error(`[codex] Running (thread ${shortId})...`);
@@ -47,12 +51,13 @@ export async function handleRun(args: string[]): Promise<void> {
       progress("Turn started");
     }
 
-    updateThreadStatus(config.threadsFile, threadId, "running");
+    updateThreadStatus(ws.threadsFile, threadId, "running");
     setActiveThreadId(threadId);
     setActiveShortId(shortId);
-    writePidFile(shortId);
+    setActiveWsPaths(ws);
+    writePidFile(ws.pidsDir, shortId);
 
-    const dispatcher = createDispatcher(shortId, options);
+    const dispatcher = createDispatcher(shortId, ws.logsDir, options);
 
     try {
       const result = await runTurn(
@@ -61,21 +66,38 @@ export async function handleRun(args: string[]): Promise<void> {
         [{ type: "text", text: prompt }],
         {
           dispatcher,
-          approvalHandler: getApprovalHandler(effective.approvalPolicy),
+          approvalHandler: getApprovalHandler(effective.approvalPolicy, ws.approvalsDir),
           timeoutMs: options.timeout * 1000,
+          killSignalsDir: ws.killSignalsDir,
           ...turnOverrides(options),
         },
       );
 
-      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-      return printResult(result, shortId, "Turn", options.contentOnly);
+      updateThreadStatus(ws.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+      updateRun(ws.stateDir, runId, {
+        status: result.status === "completed" ? "completed" : "failed",
+        phase: "finalizing",
+        completedAt: new Date().toISOString(),
+        elapsed: formatDuration(result.durationMs),
+        output: result.output || null,
+        filesChanged: result.filesChanged,
+        commandsRun: result.commandsRun,
+        error: result.error ?? null,
+      });
+      return printResult(result, shortId, threadId, "Turn", options.contentOnly);
     } catch (e) {
-      updateThreadStatus(config.threadsFile, threadId, "failed");
+      updateThreadStatus(ws.threadsFile, threadId, "failed");
+      updateRun(ws.stateDir, runId, {
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        error: e instanceof Error ? e.message : String(e),
+      });
       throw e;
     } finally {
       setActiveThreadId(undefined);
       setActiveShortId(undefined);
-      removePidFile(shortId);
+      setActiveWsPaths(undefined);
+      removePidFile(ws.pidsDir, shortId);
     }
   });
 

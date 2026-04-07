@@ -48,6 +48,7 @@ if [ "$MODE" = "dev" ]; then
   mkdir -p "$SKILL_DIR/scripts"
   ln -sf "$REPO_DIR/SKILL.md" "$SKILL_DIR/SKILL.md"
   ln -sf "$REPO_DIR/src/cli.ts" "$SKILL_DIR/scripts/codex-collab"
+  ln -sf "$REPO_DIR/src/broker-server.ts" "$SKILL_DIR/scripts/broker-server"
   ln -sf "$REPO_DIR/LICENSE" "$SKILL_DIR/LICENSE.txt"
   echo "Linked skill to $SKILL_DIR"
 
@@ -59,21 +60,24 @@ if [ "$MODE" = "dev" ]; then
 else
   echo "Building..."
 
-  # Build bundled JS
+  # Build bundled JS (CLI + broker server)
   rm -rf "$REPO_DIR/skill"
   mkdir -p "$REPO_DIR/skill/codex-collab/scripts"
   bun build "$REPO_DIR/src/cli.ts" --outfile "$REPO_DIR/skill/codex-collab/scripts/codex-collab" --target bun
+  bun build "$REPO_DIR/src/broker-server.ts" --outfile "$REPO_DIR/skill/codex-collab/scripts/broker-server" --target bun
 
-  # Prepend shebang
-  BUILT="$REPO_DIR/skill/codex-collab/scripts/codex-collab"
-  if ! head -1 "$BUILT" | grep -q '^#!/'; then
-    TEMP=$(mktemp)
-    trap 'rm -f "$TEMP"' EXIT
-    printf '#!/usr/bin/env bun\n' > "$TEMP"
-    cat "$BUILT" >> "$TEMP"
-    mv "$TEMP" "$BUILT"
-    trap - EXIT
-  fi
+  # Prepend shebangs
+  for BUILT in "$REPO_DIR/skill/codex-collab/scripts/codex-collab" "$REPO_DIR/skill/codex-collab/scripts/broker-server"; do
+    if ! head -1 "$BUILT" | grep -q '^#!/'; then
+      TEMP=$(mktemp)
+      trap 'rm -f "$TEMP"' EXIT
+      printf '#!/usr/bin/env bun\n' > "$TEMP"
+      cat "$BUILT" >> "$TEMP"
+      mv "$TEMP" "$BUILT"
+      trap - EXIT
+    fi
+    chmod +x "$BUILT"
+  done
 
   # Copy SKILL.md and LICENSE into build
   cp "$REPO_DIR/SKILL.md" "$REPO_DIR/skill/codex-collab/SKILL.md"
