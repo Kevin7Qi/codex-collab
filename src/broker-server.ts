@@ -142,14 +142,6 @@ async function main() {
 
   // ─── Notification routing ───────────────────────────────────────────────
 
-  function routeNotification(params: unknown): void {
-    // The notification handler receives the full JSON-RPC message object
-    // from the app-server. We need to route it to the active socket.
-    // However, the connectDirect client dispatches notifications through
-    // registered handlers by method name, so we need a different approach.
-    // We'll handle this by intercepting via the raw message.
-  }
-
   // Wire up a raw notification forwarder. The connectDirect client uses
   // `on(method, handler)` for each method. Instead of registering every
   // possible method, we'll use a single forwarding approach by re-exporting
@@ -215,11 +207,13 @@ async function main() {
         const reqId = `broker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
         // Set up response listener for this request
-        const responseHandler = (data: string) => {
+        let approvalBuffer = "";
+        const responseHandler = (chunk: string) => {
+          approvalBuffer += chunk;
           let newlineIdx: number;
-          while ((newlineIdx = data.indexOf("\n")) !== -1) {
-            const line = data.slice(0, newlineIdx).trim();
-            data = data.slice(newlineIdx + 1);
+          while ((newlineIdx = approvalBuffer.indexOf("\n")) !== -1) {
+            const line = approvalBuffer.slice(0, newlineIdx).trim();
+            approvalBuffer = approvalBuffer.slice(newlineIdx + 1);
             if (!line) continue;
             try {
               const msg = JSON.parse(line);
@@ -233,8 +227,8 @@ async function main() {
                 reject(new Error(msg.error?.message ?? "Client error"));
                 return;
               }
-            } catch {
-              // Not our response, ignore
+            } catch (e) {
+              process.stderr.write(`[broker-server] Warning: could not parse approval response: ${line.slice(0, 200)}\n`);
             }
           }
         };
@@ -439,7 +433,8 @@ async function main() {
       clearSocketOwnership(socket);
     });
 
-    socket.on("error", () => {
+    socket.on("error", (err) => {
+      process.stderr.write(`[broker-server] Client socket error: ${err.message}\n`);
       sockets.delete(socket);
       clearSocketOwnership(socket);
     });

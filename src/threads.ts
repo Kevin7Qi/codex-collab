@@ -216,10 +216,12 @@ export function findShortId(stateDir: string, threadId: string): string | null {
   return null;
 }
 
+type ThreadMetaPatch = Partial<Pick<ThreadIndexEntry, "name" | "model" | "cwd">>;
+
 export function updateThreadMeta(
   stateDir: string,
   shortId: string,
-  patch: Partial<ThreadIndexEntry>,
+  patch: ThreadMetaPatch,
 ): void {
   const filePath = threadsFilePath(stateDir);
   withThreadLock(filePath, () => {
@@ -280,14 +282,31 @@ export function loadRun(stateDir: string, runId: string): RunRecord | null {
     return null;
   }
   try {
-    return JSON.parse(content);
+    const parsed = JSON.parse(content);
+    // Basic shape validation
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof parsed.runId !== "string" ||
+      typeof parsed.threadId !== "string" ||
+      typeof parsed.shortId !== "string"
+    ) {
+      console.error(`[codex] Warning: run file ${runId} has invalid structure`);
+      return null;
+    }
+    return parsed;
   } catch (e) {
     console.error(`[codex] Warning: failed to parse run file ${runId}: ${e instanceof Error ? e.message : e}`);
     return null;
   }
 }
 
-export function updateRun(stateDir: string, runId: string, patch: Partial<RunRecord>): void {
+type RunPatch = Partial<Pick<RunRecord,
+  "status" | "phase" | "sessionId" | "completedAt" | "elapsed" |
+  "output" | "filesChanged" | "commandsRun" | "error" | "logOffset"
+>>;
+
+export function updateRun(stateDir: string, runId: string, patch: RunPatch): void {
   const filePath = runFilePath(stateDir, runId);
   if (!existsSync(filePath)) {
     console.error(`[codex] Warning: cannot update unknown run ${runId}`);
@@ -608,7 +627,7 @@ export function saveThreadMapping(threadsFile: string, mapping: ThreadMapping): 
 export function legacyUpdateThreadMeta(
   threadsFile: string,
   threadId: string,
-  meta: { model?: string; cwd?: string; preview?: string },
+  meta: Partial<Pick<ThreadMappingEntry, "model" | "cwd" | "preview">>,
 ): void {
   withThreadLock(threadsFile, () => {
     const mapping = loadThreadMapping(threadsFile);

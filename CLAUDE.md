@@ -26,6 +26,8 @@ codex-collab health
 | `src/types.ts` | Protocol types (JSON-RPC, threads, turns, items, approvals) |
 | `src/config.ts` | Configuration constants, workspace resolution |
 | `src/broker.ts` | Shared app-server lifecycle (connection pooling) |
+| `src/broker-client.ts` | Socket-based client for connecting to the broker server |
+| `src/broker-server.ts` | Detached broker server process (multiplexes JSON-RPC between clients and app-server) |
 | `src/process.ts` | Process spawn/lifecycle utilities |
 | `src/git.ts` | Git operations (diff, log, status) |
 | `src/reviews.ts` | Review validation, structured output parsing |

@@ -49,7 +49,7 @@ export const config = {
   serviceName: "codex-collab" as const,
 
   // Data paths — lazy via getters so the home directory is validated at point of use, not import time.
-  // Validated by ensureDataDirs() in cli.ts before any file operations.
+  // Lazily created by getWorkspacePaths() on first access.
   get dataDir() { return join(getHome(), ".codex-collab"); },
 
   /** @deprecated Will be removed when threads module is refactored to use per-workspace state. */

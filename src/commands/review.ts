@@ -2,6 +2,7 @@
 
 import { updateThreadStatus, updateRun } from "../threads";
 import { runReview } from "../turns";
+import { getDefaultBranch } from "../git";
 import type { ReviewTarget } from "../types";
 import {
   die,
@@ -26,7 +27,7 @@ import {
   type Options,
 } from "./shared";
 
-function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget {
+function resolveReviewTarget(positional: string[], opts: Options, cwd: string): ReviewTarget {
   const mode = opts.reviewMode ?? "pr";
 
   if (positional.length > 0) {
@@ -41,8 +42,11 @@ function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget 
   }
 
   switch (mode) {
-    case "pr":
-      return { type: "baseBranch", branch: opts.base };
+    case "pr": {
+      // Use dynamically detected default branch unless --base was explicitly provided
+      const base = opts.explicit.has("base") ? opts.base : getDefaultBranch(cwd);
+      return { type: "baseBranch", branch: base };
+    }
     case "uncommitted":
       return { type: "uncommittedChanges" };
     case "commit":
@@ -56,7 +60,7 @@ export async function handleReview(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
   applyUserConfig(options);
 
-  const target = resolveReviewTarget(positional, options);
+  const target = resolveReviewTarget(positional, options, options.dir);
   const ws = getWorkspacePaths(options.dir);
 
   const exitCode = await withClient(async (client) => {

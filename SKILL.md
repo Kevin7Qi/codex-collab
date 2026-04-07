@@ -69,7 +69,7 @@ codex-collab review "Focus on security issues" -d /path/to/project --content-onl
 codex-collab review --resume <id> -d /path/to/project --content-only
 ```
 
-Review modes: `pr` (default), `uncommitted`, `commit`
+Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
 **IMPORTANT: Use `run_in_background=true` and `dangerouslyDisableSandbox=true`** — reviews typically take 5-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically. If other background tasks complete while a review is still running, handle those completed tasks normally — do NOT proactively check on or wait for the review.
 
@@ -83,7 +83,7 @@ Review modes: `pr` (default), `uncommitted`, `commit`
 
 When consecutive tasks relate to the same project, resume the existing thread. Codex retains the conversation history, so follow-ups like "now fix what you found" or "check the tests too" work better when Codex already has context from the previous exchange. Start a fresh thread when the task is unrelated or targets a different project.
 
-**Before starting a new thread for a follow-up**, run `codex-collab resume-candidate --json` first. If it returns `{ "available": true, "shortId": "...", "name": "..." }`, use `--resume <shortId>` instead of starting fresh. This finds the best resumable thread across the current session, prior sessions, and TUI-created threads.
+**Before starting a new thread for a follow-up**, run `codex-collab resume-candidate --json` first. If it returns `{ "available": true, "threadId": "...", "shortId": "...", "name": "..." }`, use `--resume <shortId>` instead of starting fresh. This finds the best resumable thread across the current session, prior sessions, and TUI-created threads.
 
 The `--resume` flag accepts both ID formats:
 - `--resume <short-id>` — 8-char hex short ID (supports prefix matching, e.g., `a1b2`)
@@ -172,10 +172,9 @@ codex-collab progress <id>              # Recent activity (tail of log)
 
 ```bash
 codex-collab threads                    # List threads (current session)
-codex-collab threads --all              # List all threads (cross-session)
+codex-collab threads --all              # List all threads (no display limit)
 codex-collab threads --discover         # Discover threads from Codex server
 codex-collab threads --json             # List threads (JSON)
-codex-collab threads --wait <id>        # Wait for thread to complete
 codex-collab resume-candidate --json    # Find best resumable thread
 codex-collab kill <id>                  # Stop a running thread
 codex-collab delete <id>               # Archive thread, delete local files
@@ -202,17 +201,16 @@ codex-collab health                     # Check prerequisites
 | Flag | Description |
 |------|-------------|
 | `-m, --model <model>` | Model name (default: auto — latest available) |
-| `-r, --reasoning <level>` | Reasoning effort: low, medium, high, xhigh (default: auto — highest for model) |
+| `-r, --reasoning <level>` | Reasoning effort: none, minimal, low, medium, high, xhigh (default: auto — highest for model) |
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
 | `--timeout <sec>` | Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes. Increase for large reviews or complex tasks. |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
-| `--mode <mode>` | Review mode: pr, uncommitted, commit |
+| `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
-| `--all` | List all threads cross-session (threads command) |
+| `--all` | List all threads with no display limit (threads command) |
 | `--discover` | Query Codex server for threads not in local index (threads command) |
-| `--wait <id>` | Wait for thread to complete (threads command) |
 | `--json` | JSON output (threads, resume-candidate commands) |
 | `--content-only` | Print only result text (no progress lines) |
 | `--limit <n>` | Limit items shown |

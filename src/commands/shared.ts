@@ -3,6 +3,7 @@
 import {
   config,
   resolveStateDir,
+  resolveModel,
   validateId,
   type ReasoningEffort,
   type SandboxMode,
@@ -23,6 +24,7 @@ import {
   generateRunId,
   createRun,
   updateRun,
+  migrateGlobalState,
 } from "../threads";
 import { EventDispatcher } from "../events";
 import {
@@ -71,13 +73,14 @@ export function getWorkspacePaths(cwd: string): WorkspacePaths {
     pidsDir: join(stateDir, "pids"),
     runsDir: join(stateDir, "runs"),
   };
-  // Lazily ensure workspace directories exist so callers don't need a
-  // separate ensureDataDirs() call.
+  // Lazily ensure workspace directories exist on first access.
   for (const dir of [paths.logsDir, paths.approvalsDir, paths.killSignalsDir, paths.pidsDir, paths.runsDir]) {
     mkdirSync(dir, { recursive: true });
   }
   // Ensure global data dir exists for config.json
   mkdirSync(config.dataDir, { recursive: true });
+  // Migrate legacy global state to per-workspace layout (idempotent)
+  migrateGlobalState(cwd);
   return paths;
 }
 
@@ -281,6 +284,7 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
         process.exit(1);
       }
       options.base = validateGitRef(args[++i], "base branch");
+      options.explicit.add("base");
     } else if (arg === "--resume") {
       if (i + 1 >= args.length) {
         console.error("Error: --resume requires a value");
@@ -301,6 +305,9 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       positional.push(arg);
     }
   }
+
+  // Resolve model aliases (e.g., "spark" → "gpt-5.3-codex-spark")
+  options.model = resolveModel(options.model);
 
   return { positional, options };
 }
@@ -355,7 +362,7 @@ export function applyUserConfig(options: Options): void {
     if (/[^a-zA-Z0-9._\-\/:]/.test(cfg.model)) {
       console.error(`[codex] Warning: ignoring invalid model in config: ${cfg.model}`);
     } else {
-      options.model = cfg.model;
+      options.model = resolveModel(cfg.model);
       options.configured.add("model");
     }
   }
@@ -550,7 +557,11 @@ export async function startOrResumeThread(
     // and pass it directly to the server (handles TUI-created threads not yet discovered)
     try {
       threadId = resolveThreadId(ws.threadsFile, opts.resumeId);
-    } catch {
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("Ambiguous")) {
+        throw e; // Let user see the ambiguity error
+      }
+      // Thread not found locally — treat as raw server thread ID
       threadId = opts.resumeId;
     }
     shortId = findShortId(ws.threadsFile, threadId) ?? opts.resumeId;
@@ -786,21 +797,3 @@ export async function tryArchive(client: AppServerClient, threadId: string): Pro
   }
 }
 
-// ---------------------------------------------------------------------------
-// Data directory setup
-// ---------------------------------------------------------------------------
-
-/** Ensure per-workspace data directories exist (called only for commands that need them).
- *  Also ensures the global data dir exists for config.json.
- *  Config getters throw if the home directory cannot be determined, producing a clear error. */
-export function ensureDataDirs(cwd?: string): void {
-  const effectiveCwd = cwd ?? process.cwd();
-  const ws = getWorkspacePaths(effectiveCwd);
-  mkdirSync(ws.logsDir, { recursive: true });
-  mkdirSync(ws.approvalsDir, { recursive: true });
-  mkdirSync(ws.killSignalsDir, { recursive: true });
-  mkdirSync(ws.pidsDir, { recursive: true });
-  mkdirSync(ws.runsDir, { recursive: true });
-  // Ensure global data dir exists for config.json
-  mkdirSync(config.dataDir, { recursive: true });
-}

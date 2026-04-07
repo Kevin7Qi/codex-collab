@@ -65,6 +65,7 @@ export function loadBrokerState(stateDir: string): BrokerState | null {
       typeof parsed === "object" &&
       parsed !== null &&
       (typeof parsed.endpoint === "string" || parsed.endpoint === null) &&
+      (typeof parsed.pid === "number" || parsed.pid === null) &&
       typeof parsed.sessionDir === "string" &&
       typeof parsed.startedAt === "string"
     ) {
@@ -377,13 +378,16 @@ async function waitForBrokerReady(
  * Ensure a live connection to the Codex app server for the given working directory.
  *
  * Flow:
- * 1. Resolve state dir from cwd
- * 2. Check if a broker is already alive (probe the socket)
+ * 1. Resolve state dir, ensure it exists, resolve/reuse session ID
+ * 2. Check if an existing broker is alive (probe the socket)
  *    - If yes, connect to it via BrokerClient
- * 3. If not alive, acquire spawn lock and start a new broker
- * 4. Connect to the new broker
- * 5. On busy (-32001) or connection failure, fall back to direct connection
- * 6. Save broker state and session state
+ *    - If connection fails, tear down and proceed to spawn
+ * 3. Acquire spawn lock (falls back to direct connection if lock unavailable)
+ *    - Re-check for a broker after lock acquisition (race avoidance)
+ * 4. Spawn a new broker, wait for it to become ready
+ *    - Falls back to direct connection if spawn or readiness check fails
+ * 5. Save broker state and session state before the connection attempt
+ * 6. Connect to the new broker (falls back to direct connection on failure)
  */
 export async function ensureConnection(cwd: string): Promise<AppServerClient> {
   const stateDir = resolveStateDir(cwd);
@@ -437,6 +441,7 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
   if (!release) {
     // Could not acquire lock — another process may be spawning.
     // Fall back to direct connection.
+    console.error("[broker] Warning: could not acquire spawn lock. Using direct connection.");
     return connectDirect({ cwd });
   }
 
@@ -453,7 +458,8 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
           startedAt: existingSession?.startedAt ?? now,
         });
         return client;
-      } catch {
+      } catch (e) {
+        console.error(`[broker] Warning: failed to connect to existing broker after lock: ${(e as Error).message}. Spawning new one.`);
         teardownBroker(stateDir, freshState);
       }
     }
