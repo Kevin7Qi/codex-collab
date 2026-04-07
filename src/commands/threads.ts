@@ -12,7 +12,7 @@ import {
   withThreadLock,
   getResumeCandidate,
 } from "../threads";
-import { resolveStateDir } from "../config";
+import { resolveStateDir, resolveWorkspaceDir } from "../config";
 import { getCurrentSessionId } from "../broker";
 import type { AppServerClient } from "../client";
 import type { Thread } from "../types";
@@ -53,8 +53,9 @@ import {
 const DISCOVERY_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer"];
 
 async function discoverThreads(client: AppServerClient, ws: WorkspacePaths, cwd: string): Promise<number> {
+  const workspaceRoot = resolveWorkspaceDir(cwd);
   const serverThreads = await fetchAllPages<Thread>(client, "thread/list", {
-    cwd,
+    cwd: workspaceRoot,
     limit: 50,
     sourceKinds: DISCOVERY_SOURCE_KINDS,
   });

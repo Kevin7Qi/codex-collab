@@ -119,6 +119,9 @@ async function main() {
   let activeStreamThreadIds: Set<string> | null = null;
   /** All connected sockets. */
   const sockets = new Set<net.Socket>();
+  /** Thread IDs whose turns completed — prevents stale stream ownership
+   *  when turn/completed arrives during the streaming request itself. */
+  const completedStreamThreadIds = new Set<string>();
   /** Idle timer — shut down if no activity within idleTimeout. */
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -171,6 +174,12 @@ async function main() {
       // If turn/completed, release the stream socket
       if (method === "turn/completed") {
         const threadId = (notifParams as Record<string, unknown>)?.threadId;
+        // Track completed thread IDs so that a streaming request that is
+        // still awaiting its response doesn't re-establish ownership after
+        // the turn has already finished (fast-turn race).
+        if (typeof threadId === "string") {
+          completedStreamThreadIds.add(threadId);
+        }
         if (
           activeStreamSocket === target &&
           (!threadId ||
@@ -399,12 +408,22 @@ async function main() {
           send(socket, { id: message.id, result });
 
           if (isStreaming) {
-            activeStreamSocket = socket;
-            activeStreamThreadIds = buildStreamThreadIds(
+            const streamIds = buildStreamThreadIds(
               message.method as string,
               message.params as Record<string, unknown> | undefined,
               result as Record<string, unknown>,
             );
+            // Only claim stream ownership if the turn hasn't already completed
+            // during the request. turn/completed can arrive in the same read
+            // chunk as the response, firing the notification handler before
+            // this code runs. Without this check the broker stays permanently busy.
+            const alreadyCompleted = [...streamIds].some(id => completedStreamThreadIds.has(id));
+            if (!alreadyCompleted) {
+              activeStreamSocket = socket;
+              activeStreamThreadIds = streamIds;
+            }
+            // Clean up tracked completions for these thread IDs
+            for (const id of streamIds) completedStreamThreadIds.delete(id);
           }
 
           if (activeRequestSocket === socket) {

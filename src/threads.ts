@@ -10,7 +10,7 @@ import {
   copyFileSync, realpathSync,
 } from "fs";
 import { randomBytes, createHash } from "crypto";
-import { basename, dirname, join, resolve } from "path";
+import { basename, dirname, join, resolve, sep } from "path";
 import { config, validateId, resolveWorkspaceDir } from "./config";
 import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus, ThreadMapping, ThreadMappingEntry } from "./types";
 
@@ -502,7 +502,7 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   const wsRoot = resolveWorkspaceDir(cwd);
   const matchingEntries: [string, ThreadMappingEntry][] = [];
   for (const [shortId, entry] of Object.entries(globalMapping)) {
-    if (entry.cwd && (entry.cwd === wsRoot || entry.cwd.startsWith(wsRoot + "/"))) {
+    if (entry.cwd && (entry.cwd === wsRoot || entry.cwd.startsWith(wsRoot + sep))) {
       matchingEntries.push([shortId, entry]);
     }
   }
