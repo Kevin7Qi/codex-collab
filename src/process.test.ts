@@ -36,4 +36,12 @@ describe("isProcessAlive", () => {
   test("returns false for non-existent PID", () => {
     expect(isProcessAlive(99999999)).toBe(false);
   });
+
+  test("treats EPERM as alive (PID 1 on Linux as non-root)", () => {
+    // PID 1 (init/systemd) is always alive but owned by root.
+    // As non-root, kill(1, 0) throws EPERM — should still report alive.
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      expect(isProcessAlive(1)).toBe(true);
+    }
+  });
 });

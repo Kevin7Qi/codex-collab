@@ -489,7 +489,7 @@ export interface RunRecord {
 // --- Broker state (per-workspace) ---
 
 export interface BrokerState {
-  endpoint: string;
+  endpoint: string | null;
   pid: number | null;
   sessionDir: string;
   startedAt: string;

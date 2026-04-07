@@ -160,6 +160,11 @@ describe("isBrokerAlive", () => {
     const alive = await isBrokerAlive("invalid:something", 100);
     expect(alive).toBe(false);
   });
+
+  test("returns false for null endpoint", async () => {
+    const alive = await isBrokerAlive(null, 100);
+    expect(alive).toBe(false);
+  });
 });
 
 // ─── getCurrentSessionId ──────────────────────────────────────────────────

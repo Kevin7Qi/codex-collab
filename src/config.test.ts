@@ -172,6 +172,12 @@ describe("loadTemplate", () => {
   test("throws for missing template", () => {
     expect(() => loadTemplate("nonexistent", tmpDir)).toThrow();
   });
+
+  test("rejects path traversal attempts", () => {
+    expect(() => loadTemplate("../escape")).toThrow("Invalid template name");
+    expect(() => loadTemplate("sub/path")).toThrow("Invalid template name");
+    expect(() => loadTemplate("..\\escape")).toThrow("Invalid template name");
+  });
 });
 
 // ─── interpolateTemplate ────────────────────────────────────────────────────

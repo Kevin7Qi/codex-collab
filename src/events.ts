@@ -124,6 +124,7 @@ export class EventDispatcher {
     this.accumulatedOutput = "";
     this.filesChanged = [];
     this.commandsRun = [];
+    this.lastPhase.clear();
   }
 
   /** Write accumulated agent output to the log (called before final flush). */

@@ -263,15 +263,25 @@ export function createRun(stateDir: string, record: RunRecord): void {
   const dir = runsDir(stateDir);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const filePath = runFilePath(stateDir, record.runId);
-  writeFileSync(filePath, JSON.stringify(record, null, 2), { mode: 0o600 });
+  const tmpPath = filePath + ".tmp";
+  writeFileSync(tmpPath, JSON.stringify(record, null, 2), { mode: 0o600 });
+  renameSync(tmpPath, filePath);
 }
 
 export function loadRun(stateDir: string, runId: string): RunRecord | null {
   const filePath = runFilePath(stateDir, runId);
   if (!existsSync(filePath)) return null;
+  let content: string;
   try {
-    return JSON.parse(readFileSync(filePath, "utf-8"));
-  } catch {
+    content = readFileSync(filePath, "utf-8");
+  } catch (e) {
+    console.error(`[codex] Warning: failed to read run file ${runId}: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+  try {
+    return JSON.parse(content);
+  } catch (e) {
+    console.error(`[codex] Warning: failed to parse run file ${runId}: ${e instanceof Error ? e.message : e}`);
     return null;
   }
 }
@@ -282,12 +292,20 @@ export function updateRun(stateDir: string, runId: string, patch: Partial<RunRec
     console.error(`[codex] Warning: cannot update unknown run ${runId}`);
     return;
   }
+  let record: RunRecord;
   try {
-    const record: RunRecord = JSON.parse(readFileSync(filePath, "utf-8"));
-    Object.assign(record, patch);
-    writeFileSync(filePath, JSON.stringify(record, null, 2), { mode: 0o600 });
+    record = JSON.parse(readFileSync(filePath, "utf-8"));
   } catch (e) {
-    console.error(`[codex] Warning: failed to update run ${runId}: ${e instanceof Error ? e.message : e}`);
+    console.error(`[codex] Warning: failed to read run ${runId}: ${e instanceof Error ? e.message : e}`);
+    return;
+  }
+  Object.assign(record, patch);
+  try {
+    const tmpPath = filePath + ".tmp";
+    writeFileSync(tmpPath, JSON.stringify(record, null, 2), { mode: 0o600 });
+    renameSync(tmpPath, filePath);
+  } catch (e) {
+    console.error(`[codex] Warning: failed to write run ${runId}: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -301,8 +319,8 @@ export function listRuns(stateDir: string, opts?: { sessionId?: string }): RunRe
       const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
       if (opts?.sessionId && record.sessionId !== opts.sessionId) continue;
       records.push(record);
-    } catch {
-      // Skip corrupt run files
+    } catch (e) {
+      console.error(`[codex] Warning: skipping corrupt/unreadable run file ${file}: ${e instanceof Error ? e.message : e}`);
     }
   }
   // Sort by startedAt descending (newest first)
@@ -332,8 +350,9 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
     try {
       const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
       entries.push({ file, startedAt: record.startedAt });
-    } catch {
+    } catch (e) {
       // Corrupt files count toward the total; delete them first
+      console.error(`[codex] Warning: cannot read run file ${file} during prune: ${e instanceof Error ? e.message : e}`);
       entries.push({ file, startedAt: "1970-01-01T00:00:00Z" });
     }
   }
@@ -346,8 +365,8 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   for (let i = 0; i < toDelete; i++) {
     try {
       rmSync(join(dir, entries[i].file));
-    } catch {
-      // Ignore deletion failures (race, already removed)
+    } catch (e) {
+      console.error(`[codex] Warning: failed to delete run file ${entries[i].file} during prune: ${e instanceof Error ? e.message : e}`);
     }
   }
 }

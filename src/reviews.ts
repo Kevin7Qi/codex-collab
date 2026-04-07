@@ -218,5 +218,8 @@ function formatLocation(f: ReviewFinding): string {
   if (f.lineStart !== null && f.lineEnd !== null) {
     return `${f.file}:${f.lineStart}-${f.lineEnd}`;
   }
+  if (f.lineStart !== null) {
+    return `${f.file}:${f.lineStart}`;
+  }
   return f.file;
 }

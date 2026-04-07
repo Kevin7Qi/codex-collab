@@ -225,6 +225,21 @@ describe("phase dedup", () => {
     expect(lines).toHaveLength(2);
   });
 
+  test("reset clears phase dedup state", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-phase-reset", TEST_LOG_DIR, (line) => lines.push(line));
+
+    // Emit a phase, then reset, then emit the same phase again — should NOT be suppressed
+    dispatcher.emitProgress("Starting thread", { phase: "starting", threadId: "t1" });
+    expect(lines).toHaveLength(1);
+
+    dispatcher.reset();
+
+    dispatcher.emitProgress("Starting thread again", { phase: "starting", threadId: "t1" });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("Starting thread again");
+  });
+
   test("emits without dedup when no phase/threadId provided", () => {
     const lines: string[] = [];
     const dispatcher = new EventDispatcher("test-phase5", TEST_LOG_DIR, (line) => lines.push(line));

@@ -10,7 +10,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import type { BrokerState, SessionState, ParsedEndpoint } from "./types";
 import { connectDirect, type AppServerClient } from "./client";
-import { resolveStateDir } from "./config";
+import { config, resolveStateDir } from "./config";
 import { terminateProcessTree, isProcessAlive } from "./process";
 
 /** JSON-RPC error code returned when the broker is busy with another request. */
@@ -60,18 +60,21 @@ export function loadBrokerState(stateDir: string): BrokerState | null {
   try {
     const raw = fs.readFileSync(filePath, "utf-8");
     const parsed = JSON.parse(raw);
-    // Basic shape validation
+    // Basic shape validation — endpoint may be null (deferred broker multiplexing)
     if (
       typeof parsed === "object" &&
       parsed !== null &&
-      typeof parsed.endpoint === "string" &&
+      (typeof parsed.endpoint === "string" || parsed.endpoint === null) &&
       typeof parsed.sessionDir === "string" &&
       typeof parsed.startedAt === "string"
     ) {
       return parsed as BrokerState;
     }
     return null;
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[broker] Warning: failed to load broker state: ${e instanceof Error ? e.message : e}`);
+    }
     return null;
   }
 }
@@ -114,7 +117,10 @@ export function loadSessionState(stateDir: string): SessionState | null {
       return parsed as SessionState;
     }
     return null;
-  } catch {
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[broker] Warning: failed to load session state: ${e instanceof Error ? e.message : e}`);
+    }
     return null;
   }
 }
@@ -134,11 +140,15 @@ export function saveSessionState(stateDir: string, state: SessionState): void {
  * Probe whether a broker is alive by attempting a socket connection.
  * Returns true if the connection succeeds within the timeout, false otherwise.
  */
-export async function isBrokerAlive(endpoint: string, timeoutMs = 150): Promise<boolean> {
+export async function isBrokerAlive(endpoint: string | null, timeoutMs = 150): Promise<boolean> {
+  // Null endpoint means broker multiplexing is deferred — not alive
+  if (!endpoint) return false;
+
   let target: ParsedEndpoint;
   try {
     target = parseEndpoint(endpoint);
-  } catch {
+  } catch (e) {
+    console.error(`[broker] Warning: cannot parse endpoint for liveness probe: ${(e as Error).message}`);
     return false;
   }
 
@@ -186,6 +196,7 @@ export function acquireSpawnLock(stateDir: string): (() => void) | null {
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
         // Unexpected filesystem error
+        console.error(`[broker] Warning: spawn lock creation failed: ${(e as Error).message}`);
         return null;
       }
       Bun.sleepSync(30 + Math.random() * 40);
@@ -202,8 +213,9 @@ export function acquireSpawnLock(stateDir: string): (() => void) | null {
       }
       // Lock is stale — force acquire after unlink
       fs.unlinkSync(lockPath);
-    } catch {
+    } catch (e) {
       // statSync/unlinkSync failed (ENOENT race) — try once more
+      console.error(`[broker] Warning: stale lock recovery failed: ${(e as Error).message}`);
     }
     try {
       fd = fs.openSync(lockPath, "wx");
@@ -243,20 +255,23 @@ export function teardownBroker(stateDir: string, state: BrokerState): void {
     terminateProcessTree(state.pid);
   }
 
-  // Remove socket file for unix endpoints
-  try {
-    const target = parseEndpoint(state.endpoint);
-    if (target.kind === "unix") {
-      try {
-        fs.unlinkSync(target.path);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-          console.error(`[broker] Warning: socket cleanup failed: ${(e as Error).message}`);
+  // Remove socket file for unix endpoints (skip if endpoint is null — deferred multiplexing)
+  if (state.endpoint !== null) {
+    try {
+      const target = parseEndpoint(state.endpoint);
+      if (target.kind === "unix") {
+        try {
+          fs.unlinkSync(target.path);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+            console.error(`[broker] Warning: socket cleanup failed: ${(e as Error).message}`);
+          }
         }
       }
+    } catch (e) {
+      // parseEndpoint failed — skip socket cleanup
+      console.error(`[broker] Warning: could not parse endpoint for socket cleanup: ${(e as Error).message}`);
     }
-  } catch {
-    // parseEndpoint failed — skip socket cleanup
   }
 
   // Clear broker state
@@ -282,80 +297,70 @@ export function getCurrentSessionId(stateDir: string): string | null {
 /**
  * Ensure a live connection to the Codex app server for the given working directory.
  *
+ * Current implementation: each invocation spawns a fresh `connectDirect` connection.
+ * Session state is persisted so that runs within a recent session share a session ID.
+ *
+ * TODO: Full broker multiplexing (single long-lived process serving multiple callers
+ * over a Unix/pipe socket) is deferred to a future task. When implemented:
+ * - `broker.json` will contain a real endpoint and PID
+ * - `isBrokerAlive` will probe the socket
+ * - Callers will connect to the shared broker instead of spawning their own process
+ *
+ * Flow:
  * 1. Resolve state dir from cwd
- * 2. Load existing broker state
- * 3. If exists and alive (socket probe) → connect via connectDirect({ cwd })
- * 4. If exists but dead → teardown old state, respawn
- * 5. Acquire spawn lock
- * 6. Spawn new connection via connectDirect({ cwd })
- * 7. Generate session ID, save broker state + session state
- * 8. Release lock
- * 9. If lock acquisition fails → try loading broker state again (another process
- *    may have spawned), or fall back to direct connection
+ * 2. Check if session.json exists and is recent (< broker idle timeout)
+ *    - If yes, reuse the session ID
+ *    - If no, generate a new session ID
+ * 3. Acquire spawn lock
+ * 4. Spawn new connection via connectDirect({ cwd })
+ * 5. Save broker state (endpoint: null, pid: null) + session state
+ * 6. Release lock
  */
 export async function ensureConnection(cwd: string): Promise<AppServerClient> {
   const stateDir = resolveStateDir(cwd);
   fs.mkdirSync(stateDir, { recursive: true });
 
-  // Check for existing broker
-  const existing = loadBrokerState(stateDir);
-  if (existing) {
-    const alive = await isBrokerAlive(existing.endpoint);
-    if (alive) {
-      // Broker is alive — connect directly
-      return connectDirect({ cwd });
+  // Check for an existing recent session to reuse the session ID
+  const existingSession = loadSessionState(stateDir);
+  let sessionId: string;
+  if (existingSession) {
+    const ageMs = Date.now() - new Date(existingSession.startedAt).getTime();
+    if (ageMs < config.defaultBrokerIdleTimeout) {
+      sessionId = existingSession.sessionId;
+    } else {
+      sessionId = randomBytes(16).toString("hex");
     }
-    // Broker is dead — teardown stale state
-    teardownBroker(stateDir, existing);
+  } else {
+    sessionId = randomBytes(16).toString("hex");
   }
 
   // Try to acquire spawn lock
   const release = acquireSpawnLock(stateDir);
   if (!release) {
     // Could not acquire lock — another process may be spawning.
-    // Re-check broker state in case it was just created.
-    const retryState = loadBrokerState(stateDir);
-    if (retryState) {
-      const alive = await isBrokerAlive(retryState.endpoint);
-      if (alive) {
-        return connectDirect({ cwd });
-      }
-    }
-    // Fall back to direct connection without broker tracking
+    // Fall back to direct connection without broker tracking.
     return connectDirect({ cwd });
   }
 
   try {
-    // Re-check after acquiring lock (another process may have won the race)
-    const raceState = loadBrokerState(stateDir);
-    if (raceState) {
-      const alive = await isBrokerAlive(raceState.endpoint);
-      if (alive) {
-        return connectDirect({ cwd });
-      }
-      teardownBroker(stateDir, raceState);
-    }
-
     // Spawn new connection
     const client = await connectDirect({ cwd });
 
-    // Generate endpoint and session state
-    const endpoint = createEndpoint(stateDir);
-    const sessionId = randomBytes(16).toString("hex");
     const now = new Date().toISOString();
 
-    // Save broker state (pid is null since connectDirect manages its own process)
+    // Save broker state with null endpoint and pid — actual broker
+    // multiplexing is deferred (see TODO above)
     saveBrokerState(stateDir, {
-      endpoint,
+      endpoint: null,
       pid: null,
       sessionDir: stateDir,
       startedAt: now,
     });
 
-    // Save session state
+    // Save/update session state
     saveSessionState(stateDir, {
       sessionId,
-      startedAt: now,
+      startedAt: existingSession?.startedAt ?? now,
     });
 
     return client;

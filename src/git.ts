@@ -1,7 +1,7 @@
 // src/git.ts — Git operations for review scoping
 
 import { spawnSync } from "child_process";
-import { statSync, readFileSync } from "fs";
+import { statSync, openSync, readSync, closeSync } from "fs";
 import { join } from "path";
 import type { ReviewTarget } from "./types";
 
@@ -86,9 +86,11 @@ export function getUntrackedFiles(cwd: string, maxSize: number = DEFAULT_MAX_SIZ
 
     // Skip binary files (check first 8KB for null bytes)
     try {
-      const fd = readFileSync(absPath);
-      const chunk = fd.subarray(0, 8192);
-      if (chunk.includes(0)) continue;
+      const fd = openSync(absPath, "r");
+      const buf = Buffer.alloc(8192);
+      const bytesRead = readSync(fd, buf, 0, 8192, 0);
+      closeSync(fd);
+      if (buf.subarray(0, bytesRead).includes(0)) continue;
     } catch {
       continue;
     }

@@ -255,6 +255,28 @@ describe("formatReviewOutput", () => {
     expect(formatted).not.toContain("README.md:");
   });
 
+  test("formats findings with lineStart but null lineEnd", () => {
+    const output: StructuredReviewOutput = {
+      ...VALID_OUTPUT,
+      findings: [
+        {
+          severity: "medium",
+          file: "src/utils.ts",
+          lineStart: 42,
+          lineEnd: null,
+          confidence: 0.7,
+          description: "Unused variable.",
+          recommendation: "Remove the variable.",
+        },
+      ],
+    };
+    const formatted = formatReviewOutput(output);
+    expect(formatted).toContain("src/utils.ts:42");
+    // Should NOT show a range like "42-null"
+    expect(formatted).not.toContain("null");
+    expect(formatted).not.toContain("42-");
+  });
+
   test("formats next steps", () => {
     const formatted = formatReviewOutput(VALID_OUTPUT);
     expect(formatted).toContain("Next Steps:");
