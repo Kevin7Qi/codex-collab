@@ -102,7 +102,7 @@ export async function handleRun(args: string[]): Promise<void> {
       setActiveWsPaths(undefined);
       removePidFile(ws.pidsDir, shortId);
     }
-  });
+  }, options.dir);
 
   process.exit(exitCode);
 }

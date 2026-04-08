@@ -519,9 +519,13 @@ async function main() {
         pendingForwardedRequests.delete(reqId);
       }
       if (activeStreamSocket === socket) {
-        process.stderr.write("[broker-server] Warning: stream-owning client errored while turn is active\n");
-        activeStreamSocket = null;
-        // Keep activeStreamThreadIds so turn/completed can still clear the state
+        if (activeStreamThreadIds) {
+          // Turn is still running — keep activeStreamSocket as sentinel so the
+          // concurrency check blocks new streaming requests until turn/completed.
+          process.stderr.write("[broker-server] Warning: stream-owning client errored while turn is active\n");
+        } else {
+          activeStreamSocket = null;
+        }
       }
       if (activeRequestSocket === socket) {
         activeRequestSocket = null;

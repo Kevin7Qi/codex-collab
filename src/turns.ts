@@ -281,6 +281,15 @@ async function executeTurn(
     // turnId is now known — notify caller and replay buffered notifications
     turnId = turn.id;
     opts.onTurnId?.(turnId);
+
+    // Set up completion inference BEFORE replaying buffered items — if a fast
+    // turn delivered its final_answer item/completed before turn/start resolved,
+    // the replay below needs inferenceResolver to be armed so the debounce
+    // timer starts. Otherwise the turn waits for the full timeout.
+    const inferencePromise = new Promise<void>((resolve) => {
+      inferenceResolver = resolve;
+    });
+
     for (const buffered of notificationBuffer) {
       if (buffered.method === "item/completed") {
         const p = buffered.params as ItemCompletedParams;
@@ -290,11 +299,6 @@ async function executeTurn(
       }
     }
     notificationBuffer.length = 0;
-
-    // Set up completion inference as a safety net for lost turn/completed
-    const inferencePromise = new Promise<void>((resolve) => {
-      inferenceResolver = resolve;
-    });
 
     const completedTurn = await Promise.race([
       completion.waitFor(turn.id).then((p) => {
