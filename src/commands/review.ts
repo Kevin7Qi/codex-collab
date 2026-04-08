@@ -119,7 +119,7 @@ export async function handleReview(args: string[]): Promise<void> {
         commandsRun: result.commandsRun,
         error: result.error ?? null,
       });
-      return printResult(result, shortId, threadId, "Review", options.contentOnly);
+      return printResult(result, "Review", options.contentOnly);
     } catch (e) {
       updateThreadStatus(ws.threadsFile, threadId, "failed");
       updateRun(ws.stateDir, runId, {

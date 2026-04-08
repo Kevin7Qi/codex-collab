@@ -32,19 +32,16 @@ codex-collab run --resume <id> "now check the error handling" --content-only
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
 ```
 
-**IMPORTANT: Always use `dangerouslyDisableSandbox=true`** for all `codex-collab` Bash commands — the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist.
+**IMPORTANT — Execution rules for ALL `codex-collab` Bash commands:**
+- Always use `dangerouslyDisableSandbox=true` — the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist.
+- For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: read the completed task's output (the notification includes it or use `Read` on the output file), then present the results to the user.
+- For all other commands (`kill`, `threads`, `progress`, `output`, `approve`, `decline`, `clean`, `delete`, `models`, `health`): run in the **foreground** — they complete in seconds.
 
-For **`run` and `review`** commands, also use `run_in_background=true` — these take minutes. You will be notified automatically when the command finishes. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically. If other background tasks complete while a Codex task is still running, handle those completed tasks normally — do NOT proactively check on, wait for, or poll the still-running Codex task. It will notify you when it finishes.
-
-For **all other commands** (`kill`, `threads`, `progress`, `output`, `approve`, `decline`, `clean`, `delete`, `models`, `health`), run in the **foreground** — they complete in seconds.
-
-If the user asks about progress mid-task, use `progress` to check the recent activity:
+If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or:
 
 ```bash
 codex-collab progress <id>
 ```
-
-Or use `TaskOutput(block=false)` to check the current output stream without blocking.
 
 ## Code Review (Recommended: Single Command)
 
@@ -70,8 +67,6 @@ codex-collab review --resume <id> -d /path/to/project --content-only
 ```
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
-
-**IMPORTANT: Use `run_in_background=true` and `dangerouslyDisableSandbox=true`** — reviews typically take 5-20 minutes. You will be notified automatically when done. After launching, tell the user it's running and end your turn. Do NOT use TaskOutput, block, poll, wait, or spawn an agent to monitor the result — the background task notification handles this automatically. If other background tasks complete while a review is still running, handle those completed tasks normally — do NOT proactively check on or wait for the review.
 
 ## Context Efficiency
 
@@ -217,12 +212,7 @@ codex-collab health                     # Check prerequisites
 
 ## TUI Handoff
 
-After completion, output includes the full Codex session ID:
-```
-Codex session ID: 019d680c-7b23-7f22-ab99-6584214a2bed
-Resume in Codex: codex resume 019d680c-7b23-7f22-ab99-6584214a2bed
-```
-The user can continue the thread in the Codex TUI if they want interactive control.
+To hand off a thread to the Codex TUI, look up the full thread ID with `codex-collab threads --json` and then run `codex resume <full-thread-id>` in the terminal.
 
 ## Tips
 

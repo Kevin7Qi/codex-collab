@@ -710,8 +710,6 @@ export function pluralize(n: number, word: string): string {
 /** Print turn result and return the appropriate exit code. */
 export function printResult(
   result: TurnResult,
-  shortId: string,
-  threadId: string,
   label: string,
   contentOnly: boolean,
 ): number {
@@ -722,12 +720,6 @@ export function printResult(
 
   if (result.output) console.log(result.output);
   if (result.error) console.error(`\nError: ${result.error}`);
-  if (!contentOnly) {
-    console.error(`\nThread: ${shortId}`);
-    console.error(`Codex session ID: ${threadId}`);
-    console.error(`Resume in Codex: codex resume ${threadId}`);
-  }
-
   return result.status === "completed" ? 0 : 1;
 }
 

@@ -86,7 +86,7 @@ export async function handleRun(args: string[]): Promise<void> {
         commandsRun: result.commandsRun,
         error: result.error ?? null,
       });
-      return printResult(result, shortId, threadId, "Turn", options.contentOnly);
+      return printResult(result, "Turn", options.contentOnly);
     } catch (e) {
       updateThreadStatus(ws.threadsFile, threadId, "failed");
       updateRun(ws.stateDir, runId, {
