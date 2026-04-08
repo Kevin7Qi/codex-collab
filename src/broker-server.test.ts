@@ -418,7 +418,12 @@ async function waitFor(
 
 // ─── Socket support detection ────────────────────────────────────────────────
 
-const SOCKETS_AVAILABLE = await (async () => {
+// These integration tests spawn a real broker-server subprocess with a mock
+// codex script (bash shebang) and connect via Unix socket. They require:
+// 1. Unix platform (the mock script uses #!/usr/bin/env bun)
+// 2. Unix socket support (not restricted by sandbox)
+const IS_UNIX = process.platform !== "win32";
+const SOCKETS_AVAILABLE = IS_UNIX && await (async () => {
   const checkDir = mkdtempSync(join(tmpdir(), "broker-sock-check-"));
   const testSock = join(checkDir, "test.sock");
   try {
@@ -1201,33 +1206,58 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
 
-      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 15000 });
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 30000 });
       await waitForSocket(sockPath);
 
       try {
-        const client = await TestClient.connectAndInit(sockPath);
+        // Use a raw socket (not TestClient) so we can flood data without
+        // the JSON-RPC framing getting in the way.
+        const rawSocket = new net.Socket();
+        await new Promise<void>((resolve, reject) => {
+          rawSocket.on("connect", resolve);
+          rawSocket.on("error", reject);
+          rawSocket.connect({ path: sockPath });
+        });
 
-        // Send >10MB of data without any newlines to trigger buffer overflow.
-        // Write in chunks to avoid backpressure issues.
-        const chunkSize = 512 * 1024; // 512KB chunks
-        const totalNeeded = 11 * 1024 * 1024; // 11MB > MAX_BUFFER_SIZE (10MB)
-        const chunk = "x".repeat(chunkSize);
+        // Complete the initialize handshake first so the broker accepts us
+        rawSocket.write(JSON.stringify({ id: 1, method: "initialize", params: { clientInfo: { name: "test", title: null, version: "1.0" }, capabilities: { experimentalApi: false } } }) + "\n");
+        await new Promise((r) => setTimeout(r, 100));
+
+        // Now flood >10MB without newlines. Use a single large write to
+        // maximize the chance the broker receives it all in one chunk.
+        let destroyed = false;
+        rawSocket.on("close", () => { destroyed = true; });
+        rawSocket.on("error", () => { destroyed = true; });
+
+        // Write in a loop with drain handling to ensure data actually flows
+        const chunkSize = 256 * 1024; // 256KB — typical kernel buffer unit
+        const target = 11 * 1024 * 1024; // 11MB > MAX_BUFFER_SIZE (10MB)
         let written = 0;
 
-        while (written < totalNeeded && !client.destroyed) {
-          (client as any).socket.write(chunk);
+        while (written < target && !destroyed) {
+          const chunk = "x".repeat(chunkSize);
+          const canWrite = rawSocket.write(chunk);
           written += chunkSize;
-          // Yield to allow the broker to process and potentially destroy
-          await new Promise((r) => setTimeout(r, 5));
+          if (!canWrite && !destroyed) {
+            // Wait for drain before writing more
+            await new Promise<void>((resolve) => {
+              rawSocket.once("drain", resolve);
+              // Safety: if socket destroyed, also resolve
+              rawSocket.once("close", resolve);
+              setTimeout(resolve, 1000);
+            });
+          }
         }
 
-        // Wait for the broker to detect overflow and destroy the socket
-        await waitFor(() => client.destroyed, 5000);
-        expect(client.destroyed).toBe(true);
+        // Wait for the broker to detect overflow and destroy our socket
+        await waitFor(() => destroyed, 30000, 50);
+        expect(destroyed).toBe(true);
+
+        rawSocket.destroy();
       } finally {
         proc.kill();
       }
-    }, 20_000);
+    }, 30_000);
   });
 
   // ── Multiple clients ──────────────────────────────────────────────────────

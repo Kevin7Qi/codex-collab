@@ -323,14 +323,16 @@ describe("parseOptions", () => {
   // -- dir ---
 
   test("--dir sets dir and marks explicit", () => {
-    const { options } = parseOptions(["--dir", "/tmp/myproject"]);
-    expect(options.dir).toBe("/tmp/myproject");
+    const testDir = process.platform === "win32" ? "C:\\tmp\\myproject" : "/tmp/myproject";
+    const { options } = parseOptions(["--dir", testDir]);
+    expect(options.dir).toBe(testDir);
     expect(options.explicit.has("dir")).toBe(true);
   });
 
   test("-d shorthand works", () => {
-    const { options } = parseOptions(["-d", "/tmp/other"]);
-    expect(options.dir).toBe("/tmp/other");
+    const testDir = process.platform === "win32" ? "C:\\tmp\\other" : "/tmp/other";
+    const { options } = parseOptions(["-d", testDir]);
+    expect(options.dir).toBe(testDir);
   });
 
   test("--dir missing value exits", () => {
@@ -801,7 +803,7 @@ console.log(JSON.stringify(${checkExpression}));
       cwd: projectDir,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, HOME: fakeHome },
+      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
     });
     return {
       stdout: result.stdout.toString().trim(),
@@ -931,7 +933,7 @@ console.log("ok");
       cwd: projectDir,
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, HOME: fakeHome },
+      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
     });
     expect(result.stdout.toString().trim()).toBe("ok");
     expect(result.exitCode).toBe(0);

@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, realpathSync } from "fs";
-import { join, basename } from "path";
+import { join, basename, resolve, sep } from "path";
 import { createHash } from "crypto";
 import {
   config,
@@ -77,13 +77,15 @@ describe("resolveWorkspaceDir", () => {
   test("returns git repo root for cwd inside a git repo", () => {
     const result = resolveWorkspaceDir(process.cwd());
     // This test repo is a git repo; the root should contain package.json
-    expect(result).toBe(process.cwd());
+    // On Windows, git returns forward-slash paths while process.cwd() uses backslashes
+    expect(resolve(result)).toBe(resolve(process.cwd()));
   });
 
   test("returns resolved cwd when not in a git repo", () => {
-    // /tmp is not a git repo
-    const result = resolveWorkspaceDir("/tmp");
-    expect(result).toBe(realpathSync("/tmp"));
+    // Use a platform-appropriate temp directory that is not inside a git repo
+    const tmpDir = process.env.TMPDIR ?? (process.platform === "win32" ? process.env.TEMP ?? "C:\\Windows\\Temp" : "/tmp");
+    const result = resolveWorkspaceDir(tmpDir);
+    expect(resolve(result)).toBe(resolve(realpathSync(tmpDir)));
   });
 });
 
@@ -92,7 +94,7 @@ describe("resolveWorkspaceDir", () => {
 describe("resolveStateDir", () => {
   test("returns path under ~/.codex-collab/workspaces/", () => {
     const result = resolveStateDir(process.cwd());
-    expect(result).toContain(".codex-collab/workspaces/");
+    expect(result).toContain(`.codex-collab${sep}workspaces${sep}`);
   });
 
   test("path contains slug and hash", () => {
@@ -106,7 +108,8 @@ describe("resolveStateDir", () => {
 
   test("different paths produce different state dirs", () => {
     const dir1 = resolveStateDir(process.cwd());
-    const dir2 = resolveStateDir("/tmp");
+    const tmpDir = process.env.TMPDIR ?? (process.platform === "win32" ? process.env.TEMP ?? "C:\\Windows\\Temp" : "/tmp");
+    const dir2 = resolveStateDir(tmpDir);
     expect(dir1).not.toBe(dir2);
   });
 });
