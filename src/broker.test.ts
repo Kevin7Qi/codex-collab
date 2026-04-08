@@ -455,3 +455,441 @@ describe("BrokerClient", () => {
     }
   });
 });
+
+// ─── BrokerClient edge cases ────────────────────────────────────────────
+
+// Helper: create a mock broker server that completes the initialize handshake
+// and optionally runs a per-connection callback for custom behavior.
+type ConnectionHandler = (
+  socket: net.Socket,
+  parsedMessages: { resolve: (msg: Record<string, unknown>) => void; promise: Promise<Record<string, unknown>> },
+) => void;
+
+function createMockBroker(
+  sockPath: string,
+  onConnection?: ConnectionHandler,
+): { server: net.Server; clientSockets: net.Socket[]; start: () => Promise<void>; stop: () => Promise<void> } {
+  const clientSockets: net.Socket[] = [];
+  const server = net.createServer((socket) => {
+    clientSockets.push(socket);
+    socket.setEncoding("utf8");
+    let buffer = "";
+    let handshakeDone = false;
+
+    // Create a deferred for the first post-handshake message
+    let resolveNext: ((msg: Record<string, unknown>) => void) | null = null;
+    const nextMessage = new Promise<Record<string, unknown>>((resolve) => {
+      resolveNext = resolve;
+    });
+
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (msg.method === "initialize" && msg.id !== undefined) {
+            socket.write(
+              JSON.stringify({ id: msg.id, result: { userAgent: "test-broker" } }) + "\n",
+            );
+          } else if (msg.method === "initialized") {
+            handshakeDone = true;
+          } else if (handshakeDone && resolveNext) {
+            resolveNext(msg);
+          }
+        } catch {}
+      }
+    });
+
+    if (onConnection) {
+      onConnection(socket, { resolve: resolveNext!, promise: nextMessage });
+    }
+  });
+
+  return {
+    server,
+    clientSockets,
+    start: () => new Promise<void>((resolve) => server.listen(sockPath, resolve)),
+    stop: () =>
+      new Promise<void>((resolve) => {
+        for (const s of clientSockets) {
+          try { s.destroy(); } catch {}
+        }
+        server.close(() => resolve());
+        try { rmSync(sockPath); } catch {}
+      }),
+  };
+}
+
+describe("BrokerClient — request timeout", () => {
+  test("rejects when server never responds to a request", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "timeout.sock");
+
+    // Server completes handshake but never responds to subsequent requests
+    const broker = createMockBroker(sockPath);
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({
+        endpoint: `unix:${sockPath}`,
+        requestTimeout: 200, // 200ms for fast test
+      });
+
+      const start = Date.now();
+      await expect(client.request("test/hang")).rejects.toThrow(/timed out/);
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeGreaterThanOrEqual(180);
+      expect(elapsed).toBeLessThan(2000);
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+});
+
+describe("BrokerClient — socket close during pending request", () => {
+  test("rejects all pending requests when server closes the connection", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "close-pending.sock");
+
+    const broker = createMockBroker(sockPath, (socket) => {
+      // After handshake, close the socket when the next message arrives
+      // (but we'll also close it proactively from the test)
+    });
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({
+        endpoint: `unix:${sockPath}`,
+        requestTimeout: 5000,
+      });
+
+      // Fire a request, then immediately destroy the server socket
+      const reqPromise = client.request("test/pending");
+      // Small delay to ensure the request is sent before destroying
+      await new Promise((r) => setTimeout(r, 20));
+      for (const s of broker.clientSockets) s.destroy();
+
+      await expect(reqPromise).rejects.toThrow(/Broker connection closed|Broker socket error/);
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+});
+
+describe("BrokerClient — socket error during pending request", () => {
+  test("rejects pending requests when socket emits an error", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "error-pending.sock");
+
+    const broker = createMockBroker(sockPath);
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({
+        endpoint: `unix:${sockPath}`,
+        requestTimeout: 5000,
+      });
+
+      const reqPromise = client.request("test/error-case");
+      await new Promise((r) => setTimeout(r, 20));
+      // Destroy with an error from the server side
+      for (const s of broker.clientSockets) {
+        s.destroy(new Error("simulated socket failure"));
+      }
+
+      await expect(reqPromise).rejects.toThrow(/Broker connection closed|Broker socket error/);
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+});
+
+describe("BrokerClient — close() while requests pending", () => {
+  test("rejects pending requests with 'Client closed'", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "close-while-pending.sock");
+
+    // Server never responds to post-handshake requests
+    const broker = createMockBroker(sockPath);
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({
+        endpoint: `unix:${sockPath}`,
+        requestTimeout: 5000,
+      });
+
+      const reqPromise = client.request("test/slow");
+      // Close the client while the request is still pending
+      await client.close();
+
+      await expect(reqPromise).rejects.toThrow(/Client closed/);
+    } finally {
+      await broker.stop();
+    }
+  });
+});
+
+describe("BrokerClient — request after close()", () => {
+  test("immediately rejects with 'Client is closed'", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "request-after-close.sock");
+
+    const broker = createMockBroker(sockPath);
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+      await client.close();
+
+      await expect(client.request("test/anything")).rejects.toThrow(/Client is closed/);
+    } finally {
+      await broker.stop();
+    }
+  });
+});
+
+describe("BrokerClient — server-sent request (onRequest handler)", () => {
+  test("dispatches server-sent requests and sends back the response", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "server-request.sock");
+
+    let serverSocket: net.Socket | null = null;
+    const broker = createMockBroker(sockPath, (socket) => {
+      serverSocket = socket;
+    });
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+
+      // Register a handler for a method the server will call
+      const receivedParams: unknown[] = [];
+      client.onRequest("approval/request", (params) => {
+        receivedParams.push(params);
+        return { approved: true };
+      });
+
+      // Server sends a request to the client
+      serverSocket!.write(
+        JSON.stringify({ id: 999, method: "approval/request", params: { tool: "bash", command: "ls" } }) + "\n",
+      );
+
+      // Wait for the response to come back on the server socket
+      const response = await new Promise<Record<string, unknown>>((resolve) => {
+        let buf = "";
+        // The socket already has a data listener from createMockBroker, so
+        // we add another one specifically to capture the response
+        const onData = (chunk: string) => {
+          buf += chunk;
+          let idx: number;
+          while ((idx = buf.indexOf("\n")) !== -1) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (msg.id === 999 && "result" in msg) {
+                serverSocket!.removeListener("data", onData);
+                resolve(msg);
+              }
+            } catch {}
+          }
+        };
+        serverSocket!.on("data", onData);
+      });
+
+      expect(receivedParams).toEqual([{ tool: "bash", command: "ls" }]);
+      expect(response.result).toEqual({ approved: true });
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+
+  test("sends method-not-found error when no handler registered", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "server-request-no-handler.sock");
+
+    let serverSocket: net.Socket | null = null;
+    const broker = createMockBroker(sockPath, (socket) => {
+      serverSocket = socket;
+    });
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+
+      // Server sends a request for a method with no handler
+      serverSocket!.write(
+        JSON.stringify({ id: 888, method: "unknown/method", params: {} }) + "\n",
+      );
+
+      // Wait for the error response
+      const response = await new Promise<Record<string, unknown>>((resolve) => {
+        let buf = "";
+        const onData = (chunk: string) => {
+          buf += chunk;
+          let idx: number;
+          while ((idx = buf.indexOf("\n")) !== -1) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (msg.id === 888 && "error" in msg) {
+                serverSocket!.removeListener("data", onData);
+                resolve(msg);
+              }
+            } catch {}
+          }
+        };
+        serverSocket!.on("data", onData);
+      });
+
+      expect((response.error as any).code).toBe(-32601);
+      expect((response.error as any).message).toContain("Method not found");
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+});
+
+describe("BrokerClient — onClose callback", () => {
+  test("fires on unexpected server disconnect", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "onclose-unexpected.sock");
+
+    const broker = createMockBroker(sockPath);
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+
+      let closeFired = false;
+      client.onClose(() => {
+        closeFired = true;
+      });
+
+      // Destroy all server sockets (simulate unexpected disconnect)
+      for (const s of broker.clientSockets) s.destroy();
+
+      // Wait for close event to propagate
+      await new Promise((r) => setTimeout(r, 100));
+      expect(closeFired).toBe(true);
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+
+  test("does NOT fire on intentional close()", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "onclose-intentional.sock");
+
+    const broker = createMockBroker(sockPath);
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+
+      let closeFired = false;
+      client.onClose(() => {
+        closeFired = true;
+      });
+
+      await client.close();
+
+      // Give it some time to ensure the handler does not fire
+      await new Promise((r) => setTimeout(r, 100));
+      expect(closeFired).toBe(false);
+    } finally {
+      await broker.stop();
+    }
+  });
+
+  test("unsubscribe removes the onClose handler", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "onclose-unsub.sock");
+
+    const broker = createMockBroker(sockPath);
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+
+      let closeFired = false;
+      const unsub = client.onClose(() => {
+        closeFired = true;
+      });
+      unsub(); // unsubscribe before the disconnect
+
+      for (const s of broker.clientSockets) s.destroy();
+      await new Promise((r) => setTimeout(r, 100));
+      expect(closeFired).toBe(false);
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+});
+
+describe("BrokerClient — buffer overflow protection", () => {
+  test("disconnects when buffer exceeds MAX_BUFFER_SIZE", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "overflow.sock");
+
+    let serverSocket: net.Socket | null = null;
+    const broker = createMockBroker(sockPath, (socket) => {
+      serverSocket = socket;
+    });
+    await broker.start();
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+
+      let closeFired = false;
+      client.onClose(() => {
+        closeFired = true;
+      });
+
+      // Send a payload larger than MAX_BUFFER_SIZE (10 MB) without any newline.
+      // We send it in chunks to avoid blocking the event loop.
+      const chunkSize = 1024 * 1024; // 1 MB per chunk
+      const totalChunks = 11; // 11 MB total > 10 MB limit
+      const chunk = "x".repeat(chunkSize);
+      for (let i = 0; i < totalChunks; i++) {
+        if (serverSocket!.destroyed) break;
+        serverSocket!.write(chunk);
+      }
+
+      // Wait for the client to detect the overflow and disconnect
+      await new Promise((r) => setTimeout(r, 500));
+      expect(closeFired).toBe(true);
+
+      // Any pending request should also fail
+      await expect(client.request("test/after-overflow")).rejects.toThrow(
+        /Client is closed|Broker connection closed|Broker socket error/,
+      );
+
+      await client.close();
+    } finally {
+      await broker.stop();
+    }
+  });
+});
