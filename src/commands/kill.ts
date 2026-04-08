@@ -82,7 +82,7 @@ export async function handleKill(args: string[]): Promise<void> {
         console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
       }
     }
-  });
+  }, options.dir);
 
   if (killSignalWritten || serverInterrupted) {
     updateThreadStatus(ws.threadsFile, threadId, "interrupted");

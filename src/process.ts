@@ -47,8 +47,11 @@ function terminateUnix(pid: number): void {
   try {
     process.kill(-pid, "SIGTERM");
     sent = true;
-  } catch {
-    // Group kill failed (ESRCH or EPERM) — fall through to individual.
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EPERM") {
+      console.error(`[codex] Warning: group kill failed: ${(e as Error).message}`);
+    }
   }
 
   if (!sent) {
@@ -65,11 +68,18 @@ function terminateUnix(pid: number): void {
     setTimeout(() => {
       try {
         process.kill(-pid, "SIGKILL");
-      } catch {
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ESRCH" && code !== "EPERM") {
+          console.error(`[codex] Warning: group SIGKILL failed: ${(e as Error).message}`);
+        }
         try {
           process.kill(pid, "SIGKILL");
-        } catch {
-          // Process already gone — nothing to do.
+        } catch (e2) {
+          const code2 = (e2 as NodeJS.ErrnoException).code;
+          if (code2 !== "ESRCH" && code2 !== "EPERM") {
+            console.error(`[codex] Warning: SIGKILL failed: ${(e2 as Error).message}`);
+          }
         }
       }
     }, 100);
@@ -82,10 +92,9 @@ function terminateWindows(pid: number): void {
       stdio: "pipe",
       timeout: 5000,
       windowsHide: true,
-      shell: true,
     });
-  } catch {
-    // Best-effort — process may already be gone.
+  } catch (e) {
+    console.error(`[codex] Warning: process termination failed: ${(e as Error).message}`);
   }
 }
 

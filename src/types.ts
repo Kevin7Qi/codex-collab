@@ -172,6 +172,14 @@ export type CodexErrorInfo =
   | { responseTooManyFailedAttempts: { httpStatusCode: number | null } }
   | "other";
 
+/** Error carrying a JSON-RPC error code for protocol-level error forwarding. */
+export class RpcError extends Error {
+  constructor(message: string, public readonly rpcCode: number) {
+    super(message);
+    this.name = "RpcError";
+  }
+}
+
 export interface TurnError {
   message: string;
   codexErrorInfo?: CodexErrorInfo | null;
@@ -189,7 +197,8 @@ export interface TurnInterruptParams {
 
 // --- Items ---
 
-export type ThreadItem =
+/** Known item types with proper discriminants. */
+export type KnownThreadItem =
   | UserMessageItem
   | AgentMessageItem
   | PlanItem
@@ -201,8 +210,20 @@ export type ThreadItem =
   | ImageViewItem
   | EnteredReviewModeItem
   | ExitedReviewModeItem
-  | ContextCompactionItem
-  | GenericItem;
+  | ContextCompactionItem;
+
+/** Any item from the server — known types narrow via `type` discriminant. */
+export type ThreadItem = KnownThreadItem | GenericItem;
+
+/** Narrow a ThreadItem to a known type, enabling discriminated union switches. */
+export function isKnownItem(item: ThreadItem): item is KnownThreadItem {
+  const knownTypes = new Set([
+    "userMessage", "agentMessage", "plan", "reasoning",
+    "commandExecution", "fileChange", "mcpToolCall", "webSearch",
+    "imageView", "enteredReviewMode", "exitedReviewMode", "contextCompaction",
+  ]);
+  return knownTypes.has(item.type);
+}
 
 export interface UserMessageItem {
   type: "userMessage";

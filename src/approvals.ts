@@ -35,7 +35,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     private onProgress: (line: string) => void,
     private pollIntervalMs = 1000,
   ) {
-    if (!existsSync(approvalsDir)) mkdirSync(approvalsDir, { recursive: true });
+    if (!existsSync(approvalsDir)) mkdirSync(approvalsDir, { recursive: true, mode: 0o700 });
   }
 
   async handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {

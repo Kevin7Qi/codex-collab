@@ -137,7 +137,7 @@ export function loadThreadIndex(stateDir: string): ThreadIndex {
 export function saveThreadIndex(stateDir: string, index: ThreadIndex): void {
   const filePath = threadsFilePath(stateDir);
   const dir = dirname(filePath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmpPath = filePath + ".tmp";
   writeFileSync(tmpPath, JSON.stringify(index, null, 2), { mode: 0o600 });
   renameSync(tmpPath, filePath);
@@ -264,7 +264,7 @@ export function generateRunId(): string {
 
 export function createRun(stateDir: string, record: RunRecord): void {
   const dir = runsDir(stateDir);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const filePath = runFilePath(stateDir, record.runId);
   const tmpPath = filePath + ".tmp";
   writeFileSync(tmpPath, JSON.stringify(record, null, 2), { mode: 0o600 });
@@ -530,9 +530,14 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
     const wsLogFile = join(wsLogsDir, `${shortId}.log`);
     let logFile = "";
     if (existsSync(globalLogFile)) {
-      if (!existsSync(wsLogsDir)) mkdirSync(wsLogsDir, { recursive: true });
-      copyFileSync(globalLogFile, wsLogFile);
-      logFile = wsLogFile;
+      if (!existsSync(wsLogsDir)) mkdirSync(wsLogsDir, { recursive: true, mode: 0o700 });
+      try {
+        copyFileSync(globalLogFile, wsLogFile);
+        logFile = wsLogFile;
+      } catch (e) {
+        console.error(`[codex] Warning: could not copy log file ${globalLogFile}: ${(e as Error).message}`);
+        logFile = globalLogFile; // fall back to original path
+      }
     }
 
     // Determine terminal status
@@ -614,7 +619,7 @@ export function loadThreadMapping(threadsFile: string): ThreadMapping {
 /** @deprecated Use saveThreadIndex instead. */
 export function saveThreadMapping(threadsFile: string, mapping: ThreadMapping): void {
   const dir = dirname(threadsFile);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmpPath = threadsFile + ".tmp";
   writeFileSync(tmpPath, JSON.stringify(mapping, null, 2), { mode: 0o600 });
   renameSync(tmpPath, threadsFile);

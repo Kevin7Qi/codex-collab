@@ -47,8 +47,11 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
   if (activeClient && activeThreadId && activeTurnId) {
     try {
       await activeClient.request("turn/interrupt", { threadId: activeThreadId, turnId: activeTurnId });
-    } catch {
+    } catch (e) {
       // Best effort — may fail if turn already completed
+      if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("already")) {
+        console.error(`[codex] Warning: could not interrupt turn: ${e.message}`);
+      }
     }
   }
 

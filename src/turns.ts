@@ -3,14 +3,15 @@
 import { existsSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
 import type { AppServerClient } from "./client";
-import type {
-  UserInput, TurnStartParams, TurnStartResponse, TurnCompletedParams,
-  ReviewTarget, ReviewStartParams, ReviewDelivery,
-  TurnResult, ItemStartedParams, ItemCompletedParams, DeltaParams,
-  ErrorNotificationParams,
-  CommandApprovalRequest, FileChangeApprovalRequest,
-  ApprovalPolicy, ReasoningEffort,
-  ReasoningItem, AgentMessageItem,
+import {
+  isKnownItem,
+  type UserInput, type TurnStartParams, type TurnStartResponse, type TurnCompletedParams,
+  type ReviewTarget, type ReviewStartParams, type ReviewDelivery,
+  type TurnResult, type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
+  type ErrorNotificationParams,
+  type CommandApprovalRequest, type FileChangeApprovalRequest,
+  type ApprovalPolicy, type ReasoningEffort,
+  type ReasoningItem,
 } from "./types";
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
@@ -192,25 +193,23 @@ async function executeTurn(
   // Process an item/completed notification for reasoning extraction & completion inference
   function processItemCompleted(itemParams: ItemCompletedParams): void {
     const { item } = itemParams;
+    if (!isKnownItem(item)) return;
+
     // Reasoning extraction
     if (item.type === "reasoning") {
-      const reasoningItem = item as ReasoningItem;
-      const extracted = extractReasoning(reasoningItem);
+      const extracted = extractReasoning(item);
       if (extracted) {
         turnReasoning = mergeReasoningStrings(turnReasoning, extracted);
       }
     }
-    // Completion inference: only agentMessage completing starts the debounce timer.
-    // Other item types clear the timer (prevent premature inference while the
-    // agent is still doing work like running commands or editing files).
-    // Completion inference: only trigger on agentMessage items with phase "final_answer".
-    // The server marks the last agent message with this phase when the turn is
-    // effectively done. Intermediate agent messages (planning, progress) don't trigger
-    // inference — they happen between tool calls and would fire prematurely.
-    if (inferenceResolver && item.type === "agentMessage") {
-      const phase = (item as AgentMessageItem).phase;
-      if (phase === "final_answer") {
+    // Completion inference: only agentMessage with phase "final_answer" starts the
+    // debounce timer. Other item types clear the timer to prevent premature inference
+    // while the agent is still doing work like running commands or editing files.
+    if (inferenceResolver) {
+      if (item.type === "agentMessage" && item.phase === "final_answer") {
         resetInferenceTimer();
+      } else {
+        clearInferenceTimer();
       }
     }
   }

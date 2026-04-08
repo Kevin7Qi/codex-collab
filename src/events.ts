@@ -2,13 +2,12 @@
 
 import { appendFileSync, mkdirSync, existsSync } from "fs";
 import { join } from "path";
-import type {
-  ItemStartedParams, ItemCompletedParams, DeltaParams,
-  ErrorNotificationParams,
-  FileChange, CommandExec,
-  CommandExecutionItem, FileChangeItem, ExitedReviewModeItem,
-  AgentMessageItem,
-  RunPhase,
+import {
+  isKnownItem,
+  type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
+  type ErrorNotificationParams,
+  type FileChange, type CommandExec,
+  type RunPhase,
 } from "./types";
 
 type ProgressCallback = (line: string) => void;
@@ -32,16 +31,17 @@ export class EventDispatcher {
     logsDir: string,
     onProgress?: ProgressCallback,
   ) {
-    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
+    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true, mode: 0o700 });
     this.logPath = join(logsDir, `${shortId}.log`);
     this.onProgress = onProgress ?? ((line) => process.stderr.write(line + "\n"));
   }
 
   handleItemStarted(params: ItemStartedParams): void {
     const { item } = params;
+    if (!isKnownItem(item)) return;
 
     if (item.type === "commandExecution") {
-      this.progress(`Running: ${(item as CommandExecutionItem).command}`);
+      this.progress(`Running: ${item.command}`);
     }
 
     // Track which item is receiving deltas and separate consecutive messages
@@ -58,50 +58,47 @@ export class EventDispatcher {
 
   handleItemCompleted(params: ItemCompletedParams): void {
     const { item } = params;
+    if (!isKnownItem(item)) return;
 
     // Track agent message phases for output filtering
     if (item.type === "agentMessage") {
-      const agentMsg = item as AgentMessageItem;
-      if (agentMsg.phase === "final_answer") {
+      if (item.phase === "final_answer") {
         // Final answer: capture its text into finalAnswerOutput
         this.finalAnswerItemIds.add(item.id);
-        if (agentMsg.text) {
-          this.finalAnswerOutput = agentMsg.text;
+        if (item.text) {
+          this.finalAnswerOutput = item.text;
         }
-      } else if (agentMsg.text) {
+      } else if (item.text) {
         // Intermediate agent message (planning/status): show as progress
-        const preview = agentMsg.text.length > 120
-          ? agentMsg.text.slice(0, 117) + "..."
-          : agentMsg.text;
+        const preview = item.text.length > 120
+          ? item.text.slice(0, 117) + "..."
+          : item.text;
         this.progress(preview);
       }
     }
 
-    // Type assertions needed: GenericItem's `type: string` prevents discriminated union narrowing
     switch (item.type) {
       case "commandExecution": {
-        const cmd = item as CommandExecutionItem;
-        if (cmd.status !== "completed") {
-          this.progress(`Command ${cmd.status}: ${cmd.command}`);
+        if (item.status !== "completed") {
+          this.progress(`Command ${item.status}: ${item.command}`);
           break;
         }
         this.commandsRun.push({
-          command: cmd.command,
-          exitCode: cmd.exitCode ?? null,
-          durationMs: cmd.durationMs ?? null,
+          command: item.command,
+          exitCode: item.exitCode ?? null,
+          durationMs: item.durationMs ?? null,
         });
-        const exit = cmd.exitCode ?? "?";
-        this.log(`command: ${cmd.command} (exit ${exit})`);
+        const exit = item.exitCode ?? "?";
+        this.log(`command: ${item.command} (exit ${exit})`);
         break;
       }
       case "fileChange": {
-        const fc = item as FileChangeItem;
-        if (fc.status !== "completed") {
-          const paths = fc.changes.map(c => c.path).join(", ");
-          this.progress(`File change ${fc.status}: ${paths || "(no paths)"}`);
+        if (item.status !== "completed") {
+          const paths = item.changes.map(c => c.path).join(", ");
+          this.progress(`File change ${item.status}: ${paths || "(no paths)"}`);
           break;
         }
-        for (const change of fc.changes) {
+        for (const change of item.changes) {
           this.filesChanged.push({
             path: change.path,
             kind: change.kind.type,
@@ -112,9 +109,8 @@ export class EventDispatcher {
         break;
       }
       case "exitedReviewMode": {
-        const review = item as ExitedReviewModeItem;
-        this.accumulatedOutput = review.review;
-        this.log(`review output (${review.review.length} chars)`);
+        this.accumulatedOutput = item.review;
+        this.log(`review output (${item.review.length} chars)`);
         break;
       }
     }

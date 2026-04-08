@@ -17,19 +17,20 @@
  */
 
 import net from "node:net";
-import fs from "node:fs";
+import fs, { chmodSync } from "node:fs";
 import path from "node:path";
 import {
   connectDirect,
   parseMessage,
   type AppServerClient,
 } from "./client";
-import { parseEndpoint } from "./broker";
+import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
+import { RpcError } from "./types";
 import { config } from "./config";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const BROKER_BUSY_RPC_CODE = -32001;
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 
 /** Methods that start a streaming turn — the socket that initiated the stream
  *  owns notifications until turn/completed arrives. */
@@ -122,6 +123,14 @@ async function main() {
   /** Thread IDs whose turns completed — prevents stale stream ownership
    *  when turn/completed arrives during the streaming request itself. */
   const completedStreamThreadIds = new Set<string>();
+  /** Pending forwarded requests (e.g. approval requests sent to a client socket,
+   *  awaiting a response routed through the main data handler). */
+  const pendingForwardedRequests = new Map<string, {
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+    target: net.Socket;
+  }>();
   /** Idle timer — shut down if no activity within idleTimeout. */
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -213,47 +222,22 @@ async function main() {
         throw new Error("No active client to forward approval request");
       }
 
-      // Forward the request to the client socket and wait for response
+      // Forward the request to the client socket and wait for the response
+      // via the main data handler (which checks pendingForwardedRequests).
       return new Promise((resolve, reject) => {
         const reqId = `broker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-        // Set up response listener for this request
-        let approvalBuffer = "";
-        const responseHandler = (chunk: string) => {
-          approvalBuffer += chunk;
-          let newlineIdx: number;
-          while ((newlineIdx = approvalBuffer.indexOf("\n")) !== -1) {
-            const line = approvalBuffer.slice(0, newlineIdx).trim();
-            approvalBuffer = approvalBuffer.slice(newlineIdx + 1);
-            if (!line) continue;
-            try {
-              const msg = JSON.parse(line);
-              if (msg.id === reqId && "result" in msg) {
-                target.removeListener("data", responseHandler);
-                resolve(msg.result);
-                return;
-              }
-              if (msg.id === reqId && "error" in msg) {
-                target.removeListener("data", responseHandler);
-                reject(new Error(msg.error?.message ?? "Client error"));
-                return;
-              }
-            } catch (e) {
-              process.stderr.write(`[broker-server] Warning: could not parse approval response (reqId=${reqId}): ${line.slice(0, 200)}\n`);
-            }
-          }
-        };
+        // Match client-side approval timeout (1 hour) — interactive approvals
+        // require human action and 60s is too short.
+        const timer = setTimeout(() => {
+          pendingForwardedRequests.delete(reqId);
+          reject(new Error("Approval request forwarding timed out"));
+        }, 3_600_000);
 
-        target.on("data", responseHandler);
+        pendingForwardedRequests.set(reqId, { resolve, reject, timer, target });
 
         // Send the request to the client socket
         send(target, { id: reqId, method, params: reqParams });
-
-        // Timeout after 60s
-        setTimeout(() => {
-          target.removeListener("data", responseHandler);
-          reject(new Error("Approval request forwarding timed out"));
-        }, 60_000);
       });
     });
   }
@@ -262,6 +246,12 @@ async function main() {
 
   async function shutdown(server: net.Server): Promise<void> {
     if (idleTimer) clearTimeout(idleTimer);
+    // Reject all pending forwarded requests before closing sockets
+    for (const [reqId, entry] of pendingForwardedRequests) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error("Broker shutting down"));
+      pendingForwardedRequests.delete(reqId);
+    }
     for (const socket of sockets) {
       socket.end();
     }
@@ -294,6 +284,11 @@ async function main() {
 
     socket.on("data", async (chunk: string) => {
       buffer += chunk;
+      if (buffer.length > MAX_BUFFER_SIZE) {
+        process.stderr.write("[broker-server] Client buffer exceeded maximum size, disconnecting\n");
+        socket.destroy();
+        return;
+      }
       let newlineIdx: number;
       while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, newlineIdx).trim();
@@ -342,9 +337,33 @@ async function main() {
           continue;
         }
 
-        // Ignore responses (id + result/error, no method) — these are answers
-        // to forwarded approval requests, handled by their own listener
+        // Route responses (id + result/error, no method) to pending forwarded
+        // requests (e.g. approval request responses from the client).
         if (message.id !== undefined && !("method" in message)) {
+          const reqId = String(message.id);
+          const entry = pendingForwardedRequests.get(reqId);
+          if (entry) {
+            if (entry.target !== socket) {
+              process.stderr.write(
+                `[broker-server] Warning: forwarded response id=${reqId} from wrong socket — ignoring\n`,
+              );
+              continue;
+            }
+            pendingForwardedRequests.delete(reqId);
+            clearTimeout(entry.timer);
+            if ("result" in message) {
+              entry.resolve(message.result);
+            } else if ("error" in message) {
+              const errObj = message.error as Record<string, unknown> | undefined;
+              entry.reject(new Error((errObj?.message as string) ?? "Client error"));
+            } else {
+              entry.reject(new Error("Malformed forwarded response: missing both 'result' and 'error'"));
+            }
+          } else {
+            process.stderr.write(
+              `[broker-server] Warning: received response for unknown/expired forwarded request id=${reqId}\n`,
+            );
+          }
           continue;
         }
 
@@ -394,7 +413,7 @@ async function main() {
             send(socket, {
               id: message.id,
               error: buildJsonRpcError(
-                (error as any).rpcCode ?? -32000,
+                error instanceof RpcError ? error.rpcCode : -32000,
                 (error as Error).message,
               ),
             });
@@ -440,7 +459,7 @@ async function main() {
           send(socket, {
             id: message.id,
             error: buildJsonRpcError(
-              (error as any).rpcCode ?? -32000,
+              error instanceof RpcError ? error.rpcCode : -32000,
               (error as Error).message,
             ),
           });
@@ -456,10 +475,22 @@ async function main() {
 
     socket.on("close", () => {
       sockets.delete(socket);
+      // Reject only pending forwarded requests targeting this socket
+      for (const [reqId, entry] of pendingForwardedRequests) {
+        if (entry.target !== socket) continue;
+        clearTimeout(entry.timer);
+        entry.reject(new Error("Client disconnected while awaiting approval response"));
+        pendingForwardedRequests.delete(reqId);
+      }
       if (activeStreamSocket === socket) {
-        process.stderr.write("[broker-server] Warning: stream-owning client disconnected while turn is active\n");
-        activeStreamSocket = null;
-        // Keep activeStreamThreadIds so turn/completed can still clear the state
+        if (activeStreamThreadIds) {
+          // Turn is still running — keep activeStreamSocket as a sentinel so the
+          // concurrency check blocks new streaming requests until turn/completed
+          // clears the state. Nulling it would let a second client interleave.
+          process.stderr.write("[broker-server] Warning: stream-owning client disconnected while turn is active\n");
+        } else {
+          activeStreamSocket = null;
+        }
       }
       if (activeRequestSocket === socket) {
         activeRequestSocket = null;
@@ -469,6 +500,13 @@ async function main() {
     socket.on("error", (err) => {
       process.stderr.write(`[broker-server] Client socket error: ${err.message}\n`);
       sockets.delete(socket);
+      // Reject only pending forwarded requests targeting this socket
+      for (const [reqId, entry] of pendingForwardedRequests) {
+        if (entry.target !== socket) continue;
+        clearTimeout(entry.timer);
+        entry.reject(new Error("Client socket error while awaiting approval response"));
+        pendingForwardedRequests.delete(reqId);
+      }
       if (activeStreamSocket === socket) {
         process.stderr.write("[broker-server] Warning: stream-owning client errored while turn is active\n");
         activeStreamSocket = null;
@@ -507,6 +545,9 @@ async function main() {
     process.stderr.write(
       `[broker-server] Listening on ${endpoint} (idle timeout: ${idleTimeout}ms)\n`,
     );
+    if (listenTarget.kind === "unix") {
+      chmodSync(listenTarget.path, 0o700);
+    }
   });
 
   resetIdleTimer();

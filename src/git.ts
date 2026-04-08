@@ -48,8 +48,8 @@ export function getDiffStats(
   const args = ["diff", "--shortstat"];
   if (ref) args.push(ref);
 
-  const { stdout } = git(args, cwd);
-  if (!stdout) return { files: 0, insertions: 0, deletions: 0 };
+  const { stdout, status } = git(args, cwd);
+  if (status !== 0 || !stdout) return { files: 0, insertions: 0, deletions: 0 };
 
   // Parse lines like: "3 files changed, 10 insertions(+), 5 deletions(-)"
   // Some components may be missing (e.g. no deletions, or only file renames).
@@ -79,8 +79,10 @@ export function getUntrackedFiles(cwd: string, maxSize: number = DEFAULT_MAX_SIZ
     try {
       const stat = statSync(absPath);
       if (stat.size > maxSize) continue;
-    } catch {
-      // File may have been deleted between listing and stat; skip
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: could not stat ${relPath}: ${(e as Error).message}`);
+      }
       continue;
     }
 
@@ -91,7 +93,10 @@ export function getUntrackedFiles(cwd: string, maxSize: number = DEFAULT_MAX_SIZ
       const bytesRead = readSync(fd, buf, 0, 8192, 0);
       closeSync(fd);
       if (buf.subarray(0, bytesRead).includes(0)) continue;
-    } catch {
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: could not read ${relPath}: ${(e as Error).message}`);
+      }
       continue;
     }
 

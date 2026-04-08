@@ -55,17 +55,17 @@ export function parseMessage(line: string): JsonRpcMessage | null {
 // ---------------------------------------------------------------------------
 
 /** Pending request tracker. */
-interface PendingRequest {
+export interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
 /** Handler for server-sent notifications. */
-type NotificationHandler = (params: unknown) => void;
+export type NotificationHandler = (params: unknown) => void;
 
 /** Handler for server-sent requests (e.g. approval requests). Returns the result to send back. */
-type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
+export type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
 
 /** Options for connectDirect(). */
 export interface ConnectOptions {
@@ -102,22 +102,22 @@ export interface AppServerClient {
 }
 
 /** Type guard: message is a response (has id + result). */
-function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
+export function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
   return "id" in msg && "result" in msg && !("method" in msg);
 }
 
 /** Type guard: message is an error response (has id + error). */
-function isError(msg: JsonRpcMessage): msg is JsonRpcError {
+export function isError(msg: JsonRpcMessage): msg is JsonRpcError {
   return "id" in msg && "error" in msg && !("method" in msg);
 }
 
 /** Type guard: message is a request (has id + method). */
-function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
+export function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
   return "id" in msg && "method" in msg && !("result" in msg) && !("error" in msg);
 }
 
 /** Type guard: message is a notification (has method, no id). */
-function isNotification(msg: JsonRpcMessage): msg is JsonRpcNotification {
+export function isNotification(msg: JsonRpcMessage): msg is JsonRpcNotification {
   return "method" in msg && !("id" in msg);
 }
 

@@ -7,44 +7,13 @@
  */
 
 import net from "node:net";
-import { parseMessage, formatNotification, formatResponse } from "./client";
-import type { AppServerClient, RequestId } from "./client";
-import type {
-  JsonRpcMessage,
-  JsonRpcResponse,
-  JsonRpcError,
-  JsonRpcRequest,
-  JsonRpcNotification,
-} from "./types";
+import { parseMessage, formatNotification, formatResponse, isResponse, isError, isRequest, isNotification } from "./client";
+import type { AppServerClient, RequestId, PendingRequest, NotificationHandler, ServerRequestHandler } from "./client";
+import { RpcError, type JsonRpcMessage } from "./types";
 import { config } from "./config";
 import { parseEndpoint } from "./broker";
 
-/** Pending request tracker. */
-interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-/** Handler for server-sent notifications. */
-type NotificationHandler = (params: unknown) => void;
-
-/** Handler for server-sent requests. */
-type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
-
-/** Type guard helpers */
-function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
-  return "id" in msg && "result" in msg && !("method" in msg);
-}
-function isError(msg: JsonRpcMessage): msg is JsonRpcError {
-  return "id" in msg && "error" in msg && !("method" in msg);
-}
-function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
-  return "id" in msg && "method" in msg && !("result" in msg) && !("error" in msg);
-}
-function isNotification(msg: JsonRpcMessage): msg is JsonRpcNotification {
-  return "method" in msg && !("id" in msg);
-}
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 
 export interface BrokerClientOptions {
   /** The broker endpoint (unix:/path or pipe:\path). */
@@ -128,10 +97,10 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
         clearTimeout(entry.timer);
         pending.delete(msg.id);
         const e = msg.error;
-        const err = new Error(
+        const err = new RpcError(
           `JSON-RPC error ${e.code}: ${e.message}${e.data ? ` (${JSON.stringify(e.data)})` : ""}`,
+          e.code,
         );
-        (err as any).rpcCode = e.code;
         entry.reject(err);
       }
       return;
@@ -186,6 +155,10 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
   let buffer = "";
   socket.on("data", (chunk: string) => {
     buffer += chunk;
+    if (buffer.length > MAX_BUFFER_SIZE) {
+      socket.destroy(new Error("Broker response buffer exceeded maximum size"));
+      return;
+    }
     let newlineIdx: number;
     while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, newlineIdx).trim();

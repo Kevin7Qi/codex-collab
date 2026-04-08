@@ -40,7 +40,7 @@ import {
   unlinkSync,
   statSync,
 } from "fs";
-import { resolve, join } from "path";
+import { resolve, join, dirname } from "path";
 import type {
   ThreadStartResponse,
   Model,
@@ -75,10 +75,10 @@ export function getWorkspacePaths(cwd: string): WorkspacePaths {
   };
   // Lazily ensure workspace directories exist on first access.
   for (const dir of [paths.logsDir, paths.approvalsDir, paths.killSignalsDir, paths.pidsDir, paths.runsDir]) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   // Ensure global data dir exists for config.json
-  mkdirSync(config.dataDir, { recursive: true });
+  mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   // Migrate legacy global state to per-workspace layout (idempotent)
   migrateGlobalState(cwd);
   return paths;
@@ -319,9 +319,9 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
 /** Fields users can set in ~/.codex-collab/config.json. */
 export interface UserConfig {
   model?: string;
-  reasoning?: string;
-  sandbox?: string;
-  approval?: string;
+  reasoning?: ReasoningEffort;
+  sandbox?: SandboxMode;
+  approval?: ApprovalPolicy;
   timeout?: number;
 }
 
@@ -346,6 +346,7 @@ export function loadUserConfig(): UserConfig {
 
 export function saveUserConfig(cfg: UserConfig): void {
   try {
+    mkdirSync(dirname(config.configFile), { recursive: true, mode: 0o700 });
     writeFileSync(config.configFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
   } catch (e) {
     die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)}`);
@@ -367,24 +368,24 @@ export function applyUserConfig(options: Options): void {
     }
   }
   if (!options.explicit.has("reasoning") && typeof cfg.reasoning === "string") {
-    if (config.reasoningEfforts.includes(cfg.reasoning as any)) {
-      options.reasoning = cfg.reasoning as ReasoningEffort;
+    if (cfg.reasoning && config.reasoningEfforts.includes(cfg.reasoning)) {
+      options.reasoning = cfg.reasoning;
       options.configured.add("reasoning");
     } else {
       console.error(`[codex] Warning: ignoring invalid reasoning in config: ${cfg.reasoning}`);
     }
   }
   if (!options.explicit.has("sandbox") && typeof cfg.sandbox === "string") {
-    if (config.sandboxModes.includes(cfg.sandbox as any)) {
-      options.sandbox = cfg.sandbox as SandboxMode;
+    if (cfg.sandbox && config.sandboxModes.includes(cfg.sandbox)) {
+      options.sandbox = cfg.sandbox;
       options.configured.add("sandbox");
     } else {
       console.error(`[codex] Warning: ignoring invalid sandbox in config: ${cfg.sandbox}`);
     }
   }
   if (!options.explicit.has("approval") && typeof cfg.approval === "string") {
-    if (config.approvalPolicies.includes(cfg.approval as any)) {
-      options.approval = cfg.approval as ApprovalPolicy;
+    if (cfg.approval && config.approvalPolicies.includes(cfg.approval)) {
+      options.approval = cfg.approval;
       options.configured.add("approval");
     } else {
       console.error(`[codex] Warning: ignoring invalid approval in config: ${cfg.approval}`);
@@ -564,6 +565,7 @@ export async function startOrResumeThread(
         throw e; // Let user see the ambiguity error
       }
       // Thread not found locally — treat as raw server thread ID
+      validateId(opts.resumeId);
       threadId = opts.resumeId;
     }
     shortId = findShortId(ws.threadsFile, threadId) ?? opts.resumeId;

@@ -71,6 +71,7 @@ export function loadBrokerState(stateDir: string): BrokerState | null {
     ) {
       return parsed as BrokerState;
     }
+    console.error("[broker] Warning: broker state file has invalid structure — ignoring");
     return null;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -82,10 +83,10 @@ export function loadBrokerState(stateDir: string): BrokerState | null {
 
 /** Save broker state to `{stateDir}/broker.json`. Creates the directory if needed. */
 export function saveBrokerState(stateDir: string, state: BrokerState): void {
-  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const filePath = path.join(stateDir, BROKER_STATE_FILE);
   const tmp = filePath + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
   fs.renameSync(tmp, filePath);
 }
 
@@ -117,6 +118,7 @@ export function loadSessionState(stateDir: string): SessionState | null {
     ) {
       return parsed as SessionState;
     }
+    console.error("[broker] Warning: session state file has invalid structure — ignoring");
     return null;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -128,10 +130,10 @@ export function loadSessionState(stateDir: string): SessionState | null {
 
 /** Save session state to `{stateDir}/session.json`. Creates the directory if needed. */
 export function saveSessionState(stateDir: string, state: SessionState): void {
-  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const filePath = path.join(stateDir, SESSION_STATE_FILE);
   const tmp = filePath + ".tmp";
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n", { mode: 0o600 });
   fs.renameSync(tmp, filePath);
 }
 
@@ -186,7 +188,7 @@ const LOCK_STALE_THRESHOLD_MS = 60_000;
  * Returns a release function, or null if the lock cannot be acquired.
  */
 export function acquireSpawnLock(stateDir: string): (() => void) | null {
-  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(stateDir, LOCK_FILE);
   let fd: number | undefined;
 
@@ -392,7 +394,7 @@ async function waitForBrokerReady(
  */
 export async function ensureConnection(cwd: string): Promise<AppServerClient> {
   const stateDir = resolveStateDir(cwd);
-  fs.mkdirSync(stateDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 
   // Check for an existing recent session to reuse the session ID
   const existingSession = loadSessionState(stateDir);
@@ -416,12 +418,16 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
         const { connectToBroker } = await import("./broker-client");
         const client = await connectToBroker({ endpoint: existingState.endpoint });
 
-        // Update session state
-        const now = new Date().toISOString();
-        saveSessionState(stateDir, {
-          sessionId,
-          startedAt: existingSession?.startedAt ?? now,
-        });
+        // Update session state (non-fatal if save fails — connection is valid)
+        try {
+          const now = new Date().toISOString();
+          saveSessionState(stateDir, {
+            sessionId,
+            startedAt: existingSession?.startedAt ?? now,
+          });
+        } catch (e) {
+          console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
+        }
 
         return client;
       } catch (e) {
@@ -453,11 +459,15 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
       try {
         const { connectToBroker } = await import("./broker-client");
         const client = await connectToBroker({ endpoint: freshState.endpoint });
-        const now = new Date().toISOString();
-        saveSessionState(stateDir, {
-          sessionId,
-          startedAt: existingSession?.startedAt ?? now,
-        });
+        try {
+          const now = new Date().toISOString();
+          saveSessionState(stateDir, {
+            sessionId,
+            startedAt: existingSession?.startedAt ?? now,
+          });
+        } catch (e) {
+          console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
+        }
         return client;
       } catch (e) {
         console.error(`[broker] Warning: failed to connect to existing broker after lock: ${(e as Error).message}. Spawning new one.`);
@@ -476,9 +486,13 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
         `[broker] Warning: failed to spawn broker: ${(e as Error).message}. Using direct connection.`,
       );
       const client = await connectDirect({ cwd });
-      const now = new Date().toISOString();
-      saveBrokerState(stateDir, { endpoint: null, pid: null, sessionDir: stateDir, startedAt: now });
-      saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+      try {
+        const now = new Date().toISOString();
+        saveBrokerState(stateDir, { endpoint: null, pid: null, sessionDir: stateDir, startedAt: now });
+        saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+      } catch (e) {
+        console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}`);
+      }
       return client;
     }
 
@@ -488,16 +502,24 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
       // Broker didn't start in time — fall back to direct
       console.error("[broker] Warning: broker did not become ready in time. Using direct connection.");
       const client = await connectDirect({ cwd });
-      const now = new Date().toISOString();
-      saveBrokerState(stateDir, { endpoint: null, pid, sessionDir: stateDir, startedAt: now });
-      saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+      try {
+        const now = new Date().toISOString();
+        saveBrokerState(stateDir, { endpoint: null, pid, sessionDir: stateDir, startedAt: now });
+        saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+      } catch (e) {
+        console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}`);
+      }
       return client;
     }
 
     // 5. Connect to the new broker
-    const now = new Date().toISOString();
-    saveBrokerState(stateDir, { endpoint, pid, sessionDir: stateDir, startedAt: now });
-    saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+    try {
+      const now = new Date().toISOString();
+      saveBrokerState(stateDir, { endpoint, pid, sessionDir: stateDir, startedAt: now });
+      saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+    } catch (e) {
+      console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}. Next invocation may not find this broker.`);
+    }
 
     try {
       const { connectToBroker } = await import("./broker-client");

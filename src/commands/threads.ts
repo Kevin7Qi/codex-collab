@@ -96,7 +96,7 @@ export async function handleThreads(args: string[]): Promise<void> {
     try {
       await withClient(async (client) => {
         const count = await discoverThreads(client, ws, options.dir);
-        if (count > 0) {
+        if (count > 0 && !options.json) {
           progress(`Discovered ${count} thread(s) from server`);
         }
       });
@@ -410,8 +410,8 @@ export async function handleResumeCandidate(args: string[]): Promise<void> {
           candidate = getResumeCandidate(stateDir, sessionId);
         }
       });
-    } catch {
-      // Discovery failed — fall through with local-only result
+    } catch (e) {
+      console.error(`[codex] Warning: server discovery failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

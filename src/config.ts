@@ -114,7 +114,12 @@ export function resolveWorkspaceDir(cwd: string): string {
  */
 export function resolveStateDir(cwd: string): string {
   const wsRoot = resolveWorkspaceDir(cwd);
-  const canonical = realpathSync(wsRoot);
+  let canonical: string;
+  try {
+    canonical = realpathSync(wsRoot);
+  } catch {
+    canonical = resolve(wsRoot);
+  }
   const slug = basename(canonical).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
   const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
   return join(getHome(), ".codex-collab", "workspaces", `${slug}-${hash}`);

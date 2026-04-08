@@ -135,7 +135,7 @@ export async function handleReview(args: string[]): Promise<void> {
       setActiveWsPaths(undefined);
       removePidFile(ws.pidsDir, shortId);
     }
-  });
+  }, options.dir);
 
   process.exit(exitCode);
 }
