@@ -110,6 +110,16 @@ async function main() {
   // Spawn the real app-server
   const appClient = await connectDirect({ cwd });
 
+  // If the app-server exits unexpectedly, shut down the broker immediately
+  // so the next ensureConnection() spawns a fresh broker + app-server.
+  let shutdownInitiated = false;
+  appClient.onClose(() => {
+    if (shutdownInitiated) return;
+    shutdownInitiated = true;
+    process.stderr.write("[broker-server] App-server exited unexpectedly — shutting down\n");
+    shutdown(server).then(() => process.exit(1));
+  });
+
   // ─── State ──────────────────────────────────────────────────────────────
 
   /** Socket that currently owns a pending request (waiting for response). */
@@ -245,6 +255,7 @@ async function main() {
   // ─── Shutdown ───────────────────────────────────────────────────────────
 
   async function shutdown(server: net.Server): Promise<void> {
+    shutdownInitiated = true;
     if (idleTimer) clearTimeout(idleTimer);
     // Reject all pending forwarded requests before closing sockets
     for (const [reqId, entry] of pendingForwardedRequests) {

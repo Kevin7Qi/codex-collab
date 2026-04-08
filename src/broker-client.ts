@@ -169,9 +169,14 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     }
   });
 
+  const closeHandlers = new Set<() => void>();
+
   socket.on("close", () => {
     if (!closed) {
       rejectAll("Broker connection closed");
+      for (const handler of closeHandlers) {
+        try { handler(); } catch { /* best effort */ }
+      }
     }
   });
 
@@ -245,6 +250,11 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     write(formatResponse(id, result));
   }
 
+  function onClose(handler: () => void): () => void {
+    closeHandlers.add(handler);
+    return () => { closeHandlers.delete(handler); };
+  }
+
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
@@ -287,6 +297,7 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     on,
     onRequest,
     respond,
+    onClose,
     close,
     userAgent,
   };

@@ -92,6 +92,9 @@ export interface AppServerClient {
   onRequest(method: string, handler: ServerRequestHandler): () => void;
   /** Send a response to a server-sent request. */
   respond(id: RequestId, result: unknown): void;
+  /** Register a callback invoked when the connection closes unexpectedly
+   *  (e.g. the app-server process exits). Not called on intentional close(). */
+  onClose(handler: () => void): () => void;
   /** Close the connection and terminate the server process.
    *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL.
    *  On Windows: close stdin, then immediately terminate the process tree
@@ -272,11 +275,15 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     }
   })();
 
-  // Monitor process exit: reject all pending requests
+  // Monitor process exit: reject all pending requests and notify close handlers
+  const closeHandlers = new Set<() => void>();
   proc.exited.then(() => {
     exited = true;
     if (!closed) {
       rejectAll("App server process exited unexpectedly");
+      for (const handler of closeHandlers) {
+        try { handler(); } catch { /* best effort */ }
+      }
     }
   });
 
@@ -355,6 +362,11 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
 
   function respond(id: RequestId, result: unknown): void {
     write(formatResponse(id, result));
+  }
+
+  function onClose(handler: () => void): () => void {
+    closeHandlers.add(handler);
+    return () => { closeHandlers.delete(handler); };
   }
 
   /** Wait for the process to exit within the given timeout. */
@@ -443,6 +455,7 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     on,
     onRequest,
     respond,
+    onClose,
     close,
     userAgent: initResult.userAgent,
   };

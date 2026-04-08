@@ -77,6 +77,7 @@ function buildMockClient(
       return () => { requestHandlers.delete(method); };
     },
     respond() {},
+    onClose() { return () => {}; },
     async close() {},
     userAgent: "mock/1.0",
   };
