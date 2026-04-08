@@ -11,7 +11,6 @@
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import net from "node:net";
-import fs from "node:fs";
 import { mkdtempSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -419,10 +418,7 @@ async function waitFor(
 
 // ─── Socket support detection ────────────────────────────────────────────────
 
-let canCreateSockets: boolean | null = null;
-
-async function checkSocketSupport(): Promise<boolean> {
-  if (canCreateSockets !== null) return canCreateSockets;
+const SOCKETS_AVAILABLE = await (async () => {
   const checkDir = mkdtempSync(join(tmpdir(), "broker-sock-check-"));
   const testSock = join(checkDir, "test.sock");
   try {
@@ -431,23 +427,23 @@ async function checkSocketSupport(): Promise<boolean> {
       srv.on("error", reject);
       srv.listen(testSock, () => { srv.close(); resolve(); });
     });
-    canCreateSockets = true;
+    return true;
   } catch {
-    canCreateSockets = false;
+    return false;
+  } finally {
+    try { rmSync(checkDir, { recursive: true, force: true }); } catch {}
   }
-  try { rmSync(checkDir, { recursive: true, force: true }); } catch {}
-  return canCreateSockets;
-}
+})();
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe("broker-server", () => {
+describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
   // ── Initialize handshake ──────────────────────────────────────────────────
 
   describe("initialize handshake", () => {
     test("responds with userAgent locally, does not forward to app-server", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -470,7 +466,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("swallows initialized notification without error", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -496,7 +492,7 @@ describe("broker-server", () => {
 
   describe("request forwarding", () => {
     test("forwards thread/start to app-server and returns result", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -520,7 +516,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("forwards thread/read and thread/list as read-only methods", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -547,7 +543,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("returns JSON parse error for invalid JSON input", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -579,7 +575,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("ignores client notifications (no id)", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -593,7 +589,11 @@ describe("broker-server", () => {
         // Send a notification (no id) — broker should silently ignore it
         client.send({ method: "some/notification", params: {} });
 
-        // Verify the broker is still functional
+        // Verify the broker is still functional after receiving the notification.
+        // NOTE: This only verifies the broker didn't crash. It does not verify that
+        // the notification was NOT forwarded to the app-server, because the mock
+        // app-server silently ignores notifications (no id) and there is no
+        // observable side-effect to check from the client side.
         const result = await client.request("thread/list") as { data: unknown[] };
         expect(result.data).toBeArrayOfSize(0);
 
@@ -608,7 +608,7 @@ describe("broker-server", () => {
 
   describe("concurrency control", () => {
     test("second client gets -32001 busy error during active stream", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       // Use a long turn delay so the stream stays active
@@ -653,7 +653,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("second client can proceed after first client's turn completes", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -689,7 +689,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("turn/interrupt allowed from different socket during active stream", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -717,7 +717,7 @@ describe("broker-server", () => {
           threadId: "thread-001",
           turnId: "turn-001",
         });
-        expect(interruptResult).toBeDefined();
+        expect(interruptResult).toEqual({});
 
         await client1.close();
         await client2.close();
@@ -727,7 +727,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("thread/read allowed from different socket during active stream", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -764,7 +764,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("thread/list allowed from different socket during active stream", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -798,7 +798,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("non-streaming request from same socket is allowed", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -837,7 +837,7 @@ describe("broker-server", () => {
 
   describe("notification routing", () => {
     test("turn/completed notification is forwarded to the stream-owning socket", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -874,7 +874,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("notifications are not sent to non-owning sockets", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -917,7 +917,7 @@ describe("broker-server", () => {
 
   describe("approval forwarding", () => {
     test("client receives forwarded approval request and responds — round-trip", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -974,7 +974,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("malformed response (missing result and error) is rejected", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -1010,9 +1010,11 @@ describe("broker-server", () => {
           3000,
         );
 
-        // The broker should reject the malformed response internally.
-        // Since this is an internal error logged to stderr, we verify the
-        // broker is still functional after handling it.
+        // The broker should reject the malformed response internally and log a
+        // warning to stderr. We cannot easily verify the stderr warning from the
+        // subprocess, nor can we observe the rejection sent to the app-server from
+        // the client side. We verify the broker remains functional, which confirms
+        // it handled the malformed response without crashing.
         await new Promise((r) => setTimeout(r, 200));
 
         // Broker should still be alive and respond to requests
@@ -1030,7 +1032,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("socket disconnect during pending approval rejects only that socket's approvals", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -1064,17 +1066,13 @@ describe("broker-server", () => {
         await waitFor(() => approvalReceived, 3000);
         await new Promise((r) => setTimeout(r, 200));
 
-        // Broker should still be alive — connect a new client
+        // Broker should still be alive — connect a new client.
+        // NOTE: We cannot directly verify that the pending approval was rejected
+        // (sent back to the app-server as a reject response) because the mock
+        // app-server does not expose that information. We verify indirectly: the
+        // broker survives the disconnect and accepts new connections, which confirms
+        // it cleaned up the pending approval state without deadlocking.
         const client2 = await TestClient.connectAndInit(sockPath);
-
-        // The broker might still have stream ownership from the disconnected
-        // client's turn, but thread/read should work as read-only
-        // Actually, after disconnect while turn is active, stream ownership
-        // is preserved as a sentinel. New client should get busy for streaming.
-        // But thread/list should work since no activeRequestSocket.
-        // However, the stream socket is a sentinel (not null), so even
-        // read-only from a different socket needs activeRequestSocket === null.
-        // Let's just verify the broker process is still running and accepts connections.
         expect(client2.destroyed).toBe(false);
 
         await client2.close();
@@ -1088,7 +1086,7 @@ describe("broker-server", () => {
 
   describe("socket permissions", () => {
     test("socket file has restrictive permissions (0o700)", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -1113,7 +1111,7 @@ describe("broker-server", () => {
 
   describe("broker/shutdown", () => {
     test("broker exits cleanly after broker/shutdown request", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -1142,7 +1140,7 @@ describe("broker-server", () => {
 
   describe("idle timeout", () => {
     test("broker shuts down after idle timeout with no activity", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -1162,7 +1160,7 @@ describe("broker-server", () => {
     }, 10_000);
 
     test("activity resets the idle timer", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -1198,33 +1196,45 @@ describe("broker-server", () => {
   // ── Buffer overflow protection ────────────────────────────────────────────
 
   describe("buffer overflow protection", () => {
-    test("MAX_BUFFER_SIZE constant exists (10MB)", async () => {
-      // Read the source file to verify the constant
-      const source = fs.readFileSync(
-        join(import.meta.dir, "broker-server.ts"),
-        "utf-8",
-      );
-      expect(source).toContain("MAX_BUFFER_SIZE = 10 * 1024 * 1024");
-    });
+    test("broker destroys socket when client sends >10MB without newlines", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir);
 
-    test("broker source includes buffer size check and socket.destroy call", () => {
-      // Verify that the buffer overflow protection logic exists:
-      // 1. Buffer size is checked against MAX_BUFFER_SIZE
-      // 2. socket.destroy() is called when exceeded
-      const source = fs.readFileSync(
-        join(import.meta.dir, "broker-server.ts"),
-        "utf-8",
-      );
-      expect(source).toContain("buffer.length > MAX_BUFFER_SIZE");
-      expect(source).toContain("socket.destroy()");
-    });
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 15000 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+
+        // Send >10MB of data without any newlines to trigger buffer overflow.
+        // Write in chunks to avoid backpressure issues.
+        const chunkSize = 512 * 1024; // 512KB chunks
+        const totalNeeded = 11 * 1024 * 1024; // 11MB > MAX_BUFFER_SIZE (10MB)
+        const chunk = "x".repeat(chunkSize);
+        let written = 0;
+
+        while (written < totalNeeded && !client.destroyed) {
+          (client as any).socket.write(chunk);
+          written += chunkSize;
+          // Yield to allow the broker to process and potentially destroy
+          await new Promise((r) => setTimeout(r, 5));
+        }
+
+        // Wait for the broker to detect overflow and destroy the socket
+        await waitFor(() => client.destroyed, 5000);
+        expect(client.destroyed).toBe(true);
+      } finally {
+        proc.kill();
+      }
+    }, 20_000);
   });
 
   // ── Multiple clients ──────────────────────────────────────────────────────
 
   describe("multiple clients", () => {
     test("multiple clients can connect and make sequential requests", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -1256,7 +1266,7 @@ describe("broker-server", () => {
     }, 15_000);
 
     test("client disconnect during stream preserves concurrency lock until turn completes", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir, {
@@ -1276,25 +1286,27 @@ describe("broker-server", () => {
           input: [{ type: "text", text: "hello" }],
         });
 
-        await new Promise((r) => setTimeout(r, 100));
+        // Use a longer delay to ensure stream ownership is firmly established
+        await new Promise((r) => setTimeout(r, 300));
 
         // Client 1 disconnects while stream is active
         await client1.close();
-        await new Promise((r) => setTimeout(r, 100));
+        // Wait long enough for broker to process the disconnect and set sentinel
+        await new Promise((r) => setTimeout(r, 300));
 
         // Client 2 tries to start a new streaming request — should be blocked
-        // because the orphaned stream is still a sentinel
+        // because the orphaned stream is still a sentinel (turn never completed)
+        let gotBusy = false;
         try {
           await client2.request("turn/start", {
             threadId: "thread-001",
             input: [{ type: "text", text: "next" }],
           });
-          // If this succeeds, the broker might have already cleared the lock.
-          // This is acceptable if the turn completed naturally.
         } catch (err: any) {
-          // Expected: busy error because the orphaned stream is a sentinel
+          gotBusy = true;
           expect(err.code).toBe(-32001);
         }
+        expect(gotBusy).toBe(true);
 
         await client2.close();
       } finally {
@@ -1307,12 +1319,13 @@ describe("broker-server", () => {
 
   describe("streaming methods", () => {
     test("review/start establishes stream ownership with reviewThreadId", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
+      // Use a long turn-completed delay so stream stays active during the test
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: true,
-        turnCompletedDelay: 200,
+        turnCompletedDelay: 5000,
       });
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1329,16 +1342,18 @@ describe("broker-server", () => {
         }) as { turn: { id: string }; reviewThreadId: string };
         expect(reviewResult.reviewThreadId).toBe("review-thread-001");
 
-        // While review is in progress, client 2 should be blocked for streaming
+        // Immediately try client 2 — review stream is still active (5s delay)
+        let gotBusy = false;
         try {
           await client2.request("turn/start", {
             threadId: "thread-001",
             input: [{ type: "text", text: "hello" }],
           });
-          // Might succeed if turn/completed already arrived
         } catch (err: any) {
+          gotBusy = true;
           expect(err.code).toBe(-32001);
         }
+        expect(gotBusy).toBe(true);
 
         await client1.close();
         await client2.close();
@@ -1352,7 +1367,7 @@ describe("broker-server", () => {
 
   describe("error forwarding", () => {
     test("app-server error responses are forwarded to the client", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -1381,8 +1396,12 @@ describe("broker-server", () => {
   // ── Forwarded response from wrong socket ──────────────────────────────────
 
   describe("forwarded response validation", () => {
+    // NOTE: This test only verifies the broker doesn't crash when receiving a
+    // response with an unknown id. It does not verify that the response is
+    // actually dropped (vs. silently forwarded somewhere). The broker logs a
+    // warning to stderr, but we don't capture subprocess stderr in assertions.
     test("response for unknown forwarded request is ignored", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);
@@ -1412,7 +1431,7 @@ describe("broker-server", () => {
 
   describe("stale socket cleanup", () => {
     test("removes stale socket file before listening", async () => {
-      if (!await checkSocketSupport()) return;
+
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = `unix:${sockPath}`;
       const mockDir = createMockCodex(tempDir);

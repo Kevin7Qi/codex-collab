@@ -557,10 +557,7 @@ describe("BrokerClient — socket close during pending request", () => {
     if (!await checkSocketSupport()) return;
     const sockPath = join(tempDir, "close-pending.sock");
 
-    const broker = createMockBroker(sockPath, (socket) => {
-      // After handshake, close the socket when the next message arrives
-      // (but we'll also close it proactively from the test)
-    });
+    const broker = createMockBroker(sockPath);
     await broker.start();
 
     try {
@@ -575,7 +572,7 @@ describe("BrokerClient — socket close during pending request", () => {
       await new Promise((r) => setTimeout(r, 20));
       for (const s of broker.clientSockets) s.destroy();
 
-      await expect(reqPromise).rejects.toThrow(/Broker connection closed|Broker socket error/);
+      await expect(reqPromise).rejects.toThrow(/Broker connection closed/);
 
       await client.close();
     } finally {
@@ -605,7 +602,7 @@ describe("BrokerClient — socket error during pending request", () => {
         s.destroy(new Error("simulated socket failure"));
       }
 
-      await expect(reqPromise).rejects.toThrow(/Broker connection closed|Broker socket error/);
+      await expect(reqPromise).rejects.toThrow(/Broker socket error/);
 
       await client.close();
     } finally {

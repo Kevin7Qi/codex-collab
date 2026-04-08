@@ -472,7 +472,7 @@ export async function fetchAllPages<T>(
 
 /** Pick the best model by following the upgrade chain from the server default,
  *  then preferring a -codex variant if one exists at the latest generation. */
-function pickBestModel(models: Model[]): string | undefined {
+export function pickBestModel(models: Model[]): string | undefined {
   const byId = new Map(models.map(m => [m.id, m]));
 
   // Start from the server's default model

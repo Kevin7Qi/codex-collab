@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { join } from "path";
 import {
   parseOptions,
+  pickBestModel,
   validateGitRef,
   applyUserConfig,
   turnOverrides,
@@ -15,6 +16,7 @@ import {
   type Options,
 } from "./shared";
 import { config } from "../config";
+import type { Model } from "../types";
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -545,104 +547,71 @@ describe("parseOptions", () => {
   });
 });
 
-// ─── pickBestModel (tested indirectly via module-private; using subprocess) ─
-
-// pickBestModel is not exported, so we test it through a small eval shim.
+// ─── pickBestModel ────────────────────────────────────────────────────────
 
 describe("pickBestModel", () => {
-  function runPickBest(modelsJson: string): { stdout: string; exitCode: number } {
-    const script = `
-      // Re-implement pickBestModel inline since it is not exported.
-      // This mirrors the logic in shared.ts exactly.
-      function pickBestModel(models) {
-        const byId = new Map(models.map(m => [m.id, m]));
-        let current = models.find(m => m.isDefault);
-        if (!current) { console.log("undefined"); return; }
-        const visited = new Set();
-        while (current.upgrade && !visited.has(current.id)) {
-          visited.add(current.id);
-          const next = byId.get(current.upgrade);
-          if (!next) break;
-          current = next;
-        }
-        if (!current.id.endsWith("-codex")) {
-          const codexVariant = byId.get(current.id + "-codex");
-          if (codexVariant && codexVariant.upgrade === null) { console.log(codexVariant.id); return; }
-        }
-        console.log(current.id);
-      }
-      const models = ${modelsJson};
-      pickBestModel(models);
-    `;
-    const result = Bun.spawnSync({
-      cmd: ["bun", "-e", script],
-      cwd: process.cwd(),
-      stdout: "pipe",
-    });
-    return { stdout: result.stdout.toString().trim(), exitCode: result.exitCode };
-  }
+  const m = (id: string, opts: { upgrade?: string; isDefault?: boolean } = {}): Model => ({
+    id,
+    model: id,
+    upgrade: opts.upgrade ?? null,
+    isDefault: opts.isDefault ?? false,
+    displayName: id,
+    description: "",
+    hidden: false,
+    supportedReasoningEfforts: [],
+    defaultReasoningEffort: "medium",
+    inputModalities: ["text"],
+    supportsPersonality: false,
+  });
 
   test("follows upgrade chain to latest model", () => {
-    const models = JSON.stringify([
-      { id: "old", upgrade: "mid", isDefault: true },
-      { id: "mid", upgrade: "new", isDefault: false },
-      { id: "new", upgrade: null, isDefault: false },
-    ]);
-    const { stdout } = runPickBest(models);
-    expect(stdout).toBe("new");
+    const models = [
+      m("old", { upgrade: "mid", isDefault: true }),
+      m("mid", { upgrade: "new" }),
+      m("new"),
+    ];
+    expect(pickBestModel(models)).toBe("new");
   });
 
   test("prefers -codex variant at end of chain", () => {
-    const models = JSON.stringify([
-      { id: "gpt-5", upgrade: null, isDefault: true },
-      { id: "gpt-5-codex", upgrade: null, isDefault: false },
-    ]);
-    const { stdout } = runPickBest(models);
-    expect(stdout).toBe("gpt-5-codex");
+    const models = [
+      m("gpt-5", { isDefault: true }),
+      m("gpt-5-codex"),
+    ];
+    expect(pickBestModel(models)).toBe("gpt-5-codex");
   });
 
   test("does not prefer -codex variant if it has an upgrade itself", () => {
-    const models = JSON.stringify([
-      { id: "gpt-5", upgrade: null, isDefault: true },
-      { id: "gpt-5-codex", upgrade: "gpt-6-codex", isDefault: false },
-    ]);
-    const { stdout } = runPickBest(models);
+    const models = [
+      m("gpt-5", { isDefault: true }),
+      m("gpt-5-codex", { upgrade: "gpt-6-codex" }),
+    ];
     // codexVariant.upgrade !== null, so returns current (gpt-5)
-    expect(stdout).toBe("gpt-5");
+    expect(pickBestModel(models)).toBe("gpt-5");
   });
 
   test("returns undefined when no default model", () => {
-    const models = JSON.stringify([
-      { id: "gpt-5", upgrade: null, isDefault: false },
-    ]);
-    const { stdout } = runPickBest(models);
-    expect(stdout).toBe("undefined");
+    const models = [m("gpt-5")];
+    expect(pickBestModel(models)).toBeUndefined();
   });
 
   test("handles circular upgrade chain via visited guard", () => {
-    const models = JSON.stringify([
-      { id: "a", upgrade: "b", isDefault: true },
-      { id: "b", upgrade: "a", isDefault: false },
-    ]);
-    const { stdout } = runPickBest(models);
-    // a -> b (visited={a}), b -> a (visited={a,b}), a.upgrade="b" but visited.has("a") -> exit, current = a
-    expect(stdout).toBe("a");
+    const models = [
+      m("a", { upgrade: "b", isDefault: true }),
+      m("b", { upgrade: "a" }),
+    ];
+    // a -> b (visited={a}), b -> a (visited={a,b}), a: visited.has(a) -> exit loop, current = a
+    expect(pickBestModel(models)).toBe("a");
   });
 
   test("returns default when upgrade target not in list", () => {
-    const models = JSON.stringify([
-      { id: "gpt-5", upgrade: "nonexistent", isDefault: true },
-    ]);
-    const { stdout } = runPickBest(models);
-    expect(stdout).toBe("gpt-5");
+    const models = [m("gpt-5", { upgrade: "nonexistent", isDefault: true })];
+    expect(pickBestModel(models)).toBe("gpt-5");
   });
 
   test("already a -codex model stays as-is", () => {
-    const models = JSON.stringify([
-      { id: "gpt-5-codex", upgrade: null, isDefault: true },
-    ]);
-    const { stdout } = runPickBest(models);
-    expect(stdout).toBe("gpt-5-codex");
+    const models = [m("gpt-5-codex", { isDefault: true })];
+    expect(pickBestModel(models)).toBe("gpt-5-codex");
   });
 });
 
