@@ -208,6 +208,13 @@ async function main() {
           !activeStreamThreadIds ||
           activeStreamThreadIds.has(threadId);
         if (matchesStream && (activeStreamSocket === target || activeStreamSocket === null)) {
+          // If we're releasing actual stream ownership (activeStreamSocket was set),
+          // also clean up the completed tracking so it doesn't block the next turn
+          // on the same thread. In the fast-turn race (activeStreamSocket is null),
+          // keep the tracking — the pending response handler needs it.
+          if (activeStreamSocket !== null && typeof threadId === "string") {
+            completedStreamThreadIds.delete(threadId);
+          }
           activeStreamSocket = null;
           activeStreamThreadIds = null;
           if (target && activeRequestSocket === target) {
@@ -442,6 +449,21 @@ async function main() {
             message.method as string,
             (message.params ?? {}) as Record<string, unknown>,
           );
+
+          // If the requesting client disconnected while we were waiting for the
+          // response, the turn has started on the app-server but nobody is
+          // listening. Interrupt it immediately to free the stream slot.
+          if (socket.destroyed && isStreaming) {
+            const turn = (result as Record<string, unknown>)?.turn as Record<string, unknown> | undefined;
+            const turnId = turn?.id as string | undefined;
+            const threadId = (message.params as Record<string, unknown>)?.threadId as string | undefined;
+            if (turnId && threadId) {
+              appClient.request("turn/interrupt", { threadId, turnId }).catch(() => {});
+            }
+            if (activeRequestSocket === socket) activeRequestSocket = null;
+            continue;
+          }
+
           send(socket, { id: message.id, result });
 
           if (isStreaming) {

@@ -24,6 +24,7 @@ import {
   generateRunId,
   createRun,
   updateRun,
+  pruneRuns,
   migrateGlobalState,
 } from "../threads";
 import { EventDispatcher } from "../events";
@@ -103,6 +104,7 @@ export interface Options {
   base: string;
   resumeId: string | null;
   discover: boolean;
+  help: boolean;
   /** Flags explicitly provided on the command line (forwarded on resume). */
   explicit: Set<string>;
   /** Flags set by user config file (suppress auto-detection but NOT forwarded on resume). */
@@ -154,6 +156,7 @@ export function defaultOptions(): Options {
     base: "main",
     resumeId: null,
     discover: false,
+    help: false,
     explicit: new Set<string>(),
     configured: new Set<string>(),
   };
@@ -167,8 +170,7 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
     const arg = args[i];
 
     if (arg === "-h" || arg === "--help") {
-      // Commands handle their own help; for now just pass through
-      positional.push(arg);
+      options.help = true;
     } else if (arg === "-r" || arg === "--reasoning") {
       if (i + 1 >= args.length) {
         console.error("Error: --reasoning requires a value");
@@ -410,6 +412,7 @@ export let activeThreadId: string | undefined;
 export let activeShortId: string | undefined;
 export let activeTurnId: string | undefined;
 export let activeWsPaths: WorkspacePaths | undefined;
+export let activeRunId: string | undefined;
 export let shuttingDown = false;
 
 export function setActiveClient(client: AppServerClient | undefined): void { activeClient = client; }
@@ -417,6 +420,7 @@ export function setActiveThreadId(id: string | undefined): void { activeThreadId
 export function setActiveShortId(id: string | undefined): void { activeShortId = id; }
 export function setActiveTurnId(id: string | undefined): void { activeTurnId = id; }
 export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeWsPaths = ws; }
+export function setActiveRunId(id: string | undefined): void { activeRunId = id; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
 
 export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string): ApprovalHandler {
@@ -663,6 +667,7 @@ export async function startOrResumeThread(
     commandsRun: null,
     error: null,
   });
+  pruneRuns(ws.stateDir);
 
   return { threadId, shortId, runId, effective };
 }

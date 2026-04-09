@@ -202,11 +202,14 @@ async function executeTurn(
         turnReasoning = mergeReasoningStrings(turnReasoning, extracted);
       }
     }
-    // Completion inference: only agentMessage with phase "final_answer" starts the
-    // debounce timer. Other item types clear the timer to prevent premature inference
-    // while the agent is still doing work like running commands or editing files.
+    // Completion inference: agentMessage with phase "final_answer" (normal turns)
+    // or exitedReviewMode (reviews) starts the debounce timer. Other item types
+    // clear the timer to prevent premature inference while the agent is still working.
     if (inferenceResolver) {
-      if (item.type === "agentMessage" && item.phase === "final_answer") {
+      if (
+        (item.type === "agentMessage" && item.phase === "final_answer") ||
+        item.type === "exitedReviewMode"
+      ) {
         resetInferenceTimer();
       } else {
         clearInferenceTimer();
@@ -217,6 +220,18 @@ async function executeTurn(
   // AbortController for cancelling in-flight approval polls on turn completion/timeout
   const abortController = new AbortController();
   const unsubs = registerEventHandlers(client, opts, abortController.signal);
+
+  // Wire up item/started interception for completion inference — if new work
+  // starts after a final_answer, cancel the inference timer to avoid premature
+  // completion synthesis.
+  unsubs.push(
+    client.on("item/started", (params) => {
+      const p = params as ItemStartedParams;
+      if (turnId !== null && belongsToTurn(p, threadId, turnId) && inferenceResolver) {
+        clearInferenceTimer();
+      }
+    }),
+  );
 
   // Wire up item/completed interception for reasoning & structured capture.
   // This runs alongside the dispatcher's handler (registered in registerEventHandlers).

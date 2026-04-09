@@ -4,13 +4,14 @@
 
 import { config } from "./config";
 import type { AppServerClient } from "./client";
-import { updateThreadStatus } from "./threads";
+import { updateThreadStatus, updateRun } from "./threads";
 import {
   activeClient,
   activeThreadId,
   activeShortId,
   activeTurnId,
   activeWsPaths,
+  activeRunId,
   shuttingDown,
   setShuttingDown,
   removePidFile,
@@ -35,6 +36,17 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
       updateThreadStatus(activeWsPaths.threadsFile, activeThreadId, "interrupted");
     } catch (e) {
       console.error(`[codex] Warning: could not update thread status during shutdown: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (activeRunId) {
+      try {
+        updateRun(activeWsPaths.stateDir, activeRunId, {
+          status: "cancelled",
+          completedAt: new Date().toISOString(),
+          error: "Interrupted by signal",
+        });
+      } catch (e) {
+        console.error(`[codex] Warning: could not update run record during shutdown: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
   if (activeShortId && activeWsPaths) {
@@ -177,6 +189,12 @@ async function main() {
     console.error(`Error: Unknown command: ${command}`);
     console.error("Run codex-collab --help for usage");
     process.exit(1);
+  }
+
+  // Handle --help after a command (e.g., "codex-collab run --help")
+  if (rest.includes("-h") || rest.includes("--help")) {
+    showHelp();
+    process.exit(0);
   }
 
   switch (command) {

@@ -50,9 +50,6 @@ export class EventDispatcher {
       if (this.accumulatedOutput.length > 0) {
         this.accumulatedOutput += "\n";
       }
-      if (this.finalAnswerOutput.length > 0 && this.finalAnswerItemIds.has(item.id)) {
-        this.finalAnswerOutput += "\n";
-      }
     }
   }
 
@@ -63,10 +60,13 @@ export class EventDispatcher {
     // Track agent message phases for output filtering
     if (item.type === "agentMessage") {
       if (item.phase === "final_answer") {
-        // Final answer: capture its text into finalAnswerOutput
+        // Final answer: append text (supports multiple final_answer messages)
         this.finalAnswerItemIds.add(item.id);
         if (item.text) {
-          this.finalAnswerOutput = item.text;
+          if (this.finalAnswerOutput.length > 0) {
+            this.finalAnswerOutput += "\n";
+          }
+          this.finalAnswerOutput += item.text;
         }
       } else if (item.text) {
         // Intermediate agent message (planning/status): show as progress

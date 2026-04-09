@@ -399,15 +399,19 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
   // Check for an existing recent session to reuse the session ID
   const existingSession = loadSessionState(stateDir);
   let sessionId: string;
+  let sessionStartedAt: string;
   if (existingSession) {
     const ageMs = Date.now() - new Date(existingSession.startedAt).getTime();
     if (ageMs < config.defaultBrokerIdleTimeout) {
       sessionId = existingSession.sessionId;
+      sessionStartedAt = existingSession.startedAt;
     } else {
       sessionId = randomBytes(16).toString("hex");
+      sessionStartedAt = new Date().toISOString();
     }
   } else {
     sessionId = randomBytes(16).toString("hex");
+    sessionStartedAt = new Date().toISOString();
   }
 
   // 1. Check if an existing broker is alive
@@ -420,11 +424,7 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
 
         // Update session state (non-fatal if save fails — connection is valid)
         try {
-          const now = new Date().toISOString();
-          saveSessionState(stateDir, {
-            sessionId,
-            startedAt: existingSession?.startedAt ?? now,
-          });
+          saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
         } catch (e) {
           console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
         }
@@ -460,11 +460,7 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
         const { connectToBroker } = await import("./broker-client");
         const client = await connectToBroker({ endpoint: freshState.endpoint });
         try {
-          const now = new Date().toISOString();
-          saveSessionState(stateDir, {
-            sessionId,
-            startedAt: existingSession?.startedAt ?? now,
-          });
+          saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
         } catch (e) {
           console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
         }
@@ -489,7 +485,7 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
       try {
         const now = new Date().toISOString();
         saveBrokerState(stateDir, { endpoint: null, pid: null, sessionDir: stateDir, startedAt: now });
-        saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+        saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
       } catch (e) {
         console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}`);
       }
@@ -499,13 +495,16 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
     // 4. Wait for the broker to be ready
     const ready = await waitForBrokerReady(endpoint);
     if (!ready) {
-      // Broker didn't start in time — fall back to direct
+      // Broker didn't start in time — kill the orphaned process and fall back to direct
       console.error("[broker] Warning: broker did not become ready in time. Using direct connection.");
+      if (pid) {
+        try { terminateProcessTree(pid); } catch { /* best effort */ }
+      }
       const client = await connectDirect({ cwd });
       try {
         const now = new Date().toISOString();
-        saveBrokerState(stateDir, { endpoint: null, pid, sessionDir: stateDir, startedAt: now });
-        saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+        saveBrokerState(stateDir, { endpoint: null, pid: null, sessionDir: stateDir, startedAt: now });
+        saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
       } catch (e) {
         console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}`);
       }
@@ -516,7 +515,7 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
     try {
       const now = new Date().toISOString();
       saveBrokerState(stateDir, { endpoint, pid, sessionDir: stateDir, startedAt: now });
-      saveSessionState(stateDir, { sessionId, startedAt: existingSession?.startedAt ?? now });
+      saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
     } catch (e) {
       console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}. Next invocation may not find this broker.`);
     }

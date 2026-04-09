@@ -476,14 +476,14 @@ describe("parseOptions", () => {
     expect(positional).toEqual(["run", "fix the bug"]);
   });
 
-  test("--help is passed as positional", () => {
-    const { positional } = parseOptions(["--help"]);
-    expect(positional).toContain("--help");
+  test("--help sets help flag", () => {
+    const { options } = parseOptions(["--help"]);
+    expect(options.help).toBe(true);
   });
 
-  test("-h is passed as positional", () => {
-    const { positional } = parseOptions(["-h"]);
-    expect(positional).toContain("-h");
+  test("-h sets help flag", () => {
+    const { options } = parseOptions(["-h"]);
+    expect(options.help).toBe(true);
   });
 
   // -- unknown flags ---

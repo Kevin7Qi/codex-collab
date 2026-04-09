@@ -24,6 +24,7 @@ import {
   setActiveShortId,
   setActiveTurnId,
   setActiveWsPaths,
+  setActiveRunId,
   VALID_REVIEW_MODES,
   type Options,
 } from "./shared";
@@ -92,6 +93,7 @@ export async function handleReview(args: string[]): Promise<void> {
     setActiveThreadId(threadId);
     setActiveShortId(shortId);
     setActiveWsPaths(ws);
+    setActiveRunId(runId);
     writePidFile(ws.pidsDir, shortId);
 
     const dispatcher = createDispatcher(shortId, ws.logsDir, options);
@@ -110,7 +112,7 @@ export async function handleReview(args: string[]): Promise<void> {
 
       updateThreadStatus(ws.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
       updateRun(ws.stateDir, runId, {
-        status: result.status === "completed" ? "completed" : "failed",
+        status: result.status === "completed" ? "completed" : result.status === "interrupted" ? "cancelled" : "failed",
         phase: "finalizing",
         completedAt: new Date().toISOString(),
         elapsed: formatDuration(result.durationMs),
@@ -133,6 +135,7 @@ export async function handleReview(args: string[]): Promise<void> {
       setActiveShortId(undefined);
       setActiveTurnId(undefined);
       setActiveWsPaths(undefined);
+      setActiveRunId(undefined);
       removePidFile(ws.pidsDir, shortId);
     }
   }, options.dir);
