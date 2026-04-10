@@ -41,14 +41,21 @@ The codebase is organized into focused modules:
 
 | File | Purpose |
 |------|---------|
-| `src/cli.ts` | CLI commands, argument parsing, output formatting |
-| `src/protocol.ts` | JSON-RPC client for Codex app server |
-| `src/threads.ts` | Thread lifecycle, short ID mapping |
-| `src/turns.ts` | Turn lifecycle, event wiring |
-| `src/events.ts` | Event dispatcher, log writer |
+| `src/cli.ts` | CLI router, signal handlers |
+| `src/client.ts` | JSON-RPC client for Codex app server (spawn, handshake, request routing) |
+| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve) |
+| `src/broker.ts` | Shared app-server lifecycle (connection pooling, busy fallback) |
+| `src/broker-server.ts` | Detached broker process (multiplexes JSON-RPC between clients and app-server) |
+| `src/broker-client.ts` | Socket-based client for connecting to the broker server |
+| `src/threads.ts` | Thread index, run ledger, short ID mapping |
+| `src/turns.ts` | Turn lifecycle (runTurn, runReview), event wiring |
+| `src/events.ts` | Event dispatcher, log writer, output accumulator |
 | `src/approvals.ts` | Approval handler abstraction |
-| `src/types.ts` | Protocol types |
-| `src/config.ts` | Configuration constants |
+| `src/types.ts` | Protocol types (JSON-RPC, threads, turns, items, approvals) |
+| `src/config.ts` | Configuration constants, workspace resolution |
+| `src/process.ts` | Process spawn/lifecycle utilities |
+| `src/git.ts` | Git operations (diff, log, status) |
+| `src/reviews.ts` | Review validation, structured output parsing |
 
 ## Pull Requests
 

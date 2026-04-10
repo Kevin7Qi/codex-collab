@@ -80,10 +80,11 @@ codex-collab run --resume <id> "now check error handling" --content-only
 |---------|-------------|
 | `run "prompt" [opts]` | Start thread, send prompt, wait, print output |
 | `review [opts]` | Code review (PR, uncommitted, commit) |
-| `jobs [--json] [--all]` | List threads (`--limit <n>` to cap) |
+| `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server) |
 | `kill <id>` | Interrupt running thread |
 | `output <id>` | Full log for thread |
 | `progress <id>` | Recent activity (tail of log) |
+| `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |
 | `health` | Check dependencies |
 

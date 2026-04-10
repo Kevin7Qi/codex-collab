@@ -80,10 +80,11 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 |------|------|
 | `run "prompt" [opts]` | 新建会话、发送提示、等待完成并输出结果 |
 | `review [opts]` | 代码审查（PR、未提交更改、指定 commit） |
-| `jobs [--json] [--all]` | 列出会话（`--limit <n>` 限制数量） |
+| `threads [--json] [--all]` | 列出会话（`--limit <n>` 限制数量，`--discover` 扫描服务器） |
 | `kill <id>` | 中断运行中的会话 |
 | `output <id>` | 查看会话完整日志 |
 | `progress <id>` | 查看近期活动（日志尾部） |
+| `config [key] [value]` | 查看或设置持久化默认值 |
 | `models` | 列出可用模型 |
 | `health` | 检查依赖项 |
 

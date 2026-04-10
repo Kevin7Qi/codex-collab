@@ -40,10 +40,10 @@ codex-collab health
 ## Architecture Notes
 
 - Communicates with Codex via `codex app-server` JSON-RPC protocol over stdio
-- Threads stored in `~/.codex-collab/threads.json` as short ID → full ID mapping
-- Logs stored in `~/.codex-collab/logs/` per thread
+- Per-workspace state under `~/.codex-collab/workspaces/{slug}-{hash}/` (threads, logs, runs, approvals, kill signals, PIDs)
 - User defaults stored in `~/.codex-collab/config.json` (model, reasoning, sandbox, approval, timeout)
-- Approval requests use file-based IPC in `~/.codex-collab/approvals/`
+- Broker manages a shared app-server per workspace via Unix socket / named pipe; falls back to direct connection when broker is busy (parallel execution) or unavailable
 - Short IDs are 8-char hex, support prefix resolution
+- Run ledger tracks per-invocation state (status, timing, output) under `runs/`
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running
 - Skill installed to `~/.claude/skills/codex-collab/` via `install.sh` (build + copy; `--dev` for symlinks)
