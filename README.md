@@ -113,6 +113,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
+| `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
 | `--timeout <sec>` | Turn timeout (default: 1200) |
 | `--base <branch>` | Base branch for PR review (default: main) |

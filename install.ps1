@@ -54,6 +54,57 @@ try {
     Pop-Location
 }
 
+# ---------------------------------------------------------------------------
+# Generate SKILL.md with injected template table
+# ---------------------------------------------------------------------------
+
+function Generate-SkillMd {
+    param([string]$OutPath)
+
+    $rows = @()
+
+    # Scan built-in templates
+    $builtinDir = Join-Path $RepoDir "src\prompts"
+    if (Test-Path $builtinDir) {
+        foreach ($tmpl in Get-ChildItem $builtinDir -Filter "*.md") {
+            $name = $tmpl.BaseName
+            $content = Get-Content $tmpl.FullName -Raw
+            $desc = "(no description)"; $sandbox = ""
+            if ($content -match "(?ms)^---\s*\n(.+?)\n---") {
+                $fm = $Matches[1]
+                if ($fm -match "description:\s*(.+)") { $desc = $Matches[1].Trim() }
+                if ($fm -match "sandbox:\s*(.+)") { $sandbox = " ($($Matches[1].Trim()))" }
+            }
+            $rows += "| ``$name`` | $desc$sandbox |"
+        }
+    }
+
+    # Scan user templates
+    $userDir = Join-Path $env:USERPROFILE ".codex-collab\templates"
+    if (Test-Path $userDir) {
+        foreach ($tmpl in Get-ChildItem $userDir -Filter "*.md") {
+            $name = $tmpl.BaseName
+            $content = Get-Content $tmpl.FullName -Raw
+            $desc = "(no description)"; $sandbox = ""
+            if ($content -match "(?ms)^---\s*\n(.+?)\n---") {
+                $fm = $Matches[1]
+                if ($fm -match "description:\s*(.+)") { $desc = $Matches[1].Trim() }
+                if ($fm -match "sandbox:\s*(.+)") { $sandbox = " ($($Matches[1].Trim()))" }
+            }
+            $rows += "| ``$name`` | $desc$sandbox |"
+        }
+    }
+
+    $skillContent = Get-Content (Join-Path $RepoDir "SKILL.md") -Raw
+    if ($rows.Count -gt 0) {
+        $table = "| Template | Description |`n|----------|-------------|`n" + ($rows -join "`n")
+        $skillContent = $skillContent -replace "<!-- TEMPLATES -->", $table
+    } else {
+        $skillContent = $skillContent -replace "<!-- TEMPLATES -->", "No templates found."
+    }
+    [System.IO.File]::WriteAllText($OutPath, $skillContent, [System.Text.UTF8Encoding]::new($false))
+}
+
 if ($Dev) {
     Write-Host "Installing in dev mode (symlinks)..."
     Write-Host "Note: Symlinks on Windows may require Developer Mode or elevated privileges."
@@ -61,9 +112,11 @@ if ($Dev) {
     # Create skill directory
     New-Item -ItemType Directory -Path (Join-Path $SkillDir "scripts") -Force | Out-Null
 
+    # Generate SKILL.md with template table (can't inject into a symlink)
+    Generate-SkillMd -OutPath (Join-Path $SkillDir "SKILL.md")
+
     # Symlink skill files (requires Developer Mode or elevated privileges)
     $links = @(
-        @{ Path = (Join-Path $SkillDir "SKILL.md"); Target = (Join-Path $RepoDir "SKILL.md") }
         @{ Path = (Join-Path $SkillDir "scripts\codex-collab"); Target = (Join-Path $RepoDir "src\cli.ts") }
         @{ Path = (Join-Path $SkillDir "scripts\broker-server"); Target = (Join-Path $RepoDir "src\broker-server.ts") }
         @{ Path = (Join-Path $SkillDir "LICENSE.txt"); Target = (Join-Path $RepoDir "LICENSE") }
@@ -116,8 +169,11 @@ if ($Dev) {
         }
     }
 
-    # Copy SKILL.md and LICENSE
-    Copy-Item (Join-Path $RepoDir "SKILL.md") (Join-Path $skillBuild "SKILL.md")
+    # Copy prompts (needed at runtime for built-in templates)
+    Copy-Item (Join-Path $RepoDir "src\prompts") (Join-Path $skillBuild "scripts\prompts") -Recurse
+
+    # Generate SKILL.md with injected template table, copy LICENSE
+    Generate-SkillMd -OutPath (Join-Path $skillBuild "SKILL.md")
     Copy-Item (Join-Path $RepoDir "LICENSE") (Join-Path $skillBuild "LICENSE.txt")
 
     # Install skill

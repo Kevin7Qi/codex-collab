@@ -100,6 +100,7 @@ Commands:
   progress <id>           Show recent activity for thread
   config [key] [value]    Show or set persistent defaults
   models                  List available models
+  templates               List available prompt templates
   approve <id>            Approve a pending request
   decline <id>            Decline a pending request
   clean                   Delete old logs and stale mappings
@@ -119,6 +120,7 @@ Options:
   --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: main)
+  --template <name>       Prompt template (run command; checks ~/.codex-collab/templates/ first)
   --content-only          Print only result text (no progress lines)
 
 Examples:
@@ -182,7 +184,7 @@ async function main() {
   // Validate command
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "output", "progress",
-    "config", "models", "approve", "decline", "clean", "delete", "health",
+    "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "resume-candidate",
   ]);
   if (!knownCommands.has(command)) {
@@ -217,6 +219,8 @@ async function main() {
       return (await import("./commands/config")).handleConfig(rest);
     case "models":
       return (await import("./commands/config")).handleModels(rest);
+    case "templates":
+      return (await import("./commands/config")).handleTemplates(rest);
     case "approve":
       return (await import("./commands/approve")).handleApprove(rest);
     case "decline":

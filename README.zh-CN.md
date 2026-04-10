@@ -113,6 +113,7 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | `--ref <hash>` | 指定 commit 哈希（配合 `--mode commit`） |
 | `--resume <id>` | 恢复已有会话 |
 | `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted（默认: never） |
+| `--template <name>` | 提示词模板（run 命令；优先使用 `~/.codex-collab/templates/`，然后使用内置模板） |
 | `--content-only` | 隐藏进度输出；配合 `output` 时仅返回正文内容 |
 | `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200） |
 | `--base <branch>` | PR 审查的基准分支（默认: main） |

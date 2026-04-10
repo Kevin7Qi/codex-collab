@@ -105,6 +105,7 @@ export interface Options {
   resumeId: string | null;
   discover: boolean;
   help: boolean;
+  template: string | null;
   /** Flags explicitly provided on the command line (forwarded on resume). */
   explicit: Set<string>;
   /** Flags set by user config file (suppress auto-detection but NOT forwarded on resume). */
@@ -157,6 +158,7 @@ export function defaultOptions(): Options {
     resumeId: null,
     discover: false,
     help: false,
+    template: null,
     explicit: new Set<string>(),
     configured: new Set<string>(),
   };
@@ -297,6 +299,12 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.limit = Infinity;
     } else if (arg === "--discover") {
       options.discover = true;
+    } else if (arg === "--template") {
+      if (i + 1 >= args.length) {
+        console.error("Error: --template requires a name");
+        process.exit(1);
+      }
+      options.template = args[++i];
     } else if (arg === "--unset") {
       options.explicit.add("unset");
     } else if (arg.startsWith("-")) {

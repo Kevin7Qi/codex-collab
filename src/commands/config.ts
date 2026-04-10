@@ -1,6 +1,6 @@
 // src/commands/config.ts — config, models, health command handlers
 
-import { config } from "../config";
+import { config, listTemplates } from "../config";
 import type { Model } from "../types";
 import {
   die,
@@ -129,4 +129,28 @@ export async function handleHealth(_args: string[]): Promise<void> {
   }
 
   console.log("\nHealth check passed.");
+}
+
+// ---------------------------------------------------------------------------
+// templates
+// ---------------------------------------------------------------------------
+
+export function handleTemplates(_args: string[]): void {
+  const templates = listTemplates();
+
+  if (templates.length === 0) {
+    console.log("No templates found.");
+  } else {
+    console.log("Available templates:\n");
+    const maxName = Math.max(...templates.map(t => t.name.length));
+    for (const t of templates) {
+      const sandbox = t.sandbox ? ` (${t.sandbox})` : "";
+      console.log(`  ${t.name.padEnd(maxName + 2)} ${t.description}${sandbox}`);
+    }
+  }
+
+  console.log(`\nTemplate directories:`);
+  console.log(`  User:     ~/.codex-collab/templates/`);
+  console.log(`  Built-in: (bundled with codex-collab)`);
+  console.log(`\nUsage: codex-collab run "prompt" --template <name>`);
 }

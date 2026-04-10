@@ -3,6 +3,7 @@
 import { updateThreadStatus } from "../threads";
 import { updateRun } from "../threads";
 import { runTurn } from "../turns";
+import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
 import {
   die,
   parseOptions,
@@ -34,7 +35,22 @@ export async function handleRun(args: string[]): Promise<void> {
     die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
   }
 
-  const prompt = positional.join(" ");
+  let prompt = positional.join(" ");
+
+  if (options.template) {
+    const { meta, body } = loadTemplateWithMeta(options.template);
+    prompt = interpolateTemplate(body, { PROMPT: prompt });
+    // Apply template's suggested sandbox if user didn't explicitly set one.
+    // Mark as explicit so it's forwarded on resume too.
+    if (meta.sandbox && !options.explicit.has("sandbox")) {
+      const validSandboxes: readonly string[] = config.sandboxModes;
+      if (!validSandboxes.includes(meta.sandbox)) {
+        die(`Template "${options.template}" has invalid sandbox: ${meta.sandbox}\nValid: ${config.sandboxModes.join(", ")}`);
+      }
+      options.sandbox = meta.sandbox as SandboxMode;
+      options.explicit.add("sandbox");
+    }
+  }
   const ws = getWorkspacePaths(options.dir);
 
   const exitCode = await withClient(async (client) => {

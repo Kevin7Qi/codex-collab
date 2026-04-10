@@ -3,7 +3,7 @@
 import { homedir } from "os";
 import { join, basename, resolve } from "path";
 import { createHash } from "crypto";
-import { realpathSync, existsSync, readFileSync } from "fs";
+import { realpathSync, existsSync, readFileSync, readdirSync } from "fs";
 import { spawnSync } from "child_process";
 import pkg from "../package.json";
 
@@ -148,20 +148,124 @@ export function validateEffort(effort: string | undefined): ReasoningEffort | un
   return effort as ReasoningEffort;
 }
 
+// ─── Template metadata ─────────────────────────────────────────────────────
+
+export interface TemplateMeta {
+  name: string;
+  description: string;
+  sandbox?: string;
+}
+
 /**
- * Read a `.md` template file from the prompts directory.
- * Default prompts dir is `src/prompts/` relative to this file.
+ * Parse YAML frontmatter from a template string.
+ * Returns the metadata fields and the body (content after frontmatter).
+ */
+export function parseTemplateFrontmatter(raw: string): { meta: TemplateMeta; body: string } {
+  // Normalize CRLF to LF so Windows-edited templates parse correctly
+  const normalized = raw.replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines[0]?.trim() !== "---") {
+    return { meta: { name: "", description: "" }, body: normalized };
+  }
+  const endIdx = lines.indexOf("---", 1);
+  if (endIdx === -1) {
+    return { meta: { name: "", description: "" }, body: normalized };
+  }
+
+  const meta: Record<string, string> = {};
+  for (let i = 1; i < endIdx; i++) {
+    const match = lines[i].match(/^(\w+)\s*:\s*(.+)$/);
+    if (match) meta[match[1]] = match[2].trim();
+  }
+
+  const body = lines.slice(endIdx + 1).join("\n").replace(/^\n+/, "");
+  return {
+    meta: {
+      name: meta.name ?? "",
+      description: meta.description ?? "",
+      sandbox: meta.sandbox,
+    },
+    body,
+  };
+}
+
+/**
+ * Read a `.md` template file and return its body (frontmatter stripped).
+ * Checks user templates dir first (`~/.codex-collab/templates/`),
+ * then falls back to built-in templates (relative to this file).
+ *
+ * The optional `promptsDir` parameter overrides both (used in tests).
  */
 export function loadTemplate(name: string, promptsDir?: string): string {
+  const raw = loadTemplateRaw(name, promptsDir);
+  return parseTemplateFrontmatter(raw).body;
+}
+
+/**
+ * Load a template and return both its parsed metadata and body.
+ */
+export function loadTemplateWithMeta(name: string, promptsDir?: string): { meta: TemplateMeta; body: string } {
+  return parseTemplateFrontmatter(loadTemplateRaw(name, promptsDir));
+}
+
+/** Load the raw template content (including frontmatter). */
+function loadTemplateRaw(name: string, promptsDir?: string): string {
   if (name.includes("/") || name.includes("\\") || name.includes("..")) {
     throw new Error(`Invalid template name: "${name}"`);
   }
-  const dir = promptsDir ?? join(import.meta.dir, "prompts");
-  const filePath = join(dir, `${name}.md`);
-  if (!existsSync(filePath)) {
-    throw new Error(`Template not found: ${filePath}`);
+
+  if (promptsDir) {
+    const filePath = join(promptsDir, `${name}.md`);
+    if (!existsSync(filePath)) {
+      throw new Error(`Template not found: ${filePath}`);
+    }
+    return readFileSync(filePath, "utf-8");
   }
-  return readFileSync(filePath, "utf-8");
+
+  // Check user templates first, then built-in
+  const userPath = join(config.dataDir, "templates", `${name}.md`);
+  if (existsSync(userPath)) {
+    return readFileSync(userPath, "utf-8");
+  }
+
+  const builtinPath = join(import.meta.dir, "prompts", `${name}.md`);
+  if (existsSync(builtinPath)) {
+    return readFileSync(builtinPath, "utf-8");
+  }
+
+  throw new Error(`Template "${name}" not found. Place a ${name}.md file in ~/.codex-collab/templates/ or check available built-in templates.`);
+}
+
+/**
+ * List all available templates from user and built-in directories.
+ * User templates override built-in templates with the same name.
+ */
+export function listTemplates(): TemplateMeta[] {
+  const templates = new Map<string, TemplateMeta>();
+
+  // Built-in templates
+  const builtinDir = join(import.meta.dir, "prompts");
+  if (existsSync(builtinDir)) {
+    for (const file of readdirSync(builtinDir).filter(f => f.endsWith(".md"))) {
+      const name = file.replace(/\.md$/, "");
+      const raw = readFileSync(join(builtinDir, file), "utf-8");
+      const { meta } = parseTemplateFrontmatter(raw);
+      templates.set(name, { ...meta, name });
+    }
+  }
+
+  // User templates (override built-in)
+  const userDir = join(config.dataDir, "templates");
+  if (existsSync(userDir)) {
+    for (const file of readdirSync(userDir).filter(f => f.endsWith(".md"))) {
+      const name = file.replace(/\.md$/, "");
+      const raw = readFileSync(join(userDir, file), "utf-8");
+      const { meta } = parseTemplateFrontmatter(raw);
+      templates.set(name, { ...meta, name });
+    }
+  }
+
+  return [...templates.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**

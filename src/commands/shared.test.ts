@@ -449,6 +449,21 @@ describe("parseOptions", () => {
     expect(options.discover).toBe(true);
   });
 
+  test("--template sets template name", () => {
+    const { options } = parseOptions(["--template", "plan-review"]);
+    expect(options.template).toBe("plan-review");
+  });
+
+  test("--template without value exits", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "run", "src/cli.ts", "run", "--template"],
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("--template requires a name");
+  });
+
   test("--all sets limit to Infinity", () => {
     const { options } = parseOptions(["--all"]);
     expect(options.limit).toBe(Infinity);

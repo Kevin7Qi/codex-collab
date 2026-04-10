@@ -10,7 +10,10 @@ import {
   resolveModel,
   validateEffort,
   loadTemplate,
+  loadTemplateWithMeta,
   interpolateTemplate,
+  parseTemplateFrontmatter,
+  listTemplates,
 } from "./config";
 
 // ─── config object ──────────────────────────────────────────────────────────
@@ -178,6 +181,89 @@ describe("loadTemplate", () => {
     expect(() => loadTemplate("../escape")).toThrow("Invalid template name");
     expect(() => loadTemplate("sub/path")).toThrow("Invalid template name");
     expect(() => loadTemplate("..\\escape")).toThrow("Invalid template name");
+  });
+
+  test("loads built-in plan-review template without override", () => {
+    const content = loadTemplate("plan-review");
+    expect(content).toContain("{{PROMPT}}");
+    expect(content).toContain("implementation plan");
+    // Frontmatter should be stripped
+    expect(content).not.toContain("---");
+    expect(content).not.toContain("sandbox:");
+  });
+
+  test("strips frontmatter from template with override dir", () => {
+    writeFileSync(join(tmpDir, "with-fm.md"), "---\nname: test\ndescription: A test\n---\nBody here");
+    const content = loadTemplate("with-fm", tmpDir);
+    expect(content).toBe("Body here");
+  });
+
+  test("loadTemplateWithMeta returns both metadata and body", () => {
+    writeFileSync(join(tmpDir, "meta-test.md"), "---\nname: meta-test\ndescription: Test template\nsandbox: read-only\n---\nTemplate body {{PROMPT}}");
+    const { meta, body } = loadTemplateWithMeta("meta-test", tmpDir);
+    expect(meta.name).toBe("meta-test");
+    expect(meta.description).toBe("Test template");
+    expect(meta.sandbox).toBe("read-only");
+    expect(body).toBe("Template body {{PROMPT}}");
+  });
+
+  test("throws helpful message for missing template without override", () => {
+    expect(() => loadTemplate("nonexistent-xyz")).toThrow("Template \"nonexistent-xyz\" not found");
+  });
+});
+
+// ─── parseTemplateFrontmatter ───────────────────────────────────────────────
+
+describe("parseTemplateFrontmatter", () => {
+  test("extracts frontmatter fields", () => {
+    const raw = "---\nname: test\ndescription: A test template\nsandbox: read-only\n---\nBody content";
+    const { meta, body } = parseTemplateFrontmatter(raw);
+    expect(meta.name).toBe("test");
+    expect(meta.description).toBe("A test template");
+    expect(meta.sandbox).toBe("read-only");
+    expect(body).toBe("Body content");
+  });
+
+  test("returns empty meta and full body when no frontmatter", () => {
+    const raw = "Just plain content\nNo frontmatter here";
+    const { meta, body } = parseTemplateFrontmatter(raw);
+    expect(meta.name).toBe("");
+    expect(meta.description).toBe("");
+    expect(meta.sandbox).toBeUndefined();
+    expect(body).toBe(raw);
+  });
+
+  test("handles missing closing delimiter", () => {
+    const raw = "---\nname: broken\nNo closing delimiter";
+    const { body } = parseTemplateFrontmatter(raw);
+    expect(body).toBe(raw);
+  });
+
+  test("strips leading blank lines after frontmatter", () => {
+    const raw = "---\nname: test\n---\n\n\nBody";
+    const { body } = parseTemplateFrontmatter(raw);
+    expect(body).toBe("Body");
+  });
+
+  test("handles CRLF line endings", () => {
+    const raw = "---\r\nname: test\r\ndescription: CRLF template\r\nsandbox: read-only\r\n---\r\nBody with CRLF";
+    const { meta, body } = parseTemplateFrontmatter(raw);
+    expect(meta.name).toBe("test");
+    expect(meta.description).toBe("CRLF template");
+    expect(meta.sandbox).toBe("read-only");
+    expect(body).toBe("Body with CRLF");
+  });
+});
+
+// ─── listTemplates ──────────────────────────────────────────────────────────
+
+describe("listTemplates", () => {
+  test("includes built-in plan-review template", () => {
+    const templates = listTemplates();
+    const planReview = templates.find(t => t.name === "plan-review");
+    expect(planReview).toBeDefined();
+    expect(planReview!.description).toContain("implementation plan");
+    expect(planReview!.sandbox).toBe("read-only");
   });
 });
 

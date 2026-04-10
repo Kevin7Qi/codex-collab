@@ -207,8 +207,17 @@ codex-collab health                     # Check prerequisites
 | `--all` | List all threads with no display limit (threads command) |
 | `--discover` | Query Codex server for threads not in local index (threads command) |
 | `--json` | JSON output (threads, resume-candidate commands) |
+| `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
 | `--content-only` | Print only result text (no progress lines) |
 | `--limit <n>` | Limit items shown |
+
+## Templates
+
+Use `--template <name>` with the `run` command to wrap your prompt in a structured template.
+
+<!-- TEMPLATES -->
+
+Custom templates: place `.md` files with frontmatter in `~/.codex-collab/templates/`, then re-run the installer.
 
 ## TUI Handoff
 
