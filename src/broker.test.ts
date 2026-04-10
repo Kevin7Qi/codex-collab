@@ -901,3 +901,80 @@ describe("BrokerClient — buffer overflow protection", () => {
     }
   }, 30_000); // generous timeout — writing 11MB over socket can be slow
 });
+
+describe("BrokerClient — brokerBusy flag", () => {
+  test("reports brokerBusy=true when initialize returns busy=true", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "busy-broker.sock");
+
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.method === "initialize" && msg.id !== undefined) {
+              socket.write(JSON.stringify({
+                id: msg.id,
+                result: { userAgent: "test-broker", busy: true },
+              }) + "\n");
+            }
+          } catch {}
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+      expect(client.brokerBusy).toBe(true);
+      await client.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  test("reports brokerBusy=false when initialize returns busy=false", async () => {
+    if (!await checkSocketSupport()) return;
+    const sockPath = join(tempDir, "idle-broker.sock");
+
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.method === "initialize" && msg.id !== undefined) {
+              socket.write(JSON.stringify({
+                id: msg.id,
+                result: { userAgent: "test-broker", busy: false },
+              }) + "\n");
+            }
+          } catch {}
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+
+    try {
+      const client = await connectToBroker({ endpoint: `unix:${sockPath}` });
+      expect(client.brokerBusy).toBe(false);
+      expect(client.userAgent).toBe("test-broker");
+      await client.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

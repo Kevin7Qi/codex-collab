@@ -333,7 +333,10 @@ async function main() {
         if (message.id !== undefined && message.method === "initialize") {
           send(socket, {
             id: message.id,
-            result: { userAgent: "codex-collab-broker" },
+            result: {
+              userAgent: "codex-collab-broker",
+              busy: activeStreamSocket !== null,
+            },
           });
           continue;
         }

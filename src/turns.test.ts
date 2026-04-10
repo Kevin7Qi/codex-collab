@@ -80,6 +80,7 @@ function buildMockClient(
     onClose() { return () => {}; },
     async close() {},
     userAgent: "mock/1.0",
+    brokerBusy: false,
   };
 
   return { client, emit, requestHandlers };

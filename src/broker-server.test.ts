@@ -470,6 +470,61 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
+    test("initialize returns busy=false when no stream is active", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir);
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connect(sockPath);
+        const result = await client.request("initialize", {
+          clientInfo: { name: "test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: false },
+        }) as { userAgent: string; busy: boolean };
+
+        expect(result.busy).toBe(false);
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("initialize returns busy=true when a stream is active", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        // Client 1 establishes a stream
+        const client1 = await TestClient.connectAndInit(sockPath);
+        await client1.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "hello" }],
+        });
+        await new Promise((r) => setTimeout(r, 100));
+
+        // Client 2 connects — initialize should report busy
+        const client2 = await TestClient.connect(sockPath);
+        const result = await client2.request("initialize", {
+          clientInfo: { name: "test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: false },
+        }) as { userAgent: string; busy: boolean };
+
+        expect(result.busy).toBe(true);
+
+        await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
     test("swallows initialized notification without error", async () => {
 
       const sockPath = join(tempDir, "broker.sock");

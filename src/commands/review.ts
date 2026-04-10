@@ -138,7 +138,7 @@ export async function handleReview(args: string[]): Promise<void> {
       setActiveRunId(undefined);
       removePidFile(ws.pidsDir, shortId);
     }
-  }, options.dir);
+  }, options.dir, true);
 
   process.exit(exitCode);
 }

@@ -102,6 +102,9 @@ export interface AppServerClient {
   close(): Promise<void>;
   /** The user-agent string from the initialize handshake. */
   userAgent: string;
+  /** True when the broker reported it is busy serving another client's turn.
+   *  Always false for direct connections. */
+  brokerBusy: boolean;
 }
 
 /** Type guard: message is a response (has id + result). */
@@ -458,5 +461,6 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     onClose,
     close,
     userAgent: initResult.userAgent,
+    brokerBusy: false,
   };
 }

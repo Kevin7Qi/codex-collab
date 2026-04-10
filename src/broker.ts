@@ -392,7 +392,7 @@ async function waitForBrokerReady(
  * 5. Save broker state and session state before the connection attempt
  * 6. Connect to the new broker (falls back to direct connection on failure)
  */
-export async function ensureConnection(cwd: string): Promise<AppServerClient> {
+export async function ensureConnection(cwd: string, streaming = false): Promise<AppServerClient> {
   const stateDir = resolveStateDir(cwd);
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 
@@ -421,6 +421,16 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
       try {
         const { connectToBroker } = await import("./broker-client");
         const client = await connectToBroker({ endpoint: existingState.endpoint });
+
+        // If broker is busy and caller needs streaming, fall back to direct.
+        // Non-streaming callers (kill, threads, etc.) keep the broker connection
+        // so they can inspect/interrupt the active turn.
+        if (client.brokerBusy && streaming) {
+          await client.close();
+          console.error("[broker] Broker is busy — using direct connection for this invocation.");
+          try { saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt }); } catch { /* non-fatal */ }
+          return connectDirect({ cwd });
+        }
 
         // Update session state (non-fatal if save fails — connection is valid)
         try {
@@ -459,6 +469,12 @@ export async function ensureConnection(cwd: string): Promise<AppServerClient> {
       try {
         const { connectToBroker } = await import("./broker-client");
         const client = await connectToBroker({ endpoint: freshState.endpoint });
+        if (client.brokerBusy && streaming) {
+          await client.close();
+          console.error("[broker] Broker is busy — using direct connection for this invocation.");
+          try { saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt }); } catch { /* non-fatal */ }
+          return connectDirect({ cwd });
+        }
         try {
           saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
         } catch (e) {

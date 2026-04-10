@@ -105,7 +105,7 @@ export async function handleRun(args: string[]): Promise<void> {
       setActiveRunId(undefined);
       removePidFile(ws.pidsDir, shortId);
     }
-  }, options.dir);
+  }, options.dir, true);
 
   process.exit(exitCode);
 }

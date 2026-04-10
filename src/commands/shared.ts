@@ -429,8 +429,8 @@ export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string)
 }
 
 /** Connect to app server, run fn, then close the client (even on error). */
-export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>, cwd?: string): Promise<T> {
-  const client = await ensureConnection(cwd ?? process.cwd());
+export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>, cwd?: string, streaming = false): Promise<T> {
+  const client = await ensureConnection(cwd ?? process.cwd(), streaming);
   activeClient = client;
   try {
     return await fn(client);

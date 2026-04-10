@@ -272,8 +272,9 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
 
   // Perform initialize handshake with the broker
   let userAgent: string;
+  let brokerBusy = false;
   try {
-    const result = await request<{ userAgent: string }>("initialize", {
+    const result = await request<{ userAgent: string; busy?: boolean }>("initialize", {
       clientInfo: {
         name: config.clientName,
         title: null,
@@ -284,6 +285,7 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
         optOutNotificationMethods: ["item/reasoning/textDelta"],
       },
     });
+    brokerBusy = result.busy === true;
     userAgent = result.userAgent;
     notify("initialized");
   } catch (e) {
@@ -300,5 +302,6 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     onClose,
     close,
     userAgent,
+    brokerBusy,
   };
 }
