@@ -106,7 +106,10 @@ export function getUntrackedFiles(cwd: string, maxSize: number = DEFAULT_MAX_SIZ
   return result;
 }
 
-/** Resolve review target from CLI options to protocol ReviewTarget. */
+/**
+ * Resolve review target from CLI options to protocol ReviewTarget.
+ * @deprecated Use the version in commands/review.ts which handles positional args and auto-detects the base branch.
+ */
 export function resolveReviewTarget(
   cwd: string,
   opts: { mode?: string; ref?: string; instructions?: string },
@@ -129,7 +132,7 @@ export function resolveReviewTarget(
     case "custom":
       // Reached only if no instructions were provided
       throw new Error(
-        'Custom review mode requires instructions.\nUsage: codex-collab review --mode custom --instructions "..."',
+        'Custom review mode requires instructions.\nUsage: codex-collab review --mode custom "instructions"',
       );
     default:
       throw new Error(

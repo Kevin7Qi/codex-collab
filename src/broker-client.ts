@@ -175,7 +175,9 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     if (!closed) {
       rejectAll("Broker connection closed");
       for (const handler of closeHandlers) {
-        try { handler(); } catch { /* best effort */ }
+        try { handler(); } catch (e) {
+          console.error(`[codex] Warning: close handler error: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
   });

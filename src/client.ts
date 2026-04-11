@@ -285,7 +285,9 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     if (!closed) {
       rejectAll("App server process exited unexpectedly");
       for (const handler of closeHandlers) {
-        try { handler(); } catch { /* best effort */ }
+        try { handler(); } catch (e) {
+          console.error(`[codex] Warning: close handler error: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
   });

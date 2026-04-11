@@ -152,16 +152,6 @@ async function main() {
     }, idleTimeout);
   }
 
-  function clearSocketOwnership(socket: net.Socket): void {
-    if (activeRequestSocket === socket) {
-      activeRequestSocket = null;
-    }
-    if (activeStreamSocket === socket) {
-      activeStreamSocket = null;
-      activeStreamThreadIds = null;
-    }
-  }
-
   // ─── Notification routing ───────────────────────────────────────────────
 
   // Wire up a raw notification forwarder. The connectDirect client uses
@@ -292,6 +282,250 @@ async function main() {
     }
   }
 
+  // ─── Approval response fast-path ─────────────────────────────────────
+
+  // Routes approval responses synchronously, bypassing the per-socket message
+  // queue. This prevents deadlocks when a client's approval response is queued
+  // behind an RPC request that the app-server can't complete until the approval
+  // is received.
+  function tryRouteApprovalResponse(socket: net.Socket, line: string): boolean {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return false;
+    }
+    if (typeof parsed !== "object" || parsed === null) return false;
+    // Approval responses have id but no method
+    if (parsed.id === undefined || "method" in parsed) return false;
+    const reqId = String(parsed.id);
+    const entry = pendingForwardedRequests.get(reqId);
+    if (!entry) return false; // Not a pending forwarded request — let the queue handle it
+    resetIdleTimer();
+    if (entry.target !== socket) {
+      process.stderr.write(
+        `[broker-server] Warning: forwarded response id=${reqId} from wrong socket — ignoring\n`,
+      );
+      return true;
+    }
+    pendingForwardedRequests.delete(reqId);
+    clearTimeout(entry.timer);
+    if ("result" in parsed) {
+      entry.resolve(parsed.result);
+    } else if ("error" in parsed) {
+      const errObj = parsed.error as Record<string, unknown> | undefined;
+      entry.reject(new Error((errObj?.message as string) ?? "Client error"));
+    } else {
+      entry.reject(new Error("Malformed forwarded response: missing both 'result' and 'error'"));
+    }
+    return true;
+  }
+
+  // ─── Per-socket message handler ────────────────────────────────────────
+
+  // Processes a single JSON-RPC message from a client socket. Extracted from
+  // the data handler so messages can be chained via a per-socket Promise
+  // queue, preventing async reentrancy on the shared buffer.
+  async function processMessage(socket: net.Socket, line: string): Promise<void> {
+    resetIdleTimer();
+
+    let message: Record<string, unknown>;
+    try {
+      message = JSON.parse(line);
+    } catch (err) {
+      send(socket, {
+        id: null,
+        error: buildJsonRpcError(
+          -32700,
+          `Invalid JSON: ${(err as Error).message}`,
+        ),
+      });
+      return;
+    }
+
+    // Handle initialize locally — don't forward to app-server
+    if (message.id !== undefined && message.method === "initialize") {
+      send(socket, {
+        id: message.id,
+        result: {
+          userAgent: "codex-collab-broker",
+          busy: activeStreamSocket !== null,
+        },
+      });
+      return;
+    }
+
+    // Swallow initialized notification
+    if (message.method === "initialized" && message.id === undefined) {
+      return;
+    }
+
+    // Handle broker/shutdown
+    if (message.id !== undefined && message.method === "broker/shutdown") {
+      send(socket, { id: message.id, result: {} });
+      await shutdown(server);
+      process.exit(0);
+    }
+
+    // Ignore notifications (no id) from clients
+    if (message.id === undefined) {
+      return;
+    }
+
+    // Route responses (id + result/error, no method) to pending forwarded
+    // requests (e.g. approval request responses from the client).
+    if (message.id !== undefined && !("method" in message)) {
+      const reqId = String(message.id);
+      const entry = pendingForwardedRequests.get(reqId);
+      if (entry) {
+        if (entry.target !== socket) {
+          process.stderr.write(
+            `[broker-server] Warning: forwarded response id=${reqId} from wrong socket — ignoring\n`,
+          );
+          return;
+        }
+        pendingForwardedRequests.delete(reqId);
+        clearTimeout(entry.timer);
+        if ("result" in message) {
+          entry.resolve(message.result);
+        } else if ("error" in message) {
+          const errObj = message.error as Record<string, unknown> | undefined;
+          entry.reject(new Error((errObj?.message as string) ?? "Client error"));
+        } else {
+          entry.reject(new Error("Malformed forwarded response: missing both 'result' and 'error'"));
+        }
+      } else {
+        process.stderr.write(
+          `[broker-server] Warning: received response for unknown/expired forwarded request id=${reqId}\n`,
+        );
+      }
+      return;
+    }
+
+    // ─── Concurrency control ──────────────────────────────────
+
+    const isInterrupt =
+      typeof message.method === "string" &&
+      message.method === "turn/interrupt";
+    const isReadOnly =
+      typeof message.method === "string" &&
+      (message.method === "thread/read" || message.method === "thread/list");
+
+    // Allow interrupt and read-only requests through even when another
+    // client owns the stream — but only when there's no pending request.
+    // Read-only methods are needed by `kill` (reads thread to get turn ID)
+    // and `threads` (lists threads while a turn is running).
+    const allowDuringActiveStream =
+      (isInterrupt || isReadOnly) &&
+      activeStreamSocket !== null &&
+      activeStreamSocket !== socket &&
+      activeRequestSocket === null;
+
+    if (
+      ((activeRequestSocket !== null && activeRequestSocket !== socket) ||
+        (activeStreamSocket !== null && activeStreamSocket !== socket)) &&
+      !allowDuringActiveStream
+    ) {
+      send(socket, {
+        id: message.id,
+        error: buildJsonRpcError(
+          BROKER_BUSY_RPC_CODE,
+          "Shared Codex broker is busy.",
+        ),
+      });
+      return;
+    }
+
+    // Forward interrupt/read-only during active stream (special path)
+    if (allowDuringActiveStream) {
+      try {
+        const result = await appClient.request(
+          message.method as string,
+          (message.params ?? {}) as Record<string, unknown>,
+        );
+        send(socket, { id: message.id, result });
+      } catch (error) {
+        send(socket, {
+          id: message.id,
+          error: buildJsonRpcError(
+            error instanceof RpcError ? error.rpcCode : -32000,
+            (error as Error).message,
+          ),
+        });
+      }
+      return;
+    }
+
+    // ─── Normal request forwarding ────────────────────────────
+
+    const isStreaming = STREAMING_METHODS.has(message.method as string);
+    activeRequestSocket = socket;
+
+    try {
+      const result = await appClient.request(
+        message.method as string,
+        (message.params ?? {}) as Record<string, unknown>,
+      );
+
+      // If the requesting client disconnected while we were waiting for the
+      // response, the turn has started on the app-server but nobody is
+      // listening. Interrupt it immediately to free the stream slot.
+      if (socket.destroyed && isStreaming) {
+        const turn = (result as Record<string, unknown>)?.turn as Record<string, unknown> | undefined;
+        const turnId = turn?.id as string | undefined;
+        const threadId = (message.params as Record<string, unknown>)?.threadId as string | undefined;
+        if (turnId && threadId) {
+          appClient.request("turn/interrupt", { threadId, turnId }).catch((e) => {
+            process.stderr.write(
+              `[broker-server] Warning: failed to interrupt orphaned turn ${turnId}: ${e instanceof Error ? e.message : String(e)}\n`,
+            );
+          });
+        }
+        if (activeRequestSocket === socket) activeRequestSocket = null;
+        return;
+      }
+
+      send(socket, { id: message.id, result });
+
+      if (isStreaming) {
+        const streamIds = buildStreamThreadIds(
+          message.method as string,
+          message.params as Record<string, unknown> | undefined,
+          result as Record<string, unknown>,
+        );
+        // Only claim stream ownership if the turn hasn't already completed
+        // during the request. turn/completed can arrive in the same read
+        // chunk as the response, firing the notification handler before
+        // this code runs. Without this check the broker stays permanently busy.
+        const alreadyCompleted = [...streamIds].some(id => completedStreamThreadIds.has(id));
+        if (!alreadyCompleted) {
+          activeStreamSocket = socket;
+          activeStreamThreadIds = streamIds;
+        }
+        // Clean up tracked completions for these thread IDs
+        for (const id of streamIds) completedStreamThreadIds.delete(id);
+      }
+
+      if (activeRequestSocket === socket) {
+        activeRequestSocket = null;
+      }
+    } catch (error) {
+      send(socket, {
+        id: message.id,
+        error: buildJsonRpcError(
+          error instanceof RpcError ? error.rpcCode : -32000,
+          (error as Error).message,
+        ),
+      });
+      if (activeRequestSocket === socket) {
+        activeRequestSocket = null;
+      }
+      if (activeStreamSocket === socket && !isStreaming) {
+        activeStreamSocket = null;
+      }
+    }
+  }
+
   // ─── Socket server ─────────────────────────────────────────────────────
 
   const server = net.createServer((socket) => {
@@ -300,211 +534,29 @@ async function main() {
     let buffer = "";
     resetIdleTimer();
 
-    socket.on("data", async (chunk: string) => {
+    let messageQueue: Promise<void> = Promise.resolve();
+
+    socket.on("data", (chunk: string) => {
       buffer += chunk;
       if (buffer.length > MAX_BUFFER_SIZE) {
         process.stderr.write("[broker-server] Client buffer exceeded maximum size, disconnecting\n");
         socket.destroy();
         return;
       }
+      // Extract complete lines synchronously to prevent async reentrancy
+      // on the shared buffer when multiple data events overlap.
+      const lines: string[] = [];
       let newlineIdx: number;
       while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, newlineIdx).trim();
         buffer = buffer.slice(newlineIdx + 1);
-        if (!line) continue;
-
-        resetIdleTimer();
-
-        let message: Record<string, unknown>;
-        try {
-          message = JSON.parse(line);
-        } catch (err) {
-          send(socket, {
-            id: null,
-            error: buildJsonRpcError(
-              -32700,
-              `Invalid JSON: ${(err as Error).message}`,
-            ),
-          });
-          continue;
-        }
-
-        // Handle initialize locally — don't forward to app-server
-        if (message.id !== undefined && message.method === "initialize") {
-          send(socket, {
-            id: message.id,
-            result: {
-              userAgent: "codex-collab-broker",
-              busy: activeStreamSocket !== null,
-            },
-          });
-          continue;
-        }
-
-        // Swallow initialized notification
-        if (message.method === "initialized" && message.id === undefined) {
-          continue;
-        }
-
-        // Handle broker/shutdown
-        if (message.id !== undefined && message.method === "broker/shutdown") {
-          send(socket, { id: message.id, result: {} });
-          await shutdown(server);
-          process.exit(0);
-        }
-
-        // Ignore notifications (no id) from clients
-        if (message.id === undefined) {
-          continue;
-        }
-
-        // Route responses (id + result/error, no method) to pending forwarded
-        // requests (e.g. approval request responses from the client).
-        if (message.id !== undefined && !("method" in message)) {
-          const reqId = String(message.id);
-          const entry = pendingForwardedRequests.get(reqId);
-          if (entry) {
-            if (entry.target !== socket) {
-              process.stderr.write(
-                `[broker-server] Warning: forwarded response id=${reqId} from wrong socket — ignoring\n`,
-              );
-              continue;
-            }
-            pendingForwardedRequests.delete(reqId);
-            clearTimeout(entry.timer);
-            if ("result" in message) {
-              entry.resolve(message.result);
-            } else if ("error" in message) {
-              const errObj = message.error as Record<string, unknown> | undefined;
-              entry.reject(new Error((errObj?.message as string) ?? "Client error"));
-            } else {
-              entry.reject(new Error("Malformed forwarded response: missing both 'result' and 'error'"));
-            }
-          } else {
-            process.stderr.write(
-              `[broker-server] Warning: received response for unknown/expired forwarded request id=${reqId}\n`,
-            );
-          }
-          continue;
-        }
-
-        // ─── Concurrency control ──────────────────────────────────
-
-        const isInterrupt =
-          typeof message.method === "string" &&
-          message.method === "turn/interrupt";
-        const isReadOnly =
-          typeof message.method === "string" &&
-          (message.method === "thread/read" || message.method === "thread/list");
-
-        // Allow interrupt and read-only requests through even when another
-        // client owns the stream — but only when there's no pending request.
-        // Read-only methods are needed by `kill` (reads thread to get turn ID)
-        // and `threads` (lists threads while a turn is running).
-        const allowDuringActiveStream =
-          (isInterrupt || isReadOnly) &&
-          activeStreamSocket !== null &&
-          activeStreamSocket !== socket &&
-          activeRequestSocket === null;
-
-        if (
-          ((activeRequestSocket !== null && activeRequestSocket !== socket) ||
-            (activeStreamSocket !== null && activeStreamSocket !== socket)) &&
-          !allowDuringActiveStream
-        ) {
-          send(socket, {
-            id: message.id,
-            error: buildJsonRpcError(
-              BROKER_BUSY_RPC_CODE,
-              "Shared Codex broker is busy.",
-            ),
-          });
-          continue;
-        }
-
-        // Forward interrupt/read-only during active stream (special path)
-        if (allowDuringActiveStream) {
-          try {
-            const result = await appClient.request(
-              message.method as string,
-              (message.params ?? {}) as Record<string, unknown>,
-            );
-            send(socket, { id: message.id, result });
-          } catch (error) {
-            send(socket, {
-              id: message.id,
-              error: buildJsonRpcError(
-                error instanceof RpcError ? error.rpcCode : -32000,
-                (error as Error).message,
-              ),
-            });
-          }
-          continue;
-        }
-
-        // ─── Normal request forwarding ────────────────────────────
-
-        const isStreaming = STREAMING_METHODS.has(message.method as string);
-        activeRequestSocket = socket;
-
-        try {
-          const result = await appClient.request(
-            message.method as string,
-            (message.params ?? {}) as Record<string, unknown>,
-          );
-
-          // If the requesting client disconnected while we were waiting for the
-          // response, the turn has started on the app-server but nobody is
-          // listening. Interrupt it immediately to free the stream slot.
-          if (socket.destroyed && isStreaming) {
-            const turn = (result as Record<string, unknown>)?.turn as Record<string, unknown> | undefined;
-            const turnId = turn?.id as string | undefined;
-            const threadId = (message.params as Record<string, unknown>)?.threadId as string | undefined;
-            if (turnId && threadId) {
-              appClient.request("turn/interrupt", { threadId, turnId }).catch(() => {});
-            }
-            if (activeRequestSocket === socket) activeRequestSocket = null;
-            continue;
-          }
-
-          send(socket, { id: message.id, result });
-
-          if (isStreaming) {
-            const streamIds = buildStreamThreadIds(
-              message.method as string,
-              message.params as Record<string, unknown> | undefined,
-              result as Record<string, unknown>,
-            );
-            // Only claim stream ownership if the turn hasn't already completed
-            // during the request. turn/completed can arrive in the same read
-            // chunk as the response, firing the notification handler before
-            // this code runs. Without this check the broker stays permanently busy.
-            const alreadyCompleted = [...streamIds].some(id => completedStreamThreadIds.has(id));
-            if (!alreadyCompleted) {
-              activeStreamSocket = socket;
-              activeStreamThreadIds = streamIds;
-            }
-            // Clean up tracked completions for these thread IDs
-            for (const id of streamIds) completedStreamThreadIds.delete(id);
-          }
-
-          if (activeRequestSocket === socket) {
-            activeRequestSocket = null;
-          }
-        } catch (error) {
-          send(socket, {
-            id: message.id,
-            error: buildJsonRpcError(
-              error instanceof RpcError ? error.rpcCode : -32000,
-              (error as Error).message,
-            ),
-          });
-          if (activeRequestSocket === socket) {
-            activeRequestSocket = null;
-          }
-          if (activeStreamSocket === socket && !isStreaming) {
-            activeStreamSocket = null;
-          }
+        if (line) lines.push(line);
+      }
+      for (const line of lines) {
+        // Approval responses bypass the queue to prevent deadlocks when
+        // queued behind an RPC request awaiting the same approval.
+        if (!tryRouteApprovalResponse(socket, line)) {
+          messageQueue = messageQueue.then(() => processMessage(socket, line));
         }
       }
     });

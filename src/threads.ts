@@ -197,11 +197,9 @@ export function resolveThreadId(
     );
   }
 
-  // 3. Full thread ID lookup (thr_ prefix)
-  if (id.startsWith("thr_")) {
-    for (const [shortId, entry] of Object.entries(index)) {
-      if (entry.threadId === id) return { shortId, threadId: entry.threadId };
-    }
+  // 3. Full thread ID lookup (any format — thr_, UUID, etc.)
+  for (const [shortId, entry] of Object.entries(index)) {
+    if (entry.threadId === id) return { shortId, threadId: entry.threadId };
   }
 
   // 4. Not found

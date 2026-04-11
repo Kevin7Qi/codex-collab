@@ -428,7 +428,11 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         if (client.brokerBusy && streaming) {
           await client.close();
           console.error("[broker] Broker is busy — using direct connection for this invocation.");
-          try { saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt }); } catch { /* non-fatal */ }
+          try {
+            saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
+          } catch (e) {
+            console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
+          }
           return connectDirect({ cwd });
         }
 
@@ -472,7 +476,11 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         if (client.brokerBusy && streaming) {
           await client.close();
           console.error("[broker] Broker is busy — using direct connection for this invocation.");
-          try { saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt }); } catch { /* non-fatal */ }
+          try {
+            saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
+          } catch (e) {
+            console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
+          }
           return connectDirect({ cwd });
         }
         try {

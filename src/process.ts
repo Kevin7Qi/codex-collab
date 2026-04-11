@@ -88,11 +88,15 @@ function terminateUnix(pid: number): void {
 
 function terminateWindows(pid: number): void {
   try {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    const r = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
       stdio: "pipe",
       timeout: 5000,
       windowsHide: true,
     });
+    if (r.status !== 0) {
+      const stderr = r.stderr?.toString().trim();
+      console.error(`[codex] Warning: taskkill exited with code ${r.status}${stderr ? `: ${stderr}` : ""}`);
+    }
   } catch (e) {
     console.error(`[codex] Warning: process termination failed: ${(e as Error).message}`);
   }

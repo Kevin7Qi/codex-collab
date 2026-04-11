@@ -215,14 +215,15 @@ export type KnownThreadItem =
 /** Any item from the server — known types narrow via `type` discriminant. */
 export type ThreadItem = KnownThreadItem | GenericItem;
 
+const KNOWN_ITEM_TYPES = new Set([
+  "userMessage", "agentMessage", "plan", "reasoning",
+  "commandExecution", "fileChange", "mcpToolCall", "webSearch",
+  "imageView", "enteredReviewMode", "exitedReviewMode", "contextCompaction",
+]);
+
 /** Narrow a ThreadItem to a known type, enabling discriminated union switches. */
 export function isKnownItem(item: ThreadItem): item is KnownThreadItem {
-  const knownTypes = new Set([
-    "userMessage", "agentMessage", "plan", "reasoning",
-    "commandExecution", "fileChange", "mcpToolCall", "webSearch",
-    "imageView", "enteredReviewMode", "exitedReviewMode", "contextCompaction",
-  ]);
-  return knownTypes.has(item.type);
+  return KNOWN_ITEM_TYPES.has(item.type);
 }
 
 export interface UserMessageItem {

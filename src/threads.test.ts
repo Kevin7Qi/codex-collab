@@ -170,6 +170,21 @@ describe("thread index", () => {
     expect(result).toEqual({ shortId: "abc12345", threadId: "thr_full_thread_id_here" });
   });
 
+  test("resolveThreadId — UUID-style threadId lookup", () => {
+    saveThreadIndex(testDir, {
+      abc12345: {
+        threadId: "019d680c-7b23-7f22-ab99-6584214a2bed",
+        name: "uuid thread",
+        model: null,
+        cwd: "/",
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    });
+    const result = resolveThreadId(testDir, "019d680c-7b23-7f22-ab99-6584214a2bed");
+    expect(result).toEqual({ shortId: "abc12345", threadId: "019d680c-7b23-7f22-ab99-6584214a2bed" });
+  });
+
   test("resolveThreadId — returns null for unknown", () => {
     saveThreadIndex(testDir, {});
     const result = resolveThreadId(testDir, "ffffffff");
