@@ -43,14 +43,12 @@ If the user asks about progress mid-task, use `TaskOutput(block=false)` to read 
 codex-collab progress <id>
 ```
 
-## Code Review (Recommended: Single Command)
+## Code Review
 
-The `review` command handles the entire review workflow in one call.
-
-**Note**: When no `--mode` is specified, passing a prompt string switches from the default `pr` mode to `custom` mode, which sends custom instructions instead of using the built-in diff workflow. For a standard PR review, do not pass a prompt.
+**For a standard PR review, call `review` with NO prompt string.** The default `pr` mode runs the built-in structured diff workflow against the default branch:
 
 ```bash
-# PR-style review against main (default — no prompt)
+# PR-style review against default branch (default — NO prompt)
 codex-collab review -d /path/to/project --content-only
 
 # Review uncommitted changes
@@ -58,13 +56,17 @@ codex-collab review --mode uncommitted -d /path/to/project --content-only
 
 # Review a specific commit
 codex-collab review --mode commit --ref abc1234 -d /path/to/project --content-only
-
-# Custom review focus
-codex-collab review "Focus on security issues" -d /path/to/project --content-only
-
-# Resume an existing thread for follow-up review
-codex-collab review --resume <id> -d /path/to/project --content-only
 ```
+
+**Passing a prompt string flips to `custom` mode** — it sends your text as free-form instructions and bypasses the built-in diff workflow. Use this when a focused or targeted review fits better than the default diff workflow (e.g., "review this for security issues", "check the error handling only"). Default to `pr` mode for general PR reviews:
+
+```bash
+codex-collab review "Focus on security issues in auth" -d /path/to/project --content-only
+```
+
+**Reviews are one-shot.** Each `review` call runs a single review inside a transient review sub-thread and exits — you cannot continue the review itself or ask the reviewer follow-up questions. For follow-ups on findings, use `run --resume <id>` on the same thread; the review is part of the thread's history.
+
+`review --resume <id>` is useful for running a review on a task thread Codex has already been working in (the thread persists and its context carries over). `review` with no `--resume` creates an ephemeral thread that disappears after the review — use this for standalone reviews with no prior context.
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
@@ -78,7 +80,7 @@ Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
 When consecutive tasks relate to the same project, resume the existing thread. Codex retains the conversation history, so follow-ups like "now fix what you found" or "check the tests too" work better when Codex already has context from the previous exchange. Start a fresh thread when the task is unrelated or targets a different project.
 
-**Before starting a new thread for a follow-up**, run `codex-collab resume-candidate --json` first. If it returns `{ "available": true, "threadId": "...", "shortId": "...", "name": "..." }`, use `--resume <shortId>` instead of starting fresh. This finds the best resumable thread across the current session, prior sessions, and TUI-created threads.
+**If the user asks to continue or follow up on a prior task but you don't have the thread ID in context**, run `codex-collab resume-candidate --json` to look it up. It returns the latest resumable task thread across the current session, prior sessions, and TUI-created threads. Only call it when a resume is actually wanted — it's a lookup, not a precondition for every command.
 
 The `--resume` flag accepts both ID formats:
 - `--resume <short-id>` — 8-char hex short ID (supports prefix matching, e.g., `a1b2`)
