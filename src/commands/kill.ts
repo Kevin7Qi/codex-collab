@@ -14,6 +14,7 @@ import {
   validateIdOrDie,
   progress,
   withClient,
+  readPidFile,
   removePidFile,
   getWorkspacePaths,
 } from "./shared";
@@ -38,11 +39,15 @@ export async function handleKill(args: string[]): Promise<void> {
     }
   }
 
-  // Write kill signal file so the running process can detect the kill
+  // Write kill signal file so the running process can detect the kill.
+  // Tag with the target run's PID; falls back to "*" (wildcard — matches
+  // any active run on this thread) when no PID file is available.
   let killSignalWritten = false;
   const signalPath = join(ws.killSignalsDir, threadId);
+  const pid = shortId ? readPidFile(ws.pidsDir, shortId) : null;
+  const targetPid = pid !== null ? String(pid) : "*";
   try {
-    writeFileSync(signalPath, "", { mode: 0o600 });
+    writeFileSync(signalPath, targetPid, { mode: 0o600 });
     killSignalWritten = true;
   } catch (e) {
     console.error(

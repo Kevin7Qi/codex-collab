@@ -953,6 +953,34 @@ console.log("ok");
     expect(result.stdout.toString().trim()).toBe("ok");
     expect(result.exitCode).toBe(0);
   });
+
+  test("invalid JSON in config aborts with non-zero exit instead of silently using defaults", () => {
+    const fakeHome = freshTmpDir("fake-home");
+    const configDir = join(fakeHome, ".codex-collab");
+    mkdirSync(configDir, { recursive: true });
+    // Trailing comma — valid prose but invalid JSON. Old behavior: silent {}.
+    // New behavior: die() with a clear message.
+    writeFileSync(join(configDir, "config.json"), '{"model": "gpt-5",}');
+
+    writeFileSync(scriptPath, `
+import { defaultOptions, applyUserConfig } from "./src/commands/shared";
+const opts = defaultOptions();
+applyUserConfig(opts);
+console.log("should not reach here");
+`);
+
+    const result = Bun.spawnSync({
+      cmd: ["bun", "run", scriptPath],
+      cwd: projectDir,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOME: fakeHome, USERPROFILE: fakeHome },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("Invalid JSON");
+    expect(result.stderr.toString()).toContain("config.json");
+    expect(result.stdout.toString()).not.toContain("should not reach here");
+  });
 });
 
 // ─── turnOverrides ─────────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 // src/commands/review.ts — review command handler
 
-import { updateThreadStatus, updateRun } from "../threads";
 import { runReview } from "../turns";
+import { updateThreadStatus } from "../threads";
 import { getDefaultBranch } from "../git";
 import type { ReviewTarget } from "../types";
+import { wrapBrokerBusy } from "../broker";
 import {
   die,
   parseOptions,
@@ -15,9 +16,9 @@ import {
   getApprovalHandler,
   getWorkspacePaths,
   turnOverrides,
-  printResult,
+  recordTerminalRunState,
+  recordRunFailure,
   progress,
-  formatDuration,
   writePidFile,
   removePidFile,
   setActiveThreadId,
@@ -110,25 +111,10 @@ export async function handleReview(args: string[]): Promise<void> {
         ...turnOverrides(options),
       });
 
-      updateThreadStatus(ws.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-      updateRun(ws.stateDir, runId, {
-        status: result.status === "completed" ? "completed" : result.status === "interrupted" ? "cancelled" : "failed",
-        phase: "finalizing",
-        completedAt: new Date().toISOString(),
-        elapsed: formatDuration(result.durationMs),
-        output: result.output || null,
-        filesChanged: result.filesChanged,
-        commandsRun: result.commandsRun,
-        error: result.error ?? null,
-      });
-      return printResult(result, "Review", options.contentOnly);
+      return recordTerminalRunState(ws, threadId, runId, result, "Review", options.contentOnly);
     } catch (e) {
-      updateThreadStatus(ws.threadsFile, threadId, "failed");
-      updateRun(ws.stateDir, runId, {
-        status: "failed",
-        completedAt: new Date().toISOString(),
-        error: e instanceof Error ? e.message : String(e),
-      });
+      e = wrapBrokerBusy(e);
+      recordRunFailure(ws, threadId, runId, e);
       throw e;
     } finally {
       setActiveThreadId(undefined);

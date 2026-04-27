@@ -346,10 +346,11 @@ export function loadUserConfig(): UserConfig {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
     if (e instanceof SyntaxError) {
-      console.error(`[codex] Warning: invalid JSON in ${config.configFile} — ignoring config`);
-    } else {
-      console.error(`[codex] Warning: could not read config: ${e instanceof Error ? e.message : String(e)}`);
+      // Silently ignoring a broken config means user-set defaults disappear
+      // without warning — fail fast so the user sees and fixes it.
+      die(`Invalid JSON in ${config.configFile}: ${e.message}\nFix the file or remove it to use defaults.`);
     }
+    console.error(`[codex] Warning: could not read config: ${e instanceof Error ? e.message : String(e)}`);
     return {};
   }
 }
@@ -736,6 +737,72 @@ export function printResult(
   return result.status === "completed" ? 0 : 1;
 }
 
+/**
+ * Persist a successful turn's terminal state and print the result. Returns
+ * the CLI exit code: `printResult`'s code on success, or 1 if state save
+ * failed (the result is still printed so the user doesn't lose output).
+ */
+export function recordTerminalRunState(
+  ws: WorkspacePaths,
+  threadId: string,
+  runId: string,
+  result: TurnResult,
+  label: "Turn" | "Review",
+  contentOnly: boolean,
+): number {
+  try {
+    updateThreadStatus(ws.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+  } catch (e) {
+    console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  let stateSaveFailed = false;
+  try {
+    updateRun(ws.stateDir, runId, {
+      status: result.status === "completed" ? "completed" : result.status === "interrupted" ? "cancelled" : "failed",
+      phase: "finalizing",
+      completedAt: new Date().toISOString(),
+      elapsed: formatDuration(result.durationMs),
+      output: result.output || null,
+      filesChanged: result.filesChanged,
+      commandsRun: result.commandsRun,
+      error: result.error ?? null,
+    });
+  } catch (e) {
+    console.error(`[codex] CRITICAL: could not save run state for ${runId}: ${e instanceof Error ? e.message : String(e)}`);
+    console.error(`[codex] The ${label.toLowerCase()} output is below; thread state on disk is stale.`);
+    stateSaveFailed = true;
+  }
+  const printed = printResult(result, label, contentOnly);
+  return stateSaveFailed ? 1 : printed;
+}
+
+/**
+ * Record a failed turn — best-effort persistence of "failed" status and
+ * an error string. Each call is wrapped separately so a state-save failure
+ * doesn't shadow the original turn error the caller will rethrow.
+ */
+export function recordRunFailure(
+  ws: WorkspacePaths,
+  threadId: string,
+  runId: string,
+  error: unknown,
+): void {
+  try {
+    updateThreadStatus(ws.threadsFile, threadId, "failed");
+  } catch (e) {
+    console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  try {
+    updateRun(ws.stateDir, runId, {
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } catch (e) {
+    console.error(`[codex] Warning: could not record run failure for ${runId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // PID file management
 // ---------------------------------------------------------------------------
@@ -760,24 +827,43 @@ export function removePidFile(pidsDir: string, shortId: string): void {
   }
 }
 
-/** Check if the process that owns a thread is still alive.
- *  Returns true (assume alive) when the PID file is missing — the thread may
- *  have been started before PID tracking existed, or PID file write may have
- *  failed.  Only returns false when we have a PID and can confirm the process
- *  is gone (ESRCH). */
-export function isProcessAlive(pidsDir: string, shortId: string): boolean {
+/**
+ * Read the PID file for a thread. Returns the parsed PID, or null if the
+ * file is missing, unreadable, or contains an invalid value.
+ *
+ * Logs on real I/O errors (anything other than ENOENT) so unexpected
+ * failures aren't silent.
+ */
+export function readPidFile(pidsDir: string, shortId: string): number | null {
   const pidPath = join(pidsDir, shortId);
-  let pid: number;
+  let raw: string;
   try {
-    pid = Number(readFileSync(pidPath, "utf-8").trim());
+    raw = readFileSync(pidPath, "utf-8").trim();
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // no PID file -> assume alive
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     console.error(`[codex] Warning: could not read PID file for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);
-    return true;
+    return null;
   }
+  const pid = Number(raw);
   if (!Number.isFinite(pid) || pid <= 0) {
     console.error(`[codex] Warning: PID file for ${shortId} contains invalid value`);
-    return false;
+    return null;
+  }
+  return pid;
+}
+
+/** Check if the process that owns a thread is still alive. Treats a missing
+ *  PID file as alive (pre-PID-tracking threads, or write-failed PID files);
+ *  treats an unreadable or invalid PID file as dead (already logged by
+ *  `readPidFile`). When a valid PID is present, returns false on ESRCH and
+ *  true on EPERM (process exists but we can't signal it). */
+export function isProcessAlive(pidsDir: string, shortId: string): boolean {
+  const pid = readPidFile(pidsDir, shortId);
+  if (pid === null) {
+    // null can mean "no file" (treat as alive — pre-PID-tracking thread) or
+    // "invalid contents" (already logged; treat as dead). Distinguish via
+    // existsSync rather than re-reading.
+    return !existsSync(join(pidsDir, shortId));
   }
   try {
     process.kill(pid, 0); // signal 0 = existence check
