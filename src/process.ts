@@ -24,7 +24,8 @@ export function isProcessAlive(pid: number): boolean {
  * Kill a process and its children.
  *
  * - Unix: sends SIGTERM first; if the process is still alive, schedules
- *   SIGKILL after 100 ms.
+ *   SIGKILL after 500 ms (long enough for the app-server to flush stdout).
+ *   The SIGKILL timer is unref'd so it never blocks process exit.
  * - Windows: uses `taskkill /PID <pid> /T /F`.
  *
  * If the process is already dead (ESRCH), this is a no-op.
@@ -65,7 +66,7 @@ function terminateUnix(pid: number): void {
 
   // If still alive after a short grace period, escalate to SIGKILL.
   if (isProcessAlive(pid)) {
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       try {
         process.kill(-pid, "SIGKILL");
       } catch (e) {
@@ -82,7 +83,10 @@ function terminateUnix(pid: number): void {
           }
         }
       }
-    }, 100);
+    }, 500);
+    // Don't keep the event loop alive waiting for an escalation that may
+    // never be needed — caller may exit before the timer fires.
+    timer.unref?.();
   }
 }
 

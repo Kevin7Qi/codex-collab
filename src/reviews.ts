@@ -90,8 +90,9 @@ export function formatReviewOutput(result: StructuredReviewOutput): string {
 
 /** Extract a JSON object string from raw text that may include markdown fences or prose. */
 function extractJson(raw: string): string | null {
-  // Try markdown code fence with or without language tag
-  const fenceMatch = raw.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
+  // LLM output sometimes omits the trailing newline before the closing fence,
+  // so the inner newlines are optional.
+  const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (fenceMatch) {
     return fenceMatch[1].trim();
   }

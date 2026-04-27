@@ -1,6 +1,6 @@
 // src/turns.ts — Turn lifecycle (runTurn, runReview)
 
-import { existsSync, statSync, unlinkSync } from "fs";
+import { existsSync, readFileSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
 import type { AppServerClient } from "./client";
 import {
@@ -203,15 +203,18 @@ async function executeTurn(
       }
     }
     // Completion inference: agentMessage with phase "final_answer" (normal turns)
-    // or exitedReviewMode (reviews) starts the debounce timer. Other item types
-    // clear the timer to prevent premature inference while the agent is still working.
+    // or exitedReviewMode (reviews) starts the debounce timer. Work-in-progress
+    // items (command execution, file changes, non-final agent messages) clear
+    // the timer to prevent premature inference. Reasoning items are ignored —
+    // the model can finish reasoning *after* emitting its final answer, and
+    // clearing the timer there would force the turn to wait the full timeout.
     if (inferenceResolver) {
       if (
         (item.type === "agentMessage" && item.phase === "final_answer") ||
         item.type === "exitedReviewMode"
       ) {
         resetInferenceTimer();
-      } else {
+      } else if (item.type !== "reasoning") {
         clearInferenceTimer();
       }
     }
@@ -223,12 +226,15 @@ async function executeTurn(
 
   // Wire up item/started interception for completion inference — if new work
   // starts after a final_answer, cancel the inference timer to avoid premature
-  // completion synthesis.
+  // completion synthesis. Reasoning items are excluded: the model can begin a
+  // reasoning trace concurrent with or after the final answer without that
+  // implying further work.
   unsubs.push(
     client.on("item/started", (params) => {
       const p = params as ItemStartedParams;
       if (turnId !== null && belongsToTurn(p, threadId, turnId) && inferenceResolver) {
-        clearInferenceTimer();
+        const item = p.item as { type?: string } | undefined;
+        if (item?.type !== "reasoning") clearInferenceTimer();
       }
     }),
   );
@@ -263,13 +269,20 @@ async function executeTurn(
   // the turn completes normally or on timeout so the poll interval stops.
   const killAbort = new AbortController();
 
-  // Remove signal files left over from a previous (crashed) run, but preserve
-  // fresh signals written by a concurrent `kill` targeting this thread.
-  // Heuristic: files created before this process started are stale.
-  const processStartMs = Date.now() - process.uptime() * 1000;
+  // Remove leftover signals from a previous (crashed) run while preserving
+  // fresh ones from a concurrent `kill`. Modern `kill` writes our PID or
+  // "*"; a different PID is stale. Empty content (legacy `kill`) falls back
+  // to a wall-clock mtime check — process.uptime would mis-classify a kill
+  // issued just before this process started.
+  const myPid = String(process.pid);
   try {
-    const st = statSync(signalPath);
-    if (st.mtimeMs < processStartMs) unlinkSync(signalPath);
+    const content = readFileSync(signalPath, "utf-8").trim();
+    if (content && content !== "*" && content !== myPid) {
+      unlinkSync(signalPath);
+    } else if (!content) {
+      const st = statSync(signalPath);
+      if (st.mtimeMs < Date.now() - 1000) unlinkSync(signalPath);
+    }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
       console.error(`[codex] Warning: could not check/remove stale kill signal: ${e instanceof Error ? e.message : String(e)}`);
@@ -465,11 +478,55 @@ function createKillSignalAwaiter(
   pollIntervalMs: number,
   signal: AbortSignal,
 ): Promise<never> {
+  const myPid = String(process.pid);
+  const signalPath = join(signalsDir, threadId);
+
+  /** A signal file is targeting THIS run iff its content is empty (legacy
+   *  caller — startup check already vetted freshness), our PID, or the
+   *  wildcard "*". A different PID means the signal is for some other run. */
+  function targetsUs(): boolean {
+    try {
+      const content = readFileSync(signalPath, "utf-8").trim();
+      return content === "" || content === "*" || content === myPid;
+    } catch (e) {
+      // ENOENT = no signal; anything else = bail and let caller log
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  }
+
+  // Suppress repeated identical poll-loop warnings — a persistent permission
+  // problem on the signals dir would otherwise spam stderr at the poll rate
+  // (~2 Hz) for the entire turn duration.
+  let lastPollErrorMsg: string | null = null;
+  let pollErrorBurst = 0;
+
+  function logPollError(e: unknown): void {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg === lastPollErrorMsg) {
+      pollErrorBurst++;
+      // Re-emit at exponentially decreasing rate so a long-running issue is
+      // still occasionally visible without flooding.
+      if ((pollErrorBurst & (pollErrorBurst - 1)) !== 0) return; // not a power of 2
+    } else {
+      lastPollErrorMsg = msg;
+      pollErrorBurst = 1;
+    }
+    console.error(`[codex] Warning: kill signal poll error (will retry): ${msg}`);
+  }
+
   return new Promise<never>((_resolve, reject) => {
-    // Check immediately
-    if (existsSync(join(signalsDir, threadId))) {
-      reject(new KillSignalError(threadId));
-      return;
+    // Check immediately. Wrap in try/catch — the previous existsSync-only
+    // check returned false on permission errors; targetsUs() reads file
+    // content and can rethrow non-ENOENT errors, which would otherwise
+    // escape the Promise executor as an uncaught rejection.
+    try {
+      if (existsSync(signalPath) && targetsUs()) {
+        reject(new KillSignalError(threadId));
+        return;
+      }
+    } catch (e) {
+      logPollError(e);
     }
 
     const timer = setInterval(() => {
@@ -478,13 +535,13 @@ function createKillSignalAwaiter(
           clearInterval(timer);
           return;
         }
-        if (existsSync(join(signalsDir, threadId))) {
+        if (existsSync(signalPath) && targetsUs()) {
           clearInterval(timer);
           reject(new KillSignalError(threadId));
         }
       } catch (e) {
         // Log but keep polling — the error may be transient (e.g. momentary EACCES).
-        console.error(`[codex] Warning: kill signal poll error (will retry): ${e instanceof Error ? e.message : String(e)}`);
+        logPollError(e);
       }
     }, pollIntervalMs);
 

@@ -72,6 +72,11 @@ function buildMockClient(
       notificationHandlers.get(method)!.add(handler);
       return () => { notificationHandlers.get(method)?.delete(handler); };
     },
+    onAny(_handler: (method: string, params: unknown) => void): () => void {
+      // Mock client only fires `on(method)` handlers; tests don't exercise
+      // the wildcard path.
+      return () => {};
+    },
     onRequest(method: string, handler: (params: unknown) => unknown | Promise<unknown>): () => void {
       requestHandlers.set(method, handler);
       return () => { requestHandlers.delete(method); };
@@ -579,6 +584,75 @@ describe("kill signal", () => {
 
     expect(result.status).toBe("interrupted");
     expect(result.error).toBe("Thread killed by user");
+  });
+
+  test("PID-tagged signal targeting a different PID is treated as stale at startup", async () => {
+    // Pretend a previous run wrote a signal targeting some other PID. Both
+    // the startup check and the polling loop must reject it.
+    writeFileSync(join(TEST_KILL_DIR, "thr-1"), "99999999", { mode: 0o600 });
+
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-pid-mismatch", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    // Startup check unlinks the wrong-PID signal; turn proceeds normally.
+    expect(result.status).toBe("completed");
+  });
+
+  test("PID-tagged signal targeting our PID is honored", async () => {
+    // A signal explicitly addressed to this run's PID must trigger the kill.
+    writeFileSync(join(TEST_KILL_DIR, "thr-1"), String(process.pid), { mode: 0o600 });
+
+    const { client } = buildMockClient((method) => {
+      if (method === "turn/start") return inProgressTurn("turn-1");
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-pid-match", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("interrupted");
+  });
+
+  test("PID-tagged wildcard signal is honored", async () => {
+    // The "*" wildcard means "any active run on this thread" — used when the
+    // killer can't read a PID file.
+    writeFileSync(join(TEST_KILL_DIR, "thr-1"), "*", { mode: 0o600 });
+
+    const { client } = buildMockClient((method) => {
+      if (method === "turn/start") return inProgressTurn("turn-1");
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-wildcard", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("interrupted");
   });
 
   test("normal completion wins race — no kill signal", async () => {

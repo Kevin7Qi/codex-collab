@@ -72,6 +72,14 @@ describe("parseStructuredReviewOutput", () => {
     expect(result).toEqual(VALID_OUTPUT);
   });
 
+  test("parses JSON in markdown fence missing trailing newline before closing fence", () => {
+    // LLM output sometimes ends with `}` directly followed by ``` on the
+    // same line — the closing fence still terminates a valid block.
+    const raw = `\`\`\`json\n${JSON.stringify(VALID_OUTPUT)}\`\`\``;
+    const result = parseStructuredReviewOutput(raw);
+    expect(result).toEqual(VALID_OUTPUT);
+  });
+
   test("parses JSON with surrounding whitespace and prose", () => {
     const raw = `Some preamble text.\n\n${JSON.stringify(VALID_OUTPUT)}\n\nSome trailing text.`;
     const result = parseStructuredReviewOutput(raw);
