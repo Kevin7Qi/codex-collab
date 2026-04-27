@@ -8,7 +8,7 @@
 
 import net from "node:net";
 import { parseMessage, formatNotification, formatResponse, isResponse, isError, isRequest, isNotification } from "./client";
-import type { AppServerClient, RequestId, PendingRequest, NotificationHandler, ServerRequestHandler } from "./client";
+import type { AppServerClient, RequestId, PendingRequest, NotificationHandler, AnyNotificationHandler, ServerRequestHandler } from "./client";
 import { RpcError, type JsonRpcMessage } from "./types";
 import { config } from "./config";
 import { parseEndpoint } from "./broker";
@@ -32,6 +32,7 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
 
   const pending = new Map<RequestId, PendingRequest>();
   const notificationHandlers = new Map<string, Set<NotificationHandler>>();
+  const anyNotificationHandlers = new Set<AnyNotificationHandler>();
   const requestHandlers = new Map<string, ServerRequestHandler>();
   let closed = false;
   let nextId = 1;
@@ -136,6 +137,15 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     }
 
     if (isNotification(msg)) {
+      for (const h of anyNotificationHandlers) {
+        try {
+          h(msg.method, msg.params);
+        } catch (e) {
+          console.error(
+            `[broker-client] Error in wildcard notification handler for "${msg.method}": ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
       const handlers = notificationHandlers.get(msg.method);
       if (handlers) {
         for (const h of handlers) {
@@ -234,6 +244,11 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     };
   }
 
+  function onAny(handler: AnyNotificationHandler): () => void {
+    anyNotificationHandlers.add(handler);
+    return () => { anyNotificationHandlers.delete(handler); };
+  }
+
   function onRequest(method: string, handler: ServerRequestHandler): () => void {
     if (requestHandlers.has(method)) {
       console.error(
@@ -299,6 +314,7 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     request,
     notify,
     on,
+    onAny,
     onRequest,
     respond,
     onClose,

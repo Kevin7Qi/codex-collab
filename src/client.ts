@@ -64,6 +64,9 @@ export interface PendingRequest {
 /** Handler for server-sent notifications. */
 export type NotificationHandler = (params: unknown) => void;
 
+/** Handler for any server-sent notification, including the method name. */
+export type AnyNotificationHandler = (method: string, params: unknown) => void;
+
 /** Handler for server-sent requests (e.g. approval requests). Returns the result to send back. */
 export type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
 
@@ -87,6 +90,11 @@ export interface AppServerClient {
   notify(method: string, params?: unknown): void;
   /** Register a handler for server-sent notifications. Returns an unsubscribe function. */
   on(method: string, handler: NotificationHandler): () => void;
+  /** Register a wildcard handler that fires for every server-sent notification.
+   *  Used by the broker to forward all notifications to clients without an
+   *  allowlist of method names — new methods added by Codex's protocol must
+   *  pass through automatically. Returns an unsubscribe function. */
+  onAny(handler: AnyNotificationHandler): () => void;
   /** Register a handler for server-sent requests (e.g. approval). One handler per method;
    *  new registrations replace previous ones. Returns an unsubscribe function. */
   onRequest(method: string, handler: ServerRequestHandler): () => void;
@@ -157,6 +165,7 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   // Internal state
   const pending = new Map<RequestId, PendingRequest>();
   const notificationHandlers = new Map<string, Set<NotificationHandler>>();
+  const anyNotificationHandlers = new Set<AnyNotificationHandler>();
   const requestHandlers = new Map<string, ServerRequestHandler>();
   let closed = false;
   let exited = false;
@@ -217,11 +226,16 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
             (res) => write(formatResponse(msg.id, res)),
             (err) => {
               const errMsg = err instanceof Error ? err.message : String(err);
+              // Preserve a structured code/data the handler attached to the
+              // Error (e.g. a forwarded client rejection); fall back to the
+              // generic internal-error code otherwise.
+              const errAny = err as { code?: unknown; data?: unknown };
+              const code = typeof errAny?.code === "number" ? errAny.code : -32603;
+              const message = code === -32603 ? `Handler error: ${errMsg}` : errMsg;
               console.error(`[codex] Error in request handler for "${msg.method}": ${errMsg}`);
-              write(JSON.stringify({
-                id: msg.id,
-                error: { code: -32603, message: `Handler error: ${errMsg}` },
-              }) + "\n");
+              const errBody: Record<string, unknown> = { code, message };
+              if (errAny?.data !== undefined) errBody.data = errAny.data;
+              write(JSON.stringify({ id: msg.id, error: errBody }) + "\n");
             },
           );
       } else {
@@ -231,6 +245,15 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     }
 
     if (isNotification(msg)) {
+      // Wildcard handlers fire first, regardless of method, so the broker
+      // forwards every notification — including new ones the protocol adds.
+      for (const h of anyNotificationHandlers) {
+        try {
+          h(msg.method, msg.params);
+        } catch (e) {
+          console.error(`[codex] Error in wildcard notification handler for "${msg.method}": ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       const handlers = notificationHandlers.get(msg.method);
       if (handlers) {
         for (const h of handlers) {
@@ -350,6 +373,11 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     };
   }
 
+  function onAny(handler: AnyNotificationHandler): () => void {
+    anyNotificationHandlers.add(handler);
+    return () => { anyNotificationHandlers.delete(handler); };
+  }
+
   /** Register a handler for server-sent requests. Only one handler per method;
    *  a new registration replaces the previous one (with a warning). */
   function onRequest(method: string, handler: ServerRequestHandler): () => void {
@@ -458,6 +486,7 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     request,
     notify,
     on,
+    onAny,
     onRequest,
     respond,
     onClose,

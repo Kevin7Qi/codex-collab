@@ -7,6 +7,7 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
+import { spawn as childSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { BrokerState, SessionState, ParsedEndpoint } from "./types";
 import { connectDirect, type AppServerClient } from "./client";
@@ -15,6 +16,22 @@ import { terminateProcessTree, isProcessAlive } from "./process";
 
 /** JSON-RPC error code returned when the broker is busy with another request. */
 export const BROKER_BUSY_RPC_CODE = -32001;
+
+/**
+ * If `e` is a BROKER_BUSY RpcError, replace its message with a user-friendly
+ * one explaining the cause. Mutates in place to preserve the RpcError type
+ * so upstream code can still pattern-match on `instanceof RpcError`.
+ */
+export function wrapBrokerBusy(e: unknown): unknown {
+  // Lazy import avoids a circular dependency through types -> broker -> client.
+  // RpcError lives in types.ts and is what broker-client constructs.
+  const isRpcBusy = !!e && typeof e === "object" &&
+    (e as { rpcCode?: unknown }).rpcCode === BROKER_BUSY_RPC_CODE;
+  if (isRpcBusy && e instanceof Error) {
+    e.message = "Codex broker is busy serving another invocation. Retry in a moment, or wait for the in-flight turn to finish.";
+  }
+  return e;
+}
 
 // ─── Endpoint abstraction ─────────────────────────────────────────────────
 
@@ -278,8 +295,14 @@ export function teardownBroker(stateDir: string, state: BrokerState): void {
     }
   }
 
-  // Clear broker state
-  clearBrokerState(stateDir);
+  // Clear broker state. Don't propagate transient errors (e.g. Windows EBUSY
+  // if the file handle hasn't been released yet) — teardown is a best-effort
+  // recovery path; the next invocation can safely overwrite stale state.
+  try {
+    clearBrokerState(stateDir);
+  } catch (e) {
+    console.error(`[broker] Warning: could not clear broker state during teardown: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 // ─── Session ID helper ────────────────────────────────────────────────────
@@ -314,15 +337,26 @@ function resolveBrokerServerPath(): string {
   return srcPath;
 }
 
+/** Handle returned by {@link spawnBrokerServer}. */
+interface SpawnedBroker {
+  pid: number;
+  /** Resolves when the spawned process exits. Used to detect early crashes
+   *  while we're polling the socket for readiness. */
+  exited: Promise<number>;
+}
+
 /**
  * Spawn the broker-server as a detached process.
- * Returns the PID of the spawned process.
+ *
+ * `detached: true` puts the child in a new process group so SIGINT delivered
+ * to the foreground CLI's pgrp does not propagate to the broker. Without
+ * this, a single Ctrl-C in the CLI would tear down the shared broker.
  */
 function spawnBrokerServer(
   endpoint: string,
   cwd: string,
   stateDir: string,
-): number {
+): SpawnedBroker {
   const brokerPath = resolveBrokerServerPath();
   const args = [
     "run",
@@ -339,36 +373,48 @@ function spawnBrokerServer(
   const logPath = path.join(stateDir, "broker.log");
   const logFd = fs.openSync(logPath, "a");
 
-  const proc = Bun.spawn(["bun", ...args], {
-    stdin: "ignore",
-    stdout: logFd,
-    stderr: logFd,
+  // Use node's child_process.spawn — Bun.spawn does not expose `detached`,
+  // and we need a new process group for SIGINT isolation.
+  const proc = childSpawn("bun", args, {
+    stdio: ["ignore", logFd, logFd],
     cwd,
+    detached: true,
+    windowsHide: true,
   });
 
-  // Unref so the parent process can exit without waiting for the broker
-  proc.unref();
-
   fs.closeSync(logFd);
+  proc.unref();
 
   if (!proc.pid) {
     throw new Error("Failed to spawn broker server: no PID returned");
   }
 
-  return proc.pid;
+  const exited = new Promise<number>((resolve) => {
+    proc.once("exit", (code) => resolve(code ?? 1));
+  });
+
+  return { pid: proc.pid, exited };
 }
 
 /**
  * Wait for the broker to become alive by polling the socket.
  * Returns true if alive within the timeout, false otherwise.
+ *
+ * Aborts early if the spawned broker process exits before becoming ready —
+ * polling the full timeout against a dead pid is wasted time.
  */
 async function waitForBrokerReady(
   endpoint: string,
+  spawned: SpawnedBroker | null = null,
   timeoutMs = 10_000,
   pollMs = 100,
 ): Promise<boolean> {
+  let exitedEarly = false;
+  spawned?.exited.then(() => { exitedEarly = true; }).catch(() => {});
+
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (exitedEarly) return false;
     if (await isBrokerAlive(endpoint, 200)) return true;
     await new Promise((r) => setTimeout(r, pollMs));
   }
@@ -495,50 +541,45 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
       }
     }
 
+    // Reusable fallback: log, save session state best-effort, return a
+    // direct connection. Deliberately does NOT persist broker state — a
+    // saved `endpoint: null` would make every subsequent invocation skip
+    // broker entirely (silent permanent disable). Letting the next call
+    // see no broker state means it tries to spawn again, which we want.
+    const fallbackToDirect = async (reason: string): Promise<AppServerClient> => {
+      console.error(`[broker] Warning: ${reason}. Using direct connection.`);
+      try {
+        saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
+      } catch (e) {
+        console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
+      }
+      return connectDirect({ cwd });
+    };
+
     // 3. Spawn a new broker
     const endpoint = createEndpoint(stateDir);
-    let pid: number;
+    let spawned: SpawnedBroker;
     try {
-      pid = spawnBrokerServer(endpoint, cwd, stateDir);
+      spawned = spawnBrokerServer(endpoint, cwd, stateDir);
     } catch (e) {
-      // Broker spawn failed — fall back to direct connection
-      console.error(
-        `[broker] Warning: failed to spawn broker: ${(e as Error).message}. Using direct connection.`,
-      );
-      const client = await connectDirect({ cwd });
-      try {
-        const now = new Date().toISOString();
-        saveBrokerState(stateDir, { endpoint: null, pid: null, sessionDir: stateDir, startedAt: now });
-        saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
-      } catch (e) {
-        console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}`);
-      }
-      return client;
+      return fallbackToDirect(`failed to spawn broker: ${(e as Error).message}`);
     }
 
-    // 4. Wait for the broker to be ready
-    const ready = await waitForBrokerReady(endpoint);
+    // 4. Wait for the broker to be ready (aborts early if it crashes)
+    const ready = await waitForBrokerReady(endpoint, spawned);
     if (!ready) {
-      // Broker didn't start in time — kill the orphaned process and fall back to direct
-      console.error("[broker] Warning: broker did not become ready in time. Using direct connection.");
-      if (pid) {
-        try { terminateProcessTree(pid); } catch { /* best effort */ }
-      }
-      const client = await connectDirect({ cwd });
       try {
-        const now = new Date().toISOString();
-        saveBrokerState(stateDir, { endpoint: null, pid: null, sessionDir: stateDir, startedAt: now });
-        saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
+        terminateProcessTree(spawned.pid);
       } catch (e) {
-        console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}`);
+        console.error(`[broker] Warning: could not terminate orphaned broker pid ${spawned.pid}: ${e instanceof Error ? e.message : String(e)}`);
       }
-      return client;
+      return fallbackToDirect("broker did not become ready in time — see broker.log for the spawn failure reason");
     }
 
     // 5. Connect to the new broker
     try {
       const now = new Date().toISOString();
-      saveBrokerState(stateDir, { endpoint, pid, sessionDir: stateDir, startedAt: now });
+      saveBrokerState(stateDir, { endpoint, pid: spawned.pid, sessionDir: stateDir, startedAt: now });
       saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
     } catch (e) {
       console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}. Next invocation may not find this broker.`);
