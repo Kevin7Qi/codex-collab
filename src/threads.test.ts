@@ -74,6 +74,20 @@ describe("thread index", () => {
     expect(loaded.abc12345.model).toBe("gpt-5");
   });
 
+  test("loadThreadIndex throws on corrupt JSON instead of silently dropping mapping", () => {
+    // Write a malformed file directly to threads.json
+    writeFileSync(join(testDir, "threads.json"), "{ bro\nken json", { mode: 0o600 });
+    expect(() => loadThreadIndex(testDir)).toThrow(/corrupted/i);
+    // Original file is moved aside, not deleted — user can inspect
+    const corruptBackup = readdirSync(testDir).find(f => f.startsWith("threads.json.corrupt."));
+    expect(corruptBackup).toBeDefined();
+  });
+
+  test("loadThreadIndex throws on non-object structure (array)", () => {
+    writeFileSync(join(testDir, "threads.json"), JSON.stringify(["not", "an", "object"]));
+    expect(() => loadThreadIndex(testDir)).toThrow(/invalid structure/i);
+  });
+
   test("registerThread adds to index and returns shortId", () => {
     const shortId = registerThread(testDir, "thr_new_id", { model: "gpt-5", cwd: "/proj" });
     expect(shortId).toMatch(/^[0-9a-f]{8}$/);
@@ -317,6 +331,11 @@ describe("run ledger", () => {
     expect(loaded!.threadId).toBe("thr_test"); // unchanged
   });
 
+  test("updateRun throws on unknown run instead of silently no-op", () => {
+    expect(() => updateRun(testDir, "run-does-not-exist", { status: "completed" }))
+      .toThrow(/unknown run/i);
+  });
+
   test("listRuns returns all runs sorted by startedAt descending", () => {
     const r1 = makeRun({ startedAt: "2026-01-01T00:00:00Z" });
     const r2 = makeRun({ startedAt: "2026-01-02T00:00:00Z" });
@@ -400,6 +419,90 @@ describe("run ledger", () => {
   test("pruneRuns handles empty directory", () => {
     // Should not throw
     pruneRuns(testDir, 5);
+  });
+
+  test("pruneRuns prefers completedAt over startedAt for sort", () => {
+    // Older startedAt but later completedAt: a long-running run that started
+    // first but finished last. Should NOT be pruned ahead of a short run that
+    // started later but finished earlier.
+    const longRunningButRecent = makeRun({
+      runId: "run-long",
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-10T00:00:00Z",
+    });
+    const shortAndOldest = makeRun({
+      runId: "run-short-1",
+      startedAt: "2026-01-02T00:00:00Z",
+      completedAt: "2026-01-02T00:01:00Z",
+    });
+    const shortAndOlder = makeRun({
+      runId: "run-short-2",
+      startedAt: "2026-01-03T00:00:00Z",
+      completedAt: "2026-01-03T00:01:00Z",
+    });
+    createRun(testDir, longRunningButRecent);
+    createRun(testDir, shortAndOldest);
+    createRun(testDir, shortAndOlder);
+    pruneRuns(testDir, 2);
+    const remaining = listRuns(testDir).map(r => r.runId);
+    expect(remaining).toContain("run-long"); // most recent activity
+    expect(remaining).not.toContain("run-short-1"); // earliest activity → pruned
+  });
+
+  test("pruneRuns deletes orphan log files when no surviving run references them", () => {
+    const log1 = join(testDir, "logs", "thread1.log");
+    const log2 = join(testDir, "logs", "thread2.log");
+    mkdirSync(join(testDir, "logs"), { recursive: true });
+    writeFileSync(log1, "old log");
+    writeFileSync(log2, "kept log");
+
+    const oldRun = makeRun({
+      runId: "run-old",
+      shortId: "thread1",
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:01:00Z",
+      logFile: log1,
+    });
+    const newRun = makeRun({
+      runId: "run-new",
+      shortId: "thread2",
+      startedAt: "2026-01-05T00:00:00Z",
+      completedAt: "2026-01-05T00:01:00Z",
+      logFile: log2,
+    });
+    createRun(testDir, oldRun);
+    createRun(testDir, newRun);
+
+    pruneRuns(testDir, 1);
+    expect(existsSync(log1)).toBe(false); // orphan log removed
+    expect(existsSync(log2)).toBe(true);  // referenced log kept
+  });
+
+  test("pruneRuns keeps shared log when another run still references it", () => {
+    const sharedLog = join(testDir, "logs", "shared.log");
+    mkdirSync(join(testDir, "logs"), { recursive: true });
+    writeFileSync(sharedLog, "shared log");
+
+    const r1 = makeRun({
+      runId: "run-a",
+      shortId: "shared",
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:01:00Z",
+      logFile: sharedLog,
+    });
+    const r2 = makeRun({
+      runId: "run-b",
+      shortId: "shared",
+      startedAt: "2026-01-05T00:00:00Z",
+      completedAt: "2026-01-05T00:01:00Z",
+      logFile: sharedLog,
+    });
+    createRun(testDir, r1);
+    createRun(testDir, r2);
+
+    pruneRuns(testDir, 1);
+    // Only run-b survives, but it still references the shared log → keep it.
+    expect(existsSync(sharedLog)).toBe(true);
   });
 });
 
@@ -774,5 +877,20 @@ describe("migrateGlobalState", () => {
     expect(byShortId.bbb22222.status).toBe("failed");      // stale running -> failed
     expect(byShortId.ccc33333.status).toBe("cancelled");    // interrupted -> cancelled
     expect(byShortId.ddd44444.status).toBe("failed");
+  });
+
+  test("does not throw or destroy the legacy file when global threads.json is corrupt", () => {
+    // A corrupt legacy file would otherwise propagate through every CLI
+    // invocation (since migrateGlobalState runs from getWorkspacePaths) and
+    // — pre-fix — be renamed aside, breaking migration for OTHER workspaces.
+    writeFileSync(join(globalDir, "threads.json"), "{ this is not, valid json", { mode: 0o600 });
+
+    expect(() => migrateGlobalState(cwdDir, globalDir)).not.toThrow();
+
+    // The corrupt file must remain in place so other workspaces still see it.
+    expect(existsSync(join(globalDir, "threads.json"))).toBe(true);
+    // No `.corrupt.<ts>` backup file should have been created.
+    const backups = readdirSync(globalDir).filter(f => f.startsWith("threads.json.corrupt."));
+    expect(backups).toEqual([]);
   });
 });

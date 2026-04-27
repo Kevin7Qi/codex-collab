@@ -109,29 +109,36 @@ export function loadThreadIndex(stateDir: string): ThreadIndex {
   } catch (e) {
     throw new Error(`Cannot read threads file ${filePath}: ${e instanceof Error ? e.message : e}`);
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(content);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      console.error("[codex] Warning: threads file has invalid structure. Starting fresh.");
-      try {
-        renameSync(filePath, `${filePath}.corrupt.${Date.now()}`);
-      } catch (backupErr) {
-        console.error(`[codex] Warning: could not back up invalid threads file: ${backupErr instanceof Error ? backupErr.message : backupErr}`);
-      }
-      return {};
-    }
-    return parsed;
+    parsed = JSON.parse(content);
   } catch (e) {
-    console.error(
-      `[codex] Warning: threads file is corrupted (${e instanceof Error ? e.message : e}). Thread history may be incomplete.`,
-    );
-    try {
-      renameSync(filePath, `${filePath}.corrupt.${Date.now()}`);
-    } catch (backupErr) {
-      console.error(`[codex] Warning: could not back up corrupt threads file: ${backupErr instanceof Error ? backupErr.message : backupErr}`);
-    }
-    return {};
+    throw bailOnCorruptThreads(filePath, `unparseable JSON (${e instanceof Error ? e.message : e})`);
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw bailOnCorruptThreads(filePath, "invalid structure (not a JSON object)");
+  }
+  return parsed as ThreadIndex;
+}
+
+/**
+ * Move a corrupt threads file aside and return an Error explaining the situation.
+ * The caller throws — silently returning an empty index on corruption used to
+ * make all the user's short IDs vanish for the live invocation while the
+ * stderr warning was easy to miss.
+ */
+function bailOnCorruptThreads(filePath: string, reason: string): Error {
+  let backupPath: string | null = `${filePath}.corrupt.${Date.now()}`;
+  try {
+    renameSync(filePath, backupPath);
+  } catch (backupErr) {
+    console.error(`[codex] Warning: could not back up corrupt threads file: ${backupErr instanceof Error ? backupErr.message : backupErr}`);
+    backupPath = null;
+  }
+  const where = backupPath
+    ? `Moved aside to: ${backupPath}\nInspect or restore it, then retry. Re-running now will start with an empty thread index.`
+    : `Could not move it aside automatically — inspect ${filePath} manually.`;
+  return new Error(`Threads file corrupted (${reason}).\n${where}`);
 }
 
 export function saveThreadIndex(stateDir: string, index: ThreadIndex): void {
@@ -304,26 +311,30 @@ type RunPatch = Partial<Pick<RunRecord,
   "output" | "filesChanged" | "commandsRun" | "error" | "logOffset"
 >>;
 
+/**
+ * Update a run record. Throws on missing file, unreadable JSON, or write
+ * failure — terminal status updates that fail silently used to leave runs
+ * stuck `running` forever. Callers in shutdown paths wrap this in try/catch
+ * to log without aborting; callers in success paths must surface the error.
+ */
 export function updateRun(stateDir: string, runId: string, patch: RunPatch): void {
   const filePath = runFilePath(stateDir, runId);
   if (!existsSync(filePath)) {
-    console.error(`[codex] Warning: cannot update unknown run ${runId}`);
-    return;
+    throw new Error(`Cannot update unknown run ${runId} (file ${filePath} missing)`);
   }
   let record: RunRecord;
   try {
     record = JSON.parse(readFileSync(filePath, "utf-8"));
   } catch (e) {
-    console.error(`[codex] Warning: failed to read run ${runId}: ${e instanceof Error ? e.message : e}`);
-    return;
+    throw new Error(`Failed to read run ${runId}: ${e instanceof Error ? e.message : e}`);
   }
   Object.assign(record, patch);
+  const tmpPath = filePath + ".tmp";
   try {
-    const tmpPath = filePath + ".tmp";
     writeFileSync(tmpPath, JSON.stringify(record, null, 2), { mode: 0o600 });
     renameSync(tmpPath, filePath);
   } catch (e) {
-    console.error(`[codex] Warning: failed to write run ${runId}: ${e instanceof Error ? e.message : e}`);
+    throw new Error(`Failed to write run ${runId}: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -362,29 +373,51 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   const files = readdirSync(dir).filter(f => f.endsWith(".json"));
   if (files.length <= limit) return;
 
-  // Load all records with their filenames
-  const entries: { file: string; startedAt: string }[] = [];
+  // Load all records with their filenames. Sort by last activity, not start
+  // time: a long-running run that started early but is still updating should
+  // outlive a short, fully-completed older run.
+  type Entry = { file: string; activityAt: string; logFile: string | null };
+  const entries: Entry[] = [];
   for (const file of files) {
     try {
       const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
-      entries.push({ file, startedAt: record.startedAt });
+      const activityAt = record.completedAt ?? record.startedAt;
+      entries.push({ file, activityAt, logFile: record.logFile || null });
     } catch (e) {
       // Corrupt files count toward the total; delete them first
       console.error(`[codex] Warning: cannot read run file ${file} during prune: ${e instanceof Error ? e.message : e}`);
-      entries.push({ file, startedAt: "1970-01-01T00:00:00Z" });
+      entries.push({ file, activityAt: "1970-01-01T00:00:00Z", logFile: null });
     }
   }
 
-  // Sort ascending by startedAt (oldest first)
-  entries.sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+  entries.sort((a, b) => new Date(a.activityAt).getTime() - new Date(b.activityAt).getTime());
 
-  // Delete oldest until count <= limit
   const toDelete = entries.length - limit;
+  const survivors = entries.slice(toDelete);
+  // Logs referenced by surviving runs must NOT be deleted — multiple runs
+  // share a thread's log file.
+  const survivingLogs = new Set<string>();
+  for (const s of survivors) {
+    if (s.logFile) survivingLogs.add(s.logFile);
+  }
+
   for (let i = 0; i < toDelete; i++) {
+    const entry = entries[i];
     try {
-      rmSync(join(dir, entries[i].file));
+      rmSync(join(dir, entry.file));
     } catch (e) {
-      console.error(`[codex] Warning: failed to delete run file ${entries[i].file} during prune: ${e instanceof Error ? e.message : e}`);
+      console.error(`[codex] Warning: failed to delete run file ${entry.file} during prune: ${e instanceof Error ? e.message : e}`);
+      continue;
+    }
+    // If no surviving run references this log file, remove it too. Multiple
+    // runs of the same thread share a log; only the last prune cleans it up.
+    // `force: true` swallows ENOENT, so no existence-check race.
+    if (entry.logFile && !survivingLogs.has(entry.logFile)) {
+      try {
+        rmSync(entry.logFile, { force: true });
+      } catch (e) {
+        console.error(`[codex] Warning: failed to delete orphan log ${entry.logFile}: ${e instanceof Error ? e.message : e}`);
+      }
     }
   }
 }
@@ -492,8 +525,35 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   const wsThreadsFile = join(stateDir, "threads.json");
   if (existsSync(wsThreadsFile)) return;
 
-  // 3. Load the global thread mapping
-  const globalMapping = loadThreadMapping(globalThreadsFile);
+  // 3. Load the global thread mapping directly. We deliberately do NOT use
+  // loadThreadMapping here — it renames the file aside on corruption, which
+  // would (a) destroy the legacy state for OTHER workspaces that haven't
+  // migrated yet, and (b) cascade through every CLI invocation since
+  // migration runs from getWorkspacePaths. On corruption we skip migration
+  // and leave the file in place so the user can inspect/repair it.
+  let globalMapping: ThreadMapping;
+  let content: string;
+  try {
+    content = readFileSync(globalThreadsFile, "utf-8");
+  } catch (e) {
+    // I/O errors (EACCES, EISDIR, EIO) usually mean a fixable configuration
+    // problem — surface louder so users know history isn't actually lost.
+    const code = (e as NodeJS.ErrnoException).code;
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[codex] Migration blocked by ${code ?? "I/O error"} on ${globalThreadsFile}: ${msg}. Fix permissions/path and re-run any codex-collab command to retry migration.`);
+    return;
+  }
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      console.error(`[codex] Skipping migration: legacy global threads file is not a JSON object (${globalThreadsFile})`);
+      return;
+    }
+    globalMapping = parsed;
+  } catch (e) {
+    console.error(`[codex] Skipping migration: legacy global threads file is unparseable (${e instanceof Error ? e.message : String(e)})`);
+    return;
+  }
   if (Object.keys(globalMapping).length === 0) return;
 
   // 4. Filter entries where cwd matches or is within the workspace root
@@ -589,29 +649,16 @@ export function loadThreadMapping(threadsFile: string): ThreadMapping {
   } catch (e) {
     throw new Error(`Cannot read threads file ${threadsFile}: ${e instanceof Error ? e.message : e}`);
   }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(content);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      console.error("[codex] Warning: threads file has invalid structure. Starting fresh.");
-      try {
-        renameSync(threadsFile, `${threadsFile}.corrupt.${Date.now()}`);
-      } catch (backupErr) {
-        console.error(`[codex] Warning: could not back up invalid threads file: ${backupErr instanceof Error ? backupErr.message : backupErr}`);
-      }
-      return {};
-    }
-    return parsed;
+    parsed = JSON.parse(content);
   } catch (e) {
-    console.error(
-      `[codex] Warning: threads file is corrupted (${e instanceof Error ? e.message : e}). Thread history may be incomplete.`,
-    );
-    try {
-      renameSync(threadsFile, `${threadsFile}.corrupt.${Date.now()}`);
-    } catch (backupErr) {
-      console.error(`[codex] Warning: could not back up corrupt threads file: ${backupErr instanceof Error ? backupErr.message : backupErr}`);
-    }
-    return {};
+    throw bailOnCorruptThreads(threadsFile, `unparseable JSON (${e instanceof Error ? e.message : e})`);
   }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw bailOnCorruptThreads(threadsFile, "invalid structure (not a JSON object)");
+  }
+  return parsed as ThreadMapping;
 }
 
 /** @deprecated Use saveThreadIndex instead. */
