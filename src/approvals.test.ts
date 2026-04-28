@@ -155,6 +155,24 @@ describe("InteractiveApprovalHandler", () => {
     expect(lines.some((l) => l.includes("network access"))).toBe(true);
   });
 
+  test("progress callback includes workspace-aware approve commands", async () => {
+    const lines: string[] = [];
+    const handler = new InteractiveApprovalHandler(
+      TEST_APPROVALS_DIR,
+      (line) => lines.push(line),
+      "/project with spaces",
+      100,
+    );
+
+    setTimeout(() => {
+      writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "accept");
+    }, 200);
+
+    await handler.handleCommandApproval(mockCommandRequest);
+    expect(lines).toContain('  Approve: codex-collab approve appr-001 -d "/project with spaces"');
+    expect(lines).toContain('  Decline: codex-collab decline appr-001 -d "/project with spaces"');
+  });
+
   test("cleans up request file on abort", async () => {
     const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
     const controller = new AbortController();

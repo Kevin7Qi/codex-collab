@@ -14,6 +14,8 @@ import type {
 } from "./types";
 import { config } from "./config";
 
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
+
 export type { RequestId } from "./types";
 
 /** Format a JSON-RPC-style notification (no id, no response). Returns newline-terminated JSON.
@@ -37,9 +39,41 @@ export function parseMessage(line: string): JsonRpcMessage | null {
 
     const hasMethod = "method" in raw && typeof raw.method === "string";
     const hasId = "id" in raw && (typeof raw.id === "string" || typeof raw.id === "number");
+    const hasResult = "result" in raw;
+    const hasError = "error" in raw;
 
     if (!hasMethod && !hasId) {
       console.error(`[codex] Warning: ignoring non-protocol message: ${line.slice(0, 200)}`);
+      return null;
+    }
+
+    if (hasId && !hasMethod) {
+      if (hasResult === hasError) {
+        console.error(`[codex] Warning: ignoring malformed response: ${line.slice(0, 200)}`);
+        return null;
+      }
+      if (hasError) {
+        const error = (raw as { error?: unknown }).error;
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          typeof (error as { code?: unknown }).code !== "number" ||
+          typeof (error as { message?: unknown }).message !== "string"
+        ) {
+          console.error(`[codex] Warning: ignoring malformed error response: ${line.slice(0, 200)}`);
+          return null;
+        }
+      }
+      return raw as JsonRpcMessage;
+    }
+
+    if (hasMethod && hasId && (hasResult || hasError)) {
+      console.error(`[codex] Warning: ignoring malformed request/response hybrid: ${line.slice(0, 200)}`);
+      return null;
+    }
+
+    if (hasMethod && !hasId && (hasResult || hasError)) {
+      console.error(`[codex] Warning: ignoring malformed notification/response hybrid: ${line.slice(0, 200)}`);
       return null;
     }
 
@@ -278,6 +312,12 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_BUFFER_SIZE) {
+          console.error("[codex] App server response buffer exceeded maximum size");
+          rejectAll("App server response buffer exceeded maximum size");
+          try { proc.kill(); } catch {}
+          break;
+        }
 
         let newlineIdx: number;
         while ((newlineIdx = buffer.indexOf("\n")) !== -1) {

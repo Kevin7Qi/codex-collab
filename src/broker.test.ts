@@ -11,8 +11,11 @@ import {
   getCurrentSessionId,
   acquireSpawnLock,
   teardownBroker,
+  ensureConnection,
+  BROKER_BUSY_RPC_CODE,
 } from "./broker";
 import { connectToBroker } from "./broker-client";
+import { resolveStateDir } from "./config";
 import net from "node:net";
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
@@ -975,6 +978,60 @@ describe("BrokerClient — brokerBusy flag", () => {
       await client.close();
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe("ensureConnection — busy broker", () => {
+  test("streaming callers do not fall back to direct connection when broker is busy", async () => {
+    if (!await checkSocketSupport()) return;
+    const cwd = mkdtempSync(join(tmpdir(), "broker-busy-cwd-"));
+    const stateDir = resolveStateDir(cwd);
+    const sockPath = join(tempDir, "ensure-busy-broker.sock");
+
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      let buffer = "";
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.method === "initialize" && msg.id !== undefined) {
+              socket.write(JSON.stringify({
+                id: msg.id,
+                result: { userAgent: "busy-broker", busy: true },
+              }) + "\n");
+            }
+          } catch {}
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+
+    try {
+      saveBrokerState(stateDir, {
+        endpoint: `unix:${sockPath}`,
+        pid: null,
+        sessionDir: stateDir,
+        startedAt: new Date().toISOString(),
+      });
+
+      let code: unknown;
+      try {
+        await ensureConnection(cwd, true);
+      } catch (e) {
+        code = (e as { rpcCode?: unknown }).rpcCode;
+      }
+      expect(code).toBe(BROKER_BUSY_RPC_CODE);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(cwd, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 });

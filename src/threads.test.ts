@@ -748,8 +748,11 @@ describe("migrateGlobalState", () => {
     expect(index.aaa11111.threadId).toBe("thr_alpha");
     expect(index.aaa11111.model).toBe("gpt-5");
     expect(index.aaa11111.name).toBeNull();
+    expect(index.aaa11111.preview).toBe("Do the thing");
+    expect(index.aaa11111.lastStatus).toBe("completed");
     expect(index.bbb22222.threadId).toBe("thr_beta");
     expect(index.bbb22222.model).toBe("o3");
+    expect(index.bbb22222.lastStatus).toBe("failed");
 
     // Verify synthetic run records exist
     const runs = listRuns(wsStateDir);
@@ -796,7 +799,27 @@ describe("migrateGlobalState", () => {
     expect(runs[0].logFile).toBe(wsLogFile);
   });
 
-  test("no-ops if per-workspace state already exists", () => {
+  test("migration is idempotent and does not duplicate synthetic runs", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "completed",
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const index = loadThreadIndex(wsStateDir);
+    expect(Object.keys(index)).toHaveLength(1);
+    expect(listRuns(wsStateDir).filter(r => r.shortId === "aaa11111")).toHaveLength(1);
+  });
+
+  test("merges legacy entries when per-workspace state already exists", () => {
     const wsRoot = cwdDir;
     writeGlobalThreads(globalDir, {
       aaa11111: {
@@ -822,11 +845,16 @@ describe("migrateGlobalState", () => {
 
     migrateGlobalState(cwdDir, globalDir);
 
-    // Verify per-workspace state was NOT overwritten
+    // Verify existing state was preserved and missing legacy entries merged in.
     const index = loadThreadIndex(wsStateDir);
-    expect(Object.keys(index)).toHaveLength(1);
+    expect(Object.keys(index)).toHaveLength(2);
     expect(index.existing1.threadId).toBe("thr_existing");
-    expect(index.aaa11111).toBeUndefined();
+    expect(index.existing1.name).toBe("Existing Thread");
+    expect(index.aaa11111.threadId).toBe("thr_alpha");
+    expect(index.aaa11111.lastStatus).toBe("completed");
+
+    const runs = listRuns(wsStateDir);
+    expect(runs.some(r => r.shortId === "aaa11111" && r.threadId === "thr_alpha")).toBe(true);
   });
 
   test("no-ops if global state doesn't exist", () => {

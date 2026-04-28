@@ -85,7 +85,7 @@ export async function handleRun(args: string[]): Promise<void> {
         [{ type: "text", text: prompt }],
         {
           dispatcher,
-          approvalHandler: getApprovalHandler(effective.approvalPolicy, ws.approvalsDir),
+          approvalHandler: getApprovalHandler(effective.approvalPolicy, ws.approvalsDir, options.dir),
           timeoutMs: options.timeout * 1000,
           killSignalsDir: ws.killSignalsDir,
           onTurnId: (id) => setActiveTurnId(id),

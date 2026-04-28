@@ -194,6 +194,21 @@ describe("parseMessage", () => {
     expect(msg).toHaveProperty("error");
   });
 
+  test("returns null for malformed error response", () => {
+    const msg = parseMessage('{"id":1,"error":null}');
+    expect(msg).toBeNull();
+  });
+
+  test("returns null for response with both result and error", () => {
+    const msg = parseMessage('{"id":1,"result":"ok","error":{"code":-1,"message":"bad"}}');
+    expect(msg).toBeNull();
+  });
+
+  test("returns null for request/response hybrid", () => {
+    const msg = parseMessage('{"id":1,"method":"turn/start","result":"ok"}');
+    expect(msg).toBeNull();
+  });
+
   test("parses a request (has id and method)", () => {
     const msg = parseMessage('{"id":5,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}');
     expect(msg).toHaveProperty("id", 5);

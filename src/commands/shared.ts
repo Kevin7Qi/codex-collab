@@ -432,9 +432,9 @@ export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeW
 export function setActiveRunId(id: string | undefined): void { activeRunId = id; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
 
-export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string): ApprovalHandler {
+export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string, workspaceDir?: string): ApprovalHandler {
   if (policy === "never") return autoApproveHandler;
-  return new InteractiveApprovalHandler(approvalsDir, progress);
+  return new InteractiveApprovalHandler(approvalsDir, progress, workspaceDir);
 }
 
 /** Connect to app server, run fn, then close the client (even on error). */
@@ -891,4 +891,3 @@ export async function tryArchive(client: AppServerClient, threadId: string): Pro
     return "failed";
   }
 }
-

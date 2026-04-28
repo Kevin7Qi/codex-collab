@@ -156,6 +156,10 @@ async function main() {
   function resetIdleTimer(): void {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
+      if (activeRequestSocket !== null || activeStreamSocket !== null || pendingForwardedRequests.size > 0) {
+        resetIdleTimer();
+        return;
+      }
       process.stderr.write("[broker-server] Idle timeout — shutting down\n");
       shutdown(server).then(() => process.exit(0));
     }, idleTimeout);
@@ -679,9 +683,10 @@ async function main() {
           activeStreamSocket = null;
         }
       }
-      if (activeRequestSocket === socket) {
-        activeRequestSocket = null;
-      }
+      // Keep any active request lock until the app-server request settles. If
+      // this was a streaming start, the app-server may already be creating a
+      // turn; clearing early would allow another client to interleave before
+      // the orphan recovery path has a turnId to interrupt.
     });
 
     socket.on("error", (err) => {
@@ -704,9 +709,8 @@ async function main() {
           activeStreamSocket = null;
         }
       }
-      if (activeRequestSocket === socket) {
-        activeRequestSocket = null;
-      }
+      // See the close handler: request ownership is released by the request's
+      // await/catch path, not by socket liveness.
     });
   });
 

@@ -64,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 codex-collab health
 ```
 
-The installer replaces the installed skill bundle and binary shim. Existing configuration, templates, thread history, and run logs under `~/.codex-collab/` are preserved.
+The installer replaces the installed skill bundle and binary shim. Existing configuration, templates, thread history, and run logs under `~/.codex-collab/` are preserved. Treat `~/.claude/skills/codex-collab/` as installer-managed: manual edits there may be overwritten on upgrade.
 
 When upgrading from older versions, codex-collab automatically migrates thread state to the per-workspace layout on first use. No manual state migration is required. The old `jobs` command remains available as a deprecated alias for `threads`.
 

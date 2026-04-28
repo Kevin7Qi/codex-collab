@@ -471,6 +471,10 @@ export interface ThreadIndexEntry {
   cwd: string;
   createdAt: string;
   updatedAt: string;
+  /** Legacy display field preserved while commands finish moving to run ledger. */
+  preview?: string;
+  /** Legacy display field preserved while commands finish moving to run ledger. */
+  lastStatus?: "running" | "completed" | "failed" | "interrupted";
 }
 
 export interface ThreadIndex {

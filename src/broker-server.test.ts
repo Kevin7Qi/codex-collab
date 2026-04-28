@@ -422,6 +422,13 @@ async function waitFor(
   throw new Error("waitFor timed out");
 }
 
+async function exitsWithin(proc: Subprocess, timeoutMs: number): Promise<boolean> {
+  return Promise.race([
+    proc.exited.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+  ]);
+}
+
 // ─── Socket support detection ────────────────────────────────────────────────
 
 // These integration tests spawn a real broker-server subprocess with a mock
@@ -1257,6 +1264,56 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       ]);
       expect(exitCode).toBe(0);
     }, 15_000);
+
+    test("active stream prevents idle shutdown", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, {
+        sendTurnCompleted: false,
+      });
+
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 300 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "long running" }],
+        });
+
+        expect(await exitsWithin(proc, 900)).toBe(false);
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 10_000);
+
+    test("pending approval prevents idle shutdown", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, {
+        sendApproval: true,
+        sendTurnCompleted: false,
+      });
+
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 300 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "needs approval" }],
+        });
+
+        await waitFor(() => client.messages.some(m => m.method === "item/commandExecution/requestApproval"), 2000, 50);
+        expect(await exitsWithin(proc, 900)).toBe(false);
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 10_000);
   });
 
   // ── Buffer overflow protection ────────────────────────────────────────────
@@ -1404,6 +1461,47 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         proc.kill();
       }
     }, 15_000);
+
+    test("client disconnect before turn/start response preserves request lock", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, {
+        turnDelay: 1000,
+        sendTurnCompleted: false,
+      });
+
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 5000 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        const client2 = await TestClient.connectAndInit(sockPath);
+
+        void client1.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "slow start" }],
+        }).catch(() => undefined);
+
+        await new Promise((r) => setTimeout(r, 100));
+        await client1.close();
+
+        let gotBusy = false;
+        try {
+          await client2.request("turn/start", {
+            threadId: "thread-001",
+            input: [{ type: "text", text: "must not interleave" }],
+          });
+        } catch (err: any) {
+          gotBusy = true;
+          expect(err.code).toBe(-32001);
+        }
+        expect(gotBusy).toBe(true);
+
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 10_000);
 
     test("orphan watchdog interrupts with threadId and turnId", async () => {
       const sockPath = join(tempDir, "broker.sock");

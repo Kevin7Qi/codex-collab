@@ -518,7 +518,8 @@ function workspaceDirName(cwd: string): string {
 
 /**
  * Migrate thread entries and logs from the old global layout to per-workspace layout.
- * Idempotent — no-ops if per-workspace state already exists or global state doesn't exist.
+ * Idempotent and merging — existing per-workspace state does not block missing
+ * legacy entries from being copied in later.
  *
  * @param cwd - The current working directory to migrate state for
  * @param globalDataDir - Override for the global data directory (for testing). Defaults to config.dataDir.
@@ -530,10 +531,9 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   // 1. Check if global threads.json exists
   if (!existsSync(globalThreadsFile)) return;
 
-  // 2. Compute per-workspace state dir and check if already migrated
+  // 2. Compute per-workspace state dir and load any existing workspace index.
   const stateDir = join(dataDir, "workspaces", workspaceDirName(cwd));
-  const wsThreadsFile = join(stateDir, "threads.json");
-  if (existsSync(wsThreadsFile)) return;
+  const index: ThreadIndex = loadThreadIndex(stateDir);
 
   // 3. Load the global thread mapping directly. We deliberately do NOT use
   // loadThreadMapping here — it renames the file aside on corruption, which
@@ -577,36 +577,64 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
 
   if (matchingEntries.length === 0) return;
 
-  // 5. Build per-workspace thread index and run records
-  const index: ThreadIndex = {};
+  // 5. Merge per-workspace thread index and run records
   const globalLogsDir = join(dataDir, "logs");
   const wsLogsDir = join(stateDir, "logs");
+  let migrated = 0;
+  let updated = 0;
+  let createdRuns = 0;
 
   for (const [shortId, entry] of matchingEntries) {
-    // Create ThreadIndexEntry
-    index[shortId] = {
+    const existingShortId = Object.entries(index).find(([, e]) => e.threadId === entry.threadId)?.[0];
+    let targetShortId = existingShortId ?? shortId;
+    if (!existingShortId && index[targetShortId]?.threadId && index[targetShortId].threadId !== entry.threadId) {
+      targetShortId = generateShortId();
+      while (targetShortId in index) targetShortId = generateShortId();
+      console.error(`[codex] Warning: legacy short ID ${shortId} collided during migration; assigned ${targetShortId}`);
+    }
+
+    const previous = index[targetShortId];
+    const nextEntry = {
       threadId: entry.threadId,
-      name: null,
-      model: entry.model ?? null,
-      cwd: entry.cwd ?? cwd,
-      createdAt: entry.createdAt,
-      updatedAt: entry.updatedAt ?? entry.createdAt,
+      name: previous?.name ?? null,
+      model: previous?.model ?? entry.model ?? null,
+      cwd: previous?.cwd ?? entry.cwd ?? cwd,
+      createdAt: previous?.createdAt ?? entry.createdAt,
+      updatedAt: previous?.updatedAt ?? entry.updatedAt ?? entry.createdAt,
+      preview: previous?.preview ?? entry.preview,
+      lastStatus: previous?.lastStatus ?? entry.lastStatus,
     };
+    const changed = !previous ||
+      previous.threadId !== nextEntry.threadId ||
+      previous.name !== nextEntry.name ||
+      previous.model !== nextEntry.model ||
+      previous.cwd !== nextEntry.cwd ||
+      previous.createdAt !== nextEntry.createdAt ||
+      previous.updatedAt !== nextEntry.updatedAt ||
+      previous.preview !== nextEntry.preview ||
+      previous.lastStatus !== nextEntry.lastStatus;
+    if (changed) {
+      index[targetShortId] = nextEntry;
+      if (previous) updated++;
+      else migrated++;
+    }
 
     // Copy log file if it exists
     const globalLogFile = join(globalLogsDir, `${shortId}.log`);
-    const wsLogFile = join(wsLogsDir, `${shortId}.log`);
+    const wsLogFile = join(wsLogsDir, `${targetShortId}.log`);
     let logFile = "";
     if (existsSync(globalLogFile)) {
       if (!existsSync(wsLogsDir)) mkdirSync(wsLogsDir, { recursive: true, mode: 0o700 });
       try {
-        copyFileSync(globalLogFile, wsLogFile);
+        if (!existsSync(wsLogFile)) copyFileSync(globalLogFile, wsLogFile);
         logFile = wsLogFile;
       } catch (e) {
         console.error(`[codex] Warning: could not copy log file ${globalLogFile}: ${(e as Error).message}`);
         logFile = globalLogFile; // fall back to original path
       }
     }
+
+    if (listRunsForThread(stateDir, targetShortId).length > 0) continue;
 
     // Determine terminal status
     const status = mapLegacyStatus(entry.lastStatus);
@@ -616,7 +644,7 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
     const record: RunRecord = {
       runId: generateRunId(),
       threadId: entry.threadId,
-      shortId,
+      shortId: targetShortId,
       kind: "task",
       phase: null,
       status,
@@ -634,13 +662,16 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
       error: null,
     };
     createRun(stateDir, record);
+    createdRuns++;
   }
 
   // 6. Save the per-workspace thread index
-  saveThreadIndex(stateDir, index);
+  if (migrated > 0 || updated > 0) saveThreadIndex(stateDir, index);
 
   // 7. Log migration result
-  console.error(`[codex] Migrated ${matchingEntries.length} thread(s) from global state to workspace ${wsRoot}`);
+  if (migrated > 0 || updated > 0 || createdRuns > 0) {
+    console.error(`[codex] Migrated ${migrated} thread(s), refreshed ${updated} thread(s), created ${createdRuns} run record(s) from global state to workspace ${wsRoot}`);
+  }
 }
 
 // ─── Legacy API (backward-compatible) ──────────────────────────────────────

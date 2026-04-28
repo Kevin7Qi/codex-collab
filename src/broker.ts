@@ -10,6 +10,7 @@ import path from "node:path";
 import { spawn as childSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { BrokerState, SessionState, ParsedEndpoint } from "./types";
+import { RpcError } from "./types";
 import { connectDirect, type AppServerClient } from "./client";
 import { config, resolveStateDir } from "./config";
 import { terminateProcessTree, isProcessAlive } from "./process";
@@ -468,18 +469,16 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         const { connectToBroker } = await import("./broker-client");
         const client = await connectToBroker({ endpoint: existingState.endpoint });
 
-        // If broker is busy and caller needs streaming, fall back to direct.
-        // Non-streaming callers (kill, threads, etc.) keep the broker connection
-        // so they can inspect/interrupt the active turn.
+        // If broker is busy and caller needs streaming, keep the broker's
+        // single-stream ownership guarantee intact. Direct fallback is only
+        // for broker spawn/connect failures, not for a healthy broker that is
+        // deliberately rejecting concurrent stream ownership.
         if (client.brokerBusy && streaming) {
           await client.close();
-          console.error("[broker] Broker is busy — using direct connection for this invocation.");
-          try {
-            saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
-          } catch (e) {
-            console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
-          }
-          return connectDirect({ cwd });
+          throw new RpcError(
+            "Codex broker is busy serving another invocation. Retry in a moment, or wait for the in-flight turn to finish.",
+            BROKER_BUSY_RPC_CODE,
+          );
         }
 
         // Update session state (non-fatal if save fails — connection is valid)
@@ -491,6 +490,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
 
         return client;
       } catch (e) {
+        if ((e as { rpcCode?: unknown })?.rpcCode === BROKER_BUSY_RPC_CODE) throw e;
         // Connection to existing broker failed — tear it down and spawn fresh
         console.error(
           `[broker] Warning: failed to connect to existing broker: ${(e as Error).message}. Spawning new one.`,
@@ -521,13 +521,10 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         const client = await connectToBroker({ endpoint: freshState.endpoint });
         if (client.brokerBusy && streaming) {
           await client.close();
-          console.error("[broker] Broker is busy — using direct connection for this invocation.");
-          try {
-            saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
-          } catch (e) {
-            console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
-          }
-          return connectDirect({ cwd });
+          throw new RpcError(
+            "Codex broker is busy serving another invocation. Retry in a moment, or wait for the in-flight turn to finish.",
+            BROKER_BUSY_RPC_CODE,
+          );
         }
         try {
           saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
@@ -536,6 +533,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         }
         return client;
       } catch (e) {
+        if ((e as { rpcCode?: unknown })?.rpcCode === BROKER_BUSY_RPC_CODE) throw e;
         console.error(`[broker] Warning: failed to connect to existing broker after lock: ${(e as Error).message}. Spawning new one.`);
         teardownBroker(stateDir, freshState);
       }

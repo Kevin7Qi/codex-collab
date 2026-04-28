@@ -64,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 codex-collab health
 ```
 
-安装脚本会替换已安装的 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下已有的配置、模板、会话历史和运行日志都会保留。
+安装脚本会替换已安装的 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下已有的配置、模板、会话历史和运行日志都会保留。请将 `~/.claude/skills/codex-collab/` 视为安装脚本管理的目录：升级时其中的手动修改可能会被覆盖。
 
 从旧版本升级时，codex-collab 会在首次使用时自动把会话状态迁移到按工作区划分的新布局，无需手动迁移状态。旧的 `jobs` 命令仍可作为 `threads` 的已弃用别名使用。
 
