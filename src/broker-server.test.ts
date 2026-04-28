@@ -11,7 +11,7 @@
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import net from "node:net";
-import { mkdtempSync, rmSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Subprocess } from "bun";
@@ -59,8 +59,10 @@ function createMockCodex(dir: string, opts?: {
   const sendApproval = opts?.sendApproval ?? false;
   const turnCompletedDelay = opts?.turnCompletedDelay ?? 10;
 
+  const interruptLog = join(dir, "interrupts.log");
   const scriptPath = join(dir, "codex");
   const script = `#!/usr/bin/env bun
+import { appendFileSync } from "node:fs";
 // Mock codex app-server for broker-server tests
 const args = process.argv.slice(2);
 if (args[0] !== "app-server") {
@@ -167,6 +169,10 @@ process.stdin.on("data", (chunk) => {
       }
 
       case "turn/interrupt":
+        appendFileSync(${JSON.stringify(interruptLog)}, JSON.stringify({
+          threadId: msg.params?.threadId ?? null,
+          turnId: msg.params?.turnId ?? null,
+        }) + "\\n");
         respond({ id: msg.id, result: {} });
         break;
 
@@ -1398,6 +1404,41 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         proc.kill();
       }
     }, 15_000);
+
+    test("orphan watchdog interrupts with threadId and turnId", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, {
+        sendTurnCompleted: false,
+      });
+      const interruptLog = join(mockDir, "interrupts.log");
+
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 1000 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        await client1.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "hello" }],
+        });
+
+        await new Promise((r) => setTimeout(r, 100));
+        await client1.close();
+
+        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        const interrupts = readFileSync(interruptLog, "utf-8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(interrupts).toContainEqual({
+          threadId: "thread-001",
+          turnId: "turn-001",
+        });
+      } finally {
+        proc.kill();
+      }
+    }, 10_000);
   });
 
   // ── Streaming methods ─────────────────────────────────────────────────────

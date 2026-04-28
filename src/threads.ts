@@ -376,17 +376,27 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   // Load all records with their filenames. Sort by last activity, not start
   // time: a long-running run that started early but is still updating should
   // outlive a short, fully-completed older run.
-  type Entry = { file: string; activityAt: string; logFile: string | null };
+  const logsRoot = resolve(stateDir, "logs");
+  const resolveLogFile = (logFile: string | null): string | null => {
+    if (!logFile) return null;
+    const abs = resolve(stateDir, logFile);
+    if (abs === logsRoot || abs.startsWith(logsRoot + sep)) return abs;
+    console.error(`[codex] Warning: refusing to prune log outside workspace state: ${logFile}`);
+    return null;
+  };
+
+  type Entry = { file: string; activityAt: string; logFile: string | null; logPath: string | null };
   const entries: Entry[] = [];
   for (const file of files) {
     try {
       const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
       const activityAt = record.completedAt ?? record.startedAt;
-      entries.push({ file, activityAt, logFile: record.logFile || null });
+      const logFile = record.logFile || null;
+      entries.push({ file, activityAt, logFile, logPath: resolveLogFile(logFile) });
     } catch (e) {
       // Corrupt files count toward the total; delete them first
       console.error(`[codex] Warning: cannot read run file ${file} during prune: ${e instanceof Error ? e.message : e}`);
-      entries.push({ file, activityAt: "1970-01-01T00:00:00Z", logFile: null });
+      entries.push({ file, activityAt: "1970-01-01T00:00:00Z", logFile: null, logPath: null });
     }
   }
 
@@ -398,7 +408,7 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   // share a thread's log file.
   const survivingLogs = new Set<string>();
   for (const s of survivors) {
-    if (s.logFile) survivingLogs.add(s.logFile);
+    if (s.logPath) survivingLogs.add(s.logPath);
   }
 
   for (let i = 0; i < toDelete; i++) {
@@ -412,9 +422,9 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
     // If no surviving run references this log file, remove it too. Multiple
     // runs of the same thread share a log; only the last prune cleans it up.
     // `force: true` swallows ENOENT, so no existence-check race.
-    if (entry.logFile && !survivingLogs.has(entry.logFile)) {
+    if (entry.logPath && !survivingLogs.has(entry.logPath)) {
       try {
-        rmSync(entry.logFile, { force: true });
+        rmSync(entry.logPath, { force: true });
       } catch (e) {
         console.error(`[codex] Warning: failed to delete orphan log ${entry.logFile}: ${e instanceof Error ? e.message : e}`);
       }

@@ -79,19 +79,22 @@ function send(socket: net.Socket, message: Record<string, unknown>): void {
   socket.write(JSON.stringify(message) + "\n");
 }
 
-function buildStreamThreadIds(
+function buildStreamTargets(
   method: string,
   params: Record<string, unknown> | undefined,
   result: Record<string, unknown>,
-): Set<string> {
-  const ids = new Set<string>();
+): Map<string, string> {
+  const targets = new Map<string, string>();
+  const turn = result?.turn as Record<string, unknown> | undefined;
+  const turnId = typeof turn?.id === "string" ? turn.id : null;
+  if (!turnId) return targets;
   if (params?.threadId && typeof params.threadId === "string") {
-    ids.add(params.threadId);
+    targets.set(params.threadId, turnId);
   }
   if (method === "review/start" && typeof result?.reviewThreadId === "string") {
-    ids.add(result.reviewThreadId);
+    targets.set(result.reviewThreadId, turnId);
   }
-  return ids;
+  return targets;
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -126,8 +129,8 @@ async function main() {
   let activeRequestSocket: net.Socket | null = null;
   /** Socket that owns the current streaming turn (notifications routed here). */
   let activeStreamSocket: net.Socket | null = null;
-  /** Thread IDs for the active stream (for turn/completed matching). */
-  let activeStreamThreadIds: Set<string> | null = null;
+  /** Active stream targets keyed by thread ID with the turn ID to interrupt. */
+  let activeStreamTargets: Map<string, string> | null = null;
   /** All connected sockets. */
   const sockets = new Set<net.Socket>();
   /** Thread IDs whose turns completed — prevents stale stream ownership
@@ -161,9 +164,12 @@ async function main() {
   /** Arm the watchdog after a stream owner disconnects mid-turn. If
    *  turn/completed doesn't arrive, force the orphaned turn to end so the
    *  broker can serve other clients again. */
-  function armOrphanWatchdog(orphanedThreadIds: Set<string>): void {
+  function armOrphanWatchdog(orphanedTargets: Map<string, string>): void {
     if (orphanWatchdog) clearTimeout(orphanWatchdog);
-    const targets = [...orphanedThreadIds];
+    const targets = [...orphanedTargets].map(([threadId, turnId]) => ({ threadId, turnId }));
+    // Capture ownership at arm time. If this orphan completes and another
+    // client starts a new stream before the timer fires, do not clear it.
+    const ownedTargets = orphanedTargets;
     orphanWatchdog = setTimeout(() => {
       // The whole timer body must be guarded — Bun and Node 15+ treat
       // unhandled rejections as fatal by default, and the broker is long-
@@ -171,19 +177,14 @@ async function main() {
       orphanWatchdog = null;
       // If the turn already completed by the time we wake up, nothing to do.
       if (activeStreamSocket === null) return;
-      // Snapshot ownership we expect to clean up — used to detect a race
-      // where turn/completed and a fresh client claim happened during the
-      // await below. Without this snapshot we'd clobber the new claim.
-      const ownedThreadIds = activeStreamThreadIds;
-
       /** Release stream ownership iff we still own it. Used by the normal
        *  exit path AND the catch-of-last-resort, so a watchdog crash
        *  between the await and the cleanup cannot leave the broker
        *  permanently busy. */
       const releaseOwnershipIfStillOurs = (): void => {
-        if (activeStreamSocket !== null && activeStreamThreadIds === ownedThreadIds) {
+        if (activeStreamSocket !== null && activeStreamTargets === ownedTargets) {
           activeStreamSocket = null;
-          activeStreamThreadIds = null;
+          activeStreamTargets = null;
           // Don't touch activeRequestSocket — a fresh non-streaming request
           // (kill, threads, etc.) may have claimed it during the await.
         }
@@ -196,12 +197,12 @@ async function main() {
         // -32601). Cost: occasional unnecessary respawn when the turn
         // naturally ended right before the watchdog fired.
         const results = await Promise.allSettled(
-          targets.map(threadId => appClient.request("turn/interrupt", { threadId })),
+          targets.map(({ threadId, turnId }) => appClient.request("turn/interrupt", { threadId, turnId })),
         );
         let anySucceeded = false;
         results.forEach((r, i) => {
           if (r.status === "fulfilled") anySucceeded = true;
-          else process.stderr.write(`[broker-server] Warning: orphan-turn interrupt failed for ${targets[i]}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}\n`);
+          else process.stderr.write(`[broker-server] Warning: orphan-turn interrupt failed for ${targets[i].threadId}/${targets[i].turnId}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}\n`);
         });
         releaseOwnershipIfStillOurs();
         // If every interrupt failed, the app-server is likely unhealthy.
@@ -222,6 +223,10 @@ async function main() {
       });
     }, ORPHAN_WATCHDOG_MS);
     orphanWatchdog.unref?.();
+    // Keep the broker alive long enough for the watchdog to run. Registering
+    // the idle timer after the watchdog means equal deadlines run watchdog
+    // recovery first instead of shutting the broker down before it can clean up.
+    resetIdleTimer();
   }
 
   // ─── Notification routing ───────────────────────────────────────────────
@@ -259,8 +264,8 @@ async function main() {
       const matchesStream =
         !threadId ||
         typeof threadId !== "string" ||
-        !activeStreamThreadIds ||
-        activeStreamThreadIds.has(threadId);
+        !activeStreamTargets ||
+        activeStreamTargets.has(threadId);
       if (matchesStream && (activeStreamSocket === target || activeStreamSocket === null)) {
         // If we're releasing actual stream ownership (activeStreamSocket was set),
         // also clean up the completed tracking so it doesn't block the next turn
@@ -270,7 +275,7 @@ async function main() {
           completedStreamThreadIds.delete(threadId);
         }
         activeStreamSocket = null;
-        activeStreamThreadIds = null;
+        activeStreamTargets = null;
         if (target && activeRequestSocket === target) {
           activeRequestSocket = null;
         }
@@ -563,14 +568,14 @@ async function main() {
               `[broker-server] Warning: failed to interrupt orphaned turn ${turnId}: ${e instanceof Error ? e.message : String(e)}\n`,
             );
             // Arm the watchdog so a stuck turn cannot leave the broker busy
-            // indefinitely. activeStreamThreadIds normally tracks ownership;
-            // here we use a one-shot set since stream ownership was never
-            // claimed.
-            armOrphanWatchdog(new Set([threadId]));
+            // indefinitely. activeStreamTargets normally tracks ownership;
+            // here we use a one-shot map since stream ownership was never claimed.
+            const orphanTargets = new Map([[threadId, turnId]]);
             // Reserve the stream slot so other clients can't interleave
             // with the still-running orphan turn.
             activeStreamSocket = socket;
-            activeStreamThreadIds = new Set([threadId]);
+            activeStreamTargets = orphanTargets;
+            armOrphanWatchdog(orphanTargets);
           }
         }
         if (activeRequestSocket === socket) activeRequestSocket = null;
@@ -580,7 +585,7 @@ async function main() {
       send(socket, { id: message.id, result });
 
       if (isStreaming) {
-        const streamIds = buildStreamThreadIds(
+        const streamTargets = buildStreamTargets(
           message.method as string,
           message.params as Record<string, unknown> | undefined,
           result as Record<string, unknown>,
@@ -589,13 +594,13 @@ async function main() {
         // during the request. turn/completed can arrive in the same read
         // chunk as the response, firing the notification handler before
         // this code runs. Without this check the broker stays permanently busy.
-        const alreadyCompleted = [...streamIds].some(id => completedStreamThreadIds.has(id));
+        const alreadyCompleted = [...streamTargets.keys()].some(id => completedStreamThreadIds.has(id));
         if (!alreadyCompleted) {
           activeStreamSocket = socket;
-          activeStreamThreadIds = streamIds;
+          activeStreamTargets = streamTargets;
         }
         // Clean up tracked completions for these thread IDs
-        for (const id of streamIds) completedStreamThreadIds.delete(id);
+        for (const id of streamTargets.keys()) completedStreamThreadIds.delete(id);
       }
 
       if (activeRequestSocket === socket) {
@@ -663,13 +668,13 @@ async function main() {
         pendingForwardedRequests.delete(reqId);
       }
       if (activeStreamSocket === socket) {
-        if (activeStreamThreadIds) {
+        if (activeStreamTargets) {
           // Turn is still running — keep activeStreamSocket as a sentinel so the
           // concurrency check blocks new streaming requests until turn/completed
           // clears the state. Nulling it would let a second client interleave.
           // Arm the watchdog so a stuck/lost completion does not block forever.
           process.stderr.write("[broker-server] Warning: stream-owning client disconnected while turn is active\n");
-          armOrphanWatchdog(activeStreamThreadIds);
+          armOrphanWatchdog(activeStreamTargets);
         } else {
           activeStreamSocket = null;
         }
@@ -690,11 +695,11 @@ async function main() {
         pendingForwardedRequests.delete(reqId);
       }
       if (activeStreamSocket === socket) {
-        if (activeStreamThreadIds) {
+        if (activeStreamTargets) {
           // Turn is still running — keep activeStreamSocket as sentinel so the
           // concurrency check blocks new streaming requests until turn/completed.
           process.stderr.write("[broker-server] Warning: stream-owning client errored while turn is active\n");
-          armOrphanWatchdog(activeStreamThreadIds);
+          armOrphanWatchdog(activeStreamTargets);
         } else {
           activeStreamSocket = null;
         }

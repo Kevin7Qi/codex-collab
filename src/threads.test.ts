@@ -280,7 +280,7 @@ function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
     phase: null,
     status: "completed",
     sessionId: null,
-    logFile: "/tmp/test.log",
+    logFile: "logs/test.log",
     logOffset: 0,
     prompt: "test prompt",
     model: "gpt-5",
@@ -503,6 +503,56 @@ describe("run ledger", () => {
     pruneRuns(testDir, 1);
     // Only run-b survives, but it still references the shared log → keep it.
     expect(existsSync(sharedLog)).toBe(true);
+  });
+
+  test("pruneRuns resolves relative log files under stateDir", () => {
+    const logPath = join(testDir, "logs", "relative.log");
+    mkdirSync(join(testDir, "logs"), { recursive: true });
+    writeFileSync(logPath, "relative log");
+
+    createRun(testDir, makeRun({
+      runId: "run-old",
+      shortId: "relative",
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:01:00Z",
+      logFile: "logs/relative.log",
+    }));
+    createRun(testDir, makeRun({
+      runId: "run-new",
+      shortId: "kept",
+      startedAt: "2026-01-05T00:00:00Z",
+      completedAt: "2026-01-05T00:01:00Z",
+      logFile: "logs/kept.log",
+    }));
+
+    pruneRuns(testDir, 1);
+    expect(existsSync(logPath)).toBe(false);
+  });
+
+  test("pruneRuns refuses to delete logs outside workspace state", () => {
+    const outsideLog = join(tmpdir(), `codex-collab-outside-${Date.now()}.log`);
+    writeFileSync(outsideLog, "do not delete");
+
+    createRun(testDir, makeRun({
+      runId: "run-old",
+      shortId: "outside",
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:01:00Z",
+      logFile: outsideLog,
+    }));
+    createRun(testDir, makeRun({
+      runId: "run-new",
+      shortId: "kept",
+      startedAt: "2026-01-05T00:00:00Z",
+      completedAt: "2026-01-05T00:01:00Z",
+    }));
+
+    try {
+      pruneRuns(testDir, 1);
+      expect(existsSync(outsideLog)).toBe(true);
+    } finally {
+      rmSync(outsideLog, { force: true });
+    }
   });
 });
 

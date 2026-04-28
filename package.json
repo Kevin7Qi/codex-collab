@@ -18,7 +18,7 @@
   },
   "keywords": ["claude", "codex", "claude-code", "skill", "json-rpc", "cli"],
   "scripts": {
-    "build": "bun build src/cli.ts --outfile skill/codex-collab/scripts/codex-collab --target bun && bun build src/broker-server.ts --outfile skill/codex-collab/scripts/broker-server --target bun && cp -r src/prompts skill/codex-collab/scripts/prompts",
+    "build": "rm -rf skill/codex-collab/scripts && mkdir -p skill/codex-collab/scripts && bun build src/cli.ts --outfile skill/codex-collab/scripts/codex-collab --target bun && bun build src/broker-server.ts --outfile skill/codex-collab/scripts/broker-server --target bun && cp -R src/prompts skill/codex-collab/scripts/prompts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
