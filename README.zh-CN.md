@@ -46,6 +46,28 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并添加可执行文件到 PATH。完成后 Claude 即可自动发现该技能。
 
+### 升级
+
+升级已有安装时，拉取最新代码并重新运行安装脚本即可：
+
+```bash
+git pull
+./install.sh
+codex-collab health
+```
+
+Windows:
+
+```powershell
+git pull
+powershell -ExecutionPolicy Bypass -File install.ps1
+codex-collab health
+```
+
+安装脚本会替换已安装的 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下已有的配置、模板、会话历史和运行日志都会保留。
+
+从旧版本升级时，codex-collab 会在首次使用时自动把会话状态迁移到按工作区划分的新布局，无需手动迁移状态。旧的 `jobs` 命令仍可作为 `threads` 的已弃用别名使用。
+
 <details>
 <summary>开发模式</summary>
 

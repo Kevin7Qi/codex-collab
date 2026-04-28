@@ -46,6 +46,28 @@ After installation, **reopen your terminal** so the updated PATH takes effect, t
 
 The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and adds a binary shim to your PATH. Once installed, Claude discovers the skill automatically.
 
+### Upgrading
+
+To upgrade an existing install, pull the latest version and rerun the installer:
+
+```bash
+git pull
+./install.sh
+codex-collab health
+```
+
+On Windows:
+
+```powershell
+git pull
+powershell -ExecutionPolicy Bypass -File install.ps1
+codex-collab health
+```
+
+The installer replaces the installed skill bundle and binary shim. Existing configuration, templates, thread history, and run logs under `~/.codex-collab/` are preserved.
+
+When upgrading from older versions, codex-collab automatically migrates thread state to the per-workspace layout on first use. No manual state migration is required. The old `jobs` command remains available as a deprecated alias for `threads`.
+
 <details>
 <summary>Development mode</summary>
 

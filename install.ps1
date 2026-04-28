@@ -41,6 +41,10 @@ if ($missing.Count -gt 0) {
     exit 1
 }
 
+$isUpgrade = Test-Path $SkillDir
+$installAction = if ($isUpgrade) { "Updating existing" } else { "Installing new" }
+$installDone = if ($isUpgrade) { "Updated" } else { "Installed" }
+
 # Install dependencies
 Write-Host "Installing dependencies..."
 Push-Location $RepoDir
@@ -106,7 +110,7 @@ function Generate-SkillMd {
 }
 
 if ($Dev) {
-    Write-Host "Installing in dev mode (symlinks)..."
+    Write-Host "$installAction dev install at $SkillDir (symlinks)..."
     Write-Host "Note: Symlinks on Windows may require Developer Mode or elevated privileges."
 
     # Create skill directory
@@ -136,11 +140,12 @@ if ($Dev) {
             exit 1
         }
     }
-    Write-Host "Linked skill to $SkillDir"
+    Write-Host "$installDone dev skill at $SkillDir"
 
     $shimTarget = Join-Path $RepoDir "src\cli.ts"
 
 } else {
+    Write-Host "$installAction install at $SkillDir..."
     Write-Host "Building..."
 
     # Build bundled JS
@@ -180,7 +185,7 @@ if ($Dev) {
     if (Test-Path $SkillDir) { Remove-Item $SkillDir -Recurse -Force }
     New-Item -ItemType Directory -Path (Split-Path $SkillDir) -Force | Out-Null
     Copy-Item $skillBuild $SkillDir -Recurse
-    Write-Host "Installed skill to $SkillDir"
+    Write-Host "$installDone skill at $SkillDir"
 
     $shimTarget = Join-Path $SkillDir "scripts\codex-collab"
 }
@@ -191,7 +196,7 @@ $cmdShim = Join-Path $BinDir "codex-collab.cmd"
 [System.IO.File]::WriteAllText($cmdShim, "@bun `"$shimTarget`" %*`r`n", [System.Text.UTF8Encoding]::new($false))
 $bashShim = Join-Path $BinDir "codex-collab"
 [System.IO.File]::WriteAllText($bashShim, "#!/usr/bin/env bash`nexec bun `"$shimTarget`" `"`$@`"", [System.Text.UTF8Encoding]::new($false))
-Write-Host "Created binary shims at $BinDir"
+Write-Host "Created/updated binary shims at $BinDir"
 
 # Add bin dir to user PATH if not already present
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

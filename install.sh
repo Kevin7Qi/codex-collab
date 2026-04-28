@@ -25,6 +25,14 @@ elif [ -n "${1:-}" ]; then
   exit 1
 fi
 
+if [ -e "$SKILL_DIR" ]; then
+  INSTALL_ACTION="Updating existing"
+  INSTALL_DONE="Updated"
+else
+  INSTALL_ACTION="Installing new"
+  INSTALL_DONE="Installed"
+fi
+
 # Check prerequisites
 missing=()
 command -v bun  >/dev/null 2>&1 || missing+=(bun)
@@ -103,7 +111,7 @@ generate_skill_md() {
 }
 
 if [ "$MODE" = "dev" ]; then
-  echo "Installing in dev mode (symlinks)..."
+  echo "$INSTALL_ACTION dev install at $SKILL_DIR (symlinks)..."
 
   # Generate SKILL.md with template table (can't inject into a symlink)
   mkdir -p "$SKILL_DIR/scripts"
@@ -111,14 +119,15 @@ if [ "$MODE" = "dev" ]; then
   ln -sf "$REPO_DIR/src/cli.ts" "$SKILL_DIR/scripts/codex-collab"
   ln -sf "$REPO_DIR/src/broker-server.ts" "$SKILL_DIR/scripts/broker-server"
   ln -sf "$REPO_DIR/LICENSE" "$SKILL_DIR/LICENSE.txt"
-  echo "Linked skill to $SKILL_DIR"
 
   # Symlink binary
   mkdir -p "$BIN_DIR"
   ln -sf "$REPO_DIR/src/cli.ts" "$BIN_DIR/codex-collab"
-  echo "Linked binary to $BIN_DIR/codex-collab"
+  echo "$INSTALL_DONE dev skill at $SKILL_DIR"
+  echo "Linked binary shim to $BIN_DIR/codex-collab"
 
 else
+  echo "$INSTALL_ACTION install at $SKILL_DIR..."
   echo "Building..."
 
   # Build bundled JS (CLI + broker server)
@@ -151,13 +160,13 @@ else
   rm -rf "$SKILL_DIR"
   mkdir -p "$(dirname "$SKILL_DIR")"
   cp -r "$REPO_DIR/skill/codex-collab" "$SKILL_DIR"
-  echo "Installed skill to $SKILL_DIR"
+  echo "$INSTALL_DONE skill at $SKILL_DIR"
 
   # Symlink binary from installed skill
   mkdir -p "$BIN_DIR"
   ln -sf "$SKILL_DIR/scripts/codex-collab" "$BIN_DIR/codex-collab"
   chmod +x "$SKILL_DIR/scripts/codex-collab"
-  echo "Linked binary to $BIN_DIR/codex-collab"
+  echo "Linked binary shim to $BIN_DIR/codex-collab"
 fi
 
 # Verify PATH and run health check
