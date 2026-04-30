@@ -80,7 +80,14 @@ Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
 When consecutive tasks relate to the same project, resume the existing thread. Codex retains the conversation history, so follow-ups like "now fix what you found" or "check the tests too" work better when Codex already has context from the previous exchange. Start a fresh thread when the task is unrelated or targets a different project.
 
-**If the user asks to continue or follow up on a prior task but you don't have the thread ID in context**, run `codex-collab resume-candidate --json` to look it up. It returns the latest resumable task thread across the current session, prior sessions, and TUI-created threads. Only call it when a resume is actually wanted — it's a lookup, not a precondition for every command.
+**If the user asks to continue or follow up on a prior task but you don't have the thread ID in context**, follow this discovery flow:
+
+1. `codex-collab threads --discover --json` — see top 5 recent threads (server + local).
+2. If unsure which thread is right, `codex-collab peek <id> --json` to see the last exchange of a candidate.
+3. For very long threads where peek alone isn't enough, spawn a subagent with `codex-collab peek <id> --limit 100 --full --json` and ask it to summarize. This keeps the firehose out of your own context.
+4. `codex-collab run --resume <id> "..."` to continue.
+
+Only run `--discover` when a resume is actually wanted — it's a lookup performed on demand.
 
 The `--resume` flag accepts both ID formats:
 - `--resume <short-id>` — 8-char hex short ID (supports prefix matching, e.g., `a1b2`)
@@ -97,7 +104,7 @@ If you've lost track of the thread ID, use `codex-collab threads` to find active
 
 ## Checking Progress
 
-If the user asks about a running task, use `TaskOutput(block=false)` to read the background command's output stream. The thread ID appears in the first progress line (e.g., `[codex] Thread a1b2c3d4 started`). If you need just the tail of the log without the full stream:
+If the user asks about a running task, use `TaskOutput(block=false)` (with the background task ID returned when launching the command) to read the output stream. The codex-collab thread short ID appears in the first progress line (e.g., `[codex] Thread a1b2c3d4 started`) — handy when you need it but don't have it. If you need just the tail of the log without the full stream:
 
 ```bash
 codex-collab progress <thread-id>
@@ -170,9 +177,10 @@ codex-collab progress <id>              # Recent activity (tail of log)
 ```bash
 codex-collab threads                    # List threads (current session)
 codex-collab threads --all              # List all threads (no display limit)
-codex-collab threads --discover         # Discover threads from Codex server
+codex-collab threads --discover         # Discover threads from Codex server (top 5 by default)
 codex-collab threads --json             # List threads (JSON)
-codex-collab resume-candidate --json    # Find best resumable thread
+codex-collab peek <id>                  # Show last exchange (default) from server
+codex-collab peek <id> --limit 10 --full --json  # Show 10 raw items as JSON
 codex-collab kill <id>                  # Stop a running thread
 codex-collab delete <id>               # Archive thread, delete local files
 codex-collab clean                      # Delete old logs and stale mappings
@@ -208,7 +216,8 @@ codex-collab health                     # Check prerequisites
 | `--ref <hash>` | Commit ref for --mode commit |
 | `--all` | List all threads with no display limit (threads command) |
 | `--discover` | Query Codex server for threads not in local index (threads command) |
-| `--json` | JSON output (threads, resume-candidate commands) |
+| `--json` | JSON output (threads, peek commands) |
+| `--full` | Include all item types in peek output (default shows messages only) |
 | `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
 | `--content-only` | Print only result text (no progress lines) |
 | `--limit <n>` | Limit items shown |
