@@ -149,49 +149,43 @@ export async function handlePeek(args: string[]): Promise<void> {
   const ws = getWorkspacePaths(options.dir);
 
   // Try local index first; if not found, treat the input as a raw thread ID
-  // and let the server validate it.
+  // and let the server validate it. Surface ambiguous-prefix errors immediately
+  // — only "Thread not found" should fall through to the server.
   let threadId: string;
   let shortId: string | null;
   try {
     threadId = resolveThreadId(ws.threadsFile, id);
     shortId = findShortId(ws.threadsFile, threadId);
-  } catch {
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.startsWith("Thread not found")) die(msg);
     threadId = id;
     shortId = null;
   }
 
   const limit = options.explicit.has("limit") ? options.limit : DEFAULT_PEEK_LIMIT;
 
-  await withClient(async (client) => {
-    let response: { thread: Thread };
-    try {
-      response = await client.request<{ thread: Thread }>("thread/read", {
+  // Fetch the thread inside withClient; do all rendering / die() calls outside
+  // so withClient's finally can close the broker socket cleanly.
+  let thread: Thread;
+  try {
+    thread = await withClient(async (client) => {
+      const response = await client.request<{ thread: Thread }>("thread/read", {
         threadId,
         includeTurns: true,
       });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      die(`Could not read thread "${id}": ${msg}`);
-    }
+      return response.thread;
+    }, options.dir);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    die(`Could not read thread "${id}": ${msg}`);
+  }
 
-    const thread = response.thread;
-    const turns = thread.turns ?? [];
-    const selection = selectPeekItems(turns, limit, options.full);
+  const turns = thread.turns ?? [];
+  const selection = selectPeekItems(turns, limit, options.full);
 
-    if (options.json) {
-      const out = formatPeekJson(
-        thread,
-        shortId,
-        selection.items,
-        selection.totalItems,
-        selection.truncated,
-        options.full,
-      );
-      console.log(JSON.stringify(out, null, 2));
-      return;
-    }
-
-    const out = formatPeekHuman(
+  if (options.json) {
+    const out = formatPeekJson(
       thread,
       shortId,
       selection.items,
@@ -199,15 +193,26 @@ export async function handlePeek(args: string[]): Promise<void> {
       selection.truncated,
       options.full,
     );
-    const header = `Thread: ${shortId ?? threadId}${thread.name ? ` (${thread.name})` : ""}`;
-    console.log(header);
-    console.log(out);
+    console.log(JSON.stringify(out, null, 2));
+    return;
+  }
 
-    // Note in-progress threads where the last item is a user prompt with no agent reply yet.
-    const lastItem = selection.items[selection.items.length - 1];
-    if (thread.status?.type === "active" && lastItem?.type === "userMessage") {
-      console.log("");
-      console.log("(thread is currently active — no agent reply yet for the last user message)");
-    }
-  }, options.dir);
+  const out = formatPeekHuman(
+    thread,
+    shortId,
+    selection.items,
+    selection.totalItems,
+    selection.truncated,
+    options.full,
+  );
+  const header = `Thread: ${shortId ?? threadId}${thread.name ? ` (${thread.name})` : ""}`;
+  console.log(header);
+  console.log(out);
+
+  // Note in-progress threads where the last item is a user prompt with no agent reply yet.
+  const lastItem = selection.items[selection.items.length - 1];
+  if (thread.status?.type === "active" && lastItem?.type === "userMessage") {
+    console.log("");
+    console.log("(thread is currently active — no agent reply yet for the last user message)");
+  }
 }
