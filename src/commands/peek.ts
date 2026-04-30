@@ -1,6 +1,19 @@
 // src/commands/peek.ts — peek command and pure formatting helpers.
 
 import type { Turn, ThreadItem, Thread, UserMessageItem, AgentMessageItem } from "../types";
+import {
+  legacyResolveThreadId as resolveThreadId,
+  legacyFindShortId as findShortId,
+} from "../threads";
+import {
+  die,
+  parseOptions,
+  validateIdOrDie,
+  withClient,
+  getWorkspacePaths,
+} from "./shared";
+
+const DEFAULT_PEEK_LIMIT = 2;
 
 const MESSAGE_TYPES = new Set(["userMessage", "agentMessage"]);
 
@@ -125,4 +138,76 @@ export function formatPeekHuman(
   void shortId;
   void thread;
   return lines.join("\n");
+}
+
+export async function handlePeek(args: string[]): Promise<void> {
+  const { positional, options } = parseOptions(args);
+  const id = positional[0];
+  if (!id) die("Usage: codex-collab peek <id> [--limit N] [--full] [--json]");
+  validateIdOrDie(id);
+
+  const ws = getWorkspacePaths(options.dir);
+
+  // Try local index first; if not found, treat the input as a raw thread ID
+  // and let the server validate it.
+  let threadId: string;
+  let shortId: string | null;
+  try {
+    threadId = resolveThreadId(ws.threadsFile, id);
+    shortId = findShortId(ws.threadsFile, threadId);
+  } catch {
+    threadId = id;
+    shortId = null;
+  }
+
+  const limit = options.explicit.has("limit") ? options.limit : DEFAULT_PEEK_LIMIT;
+
+  await withClient(async (client) => {
+    let response: { thread: Thread };
+    try {
+      response = await client.request<{ thread: Thread }>("thread/read", {
+        threadId,
+        includeTurns: true,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      die(`Could not read thread "${id}": ${msg}`);
+    }
+
+    const thread = response.thread;
+    const turns = thread.turns ?? [];
+    const selection = selectPeekItems(turns, limit, options.full);
+
+    if (options.json) {
+      const out = formatPeekJson(
+        thread,
+        shortId,
+        selection.items,
+        selection.totalItems,
+        selection.truncated,
+        options.full,
+      );
+      console.log(JSON.stringify(out, null, 2));
+      return;
+    }
+
+    const out = formatPeekHuman(
+      thread,
+      shortId,
+      selection.items,
+      selection.totalItems,
+      selection.truncated,
+      options.full,
+    );
+    const header = `Thread: ${shortId ?? threadId}${thread.name ? ` (${thread.name})` : ""}`;
+    console.log(header);
+    console.log(out);
+
+    // Note in-progress threads where the last item is a user prompt with no agent reply yet.
+    const lastItem = selection.items[selection.items.length - 1];
+    if (thread.status?.type === "active" && lastItem?.type === "userMessage") {
+      console.log("");
+      console.log("(thread is currently active — no agent reply yet for the last user message)");
+    }
+  }, options.dir);
 }

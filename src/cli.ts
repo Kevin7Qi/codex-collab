@@ -98,6 +98,7 @@ Commands:
   kill <id>               Stop a running thread
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
+  peek <id>               Show recent conversation slice from server
   config [key] [value]    Show or set persistent defaults
   models                  List available models
   templates               List available prompt templates
@@ -120,6 +121,7 @@ Options:
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: main)
   --template <name>       Prompt template (run command; checks ~/.codex-collab/templates/ first)
+  --full                  Include all item types (peek command)
   --content-only          Print only result text (no progress lines)
 
 Examples:
@@ -184,6 +186,7 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
+    "peek",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -229,6 +232,8 @@ async function main() {
       return (await import("./commands/threads")).handleDelete(rest);
     case "health":
       return (await import("./commands/config")).handleHealth(rest);
+    case "peek":
+      return (await import("./commands/peek")).handlePeek(rest);
   }
 }
 

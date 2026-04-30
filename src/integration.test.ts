@@ -207,3 +207,32 @@ describe.skipIf(!runIntegration)("live integration", () => {
     expect(r.stdout).toContain("Health check passed");
   }, 30_000);
 });
+
+describe("peek command", () => {
+  test("peek with no id prints usage and exits 1", () => {
+    const r = runCli(["peek"], { HOME: TEST_DATA_DIR });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("Usage:");
+    expect(r.stderr).toContain("peek");
+  });
+
+  test("peek with invalid id prints error and exits 1", () => {
+    const r = runCli(["peek", "bad/id"], { HOME: TEST_DATA_DIR });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("Invalid ID");
+  });
+});
+
+describe("CLI help mentions peek", () => {
+  test("--help lists peek command", () => {
+    const r = runCli(["--help"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("peek");
+  });
+
+  test("--help lists --full option", () => {
+    const r = runCli(["--help"]);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("--full");
+  });
+});
