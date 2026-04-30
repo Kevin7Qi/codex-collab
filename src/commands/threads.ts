@@ -10,7 +10,6 @@ import {
   saveThreadMapping,
   updateThreadStatus,
   withThreadLock,
-  getResumeCandidate,
 } from "../threads";
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
 import { getCurrentSessionId } from "../broker";
@@ -386,42 +385,3 @@ export async function handleClean(args: string[]): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// resume-candidate
-// ---------------------------------------------------------------------------
-
-export async function handleResumeCandidate(args: string[]): Promise<void> {
-  const { options } = parseOptions(args);
-  const jsonFlag = options.json;
-  const cwd = options.dir;
-  const stateDir = resolveStateDir(cwd);
-  const ws = getWorkspacePaths(cwd);
-  const sessionId = getCurrentSessionId(stateDir);
-
-  // Check local first
-  let candidate = getResumeCandidate(stateDir, sessionId);
-
-  // If no local candidate, attempt server discovery
-  if (!candidate.available) {
-    try {
-      await withClient(async (client) => {
-        const count = await discoverThreads(client, ws, cwd);
-        if (count > 0) {
-          candidate = getResumeCandidate(stateDir, sessionId);
-        }
-      });
-    } catch (e) {
-      console.error(`[codex] Warning: server discovery failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  if (jsonFlag) {
-    console.log(JSON.stringify(candidate, null, 2));
-  } else if (candidate.available) {
-    console.log(`Resumable thread: ${candidate.shortId} (${candidate.name ?? "unnamed"})`);
-    console.log(`  Thread ID: ${candidate.threadId}`);
-    console.log(`  Use: codex-collab run --resume ${candidate.shortId} "prompt"`);
-  } else {
-    console.log("No resumable thread found.");
-  }
-}

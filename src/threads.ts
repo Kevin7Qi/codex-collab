@@ -432,57 +432,6 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   }
 }
 
-// ─── Resume Candidate ──────────────────────────────────────────────────────
-
-export function getResumeCandidate(
-  stateDir: string,
-  sessionId: string | null,
-): { available: boolean; threadId?: string; shortId?: string; name?: string } {
-  // 1. Check run ledger: find latest completed task run
-  const allRuns = listRuns(stateDir);
-  const completed = allRuns.filter(r => r.kind === "task" && r.status === "completed");
-
-  if (completed.length > 0) {
-    // Prefer runs from the current session
-    let candidate: RunRecord | undefined;
-    if (sessionId) {
-      candidate = completed.find(r => r.sessionId === sessionId);
-    }
-    if (!candidate) {
-      candidate = completed[0]; // listRuns returns newest first
-    }
-
-    const index = loadThreadIndex(stateDir);
-    const entry = index[candidate.shortId];
-    return {
-      available: true,
-      threadId: candidate.threadId,
-      shortId: candidate.shortId,
-      name: entry?.name ?? undefined,
-    };
-  }
-
-  // 2. Check thread index for entries with no local runs (e.g., TUI-created
-  //    threads discovered via thread/list). These exist server-side and are
-  //    resumable even though we never ran them locally.
-  const index = loadThreadIndex(stateDir);
-  const indexEntries = Object.entries(index)
-    .sort((a, b) => new Date(b[1].updatedAt).getTime() - new Date(a[1].updatedAt).getTime());
-
-  for (const [shortId, entry] of indexEntries) {
-    const runs = listRunsForThread(stateDir, shortId);
-    if (runs.length > 0) continue; // already checked in run ledger above
-    return {
-      available: true,
-      threadId: entry.threadId,
-      shortId,
-      name: entry.name ?? undefined,
-    };
-  }
-
-  return { available: false };
-}
-
 // ─── Migration ────────────────────────────────────────────────────────────
 
 /**

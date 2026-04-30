@@ -16,7 +16,6 @@ import {
   listRunsForThread,
   getLatestRun,
   pruneRuns,
-  getResumeCandidate,
   migrateGlobalState,
 } from "./threads";
 import type { RunRecord, ThreadMapping } from "./types";
@@ -553,111 +552,6 @@ describe("run ledger", () => {
     } finally {
       rmSync(outsideLog, { force: true });
     }
-  });
-});
-
-// ─── Resume Candidate ──────────────────────────────────────────────────────
-
-describe("getResumeCandidate", () => {
-  test("returns { available: false } when no runs exist", () => {
-    const result = getResumeCandidate(testDir, null);
-    expect(result).toEqual({ available: false });
-  });
-
-  test("returns { available: false } when no completed tasks exist", () => {
-    createRun(testDir, makeRun({ kind: "task", status: "failed" }));
-    createRun(testDir, makeRun({ kind: "review", status: "completed" }));
-    const result = getResumeCandidate(testDir, null);
-    expect(result).toEqual({ available: false });
-  });
-
-  test("returns latest completed task", () => {
-    const old = makeRun({
-      shortId: "old11111",
-      threadId: "thr_old",
-      kind: "task",
-      status: "completed",
-      startedAt: "2026-01-01T00:00:00Z",
-    });
-    const recent = makeRun({
-      shortId: "new22222",
-      threadId: "thr_new",
-      kind: "task",
-      status: "completed",
-      startedAt: "2026-01-05T00:00:00Z",
-    });
-    createRun(testDir, old);
-    createRun(testDir, recent);
-
-    const result = getResumeCandidate(testDir, null);
-    expect(result.available).toBe(true);
-    expect(result.threadId).toBe("thr_new");
-    expect(result.shortId).toBe("new22222");
-  });
-
-  test("prefers current session over any session", () => {
-    const otherSession = makeRun({
-      shortId: "aaa11111",
-      threadId: "thr_other",
-      kind: "task",
-      status: "completed",
-      sessionId: "sess-other",
-      startedAt: "2026-01-05T00:00:00Z",
-    });
-    const currentSession = makeRun({
-      shortId: "bbb22222",
-      threadId: "thr_current",
-      kind: "task",
-      status: "completed",
-      sessionId: "sess-me",
-      startedAt: "2026-01-01T00:00:00Z",
-    });
-    createRun(testDir, otherSession);
-    createRun(testDir, currentSession);
-
-    const result = getResumeCandidate(testDir, "sess-me");
-    expect(result.available).toBe(true);
-    expect(result.threadId).toBe("thr_current");
-    expect(result.shortId).toBe("bbb22222");
-  });
-
-  test("falls back to any session if no current-session match", () => {
-    const otherSession = makeRun({
-      shortId: "aaa11111",
-      threadId: "thr_other",
-      kind: "task",
-      status: "completed",
-      sessionId: "sess-other",
-      startedAt: "2026-01-05T00:00:00Z",
-    });
-    createRun(testDir, otherSession);
-
-    const result = getResumeCandidate(testDir, "sess-me");
-    expect(result.available).toBe(true);
-    expect(result.threadId).toBe("thr_other");
-  });
-
-  test("includes thread name from index", () => {
-    saveThreadIndex(testDir, {
-      abc12345: {
-        threadId: "thr_named",
-        name: "My Named Thread",
-        model: null,
-        cwd: "/",
-        createdAt: "2026-01-01T00:00:00Z",
-        updatedAt: "2026-01-01T00:00:00Z",
-      },
-    });
-    createRun(testDir, makeRun({
-      shortId: "abc12345",
-      threadId: "thr_named",
-      kind: "task",
-      status: "completed",
-    }));
-
-    const result = getResumeCandidate(testDir, null);
-    expect(result.available).toBe(true);
-    expect(result.name).toBe("My Named Thread");
   });
 });
 
