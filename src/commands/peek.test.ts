@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { selectPeekItems } from "./peek";
-import type { Turn, ThreadItem } from "../types";
+import { selectPeekItems, formatPeekJson, formatPeekHuman } from "./peek";
+import type { Turn, ThreadItem, Thread } from "../types";
 
 function userItem(text: string, id: string = "u1"): ThreadItem {
   return {
@@ -81,5 +81,110 @@ describe("selectPeekItems", () => {
     expect(result.items).toHaveLength(0);
     expect(result.totalItems).toBe(0);
     expect(result.truncated).toBe(false);
+  });
+});
+
+function makeThread(overrides: Partial<Thread> = {}): Thread {
+  return {
+    id: "thr_abc",
+    preview: "auth refactor",
+    modelProvider: "gpt-5",
+    createdAt: 1700000000,
+    updatedAt: 1700000100,
+    path: null,
+    cwd: "/repo",
+    cliVersion: "1.0",
+    source: "cli",
+    name: "auth refactor",
+    agentNickname: null,
+    agentRole: null,
+    gitInfo: null,
+    turns: [],
+    ...overrides,
+  };
+}
+
+describe("formatPeekJson", () => {
+  test("flattens userMessage content into a top-level text string", () => {
+    const thread = makeThread();
+    const items: ThreadItem[] = [
+      { type: "userMessage", id: "u1", content: [{ type: "text", text: "hi" }] } as ThreadItem,
+      { type: "agentMessage", id: "a1", text: "hello" } as ThreadItem,
+    ];
+    const out = formatPeekJson(thread, "abc12345", items, 2, false, false);
+    expect(out.items).toEqual([
+      { type: "userMessage", id: "u1", text: "hi" },
+      { type: "agentMessage", id: "a1", text: "hello" },
+    ]);
+  });
+
+  test("includes thread metadata (shortId, threadId, name, cwd)", () => {
+    const thread = makeThread({ id: "thr_xyz", cwd: "/proj", name: "feat" });
+    const out = formatPeekJson(thread, "deadbeef", [], 0, false, false);
+    expect(out.shortId).toBe("deadbeef");
+    expect(out.threadId).toBe("thr_xyz");
+    expect(out.cwd).toBe("/proj");
+    expect(out.name).toBe("feat");
+  });
+
+  test("totalItemsInThread and truncated propagate", () => {
+    const thread = makeThread();
+    const out = formatPeekJson(thread, "abc12345", [], 47, true, false);
+    expect(out.totalItemsInThread).toBe(47);
+    expect(out.truncated).toBe(true);
+  });
+
+  test("--full passes raw items through unchanged", () => {
+    const thread = makeThread();
+    const items: ThreadItem[] = [
+      { type: "reasoning", id: "r1", summary: ["s"], content: ["c"] } as ThreadItem,
+    ];
+    const out = formatPeekJson(thread, "abc12345", items, 1, false, true);
+    expect(out.items).toEqual([
+      { type: "reasoning", id: "r1", summary: ["s"], content: ["c"] },
+    ]);
+  });
+
+  test("null name when thread has no name", () => {
+    const thread = makeThread({ name: null });
+    const out = formatPeekJson(thread, null, [], 0, false, false);
+    expect(out.name).toBeNull();
+    expect(out.shortId).toBeNull();
+  });
+});
+
+describe("formatPeekHuman", () => {
+  test("renders user/agent transcript", () => {
+    const thread = makeThread();
+    const items: ThreadItem[] = [
+      { type: "userMessage", id: "u1", content: [{ type: "text", text: "what does this do?" }] } as ThreadItem,
+      { type: "agentMessage", id: "a1", text: "It does X." } as ThreadItem,
+    ];
+    const out = formatPeekHuman(thread, "abc12345", items, 2, false, false);
+    expect(out).toContain("User: what does this do?");
+    expect(out).toContain("Codex: It does X.");
+  });
+
+  test("includes truncation footer when truncated", () => {
+    const thread = makeThread();
+    const out = formatPeekHuman(thread, "abc12345", [], 47, true, false);
+    expect(out).toContain("47");
+    expect(out).toMatch(/--limit|--full/);
+  });
+
+  test("omits truncation footer when not truncated", () => {
+    const thread = makeThread();
+    const out = formatPeekHuman(thread, "abc12345", [], 5, false, false);
+    expect(out).not.toMatch(/showing.*of/);
+  });
+
+  test("--full mode footer mentions only --limit (not --full)", () => {
+    const thread = makeThread();
+    const items: ThreadItem[] = [
+      { type: "userMessage", id: "u1", content: [{ type: "text", text: "hi" }] } as ThreadItem,
+    ];
+    const out = formatPeekHuman(thread, "abc12345", items, 47, true, true);
+    expect(out).toContain("--limit");
+    expect(out).not.toContain("--full");
   });
 });
