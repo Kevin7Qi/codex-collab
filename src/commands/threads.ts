@@ -11,8 +11,7 @@ import {
   updateThreadStatus,
   withThreadLock,
 } from "../threads";
-import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { getCurrentSessionId } from "../broker";
+import { resolveWorkspaceDir } from "../config";
 import type { AppServerClient } from "../client";
 import type { Thread } from "../types";
 import {

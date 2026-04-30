@@ -105,7 +105,6 @@ Commands:
   decline <id>            Decline a pending request
   clean                   Delete old logs and stale mappings
   delete <id>             Archive thread, delete local files
-  resume-candidate --json Find resumable thread
   health                  Check prerequisites
 
 Options:
@@ -185,7 +184,6 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
-    "resume-candidate",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -231,8 +229,6 @@ async function main() {
       return (await import("./commands/threads")).handleDelete(rest);
     case "health":
       return (await import("./commands/config")).handleHealth(rest);
-    case "resume-candidate":
-      return (await import("./commands/threads")).handleResumeCandidate(rest);
   }
 }
 
