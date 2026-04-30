@@ -564,6 +564,35 @@ describe("parseOptions", () => {
   });
 });
 
+describe("parseOptions: --full and explicit --limit", () => {
+  test("--full sets full=true", () => {
+    const { options } = parseOptions(["--full"]);
+    expect(options.full).toBe(true);
+  });
+
+  test("full defaults to false", () => {
+    const { options } = parseOptions([]);
+    expect(options.full).toBe(false);
+  });
+
+  test("--limit marks limit as explicit", () => {
+    const { options } = parseOptions(["--limit", "5"]);
+    expect(options.limit).toBe(5);
+    expect(options.explicit.has("limit")).toBe(true);
+  });
+
+  test("default limit is not marked explicit", () => {
+    const { options } = parseOptions([]);
+    expect(options.explicit.has("limit")).toBe(false);
+  });
+
+  test("--all marks limit as explicit", () => {
+    const { options } = parseOptions(["--all"]);
+    expect(options.limit).toBe(Infinity);
+    expect(options.explicit.has("limit")).toBe(true);
+  });
+});
+
 // ─── pickBestModel ────────────────────────────────────────────────────────
 
 describe("pickBestModel", () => {

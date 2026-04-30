@@ -104,6 +104,7 @@ export interface Options {
   base: string;
   resumeId: string | null;
   discover: boolean;
+  full: boolean;
   help: boolean;
   template: string | null;
   /** Flags explicitly provided on the command line (forwarded on resume). */
@@ -157,6 +158,7 @@ export function defaultOptions(): Options {
     base: "main",
     resumeId: null,
     discover: false,
+    full: false,
     help: false,
     template: null,
     explicit: new Set<string>(),
@@ -264,6 +266,7 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
         process.exit(1);
       }
       options.limit = Math.floor(val);
+      options.explicit.add("limit");
     } else if (arg === "--mode") {
       if (i + 1 >= args.length) {
         console.error("Error: --mode requires a value");
@@ -297,8 +300,11 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.resumeId = args[++i];
     } else if (arg === "--all") {
       options.limit = Infinity;
+      options.explicit.add("limit");
     } else if (arg === "--discover") {
       options.discover = true;
+    } else if (arg === "--full") {
+      options.full = true;
     } else if (arg === "--template") {
       if (i + 1 >= args.length) {
         console.error("Error: --template requires a name");
