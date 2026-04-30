@@ -82,6 +82,45 @@ describe("selectPeekItems", () => {
     expect(result.totalItems).toBe(0);
     expect(result.truncated).toBe(false);
   });
+
+  test("incomplete latest turn does not backfill previous turn's agent reply", () => {
+    const turns = [
+      turn([userItem("q1", "u1"), agentItem("a1", "a1")], "completed"),
+      turn([userItem("q2", "u2")], "inProgress"),
+    ];
+    const result = selectPeekItems(turns, 2, false);
+    expect(result.items).toHaveLength(1);
+    expect((result.items[0] as any).id).toBe("u2");
+    expect(result.totalItems).toBe(1);
+    expect(result.truncated).toBe(false);
+  });
+
+  test("interrupted latest turn restricts pool to that turn", () => {
+    const turns = [
+      turn([userItem("q1", "u1"), agentItem("a1", "a1")], "completed"),
+      turn([userItem("q2", "u2")], "interrupted"),
+    ];
+    const result = selectPeekItems(turns, 10, false);
+    expect(result.items.map((i: any) => i.id)).toEqual(["u2"]);
+  });
+
+  test("failed latest turn restricts pool to that turn", () => {
+    const turns = [
+      turn([userItem("q1", "u1"), agentItem("a1", "a1")], "completed"),
+      turn([userItem("q2", "u2")], "failed"),
+    ];
+    const result = selectPeekItems(turns, 10, false);
+    expect(result.items.map((i: any) => i.id)).toEqual(["u2"]);
+  });
+
+  test("completed latest turn allows cross-turn slicing as before", () => {
+    const turns = [
+      turn([userItem("q1", "u1"), agentItem("a1", "a1")], "completed"),
+      turn([userItem("q2", "u2"), agentItem("a2", "a2")], "completed"),
+    ];
+    const result = selectPeekItems(turns, 4, false);
+    expect(result.items.map((i: any) => i.id)).toEqual(["u1", "a1", "u2", "a2"]);
+  });
 });
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {

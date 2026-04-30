@@ -26,13 +26,21 @@ export interface PeekSelection {
 /**
  * Flatten turns into a chronological item stream, optionally filter to message
  * types only, then take the last `limit` items.
+ *
+ * If the latest turn is incomplete (still running, interrupted, or failed
+ * before the agent could reply), scope to that turn alone — otherwise the
+ * default slice would backfill the previous turn's agent reply, making it
+ * appear as a response to the current user prompt.
  */
 export function selectPeekItems(
   turns: Turn[],
   limit: number,
   full: boolean,
 ): PeekSelection {
-  const allItems: ThreadItem[] = turns.flatMap((t) => t.items);
+  const latestTurn = turns[turns.length - 1];
+  const latestIncomplete = latestTurn !== undefined && latestTurn.status !== "completed";
+  const sourceTurns = latestIncomplete ? [latestTurn] : turns;
+  const allItems: ThreadItem[] = sourceTurns.flatMap((t) => t.items);
   const eligible = full ? allItems : allItems.filter((i) => MESSAGE_TYPES.has(i.type));
   const items = eligible.slice(-limit);
   return {

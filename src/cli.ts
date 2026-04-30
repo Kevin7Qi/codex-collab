@@ -121,6 +121,7 @@ Options:
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: main)
   --template <name>       Prompt template (run command; checks ~/.codex-collab/templates/ first)
+  --limit <n>             Number of items shown (peek, threads commands)
   --full                  Include all item types (peek command)
   --content-only          Print only result text (no progress lines)
 
