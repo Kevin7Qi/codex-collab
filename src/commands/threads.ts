@@ -41,6 +41,23 @@ import {
 // Thread discovery from app-server
 // ---------------------------------------------------------------------------
 
+const DISCOVER_DEFAULT_LIMIT = 5;
+
+/**
+ * Compute display limit for the threads list. When --discover is set and
+ * --limit was not explicitly provided, cap at DISCOVER_DEFAULT_LIMIT.
+ */
+export function applyDiscoverLimit(options: {
+  discover: boolean;
+  limit: number;
+  explicit: Set<string>;
+}): number {
+  if (options.discover && !options.explicit.has("limit")) {
+    return DISCOVER_DEFAULT_LIMIT;
+  }
+  return options.limit;
+}
+
 /**
  * Query the app server for threads matching the workspace cwd and register
  * any that are not already in the local index. Returns the number of newly
@@ -124,7 +141,8 @@ export async function handleThreads(args: string[]): Promise<void> {
     }
   }
 
-  if (options.limit !== Infinity) entries = entries.slice(0, options.limit);
+  const displayLimit = applyDiscoverLimit(options);
+  if (displayLimit !== Infinity) entries = entries.slice(0, displayLimit);
 
   if (options.json) {
     const enriched = entries.map(e => ({
