@@ -161,11 +161,26 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     }
   }
 
+  const closeHandlers = new Set<() => void>();
+  let unexpectedCloseNotified = false;
+
+  function notifyUnexpectedClose(reason: string): void {
+    if (closed || unexpectedCloseNotified) return;
+    unexpectedCloseNotified = true;
+    rejectAll(reason);
+    for (const handler of closeHandlers) {
+      try { handler(); } catch (e) {
+        console.error(`[codex] Warning: close handler error: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
   // Read loop — parse newline-delimited JSON from socket
   let buffer = "";
   socket.on("data", (chunk: string) => {
     buffer += chunk;
     if (buffer.length > MAX_BUFFER_SIZE) {
+      notifyUnexpectedClose("Broker response buffer exceeded maximum size");
       socket.destroy(new Error("Broker response buffer exceeded maximum size"));
       return;
     }
@@ -179,23 +194,14 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     }
   });
 
-  const closeHandlers = new Set<() => void>();
-
   socket.on("close", () => {
-    if (!closed) {
-      rejectAll("Broker connection closed");
-      for (const handler of closeHandlers) {
-        try { handler(); } catch (e) {
-          console.error(`[codex] Warning: close handler error: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+    notifyUnexpectedClose("Broker connection closed");
   });
 
   socket.on("error", (err) => {
     if (!closed) {
       console.error(`[broker-client] Socket error: ${err.message}`);
-      rejectAll("Broker socket error: " + err.message);
+      notifyUnexpectedClose("Broker socket error: " + err.message);
     }
   });
 

@@ -448,6 +448,19 @@ function mapLegacyStatus(lastStatus?: string): RunStatus {
   }
 }
 
+function mapLegacyThreadStatus(lastStatus?: string): ThreadIndexEntry["lastStatus"] {
+  switch (lastStatus) {
+    case "completed":
+    case "failed":
+    case "interrupted":
+      return lastStatus;
+    case "running":
+      return "failed"; // stale legacy process; do not keep it displayed as running
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Compute the workspace-specific slug-hash suffix for a given cwd.
  * Mirrors the logic in resolveStateDir but returns only the directory name.
@@ -551,7 +564,7 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
       createdAt: previous?.createdAt ?? entry.createdAt,
       updatedAt: previous?.updatedAt ?? entry.updatedAt ?? entry.createdAt,
       preview: previous?.preview ?? entry.preview,
-      lastStatus: previous?.lastStatus ?? entry.lastStatus,
+      lastStatus: mapLegacyThreadStatus(previous?.lastStatus ?? entry.lastStatus),
     };
     const changed = !previous ||
       previous.threadId !== nextEntry.threadId ||

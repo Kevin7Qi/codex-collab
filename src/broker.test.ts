@@ -881,6 +881,10 @@ describe("BrokerClient — buffer overflow protection", () => {
         closeFired = true;
       });
 
+      const reqPromise = client.request("test/pending-during-overflow");
+      let rejectedWith: Error | null = null;
+      reqPromise.catch((e: Error) => { rejectedWith = e; });
+
       // Send a payload larger than MAX_BUFFER_SIZE (10 MB) without any newline.
       // Write in chunks with async yields so the event loop can process the
       // client-side buffer check between writes.
@@ -899,6 +903,8 @@ describe("BrokerClient — buffer overflow protection", () => {
         await new Promise((r) => setTimeout(r, 50));
       }
       expect(closeFired).toBe(true);
+      expect(rejectedWith).not.toBeNull();
+      expect(rejectedWith!.message).toContain("Broker response buffer exceeded maximum size");
     } finally {
       await broker.stop();
     }

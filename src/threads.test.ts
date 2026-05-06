@@ -849,6 +849,9 @@ describe("migrateGlobalState", () => {
     expect(byShortId.bbb22222.status).toBe("failed");      // stale running -> failed
     expect(byShortId.ccc33333.status).toBe("cancelled");    // interrupted -> cancelled
     expect(byShortId.ddd44444.status).toBe("failed");
+
+    const index = loadThreadIndex(wsStateDir);
+    expect(index.bbb22222.lastStatus).toBe("failed");       // stale running should not stay displayed as running
   });
 
   test("does not throw or destroy the legacy file when global threads.json is corrupt", () => {

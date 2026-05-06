@@ -401,4 +401,3 @@ export async function handleClean(args: string[]): Promise<void> {
     console.log(`Cleaned: ${parts.join(", ")}.`);
   }
 }
-
