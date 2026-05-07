@@ -10,6 +10,7 @@ import {
   saveThreadMapping,
   updateThreadStatus,
   withThreadLock,
+  removeLegacyGlobalThread,
 } from "../threads";
 import { resolveWorkspaceDir } from "../config";
 import type { AppServerClient } from "../client";
@@ -114,7 +115,7 @@ export async function handleThreads(args: string[]): Promise<void> {
         if (count > 0 && !options.json) {
           progress(`Discovered ${count} thread(s) from server`);
         }
-      });
+      }, options.dir);
     } catch (e) {
       console.error(`[codex] Warning: thread discovery failed: ${e instanceof Error ? e.message : String(e)}`);
       console.error("[codex] Showing local threads only.");
@@ -299,7 +300,7 @@ export async function handleDelete(args: string[]): Promise<void> {
       }
 
       return tryArchive(client, threadId);
-    });
+    }, options.dir);
   } catch (e) {
     if (e instanceof Error && !e.message.includes("not found")) {
       console.error(`[codex] Warning: could not archive on server: ${e.message}`);
@@ -311,6 +312,11 @@ export async function handleDelete(args: string[]): Promise<void> {
     const logPath = join(ws.logsDir, `${shortId}.log`);
     if (existsSync(logPath)) unlinkSync(logPath);
     removeThread(ws.threadsFile, shortId);
+    try {
+      removeLegacyGlobalThread(options.dir, threadId);
+    } catch (e) {
+      console.error(`[codex] Warning: could not remove legacy thread entry: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   if (archiveResult === "failed") {

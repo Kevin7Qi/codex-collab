@@ -302,12 +302,17 @@ describe("AppServerClient", () => {
       env: { MOCK_ERROR_RESPONSE: "1" },
     });
     try {
-      const error = await captureErrorMessage(
-        c.request("thread/start", { model: "bad-model" }),
-      );
-      expect(error).toContain(
+      let error: unknown;
+      try {
+        await c.request("thread/start", { model: "bad-model" });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
         "JSON-RPC error -32603: Internal error: model not available",
       );
+      expect((error as { rpcCode?: number }).rpcCode).toBe(-32603);
     } finally {
       await c.close();
     }

@@ -17,6 +17,7 @@ import {
   getLatestRun,
   pruneRuns,
   migrateGlobalState,
+  removeLegacyGlobalThread,
 } from "./threads";
 import type { RunRecord, ThreadMapping } from "./types";
 import { rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
@@ -711,6 +712,46 @@ describe("migrateGlobalState", () => {
     const index = loadThreadIndex(wsStateDir);
     expect(Object.keys(index)).toHaveLength(1);
     expect(listRuns(wsStateDir).filter(r => r.shortId === "aaa11111")).toHaveLength(1);
+  });
+
+  test("removeLegacyGlobalThread prevents deleted migrated entries from reappearing", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "completed",
+      },
+      bbb22222: {
+        threadId: "thr_other",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: join(wsRoot, "nested"),
+        lastStatus: "completed",
+      },
+      ccc33333: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: join(tmpdir(), "other-workspace"),
+        lastStatus: "completed",
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    removeThread(wsStateDir, "aaa11111");
+
+    expect(removeLegacyGlobalThread(cwdDir, "thr_alpha", globalDir)).toBe(true);
+    migrateGlobalState(cwdDir, globalDir);
+
+    const index = loadThreadIndex(wsStateDir);
+    expect(index.aaa11111).toBeUndefined();
+    expect(index.bbb22222.threadId).toBe("thr_other");
+
+    const globalMapping = JSON.parse(readFileSync(join(globalDir, "threads.json"), "utf-8"));
+    expect(globalMapping.aaa11111).toBeUndefined();
+    expect(globalMapping.bbb22222.threadId).toBe("thr_other");
+    expect(globalMapping.ccc33333.threadId).toBe("thr_alpha");
   });
 
   test("merges legacy entries when per-workspace state already exists", () => {

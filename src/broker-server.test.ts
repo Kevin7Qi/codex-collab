@@ -1608,6 +1608,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
           throw new Error("Expected error");
         } catch (err: any) {
           expect(err.message).toContain("Method not found: unknown/method");
+          expect(err.code).toBe(-32601);
         }
 
         await client.close();

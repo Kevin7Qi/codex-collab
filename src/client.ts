@@ -12,6 +12,7 @@ import type {
   InitializeParams,
   InitializeResponse,
 } from "./types";
+import { RpcError } from "./types";
 import { config } from "./config";
 
 const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
@@ -246,7 +247,10 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
         clearTimeout(entry.timer);
         pending.delete(msg.id);
         const e = msg.error;
-        entry.reject(new Error(`JSON-RPC error ${e.code}: ${e.message}${e.data ? ` (${JSON.stringify(e.data)})` : ""}`));
+        entry.reject(new RpcError(
+          `JSON-RPC error ${e.code}: ${e.message}${e.data ? ` (${JSON.stringify(e.data)})` : ""}`,
+          e.code,
+        ));
       }
       return;
     }

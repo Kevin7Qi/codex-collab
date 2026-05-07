@@ -636,6 +636,53 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   }
 }
 
+/**
+ * Remove a migrated thread from the legacy global mapping after `delete`.
+ * Without this, the next command re-runs migration and resurrects the local
+ * workspace entry. Only remove entries that match both threadId and workspace
+ * root so deleting in one workspace cannot disturb unrelated legacy entries.
+ */
+export function removeLegacyGlobalThread(
+  cwd: string,
+  threadId: string,
+  globalDataDir?: string,
+): boolean {
+  const dataDir = globalDataDir ?? config.dataDir;
+  const globalThreadsFile = join(dataDir, "threads.json");
+  if (!existsSync(globalThreadsFile)) return false;
+
+  const wsRoot = resolveWorkspaceDir(cwd);
+  return withThreadLock(globalThreadsFile, () => {
+    let globalMapping: ThreadMapping;
+    try {
+      const parsed = JSON.parse(readFileSync(globalThreadsFile, "utf-8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        console.error(`[codex] Warning: cannot remove legacy thread ${threadId}: global threads file is not a JSON object`);
+        return false;
+      }
+      globalMapping = parsed;
+    } catch (e) {
+      console.error(`[codex] Warning: cannot remove legacy thread ${threadId}: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+
+    let changed = false;
+    for (const [shortId, entry] of Object.entries(globalMapping)) {
+      if (
+        entry.threadId === threadId &&
+        entry.cwd &&
+        (entry.cwd === wsRoot || entry.cwd.startsWith(wsRoot + sep))
+      ) {
+        delete globalMapping[shortId];
+        changed = true;
+      }
+    }
+
+    if (changed) saveThreadMapping(globalThreadsFile, globalMapping);
+    return changed;
+  });
+}
+
 // ─── Legacy API (backward-compatible) ──────────────────────────────────────
 // These functions preserve the old signatures used by cli.ts, turns.ts, etc.
 // They delegate to the new thread index functions using the parent directory
