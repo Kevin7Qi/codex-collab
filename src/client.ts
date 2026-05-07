@@ -187,6 +187,10 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
         stderr: "pipe",
         cwd: opts?.cwd,
         env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+        // On Windows, `codex` resolves to `codex.cmd` and Bun.spawn wraps it
+        // with `cmd.exe /c`, which would otherwise show a console window for
+        // the lifetime of the broker's app-server.
+        windowsHide: true,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
