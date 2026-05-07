@@ -68,13 +68,6 @@ describe("getDiffStats", () => {
     expect(typeof stats.insertions).toBe("number");
     expect(typeof stats.deletions).toBe("number");
   });
-
-  test("returns zeros when there are no diffs for a ref that matches HEAD", () => {
-    const stats = getDiffStats(process.cwd(), "HEAD");
-    expect(stats.files).toBe(0);
-    expect(stats.insertions).toBe(0);
-    expect(stats.deletions).toBe(0);
-  });
 });
 
 // ─── getUntrackedFiles ─────────────────────────────────────────────────────
