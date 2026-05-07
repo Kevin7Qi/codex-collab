@@ -379,6 +379,22 @@ async function executeTurn(
         durationMs: Date.now() - startTime,
       };
     }
+    // If the turn started but didn't complete (timeout, connection error,
+    // unexpected exception), tell the server to stop. Without this, a
+    // client-side timeout leaves the turn running on the app-server until
+    // the broker's 30-min orphan watchdog fires — keeping the broker
+    // marked busy and blocking every subsequent invocation in between.
+    if (turnId !== null) {
+      try {
+        await client.request("turn/interrupt", { threadId, turnId });
+      } catch (interruptErr) {
+        if (interruptErr instanceof Error
+            && !interruptErr.message.includes("not found")
+            && !interruptErr.message.includes("already")) {
+          console.error(`[codex] Warning: could not interrupt turn: ${interruptErr.message}`);
+        }
+      }
+    }
     throw e;
   } finally {
     clearInferenceTimer();
