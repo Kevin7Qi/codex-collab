@@ -106,8 +106,10 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `kill <id>` | Interrupt running thread |
 | `output <id>` | Full log for thread |
 | `progress <id>` | Recent activity (tail of log) |
+| `peek <id>` | Show recent conversation slice from server |
 | `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |
+| `templates` | List available prompt templates |
 | `health` | Check dependencies |
 
 <details>
@@ -136,9 +138,14 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
 | `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
+| `--json` | JSON output for supported commands (`threads`, `peek`) |
+| `--all` | List all threads with no display limit |
+| `--discover` | Query Codex server for threads not in the local index |
+| `--limit <n>` | Limit items shown by `threads` or `peek` |
+| `--full` | Include all item types in `peek` output (default shows messages only) |
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
 | `--timeout <sec>` | Turn timeout (default: 1200) |
-| `--base <branch>` | Base branch for PR review (default: main) |
+| `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 
 </details>
 

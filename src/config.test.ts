@@ -47,13 +47,12 @@ describe("config object", () => {
     expect(config.serviceName).toBe("codex-collab");
   });
 
-  test("has reasoning efforts including none and minimal", () => {
-    expect(config.reasoningEfforts).toContain("none");
-    expect(config.reasoningEfforts).toContain("minimal");
-    expect(config.reasoningEfforts).toContain("low");
-    expect(config.reasoningEfforts).toContain("medium");
-    expect(config.reasoningEfforts).toContain("high");
-    expect(config.reasoningEfforts).toContain("xhigh");
+  test("has accepted reasoning efforts", () => {
+    expect(config.reasoningEfforts).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"]);
+  });
+
+  test("has default display reasoning efforts", () => {
+    expect(config.defaultDisplayReasoningEfforts).toEqual(["low", "medium", "high", "xhigh"]);
   });
 
   test("is frozen", () => {

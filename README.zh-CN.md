@@ -106,8 +106,10 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | `kill <id>` | 中断运行中的会话 |
 | `output <id>` | 查看会话完整日志 |
 | `progress <id>` | 查看近期活动（日志尾部） |
+| `peek <id>` | 从服务器查看最近的会话片段 |
 | `config [key] [value]` | 查看或设置持久化默认值 |
 | `models` | 列出可用模型 |
+| `templates` | 列出可用提示词模板 |
 | `health` | 检查依赖项 |
 
 <details>
@@ -136,9 +138,14 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | `--resume <id>` | 恢复已有会话 |
 | `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted（默认: never） |
 | `--template <name>` | 提示词模板（run 命令；优先使用 `~/.codex-collab/templates/`，然后使用内置模板） |
+| `--json` | 对支持的命令输出 JSON（`threads`、`peek`） |
+| `--all` | 列出全部会话，不限制显示数量 |
+| `--discover` | 从 Codex 服务器查询本地索引中没有的会话 |
+| `--limit <n>` | 限制 `threads` 或 `peek` 显示的条目数 |
+| `--full` | 在 `peek` 输出中包含所有条目类型（默认只显示消息） |
 | `--content-only` | 隐藏进度输出；配合 `output` 时仅返回正文内容 |
 | `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200） |
-| `--base <branch>` | PR 审查的基准分支（默认: main） |
+| `--base <branch>` | PR 审查的基准分支（默认: 自动检测默认分支） |
 
 </details>
 

@@ -22,12 +22,14 @@ const MODEL_ALIASES: Record<string, string> = {
 // ─── Effort levels ──────────────────────────────────────────────────────────
 
 const VALID_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
+const DEFAULT_DISPLAY_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
 // ─── Config object ──────────────────────────────────────────────────────────
 
 export const config = {
   // Reasoning effort levels
   reasoningEfforts: VALID_EFFORTS,
+  defaultDisplayReasoningEfforts: DEFAULT_DISPLAY_EFFORTS,
 
   // Sandbox modes
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,

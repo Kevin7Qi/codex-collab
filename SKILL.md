@@ -206,7 +206,7 @@ codex-collab health                     # Check prerequisites
 | Flag | Description |
 |------|-------------|
 | `-m, --model <model>` | Model name (default: auto — latest available) |
-| `-r, --reasoning <level>` | Reasoning effort: none, minimal, low, medium, high, xhigh (default: auto — highest for model) |
+| `-r, --reasoning <level>` | Reasoning effort: low, medium, high, xhigh (default: auto — highest for model) |
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |

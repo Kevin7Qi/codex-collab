@@ -110,7 +110,7 @@ Commands:
 
 Options:
   -m, --model <model>     Model name (default: auto — latest available)
-  -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: auto — highest available)
+  -r, --reasoning <lvl>   Reasoning: ${config.defaultDisplayReasoningEfforts.join(", ")} (default: auto — highest available)
   -s, --sandbox <mode>    Sandbox: ${config.sandboxModes.join(", ")}
                           (default: ${config.defaultSandbox})
   -d, --dir <path>        Working directory (default: cwd)
@@ -119,7 +119,7 @@ Options:
   --approval <policy>     Approval: ${config.approvalPolicies.join(", ")} (default: ${config.defaultApprovalPolicy})
   --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
-  --base <branch>         Base branch for PR review (default: main)
+  --base <branch>         Base branch for PR review (default: auto-detected default branch)
   --template <name>       Prompt template (run command; checks ~/.codex-collab/templates/ first)
   --limit <n>             Number of items shown (peek, threads commands)
   --full                  Include all item types (peek command)
