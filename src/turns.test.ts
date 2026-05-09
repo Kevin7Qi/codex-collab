@@ -655,6 +655,32 @@ describe("kill signal", () => {
     expect(result.status).toBe("interrupted");
   });
 
+  test("stale wildcard signal is cleared at turn start", async () => {
+    const stalePath = join(TEST_KILL_DIR, "thr-1");
+    writeFileSync(stalePath, "*", { mode: 0o600 });
+    const staleTime = new Date(Date.now() - 10_000);
+    utimesSync(stalePath, staleTime, staleTime);
+
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-stale-wildcard", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+  });
+
   test("normal completion wins race — no kill signal", async () => {
     const { client, emit } = buildMockClient((method) => {
       if (method === "turn/start") {

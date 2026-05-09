@@ -17,6 +17,8 @@ import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
 import { config } from "./config";
 
+const STALE_KILL_SIGNAL_MS = 1000;
+
 // ---------------------------------------------------------------------------
 // Pure helpers (exported for testing)
 // ---------------------------------------------------------------------------
@@ -271,17 +273,17 @@ async function executeTurn(
 
   // Remove leftover signals from a previous (crashed) run while preserving
   // fresh ones from a concurrent `kill`. Modern `kill` writes our PID or
-  // "*"; a different PID is stale. Empty content (legacy `kill`) falls back
-  // to a wall-clock mtime check — process.uptime would mis-classify a kill
-  // issued just before this process started.
+  // "*"; a different PID is stale. Empty content (legacy `kill`) and old
+  // wildcards fall back to a wall-clock mtime check — process.uptime would
+  // mis-classify a kill issued just before this process started.
   const myPid = String(process.pid);
   try {
     const content = readFileSync(signalPath, "utf-8").trim();
     if (content && content !== "*" && content !== myPid) {
       unlinkSync(signalPath);
-    } else if (!content) {
+    } else if (!content || content === "*") {
       const st = statSync(signalPath);
-      if (st.mtimeMs < Date.now() - 1000) unlinkSync(signalPath);
+      if (st.mtimeMs < Date.now() - STALE_KILL_SIGNAL_MS) unlinkSync(signalPath);
     }
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") {

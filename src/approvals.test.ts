@@ -169,8 +169,30 @@ describe("InteractiveApprovalHandler", () => {
     }, 200);
 
     await handler.handleCommandApproval(mockCommandRequest);
-    expect(lines).toContain('  Approve: codex-collab approve appr-001 -d "/project with spaces"');
-    expect(lines).toContain('  Decline: codex-collab decline appr-001 -d "/project with spaces"');
+    expect(lines).toContain("  Approve: codex-collab approve appr-001 -d '/project with spaces'");
+    expect(lines).toContain("  Decline: codex-collab decline appr-001 -d '/project with spaces'");
+  });
+
+  test("progress callback shell-quotes workspace paths without expansion", async () => {
+    const lines: string[] = [];
+    const workspace = "/tmp/$USER/$(echo bad)/a'b";
+    const quotedWorkspace = process.platform === "win32"
+      ? "'/tmp/$USER/$(echo bad)/a''b'"
+      : "'/tmp/$USER/$(echo bad)/a'\\''b'";
+    const handler = new InteractiveApprovalHandler(
+      TEST_APPROVALS_DIR,
+      (line) => lines.push(line),
+      workspace,
+      100,
+    );
+
+    setTimeout(() => {
+      writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "accept");
+    }, 200);
+
+    await handler.handleCommandApproval(mockCommandRequest);
+    expect(lines).toContain(`  Approve: codex-collab approve appr-001 -d ${quotedWorkspace}`);
+    expect(lines).toContain(`  Decline: codex-collab decline appr-001 -d ${quotedWorkspace}`);
   });
 
   test("cleans up request file on abort", async () => {

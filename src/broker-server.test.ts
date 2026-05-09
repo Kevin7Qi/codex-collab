@@ -538,6 +538,44 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
+    test("initialize returns busy=true while a streaming request is pending", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, {
+        turnDelay: 1000,
+        sendTurnCompleted: false,
+      });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        const pendingTurn = client1.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "hello" }],
+        });
+
+        // The broker has accepted the streaming request, but turn/start has
+        // not returned yet, so stream ownership has not been established.
+        await new Promise((r) => setTimeout(r, 100));
+
+        const client2 = await TestClient.connect(sockPath);
+        const result = await client2.request("initialize", {
+          clientInfo: { name: "test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: false },
+        }) as { userAgent: string; busy: boolean };
+
+        expect(result.busy).toBe(true);
+
+        await pendingTurn;
+        await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
     test("swallows initialized notification without error", async () => {
 
       const sockPath = join(tempDir, "broker.sock");

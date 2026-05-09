@@ -28,7 +28,10 @@ export const autoApproveHandler: ApprovalHandler = {
 const APPROVAL_TIMEOUT_MS = 3_600_000; // 1 hour
 
 function shellQuote(value: string): string {
-  return JSON.stringify(value);
+  if (process.platform === "win32") {
+    return `'${value.replace(/'/g, "''")}'`;
+  }
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 /** File-based IPC approval handler. Writes a .json request file, then polls for

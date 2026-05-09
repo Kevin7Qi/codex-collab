@@ -127,6 +127,8 @@ async function main() {
 
   /** Socket that currently owns a pending request (waiting for response). */
   let activeRequestSocket: net.Socket | null = null;
+  /** Whether the pending request will claim stream ownership if it succeeds. */
+  let activeRequestIsStreaming = false;
   /** Socket that owns the current streaming turn (notifications routed here). */
   let activeStreamSocket: net.Socket | null = null;
   /** Active stream targets keyed by thread ID with the turn ID to interrupt. */
@@ -437,7 +439,7 @@ async function main() {
         id: message.id,
         result: {
           userAgent: "codex-collab-broker",
-          busy: activeStreamSocket !== null,
+          busy: activeStreamSocket !== null || activeRequestIsStreaming,
         },
       });
       return;
@@ -548,6 +550,7 @@ async function main() {
 
     const isStreaming = STREAMING_METHODS.has(message.method as string);
     activeRequestSocket = socket;
+    activeRequestIsStreaming = isStreaming;
 
     try {
       const result = await appClient.request(
@@ -582,7 +585,10 @@ async function main() {
             armOrphanWatchdog(orphanTargets);
           }
         }
-        if (activeRequestSocket === socket) activeRequestSocket = null;
+        if (activeRequestSocket === socket) {
+          activeRequestSocket = null;
+          activeRequestIsStreaming = false;
+        }
         return;
       }
 
@@ -609,6 +615,7 @@ async function main() {
 
       if (activeRequestSocket === socket) {
         activeRequestSocket = null;
+        activeRequestIsStreaming = false;
       }
     } catch (error) {
       send(socket, {
@@ -620,6 +627,7 @@ async function main() {
       });
       if (activeRequestSocket === socket) {
         activeRequestSocket = null;
+        activeRequestIsStreaming = false;
       }
       if (activeStreamSocket === socket && !isStreaming) {
         activeStreamSocket = null;
