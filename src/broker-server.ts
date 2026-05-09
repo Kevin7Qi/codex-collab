@@ -135,9 +135,11 @@ async function main() {
   let activeStreamTargets: Map<string, string> | null = null;
   /** All connected sockets. */
   const sockets = new Set<net.Socket>();
-  /** Thread IDs whose turns completed — prevents stale stream ownership
-   *  when turn/completed arrives during the streaming request itself. */
-  const completedStreamThreadIds = new Set<string>();
+  /** Turn IDs whose turn/completed arrived during the streaming request
+   *  itself — prevents claiming stream ownership for a turn that already
+   *  finished. Keyed by turnId (unique per turn) so a leaked entry from a
+   *  prior turn cannot poison a future turn on the same thread. */
+  const completedStreamTurnIds = new Set<string>();
   /** Pending forwarded requests (e.g. approval requests sent to a client socket,
    *  awaiting a response routed through the main data handler). */
   const pendingForwardedRequests = new Map<string, {
@@ -253,18 +255,23 @@ async function main() {
     // If turn/completed, release the stream ownership — even if the owning
     // socket has disconnected (orphaned turn completing naturally).
     if (method === "turn/completed") {
-      const threadId = (notifParams as Record<string, unknown>)?.threadId;
-      // Track completed thread IDs so that a streaming request that is
-      // still awaiting its response doesn't re-establish ownership after
-      // the turn has already finished (fast-turn race).
-      if (typeof threadId === "string") {
-        completedStreamThreadIds.add(threadId);
+      const params = notifParams as Record<string, unknown> | undefined;
+      const threadId = params?.threadId;
+      const completedTurn = params?.turn as Record<string, unknown> | undefined;
+      const completedTurnId = typeof completedTurn?.id === "string" ? completedTurn.id : null;
+      // Track completed turn IDs so that a streaming request still awaiting
+      // its response doesn't re-establish ownership after the turn has
+      // already finished (fast-turn race where turn/completed arrives in
+      // the same read chunk as the streaming response).
+      if (completedTurnId) {
+        completedStreamTurnIds.add(completedTurnId);
         // Bound the set: it's a fast-turn-race tracker, not a history.
-        // Without a cap, a long-lived broker accumulates entries for threads
-        // that completed once and never run again.
-        if (completedStreamThreadIds.size > 200) {
-          const drop = [...completedStreamThreadIds].slice(0, 100);
-          for (const id of drop) completedStreamThreadIds.delete(id);
+        // Without a cap, a long-lived broker accumulates entries for turns
+        // whose responses never settled (e.g. orphan-watchdog clears
+        // ownership before the natural completion arrives).
+        if (completedStreamTurnIds.size > 200) {
+          const drop = [...completedStreamTurnIds].slice(0, 100);
+          for (const id of drop) completedStreamTurnIds.delete(id);
         }
       }
       const matchesStream =
@@ -274,11 +281,11 @@ async function main() {
         activeStreamTargets.has(threadId);
       if (matchesStream && (activeStreamSocket === target || activeStreamSocket === null)) {
         // If we're releasing actual stream ownership (activeStreamSocket was set),
-        // also clean up the completed tracking so it doesn't block the next turn
-        // on the same thread. In the fast-turn race (activeStreamSocket is null),
-        // keep the tracking — the pending response handler needs it.
-        if (activeStreamSocket !== null && typeof threadId === "string") {
-          completedStreamThreadIds.delete(threadId);
+        // also clean up the tracked turn ID so the bounded set stays small.
+        // In the fast-turn race (activeStreamSocket is null), keep the entry
+        // — the pending response handler needs it.
+        if (activeStreamSocket !== null && completedTurnId) {
+          completedStreamTurnIds.delete(completedTurnId);
         }
         activeStreamSocket = null;
         activeStreamTargets = null;
@@ -600,17 +607,19 @@ async function main() {
           message.params as Record<string, unknown> | undefined,
           result as Record<string, unknown>,
         );
-        // Only claim stream ownership if the turn hasn't already completed
+        // Only claim stream ownership if this turn hasn't already completed
         // during the request. turn/completed can arrive in the same read
         // chunk as the response, firing the notification handler before
-        // this code runs. Without this check the broker stays permanently busy.
-        const alreadyCompleted = [...streamTargets.keys()].some(id => completedStreamThreadIds.has(id));
+        // this code runs. Match by the new turn's id (unique per turn) so
+        // a stale entry from an unrelated prior turn cannot block ownership.
+        const newTurn = (result as Record<string, unknown>)?.turn as Record<string, unknown> | undefined;
+        const newTurnId = typeof newTurn?.id === "string" ? newTurn.id : null;
+        const alreadyCompleted = newTurnId !== null && completedStreamTurnIds.has(newTurnId);
         if (!alreadyCompleted) {
           activeStreamSocket = socket;
           activeStreamTargets = streamTargets;
         }
-        // Clean up tracked completions for these thread IDs
-        for (const id of streamTargets.keys()) completedStreamThreadIds.delete(id);
+        if (newTurnId) completedStreamTurnIds.delete(newTurnId);
       }
 
       if (activeRequestSocket === socket) {
@@ -629,9 +638,12 @@ async function main() {
         activeRequestSocket = null;
         activeRequestIsStreaming = false;
       }
-      if (activeStreamSocket === socket && !isStreaming) {
-        activeStreamSocket = null;
-      }
+      // Do NOT clear activeStreamSocket here. A failed non-streaming RPC
+      // from the stream-owning socket (e.g. an unknown method, or a
+      // protocol-level rejection) does not end the underlying turn on the
+      // app-server. The turn keeps running and ownership must be preserved
+      // until turn/completed arrives — otherwise a second client could
+      // interleave a streaming request over the same app-server.
     }
   }
 

@@ -576,6 +576,49 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
+    test("non-streaming error from stream owner preserves stream ownership", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      // Long-running turn that won't auto-complete during the test.
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        await client1.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "hello" }],
+        });
+
+        // Same socket sends a non-streaming RPC the mock rejects with -32601.
+        // Before the fix, the broker's catch path cleared activeStreamSocket
+        // for non-streaming errors, letting a second client interleave.
+        let errored = false;
+        try {
+          await client1.request("nonexistent/method", {});
+        } catch {
+          errored = true;
+        }
+        expect(errored).toBe(true);
+
+        // Stream ownership must still be held — the turn is still running.
+        const client2 = await TestClient.connect(sockPath);
+        const result = await client2.request("initialize", {
+          clientInfo: { name: "test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: false },
+        }) as { userAgent: string; busy: boolean };
+
+        expect(result.busy).toBe(true);
+
+        await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
     test("swallows initialized notification without error", async () => {
 
       const sockPath = join(tempDir, "broker.sock");
