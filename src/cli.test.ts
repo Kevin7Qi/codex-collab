@@ -124,3 +124,41 @@ describe("CLI invalid inputs", () => {
     expect(stderr).toContain("--dir requires a value");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Global options placed before the command
+// ---------------------------------------------------------------------------
+
+describe("CLI global options before command", () => {
+  // Pre-scan regression: with a naive `break on first flag`, args like
+  // `codex-collab --dir /repo run "…"` were misread as a bare flag invocation
+  // and rejected with "Unknown option". The pre-scan now skips known value-
+  // flag/value pairs (and known boolean flags) when locating the command, so
+  // these legacy invocation forms still route to the right subcommand.
+
+  it("--dir <value> before health does not report Unknown option", () => {
+    // 'health' is the only command we can safely run without spawning an
+    // app-server; it exercises the routing path without side effects.
+    const { stderr } = run("--dir", import.meta.dir + "/..", "health");
+    expect(stderr).not.toContain("Unknown option");
+    expect(stderr).not.toContain("Unknown command");
+  });
+
+  it("--content-only (boolean) before health does not report Unknown option", () => {
+    const { stderr } = run("--content-only", "health");
+    expect(stderr).not.toContain("Unknown option");
+    expect(stderr).not.toContain("Unknown command");
+  });
+
+  it("bare known value-flag with no command falls through to help without unknown-option error", () => {
+    // `codex-collab --dir /tmp` (no subcommand) should not say "Unknown
+    // option: --dir" — --dir is known; the user just didn't supply a command.
+    const { stderr, stdout, exitCode } = run("--dir", "/tmp");
+    expect(stderr).not.toContain("Unknown option");
+    // Either help is printed (exit 0) or another command-missing path fires
+    // (exit 1) — both are acceptable; what's NOT acceptable is misclassifying
+    // --dir as unknown.
+    expect([0, 1]).toContain(exitCode);
+    if (exitCode === 0) expect(stdout).toContain("Usage:");
+  });
+});

@@ -24,9 +24,13 @@ export function getDefaultBranch(cwd: string): string {
   // Try remote HEAD first
   const { stdout, status } = git(["symbolic-ref", "refs/remotes/origin/HEAD"], cwd);
   if (status === 0 && stdout) {
-    // e.g. "refs/remotes/origin/main" → "main"
-    const parts = stdout.split("/");
-    return parts[parts.length - 1];
+    // e.g. "refs/remotes/origin/main" → "main",
+    //      "refs/remotes/origin/release/2026" → "release/2026".
+    // Strip the prefix instead of taking the last path segment so default
+    // branches whose names contain "/" survive intact.
+    const prefix = "refs/remotes/origin/";
+    if (stdout.startsWith(prefix)) return stdout.slice(prefix.length);
+    return stdout;
   }
 
   // Fall back to checking local branches

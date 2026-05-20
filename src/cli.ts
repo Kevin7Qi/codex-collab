@@ -143,25 +143,67 @@ Examples:
 
 const rawArgs = process.argv.slice(2);
 
+// Flags that consume the next argument as their value. Used only by the
+// pre-scan so `codex-collab --dir /repo run "…"` finds `run` rather than
+// stopping at `--dir` and reporting an unknown-option error; the real
+// validation happens in commands/shared.ts parseOptions. Keep in sync with
+// the value-taking branches there.
+const VALUE_FLAGS = new Set([
+  "-r", "--reasoning",
+  "-m", "--model",
+  "-s", "--sandbox",
+  "--approval",
+  "-d", "--dir",
+  "--timeout",
+  "--limit",
+  "--mode",
+  "--ref",
+  "--base",
+  "--resume",
+  "--template",
+]);
+
+// Boolean flags recognized by commands/shared.ts parseOptions. Combined with
+// VALUE_FLAGS this lets the pre-scan tell "unknown flag" (real error) from
+// "known flag but no command followed" (degenerate but not unknown).
+const BOOLEAN_FLAGS = new Set([
+  "--content-only",
+  "--json",
+  "--all",
+  "--discover",
+  "--full",
+  "--unset",
+]);
+
 function extractCommand(args: string[]): { command: string; rest: string[] } {
-  // Scan for --help / -h before any command
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (arg === "-h" || arg === "--help") {
       showHelp();
       process.exit(0);
     }
-    // Stop at first unknown flag — let command modules handle errors
-    if (arg.startsWith("-")) break;
-    // First non-flag is the command
-    return { command: arg, rest: args.slice(args.indexOf(arg) + 1) };
-  }
-  // No command found — check for bare flags
-  for (const arg of args) {
-    if (arg.startsWith("-") && arg !== "-h" && arg !== "--help") {
-      console.error(`Error: Unknown option: ${arg}`);
-      console.error("Run codex-collab --help for usage");
-      process.exit(1);
+    if (arg.startsWith("-")) {
+      // `--name=value` is one token; `--name value` is two — only skip the
+      // following arg in the latter case, and only for known value-flags.
+      if (VALUE_FLAGS.has(arg)) i++;
+      continue;
     }
+    // First non-flag token is the command; the rest is its argv slice.
+    return { command: arg, rest: args.slice(i + 1) };
+  }
+  // Reached end of args with no command found — bare flags only. Mirror the
+  // pre-existing "Unknown option" error for genuinely unknown flags so
+  // `codex-collab --bogus` still exits 1, but tolerate known flags missing
+  // their command (the empty-command help path below handles those).
+  for (const arg of args) {
+    if (!arg.startsWith("-")) continue;
+    // Strip `--name=value` so we match the option name, not the joined token.
+    const name = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (name === "-h" || name === "--help") continue;
+    if (VALUE_FLAGS.has(name) || BOOLEAN_FLAGS.has(name)) continue;
+    console.error(`Error: Unknown option: ${arg}`);
+    console.error("Run codex-collab --help for usage");
+    process.exit(1);
   }
   return { command: "", rest: [] };
 }
