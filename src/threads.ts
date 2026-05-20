@@ -564,7 +564,13 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
       createdAt: previous?.createdAt ?? entry.createdAt,
       updatedAt: previous?.updatedAt ?? entry.updatedAt ?? entry.createdAt,
       preview: previous?.preview ?? entry.preview,
-      lastStatus: mapLegacyThreadStatus(previous?.lastStatus ?? entry.lastStatus),
+      // Preserve already-migrated/live workspace state as-is (like every field
+      // above). Only normalize the *legacy* entry's status, and only when this
+      // thread has no per-workspace entry yet (genuine first migration).
+      // Re-running mapLegacyThreadStatus over previous.lastStatus would flip a
+      // legitimately live "running" thread to "failed" on the next command,
+      // corrupting state and re-firing the migration log line every turn.
+      lastStatus: previous?.lastStatus ?? mapLegacyThreadStatus(entry.lastStatus),
     };
     const changed = !previous ||
       previous.threadId !== nextEntry.threadId ||

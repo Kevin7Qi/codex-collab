@@ -714,6 +714,55 @@ describe("migrateGlobalState", () => {
     expect(listRuns(wsStateDir).filter(r => r.shortId === "aaa11111")).toHaveLength(1);
   });
 
+  test("does not clobber a live 'running' status on subsequent migrations", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "completed",
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+
+    // Simulate a live command (run/discover) starting a turn: it writes
+    // lastStatus="running" into the per-workspace index. This is NOT legacy
+    // data — it is the current, authoritative live state of an active thread.
+    const live = loadThreadIndex(wsStateDir);
+    live.aaa11111.lastStatus = "running";
+    saveThreadIndex(wsStateDir, live);
+
+    // The next command re-triggers migrateGlobalState (it runs on every
+    // command via getWorkspacePaths). It must NOT reinterpret already-migrated
+    // live workspace state through the legacy-status mapper.
+    migrateGlobalState(cwdDir, globalDir);
+
+    const after = loadThreadIndex(wsStateDir);
+    expect(after.aaa11111.lastStatus).toBe("running");
+  });
+
+  test("still normalizes a stale legacy 'running' status on first migration", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: {
+        threadId: "thr_alpha",
+        createdAt: "2026-01-01T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "running", // legacy process is long dead
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const index = loadThreadIndex(wsStateDir);
+    expect(index.aaa11111.lastStatus).toBe("failed");
+  });
+
   test("removeLegacyGlobalThread prevents deleted migrated entries from reappearing", () => {
     const wsRoot = cwdDir;
     writeGlobalThreads(globalDir, {
