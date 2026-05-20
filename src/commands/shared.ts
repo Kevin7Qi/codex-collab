@@ -9,8 +9,8 @@ import {
   type SandboxMode,
   type ApprovalPolicy,
 } from "../config";
-import { type AppServerClient } from "../client";
-import { ensureConnection, getCurrentSessionId } from "../broker";
+import { type AppServerClient, connectDirect } from "../client";
+import { ensureConnection, getCurrentSessionId, isBrokerBusyError } from "../broker";
 import {
   legacyRegisterThread as registerThread,
   legacyResolveThreadId as resolveThreadId,
@@ -443,12 +443,44 @@ export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string,
   return new InteractiveApprovalHandler(approvalsDir, progress, workspaceDir);
 }
 
-/** Connect to app server, run fn, then close the client (even on error). */
+/** Connect to app server, run fn, then close the client (even on error).
+ *
+ *  For streaming callers, transparently retries once via `connectDirect`
+ *  when fn throws a BROKER_BUSY error. The broker's busy state is set when
+ *  another invocation owns the shared stream; the initial check in
+ *  `ensureConnection` is one-shot, so two callers can both pass it before
+ *  either has actually claimed the stream — only the racing loser sees
+ *  BROKER_BUSY on its first stream-owning RPC (`thread/start` etc.).
+ *  Auto-falling back to a direct connection mirrors the documented
+ *  parallel-execution behavior. */
 export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>, cwd?: string, streaming = false): Promise<T> {
-  const client = await ensureConnection(cwd ?? process.cwd(), streaming);
+  const workingDir = cwd ?? process.cwd();
+  let client = await ensureConnection(workingDir, streaming);
   activeClient = client;
+  let triedDirectFallback = false;
   try {
-    return await fn(client);
+    while (true) {
+      try {
+        return await fn(client);
+      } catch (e) {
+        if (streaming && !triedDirectFallback && isBrokerBusyError(e)) {
+          // Lost the busy race after handshake — drop the broker client and
+          // retry via direct connection. The first attempt's side effects
+          // (e.g. a failed RunRecord recorded by the command's own catch
+          // handler) remain, like a user-observable "started, then retried"
+          // sequence.
+          triedDirectFallback = true;
+          console.error("[broker] Broker became busy after handshake — retrying with direct connection.");
+          try { await client.close(); } catch (closeErr) {
+            console.error(`[codex] Warning: cleanup failed: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`);
+          }
+          client = await connectDirect({ cwd: workingDir });
+          activeClient = client;
+          continue;
+        }
+        throw e;
+      }
+    }
   } finally {
     try {
       await client.close();

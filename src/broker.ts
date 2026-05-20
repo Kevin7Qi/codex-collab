@@ -17,17 +17,19 @@ import { terminateProcessTree, isProcessAlive } from "./process";
 /** JSON-RPC error code returned when the broker is busy with another request. */
 export const BROKER_BUSY_RPC_CODE = -32001;
 
+/** True iff `e` is an RpcError carrying the BROKER_BUSY code. */
+export function isBrokerBusyError(e: unknown): boolean {
+  return !!e && typeof e === "object" &&
+    (e as { rpcCode?: unknown }).rpcCode === BROKER_BUSY_RPC_CODE;
+}
+
 /**
  * If `e` is a BROKER_BUSY RpcError, replace its message with a user-friendly
  * one explaining the cause. Mutates in place to preserve the RpcError type
  * so upstream code can still pattern-match on `instanceof RpcError`.
  */
 export function wrapBrokerBusy(e: unknown): unknown {
-  // Lazy import avoids a circular dependency through types -> broker -> client.
-  // RpcError lives in types.ts and is what broker-client constructs.
-  const isRpcBusy = !!e && typeof e === "object" &&
-    (e as { rpcCode?: unknown }).rpcCode === BROKER_BUSY_RPC_CODE;
-  if (isRpcBusy && e instanceof Error) {
+  if (isBrokerBusyError(e) && e instanceof Error) {
     e.message = "Codex broker is busy serving another invocation. Retry in a moment, or wait for the in-flight turn to finish.";
   }
   return e;

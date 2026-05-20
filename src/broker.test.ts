@@ -12,6 +12,8 @@ import {
   acquireSpawnLock,
   teardownBroker,
   clearBrokerArtifacts,
+  isBrokerBusyError,
+  BROKER_BUSY_RPC_CODE,
 } from "./broker";
 import { connectToBroker } from "./broker-client";
 import net from "node:net";
@@ -321,6 +323,31 @@ describe("clearBrokerArtifacts", () => {
       startedAt: "2026-01-01T00:00:00Z",
     };
     expect(() => clearBrokerArtifacts(tempDir, state)).not.toThrow();
+  });
+});
+
+// ─── isBrokerBusyError ────────────────────────────────────────────────────
+
+describe("isBrokerBusyError", () => {
+  test("returns true for an RpcError carrying BROKER_BUSY_RPC_CODE", () => {
+    const err = Object.assign(new Error("busy"), { rpcCode: BROKER_BUSY_RPC_CODE });
+    expect(isBrokerBusyError(err)).toBe(true);
+  });
+
+  test("returns false for an RpcError carrying a different code", () => {
+    const err = Object.assign(new Error("nope"), { rpcCode: -32603 });
+    expect(isBrokerBusyError(err)).toBe(false);
+  });
+
+  test("returns false for an Error without rpcCode", () => {
+    expect(isBrokerBusyError(new Error("boom"))).toBe(false);
+  });
+
+  test("returns false for non-error values", () => {
+    expect(isBrokerBusyError(null)).toBe(false);
+    expect(isBrokerBusyError(undefined)).toBe(false);
+    expect(isBrokerBusyError("BROKER_BUSY")).toBe(false);
+    expect(isBrokerBusyError({})).toBe(false);
   });
 });
 

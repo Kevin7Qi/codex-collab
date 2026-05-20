@@ -302,11 +302,22 @@ async function executeTurn(
     }
   });
 
+  // For reviews, the running turn lives on a *review* subthread distinct
+  // from params.threadId. We must route turn/interrupt to that subthread on
+  // timeout/error cleanup below; otherwise the interrupt targets the parent
+  // and the review keeps running, holding the broker busy until the orphan
+  // watchdog fires.
+  let interruptThreadId = threadId;
+
   try {
-    const { turn } = await Promise.race([
-      client.request<TurnStartResponse>(method, params),
+    const startResponse = await Promise.race([
+      client.request<TurnStartResponse & { reviewThreadId?: string }>(method, params),
       killSignal,
     ]);
+    const { turn } = startResponse;
+    if (typeof startResponse.reviewThreadId === "string") {
+      interruptThreadId = startResponse.reviewThreadId;
+    }
 
     // turnId is now known — notify caller and replay buffered notifications
     turnId = turn.id;
@@ -388,7 +399,7 @@ async function executeTurn(
     // marked busy and blocking every subsequent invocation in between.
     if (turnId !== null) {
       try {
-        await client.request("turn/interrupt", { threadId, turnId });
+        await client.request("turn/interrupt", { threadId: interruptThreadId, turnId });
       } catch (interruptErr) {
         if (interruptErr instanceof Error
             && !interruptErr.message.includes("not found")

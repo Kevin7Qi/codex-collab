@@ -395,6 +395,49 @@ describe("runReview", () => {
     expect(result.output).toBe("Review: looks good");
   });
 
+  test("on timeout, turn/interrupt targets the review subthread, not the parent", async () => {
+    // Reviews run on a subthread distinct from the caller's threadId.
+    // Earlier code only retained params.threadId for the cleanup interrupt,
+    // so on broker-timeout the orphaned review would keep running on the
+    // *review* subthread, holding the broker busy until the watchdog fires.
+    const interruptCalls: Array<{ threadId: string; turnId: string }> = [];
+    const { client, emit } = buildMockClient((method, params) => {
+      if (method === "review/start") {
+        // Don't emit turn/completed — let the client-side timeout fire.
+        return {
+          turn: { id: "review-turn-1", items: [], status: "inProgress", error: null },
+          reviewThreadId: "review-thr-1",
+        };
+      }
+      if (method === "turn/interrupt") {
+        interruptCalls.push(params as { threadId: string; turnId: string });
+        return null;
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    void emit; // keep mock alive
+
+    const dispatcher = new EventDispatcher("test-review-interrupt", TEST_LOG_DIR, () => {});
+
+    await expect(
+      runReview(
+        client,
+        "thr-parent",
+        { type: "uncommittedChanges" },
+        {
+          dispatcher,
+          approvalHandler: autoApproveHandler,
+          timeoutMs: 50,
+          killSignalsDir: TEST_KILL_DIR,
+        },
+      ),
+    ).rejects.toThrow();
+
+    expect(interruptCalls).toHaveLength(1);
+    expect(interruptCalls[0].threadId).toBe("review-thr-1");
+    expect(interruptCalls[0].turnId).toBe("review-turn-1");
+  });
+
   test("returns failed result when review fails", async () => {
     const client = createMockClient({
       startMethod: "review/start",
