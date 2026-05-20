@@ -57,12 +57,16 @@ function createMockCodex(dir: string, opts?: {
    *  response. Simulates the fast-turn race where the app-server emits
    *  completion before the broker has parsed the start response. */
   completeBeforeResponse?: boolean;
+  /** Delay in ms before responding to review/start. Lets tests disconnect
+   *  the client mid-request to exercise the orphan-turn cleanup path. */
+  reviewDelay?: number;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
   const sendApproval = opts?.sendApproval ?? false;
   const turnCompletedDelay = opts?.turnCompletedDelay ?? 10;
   const completeBeforeResponse = opts?.completeBeforeResponse ?? false;
+  const reviewDelay = opts?.reviewDelay ?? 0;
 
   const interruptLog = join(dir, "interrupts.log");
   const scriptPath = join(dir, "codex");
@@ -167,21 +171,23 @@ process.stdin.on("data", (chunk) => {
       case "review/start": {
         const threadId = msg.params?.threadId || "thread-001";
         const reviewThreadId = "review-thread-001";
-        respond({ id: msg.id, result: {
-          turn: { id: "review-turn-001", items: [], status: "inProgress", error: null },
-          reviewThreadId: reviewThreadId,
-        }});
-        ${sendTurnCompleted ? `
         setTimeout(() => {
-          respond({
-            method: "turn/completed",
-            params: {
-              threadId: reviewThreadId,
-              turn: { id: "review-turn-001", items: [], status: "completed", error: null },
-            },
-          });
-        }, ${turnCompletedDelay});
-        ` : ""}
+          respond({ id: msg.id, result: {
+            turn: { id: "review-turn-001", items: [], status: "inProgress", error: null },
+            reviewThreadId: reviewThreadId,
+          }});
+          ${sendTurnCompleted ? `
+          setTimeout(() => {
+            respond({
+              method: "turn/completed",
+              params: {
+                threadId: reviewThreadId,
+                turn: { id: "review-turn-001", items: [], status: "completed", error: null },
+              },
+            });
+          }, ${turnCompletedDelay});
+          ` : ""}
+        }, ${reviewDelay});
         break;
       }
 
@@ -1638,6 +1644,56 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         expect(gotBusy).toBe(true);
 
         await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 10_000);
+
+    test("review client disconnect before review/start response interrupts the review subthread", async () => {
+      // Regression: the orphan path read params.threadId (parent) and sent
+      // turn/interrupt there, while the actual review turn runs on the
+      // response's reviewThreadId. The interrupt missed, so the review kept
+      // running and held the broker's stream slot until natural completion.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, {
+        sendTurnCompleted: false,
+        reviewDelay: 200, // window for the client to disconnect mid-flight
+      });
+      const interruptLog = join(mockDir, "interrupts.log");
+
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 5000 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+
+        // Fire-and-forget so we can close before the response lands.
+        void client1.request("review/start", {
+          threadId: "thread-parent",
+          target: { type: "uncommittedChanges" },
+        }).catch(() => undefined);
+
+        // Disconnect before reviewDelay elapses — the broker is still
+        // awaiting appClient.request, and the orphan-detection branch will
+        // fire once that promise resolves with the review subthread.
+        await new Promise((r) => setTimeout(r, 50));
+        await client1.close();
+
+        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        const interrupts = readFileSync(interruptLog, "utf-8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        // Must target the review subthread, NOT the parent.
+        expect(interrupts).toContainEqual({
+          threadId: "review-thread-001",
+          turnId: "review-turn-001",
+        });
+        expect(interrupts).not.toContainEqual({
+          threadId: "thread-parent",
+          turnId: "review-turn-001",
+        });
       } finally {
         proc.kill();
       }

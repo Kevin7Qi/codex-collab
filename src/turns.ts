@@ -230,6 +230,19 @@ async function executeTurn(
   const abortController = new AbortController();
   const unsubs = registerEventHandlers(client, opts, abortController.signal);
 
+  // For reviews the running turn fires its item events on the review
+  // subthread (set below after the start response returns). Predicate is
+  // captured as a closure so it picks up reviewSubthreadId once it's known.
+  let reviewSubthreadId: string | null = null;
+  const belongsToActiveTurn = (
+    p: { threadId: string; turnId: string },
+    expectedTurnId: string,
+  ): boolean => {
+    if (p.turnId !== expectedTurnId) return false;
+    return p.threadId === threadId
+      || (reviewSubthreadId !== null && p.threadId === reviewSubthreadId);
+  };
+
   // Wire up item/started interception for completion inference — if new work
   // starts after a final_answer, cancel the inference timer to avoid premature
   // completion synthesis. Reasoning items are excluded: the model can begin a
@@ -238,7 +251,7 @@ async function executeTurn(
   unsubs.push(
     client.on("item/started", (params) => {
       const p = params as ItemStartedParams;
-      if (turnId !== null && belongsToTurn(p, threadId, turnId) && inferenceResolver) {
+      if (turnId !== null && belongsToActiveTurn(p, turnId) && inferenceResolver) {
         const item = p.item as { type?: string } | undefined;
         if (item?.type !== "reasoning") clearInferenceTimer();
       }
@@ -251,7 +264,7 @@ async function executeTurn(
     client.on("item/completed", (params) => {
       const p = params as ItemCompletedParams;
       if (turnId !== null) {
-        if (belongsToTurn(p, threadId, turnId)) {
+        if (belongsToActiveTurn(p, turnId)) {
           processItemCompleted(p);
         }
       } else {
@@ -321,6 +334,7 @@ async function executeTurn(
     const { turn } = startResponse;
     if (typeof startResponse.reviewThreadId === "string") {
       interruptThreadId = startResponse.reviewThreadId;
+      reviewSubthreadId = startResponse.reviewThreadId;
       opts.onReviewThreadId?.(startResponse.reviewThreadId);
     }
 
@@ -339,7 +353,7 @@ async function executeTurn(
     for (const buffered of notificationBuffer) {
       if (buffered.method === "item/completed") {
         const p = buffered.params as ItemCompletedParams;
-        if (belongsToTurn(p, threadId, turnId)) {
+        if (belongsToActiveTurn(p, turnId)) {
           processItemCompleted(p);
         }
       }

@@ -578,20 +578,32 @@ async function main() {
       // interrupt fails (or doesn't take effect), the orphan watchdog gives
       // us a second chance to recover before the broker is permanently busy.
       if (socket.destroyed && isStreaming) {
-        const turn = (result as Record<string, unknown>)?.turn as Record<string, unknown> | undefined;
+        const resultObj = result as Record<string, unknown>;
+        const turn = resultObj?.turn as Record<string, unknown> | undefined;
         const turnId = turn?.id as string | undefined;
-        const threadId = (message.params as Record<string, unknown>)?.threadId as string | undefined;
-        if (turnId && threadId) {
+        const parentThreadId = (message.params as Record<string, unknown>)?.threadId as string | undefined;
+        // review/start returns a distinct review subthread that the turn
+        // actually runs on; interrupting the parent is a no-op. For normal
+        // turns there is no subthread, so we fall back to the parent.
+        const reviewThreadId = typeof resultObj?.reviewThreadId === "string"
+          ? (resultObj.reviewThreadId as string)
+          : undefined;
+        const interruptThreadId = reviewThreadId ?? parentThreadId;
+        if (turnId && interruptThreadId) {
           try {
-            await appClient.request("turn/interrupt", { threadId, turnId });
+            await appClient.request("turn/interrupt", { threadId: interruptThreadId, turnId });
           } catch (e) {
             process.stderr.write(
               `[broker-server] Warning: failed to interrupt orphaned turn ${turnId}: ${e instanceof Error ? e.message : String(e)}\n`,
             );
             // Arm the watchdog so a stuck turn cannot leave the broker busy
             // indefinitely. activeStreamTargets normally tracks ownership;
-            // here we use a one-shot map since stream ownership was never claimed.
-            const orphanTargets = new Map([[threadId, turnId]]);
+            // here we use a one-shot map keyed on every thread that might
+            // emit the turn/completed signal — for reviews that's both the
+            // parent and the review subthread.
+            const orphanTargets = new Map<string, string>();
+            if (parentThreadId) orphanTargets.set(parentThreadId, turnId);
+            if (reviewThreadId) orphanTargets.set(reviewThreadId, turnId);
             // Reserve the stream slot so other clients can't interleave
             // with the still-running orphan turn.
             activeStreamSocket = socket;

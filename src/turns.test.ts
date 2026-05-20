@@ -486,6 +486,56 @@ describe("runReview", () => {
     expect(interruptCalls[0].turnId).toBe("review-turn-1");
   });
 
+  test("completion inference fires on a review whose item events are scoped to the review subthread", async () => {
+    // Realistic: item/completed for review-turn items arrives with
+    // threadId=reviewThreadId, not the caller's parent. The inner handler
+    // in executeTurn must still match these — pre-fix it filtered on the
+    // parent threadId only, so processItemCompleted never ran, the
+    // inference timer never armed, and a lost turn/completed would let
+    // the CLI hang until timeoutMs.
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "review/start") {
+        // Emit the review's exitedReviewMode on the REVIEW subthread, then
+        // never send turn/completed. Pre-fix, this leaves the turn hanging
+        // until the timeout. Post-fix, the inference debounce kicks in.
+        setTimeout(() => {
+          emit("item/completed", {
+            item: { type: "exitedReviewMode", id: "review-turn-3", review: "All clear" },
+            threadId: "review-thr-3", // subthread, NOT the parent
+            turnId: "review-turn-3",
+          });
+        }, 20);
+        return {
+          turn: { id: "review-turn-3", items: [], status: "inProgress", error: null },
+          reviewThreadId: "review-thr-3",
+        };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    void emit;
+
+    const dispatcher = new EventDispatcher("test-review-subthread-inference", TEST_LOG_DIR, () => {});
+
+    const t0 = Date.now();
+    const result = await runReview(
+      client,
+      "thr-parent",
+      { type: "uncommittedChanges" },
+      {
+        dispatcher,
+        approvalHandler: autoApproveHandler,
+        timeoutMs: 30_000, // generous: success means inference fires, not timeout
+        killSignalsDir: TEST_KILL_DIR,
+      },
+    );
+    const elapsed = Date.now() - t0;
+
+    // Inference completion should fire ~250ms after the exitedReviewMode item
+    // (the inference debounce delay). Definitely well under the 30s timeout.
+    expect(result.status).toBe("completed");
+    expect(elapsed).toBeLessThan(2000);
+  });
+
   test("returns failed result when review fails", async () => {
     const client = createMockClient({
       startMethod: "review/start",
