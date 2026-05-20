@@ -1649,6 +1649,67 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 10_000);
 
+    test("orphan stream stays reserved after a successful interrupt RPC", async () => {
+      // Regression: the orphan path used to drop the stream reservation
+      // when turn/interrupt succeeded, on the assumption that success meant
+      // the turn was fully cancelled. But turn/interrupt only acknowledges
+      // the request; the app-server may still be unwinding. A second
+      // streaming client could then start a turn on the same app-server
+      // while the previous one was mid-cancel. Reserve before the
+      // interrupt and let the natural turn/completed (or the watchdog)
+      // release.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      // Delay the turn/start response so the broker is awaiting
+      // appClient.request when client1 disconnects — that is the only
+      // condition that triggers the orphan branch on the post-response
+      // path. Don't send turn/completed so the reservation must come from
+      // the orphan code, not from the normal completion flow.
+      const mockDir = createMockCodex(tempDir, {
+        sendTurnCompleted: false,
+        turnDelay: 300,
+      });
+
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 5000 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        void client1.request("turn/start", {
+          threadId: "thread-orphan",
+          input: [{ type: "text", text: "go" }],
+        }).catch(() => undefined);
+
+        // Disconnect during the broker's await on appClient.request, so
+        // the orphan branch fires when the response finally arrives.
+        await new Promise((r) => setTimeout(r, 50));
+        await client1.close();
+        // Wait long enough for the response (turnDelay=300ms) to land,
+        // the orphan path to set up the reservation, and turn/interrupt
+        // to come back as success.
+        await new Promise((r) => setTimeout(r, 500));
+
+        // A second client must NOT be able to start a streaming RPC on
+        // the same app-server while the orphan is still unwinding.
+        const client2 = await TestClient.connectAndInit(sockPath);
+        let gotBusy = false;
+        try {
+          await client2.request("turn/start", {
+            threadId: "thread-orphan-2",
+            input: [{ type: "text", text: "no" }],
+          });
+        } catch (err) {
+          gotBusy = true;
+          // -32001 = BROKER_BUSY
+          expect((err as { code?: number }).code).toBe(-32001);
+        }
+        expect(gotBusy).toBe(true);
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 10_000);
+
     test("review client disconnect before review/start response interrupts the review subthread", async () => {
       // Regression: the orphan path read params.threadId (parent) and sent
       // turn/interrupt there, while the actual review turn runs on the

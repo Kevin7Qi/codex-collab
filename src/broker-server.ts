@@ -574,9 +574,12 @@ async function main() {
 
       // If the requesting client disconnected while we were waiting for the
       // response, the turn has started on the app-server but nobody is
-      // listening. Interrupt it immediately to free the stream slot. If the
-      // interrupt fails (or doesn't take effect), the orphan watchdog gives
-      // us a second chance to recover before the broker is permanently busy.
+      // listening. Reserve the stream slot up front so the next client
+      // can't interleave on the same app-server while this turn is still
+      // unwinding, send turn/interrupt, and let the normal turn/completed
+      // handler (or the watchdog, on a stuck turn) clear the reservation.
+      // A successful interrupt RPC only acknowledges that the request was
+      // received — it does not guarantee the turn is fully torn down.
       if (socket.destroyed && isStreaming) {
         const resultObj = result as Record<string, unknown>;
         const turn = resultObj?.turn as Record<string, unknown> | undefined;
@@ -590,25 +593,24 @@ async function main() {
           : undefined;
         const interruptThreadId = reviewThreadId ?? parentThreadId;
         if (turnId && interruptThreadId) {
+          // Reserve BEFORE the interrupt so the slot stays held even when
+          // turn/interrupt succeeds; the natural turn/completed (or the
+          // watchdog) is what releases the reservation. Keyed on every
+          // thread that might emit completion — for reviews that's both
+          // the parent and the review subthread.
+          const orphanTargets = new Map<string, string>();
+          if (parentThreadId) orphanTargets.set(parentThreadId, turnId);
+          if (reviewThreadId) orphanTargets.set(reviewThreadId, turnId);
+          activeStreamSocket = socket;
+          activeStreamTargets = orphanTargets;
+          armOrphanWatchdog(orphanTargets);
           try {
             await appClient.request("turn/interrupt", { threadId: interruptThreadId, turnId });
           } catch (e) {
             process.stderr.write(
               `[broker-server] Warning: failed to interrupt orphaned turn ${turnId}: ${e instanceof Error ? e.message : String(e)}\n`,
             );
-            // Arm the watchdog so a stuck turn cannot leave the broker busy
-            // indefinitely. activeStreamTargets normally tracks ownership;
-            // here we use a one-shot map keyed on every thread that might
-            // emit the turn/completed signal — for reviews that's both the
-            // parent and the review subthread.
-            const orphanTargets = new Map<string, string>();
-            if (parentThreadId) orphanTargets.set(parentThreadId, turnId);
-            if (reviewThreadId) orphanTargets.set(reviewThreadId, turnId);
-            // Reserve the stream slot so other clients can't interleave
-            // with the still-running orphan turn.
-            activeStreamSocket = socket;
-            activeStreamTargets = orphanTargets;
-            armOrphanWatchdog(orphanTargets);
+            // Reservation already in place — watchdog continues to guard.
           }
         }
         if (activeRequestSocket === socket) {
