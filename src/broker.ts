@@ -267,15 +267,13 @@ export function acquireSpawnLock(stateDir: string): (() => void) | null {
 // ─── Teardown ─────────────────────────────────────────────────────────────
 
 /**
- * Tear down a broker: kill the process (if alive), remove the socket file
- * (if Unix), and clear the broker state file.
+ * Remove broker artifacts (socket file and state file) without touching the
+ * process. Safe to call when the broker is known to be gone — e.g. when the
+ * socket liveness probe returned false — because it does not interpret
+ * `state.pid` (which may by now refer to a recycled, unrelated user
+ * process). Errors are logged, not thrown — cleanup is best-effort.
  */
-export function teardownBroker(stateDir: string, state: BrokerState): void {
-  // Kill process if PID is alive
-  if (state.pid !== null && isProcessAlive(state.pid)) {
-    terminateProcessTree(state.pid);
-  }
-
+export function clearBrokerArtifacts(stateDir: string, state: BrokerState): void {
   // Remove socket file for unix endpoints (skip if endpoint is null — deferred multiplexing)
   if (state.endpoint !== null) {
     try {
@@ -303,6 +301,23 @@ export function teardownBroker(stateDir: string, state: BrokerState): void {
   } catch (e) {
     console.error(`[broker] Warning: could not clear broker state during teardown: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/**
+ * Tear down a broker we still believe is ours: kill the process (if alive),
+ * then remove the socket and state files. Only call this when the broker's
+ * socket has just responded to a liveness probe (so we know `state.pid`
+ * still names our broker) — otherwise the saved PID may have been recycled
+ * by the OS for an unrelated user process and we would SIGTERM/SIGKILL it.
+ * For stale-state cleanup after a dead-socket probe, use
+ * `clearBrokerArtifacts` instead.
+ */
+export function teardownBroker(stateDir: string, state: BrokerState): void {
+  // Kill process if PID is alive
+  if (state.pid !== null && isProcessAlive(state.pid)) {
+    terminateProcessTree(state.pid);
+  }
+  clearBrokerArtifacts(stateDir, state);
 }
 
 // ─── Session ID helper ────────────────────────────────────────────────────
@@ -501,8 +516,9 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         teardownBroker(stateDir, existingState);
       }
     } else {
-      // Broker is not alive — clean up stale state
-      teardownBroker(stateDir, existingState);
+      // Broker is not alive — clean up stale state without killing.
+      // The saved PID may already refer to a recycled, unrelated process.
+      clearBrokerArtifacts(stateDir, existingState);
     }
   }
 

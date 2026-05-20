@@ -11,6 +11,7 @@ import {
   getCurrentSessionId,
   acquireSpawnLock,
   teardownBroker,
+  clearBrokerArtifacts,
 } from "./broker";
 import { connectToBroker } from "./broker-client";
 import net from "node:net";
@@ -281,6 +282,45 @@ describe("teardownBroker", () => {
       startedAt: "2026-01-01T00:00:00Z",
     };
     expect(() => teardownBroker(tempDir, state)).not.toThrow();
+  });
+});
+
+// ─── clearBrokerArtifacts ─────────────────────────────────────────────────
+
+describe("clearBrokerArtifacts", () => {
+  // Regression guard: dead-socket cleanup must not interpret `state.pid` as
+  // "kill this". When a broker exits cleanly leaving stale broker.json behind
+  // and the OS recycles its PID for an unrelated user process, the previous
+  // teardownBroker call on the dead-socket path would SIGTERM that process.
+
+  test("removes socket and state files without killing anything", () => {
+    const sockPath = join(tempDir, "broker.sock");
+    writeFileSync(sockPath, "");
+    // Use a live PID we explicitly do NOT want killed: this test process.
+    // If clearBrokerArtifacts ever calls terminateProcessTree, this test
+    // would terminate the runner instead of failing — the kill is the bug.
+    const state: BrokerState = {
+      endpoint: `unix:${sockPath}`,
+      pid: process.pid,
+      sessionDir: tempDir,
+      startedAt: "2026-01-01T00:00:00Z",
+    };
+    saveBrokerState(tempDir, state);
+    clearBrokerArtifacts(tempDir, state);
+    expect(existsSync(sockPath)).toBe(false);
+    expect(loadBrokerState(tempDir)).toBeNull();
+    // If we got here, the helper did not kill the test runner — that's the
+    // assertion. (Bun would have terminated us otherwise.)
+  });
+
+  test("survives a missing socket file (idempotent cleanup)", () => {
+    const state: BrokerState = {
+      endpoint: `unix:${tempDir}/gone.sock`,
+      pid: 0, // PID 0 is never a real user process; safe even on accidental kill paths
+      sessionDir: tempDir,
+      startedAt: "2026-01-01T00:00:00Z",
+    };
+    expect(() => clearBrokerArtifacts(tempDir, state)).not.toThrow();
   });
 });
 
