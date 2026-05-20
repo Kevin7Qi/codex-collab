@@ -291,6 +291,13 @@ async function main() {
         activeStreamTargets = null;
         if (target && activeRequestSocket === target) {
           activeRequestSocket = null;
+          // Also clear the streaming flag — otherwise the busy state in
+          // `initialize` (computed as `activeStreamSocket !== null ||
+          // activeRequestIsStreaming`) stays true forever for fast turns
+          // that complete before the turn/start response is processed.
+          // Subsequent clients would see busy=true and fall back to direct
+          // connections, defeating broker reuse until the broker restarts.
+          activeRequestIsStreaming = false;
         }
         // Also cancel any orphan-turn watchdog; the turn ended naturally.
         if (orphanWatchdog) {

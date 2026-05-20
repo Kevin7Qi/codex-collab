@@ -53,11 +53,16 @@ function createMockCodex(dir: string, opts?: {
   sendApproval?: boolean;
   /** Delay in ms before sending turn/completed (after response) */
   turnCompletedDelay?: number;
+  /** If true, write the turn/completed notification BEFORE the turn/start
+   *  response. Simulates the fast-turn race where the app-server emits
+   *  completion before the broker has parsed the start response. */
+  completeBeforeResponse?: boolean;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
   const sendApproval = opts?.sendApproval ?? false;
   const turnCompletedDelay = opts?.turnCompletedDelay ?? 10;
+  const completeBeforeResponse = opts?.completeBeforeResponse ?? false;
 
   const interruptLog = join(dir, "interrupts.log");
   const scriptPath = join(dir, "codex");
@@ -109,6 +114,18 @@ process.stdin.on("data", (chunk) => {
 
       case "turn/start": {
         const threadId = msg.params?.threadId || "thread-001";
+        ${completeBeforeResponse ? `
+        // Fast-turn race: write turn/completed BEFORE the turn/start
+        // response so they arrive at the broker in a single read chunk
+        // with completion first.
+        respond({
+          method: "turn/completed",
+          params: {
+            threadId: threadId,
+            turn: { id: "turn-001", items: [], status: "completed", error: null },
+          },
+        });
+        ` : ""}
         setTimeout(() => {
           respond({ id: msg.id, result: {
             turn: { id: "turn-001", items: [], status: "inProgress", error: null },
@@ -613,6 +630,48 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         expect(result.busy).toBe(true);
 
         await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("reports busy=false after a fast turn that completes before turn/start response", async () => {
+      // Regression: when turn/completed arrives before the broker has finished
+      // processing the turn/start response, the fast-completion branch cleared
+      // activeRequestSocket but left activeRequestIsStreaming = true. Since
+      // initialize computes busy as (activeStreamSocket !== null ||
+      // activeRequestIsStreaming), the broker would report busy=true forever
+      // and every subsequent streaming invocation would fall back to a direct
+      // app-server until the broker restarted.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      // Force the race: the mock writes turn/completed *before* turn/start's
+      // response, and `turnDelay > 0` makes the broker still be awaiting
+      // appClient.request's resolution when it sees turn/completed.
+      const mockDir = createMockCodex(tempDir, { completeBeforeResponse: true, turnDelay: 20 });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        await client1.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "hello" }],
+        });
+        // Give the broker time to drain any straggler notifications.
+        await new Promise((r) => setTimeout(r, 100));
+        await client1.close();
+
+        // A fresh client should see busy=false. Pre-fix, this was true.
+        const client2 = await TestClient.connect(sockPath);
+        const result = await client2.request("initialize", {
+          clientInfo: { name: "test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: false },
+        }) as { userAgent: string; busy: boolean };
+
+        expect(result.busy).toBe(false);
         await client2.close();
       } finally {
         proc.kill();
