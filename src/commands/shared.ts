@@ -445,6 +445,16 @@ export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string,
   return new InteractiveApprovalHandler(approvalsDir, progress, workspaceDir);
 }
 
+/** Best-effort close that swallows + logs errors. Cleanup runs on every
+ *  exit path; a failed close is not actionable for the caller. */
+async function safeCloseClient(client: AppServerClient): Promise<void> {
+  try {
+    await client.close();
+  } catch (e) {
+    console.error(`[codex] Warning: cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 /** Connect to app server, run fn, then close the client (even on error).
  *
  *  For streaming callers, transparently retries once via `connectDirect`
@@ -459,36 +469,24 @@ export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>,
   const workingDir = cwd ?? process.cwd();
   let client = await ensureConnection(workingDir, streaming);
   activeClient = client;
-  let triedDirectFallback = false;
   try {
-    while (true) {
-      try {
-        return await fn(client);
-      } catch (e) {
-        if (streaming && !triedDirectFallback && isBrokerBusyError(e)) {
-          // Lost the busy race after handshake — drop the broker client and
-          // retry via direct connection. The first attempt's side effects
-          // (e.g. a failed RunRecord recorded by the command's own catch
-          // handler) remain, like a user-observable "started, then retried"
-          // sequence.
-          triedDirectFallback = true;
-          console.error("[broker] Broker became busy after handshake — retrying with direct connection.");
-          try { await client.close(); } catch (closeErr) {
-            console.error(`[codex] Warning: cleanup failed: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`);
-          }
-          client = await connectDirect({ cwd: workingDir });
-          activeClient = client;
-          continue;
-        }
-        throw e;
-      }
+    try {
+      return await fn(client);
+    } catch (e) {
+      if (!streaming || !isBrokerBusyError(e)) throw e;
+      // Lost the busy race after handshake — drop the broker client and
+      // retry via direct connection. The first attempt's side effects
+      // (e.g. a failed RunRecord recorded by the command's own catch
+      // handler) remain, like a user-observable "started, then retried"
+      // sequence.
+      console.error("[broker] Broker became busy after handshake — retrying with direct connection.");
+      await safeCloseClient(client);
+      client = await connectDirect({ cwd: workingDir });
+      activeClient = client;
+      return await fn(client);
     }
   } finally {
-    try {
-      await client.close();
-    } catch (e) {
-      console.error(`[codex] Warning: cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    await safeCloseClient(client);
     activeClient = undefined;
   }
 }
@@ -896,10 +894,7 @@ export function readPidFile(pidsDir: string, shortId: string): number | null {
  *  PID file as alive (pre-PID-tracking threads, or write-failed PID files);
  *  treats an unreadable or invalid PID file as dead (already logged by
  *  `readPidFile`). When a valid PID is present, returns false on ESRCH and
- *  true on EPERM (process exists but we can't signal it).
- *
- *  Distinct from the lower-level `isProcessAlive(pid)` in src/process.ts,
- *  which only does the signal-0 check and takes a PID directly. */
+ *  true on EPERM (process exists but we can't signal it). */
 export function isThreadProcessAlive(pidsDir: string, shortId: string): boolean {
   const pid = readPidFile(pidsDir, shortId);
   if (pid === null) {

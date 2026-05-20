@@ -36,6 +36,29 @@ export function belongsToTurn(
 }
 
 /**
+ * Best-effort `turn/interrupt`. Swallows "not found" / "already" errors —
+ * those indicate the turn already finished (or another caller interrupted
+ * it first), which is the desired post-state. Logs every other failure.
+ */
+export async function tryInterruptTurn(
+  client: AppServerClient,
+  threadId: string,
+  turnId: string,
+  context?: string,
+): Promise<void> {
+  try {
+    await client.request("turn/interrupt", { threadId, turnId });
+  } catch (e) {
+    if (e instanceof Error
+        && !e.message.includes("not found")
+        && !e.message.includes("already")) {
+      const prefix = context ? `could not interrupt turn ${context}` : "could not interrupt turn";
+      console.error(`[codex] Warning: ${prefix}: ${e.message}`);
+    }
+  }
+}
+
+/**
  * Extract a single reasoning string from a completed reasoning item.
  * Joins summary and content arrays with newlines, deduplicates identical sections.
  */
@@ -237,11 +260,9 @@ async function executeTurn(
   const belongsToActiveTurn = (
     p: { threadId: string; turnId: string },
     expectedTurnId: string,
-  ): boolean => {
-    if (p.turnId !== expectedTurnId) return false;
-    return p.threadId === threadId
-      || (reviewSubthreadId !== null && p.threadId === reviewSubthreadId);
-  };
+  ): boolean =>
+    belongsToTurn(p, threadId, expectedTurnId)
+    || (reviewSubthreadId !== null && belongsToTurn(p, reviewSubthreadId, expectedTurnId));
 
   // Wire up item/started interception for completion inference — if new work
   // starts after a final_answer, cancel the inference timer to avoid premature
@@ -319,13 +340,6 @@ async function executeTurn(
     }
   });
 
-  // For reviews, the running turn lives on a *review* subthread distinct
-  // from params.threadId. We must route turn/interrupt to that subthread on
-  // timeout/error cleanup below; otherwise the interrupt targets the parent
-  // and the review keeps running, holding the broker busy until the orphan
-  // watchdog fires.
-  let interruptThreadId = threadId;
-
   try {
     const startResponse = await Promise.race([
       client.request<TurnStartResponse & { reviewThreadId?: string }>(method, params),
@@ -333,7 +347,10 @@ async function executeTurn(
     ]);
     const { turn } = startResponse;
     if (typeof startResponse.reviewThreadId === "string") {
-      interruptThreadId = startResponse.reviewThreadId;
+      // For reviews, the running turn lives on a *review* subthread distinct
+      // from params.threadId. The interrupt cleanup paths below must target
+      // that subthread; otherwise the review keeps running and the broker
+      // stream stays busy until the orphan watchdog fires.
       reviewSubthreadId = startResponse.reviewThreadId;
       opts.onReviewThreadId?.(startResponse.reviewThreadId);
     }
@@ -398,25 +415,17 @@ async function executeTurn(
       durationMs: Date.now() - startTime,
     };
   } catch (e) {
+    // Both branches need to stop the server-side turn. Without this, the
+    // client closes but the turn keeps running on the app-server: the broker
+    // stream stays busy until the orphan watchdog (~30 min) fires, blocking
+    // every subsequent invocation. The separate `kill` command may have
+    // already interrupted — "not found" / "already" errors are expected.
+    const interruptThreadId = reviewSubthreadId ?? threadId;
     if (e instanceof KillSignalError) {
       opts.dispatcher.flushOutput();
       opts.dispatcher.flush();
-      // Tell the server to stop too. Without this, broker-backed runs
-      // close the client socket but leave the turn running on the
-      // shared app-server, holding the broker stream busy until the
-      // orphan watchdog fires. The separate `kill` command may have
-      // already issued an interrupt — `not found` / `already` errors
-      // from this best-effort retry are expected.
       if (turnId !== null) {
-        try {
-          await client.request("turn/interrupt", { threadId: interruptThreadId, turnId });
-        } catch (interruptErr) {
-          if (interruptErr instanceof Error
-              && !interruptErr.message.includes("not found")
-              && !interruptErr.message.includes("already")) {
-            console.error(`[codex] Warning: could not interrupt turn on kill: ${interruptErr.message}`);
-          }
-        }
+        await tryInterruptTurn(client, interruptThreadId, turnId, "on kill");
       }
       return {
         status: "interrupted",
@@ -428,21 +437,8 @@ async function executeTurn(
         durationMs: Date.now() - startTime,
       };
     }
-    // If the turn started but didn't complete (timeout, connection error,
-    // unexpected exception), tell the server to stop. Without this, a
-    // client-side timeout leaves the turn running on the app-server until
-    // the broker's 30-min orphan watchdog fires — keeping the broker
-    // marked busy and blocking every subsequent invocation in between.
     if (turnId !== null) {
-      try {
-        await client.request("turn/interrupt", { threadId: interruptThreadId, turnId });
-      } catch (interruptErr) {
-        if (interruptErr instanceof Error
-            && !interruptErr.message.includes("not found")
-            && !interruptErr.message.includes("already")) {
-          console.error(`[codex] Warning: could not interrupt turn: ${interruptErr.message}`);
-        }
-      }
+      await tryInterruptTurn(client, interruptThreadId, turnId);
     }
     throw e;
   } finally {

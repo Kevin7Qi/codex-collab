@@ -5,6 +5,7 @@
 import { config } from "./config";
 import type { AppServerClient } from "./client";
 import { updateThreadStatus, updateRun } from "./threads";
+import { tryInterruptTurn } from "./turns";
 import {
   activeClient,
   activeThreadId,
@@ -54,21 +55,13 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
     removePidFile(activeWsPaths.pidsDir, activeShortId);
   }
 
-  // Try to interrupt the active turn before disconnecting (prevents
-  // orphaned turns when using the broker — closing the socket alone
-  // only disconnects from the broker, the turn keeps running).
-  // For reviews the actual turn runs on a review subthread distinct from
-  // activeThreadId; route the interrupt there when we know it.
+  // Interrupt the active turn before disconnecting. Closing the socket
+  // alone only detaches from the broker; the turn would keep running and
+  // hold the broker stream busy. For reviews the turn lives on a review
+  // subthread distinct from activeThreadId — route there when known.
   const interruptThreadId = activeReviewThreadId ?? activeThreadId;
   if (activeClient && interruptThreadId && activeTurnId) {
-    try {
-      await activeClient.request("turn/interrupt", { threadId: interruptThreadId, turnId: activeTurnId });
-    } catch (e) {
-      // Best effort — may fail if turn already completed
-      if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("already")) {
-        console.error(`[codex] Warning: could not interrupt turn: ${e.message}`);
-      }
-    }
+    await tryInterruptTurn(activeClient, interruptThreadId, activeTurnId);
   }
 
   try {

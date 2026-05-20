@@ -11,7 +11,7 @@ import {
 } from "fs";
 import { randomBytes, createHash } from "crypto";
 import { basename, dirname, join, resolve, sep } from "path";
-import { config, validateId, resolveWorkspaceDir, STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
+import { config, validateId, resolveWorkspaceDir, isPathInside, STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
 import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus, ThreadMapping, ThreadMappingEntry } from "./types";
 
 // ─── Advisory file lock ────────────────────────────────────────────────────
@@ -380,7 +380,7 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   const resolveLogFile = (logFile: string | null): string | null => {
     if (!logFile) return null;
     const abs = resolve(stateDir, logFile);
-    if (abs === logsRoot || abs.startsWith(logsRoot + sep)) return abs;
+    if (isPathInside(abs, logsRoot)) return abs;
     console.error(`[codex] Warning: refusing to prune log outside workspace state: ${logFile}`);
     return null;
   };
@@ -406,45 +406,40 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
     }
   }
 
-  // Stable sort that puts running runs after everything else, so they survive
-  // pruning even when their startedAt is older than recently-completed runs.
-  // The terminal update for an active long-running invocation would otherwise
-  // find its JSON gone and lose the run ledger / log.
-  entries.sort((a, b) => {
-    if (a.running !== b.running) return a.running ? 1 : -1;
-    return new Date(a.activityAt).getTime() - new Date(b.activityAt).getTime();
-  });
+  // Pick eviction candidates from non-running runs only — a running run's
+  // JSON is still being updated by recordTerminalRunState; deleting it
+  // would lose the run ledger / log for an in-flight invocation. The
+  // workspace may briefly exceed the cap if every excess entry is
+  // running; the next prune (after one completes) brings it back down.
+  const evictable = entries.filter(e => !e.running).sort((a, b) =>
+    new Date(a.activityAt).getTime() - new Date(b.activityAt).getTime(),
+  );
+  const toDelete = Math.max(0, entries.length - limit);
+  if (toDelete === 0 || evictable.length === 0) return;
+  const victims = evictable.slice(0, toDelete);
 
-  // Never delete a running run, even if doing so means the workspace stays
-  // momentarily above the cap. The next prune (after the run completes) will
-  // bring it back down.
-  let toDelete = entries.length - limit;
-  while (toDelete > 0 && entries[toDelete - 1].running) toDelete--;
-  if (toDelete <= 0) return;
-  const survivors = entries.slice(toDelete);
   // Logs referenced by surviving runs must NOT be deleted — multiple runs
-  // share a thread's log file.
+  // of the same thread share a log file.
+  const victimFiles = new Set(victims.map(v => v.file));
   const survivingLogs = new Set<string>();
-  for (const s of survivors) {
-    if (s.logPath) survivingLogs.add(s.logPath);
+  for (const e of entries) {
+    if (!victimFiles.has(e.file) && e.logPath) survivingLogs.add(e.logPath);
   }
 
-  for (let i = 0; i < toDelete; i++) {
-    const entry = entries[i];
+  for (const victim of victims) {
     try {
-      rmSync(join(dir, entry.file));
+      rmSync(join(dir, victim.file));
     } catch (e) {
-      console.error(`[codex] Warning: failed to delete run file ${entry.file} during prune: ${e instanceof Error ? e.message : e}`);
+      console.error(`[codex] Warning: failed to delete run file ${victim.file} during prune: ${e instanceof Error ? e.message : e}`);
       continue;
     }
-    // If no surviving run references this log file, remove it too. Multiple
-    // runs of the same thread share a log; only the last prune cleans it up.
-    // `force: true` swallows ENOENT, so no existence-check race.
-    if (entry.logPath && !survivingLogs.has(entry.logPath)) {
+    // Only the last prune that references a shared log actually removes it.
+    // `force: true` swallows ENOENT so we don't race against a parallel prune.
+    if (victim.logPath && !survivingLogs.has(victim.logPath)) {
       try {
-        rmSync(entry.logPath, { force: true });
+        rmSync(victim.logPath, { force: true });
       } catch (e) {
-        console.error(`[codex] Warning: failed to delete orphan log ${entry.logFile}: ${e instanceof Error ? e.message : e}`);
+        console.error(`[codex] Warning: failed to delete orphan log ${victim.logFile}: ${e instanceof Error ? e.message : e}`);
       }
     }
   }
@@ -518,6 +513,27 @@ function readMigrationMarker(stateDir: string): { schemaVersion: number } | null
 }
 
 /**
+ * Read the marker and decide what migrateGlobalState should do next.
+ * Returns true if migration is already at the current schema (caller should
+ * skip), false if migration should proceed. Throws on a marker whose
+ * schemaVersion is newer than this binary — refusing to downgrade prevents
+ * an older binary from rewriting newer-format state.
+ */
+function markerSaysSkip(stateDir: string): boolean {
+  const marker = readMigrationMarker(stateDir);
+  if (!marker) return false;
+  if (marker.schemaVersion === STATE_SCHEMA_VERSION) return true;
+  if (marker.schemaVersion > STATE_SCHEMA_VERSION) {
+    throw new Error(
+      `[codex] Refusing to run migration: workspace ${stateDir} was written by a newer schema version (${marker.schemaVersion} > ${STATE_SCHEMA_VERSION}). ` +
+      `This binary would downgrade the state. Upgrade codex-collab or move the workspace state aside.`,
+    );
+  }
+  // schemaVersion < current → future migrations slot here; for now, re-run.
+  return false;
+}
+
+/**
  * Atomically stamp the per-workspace migration marker.
  *
  * Caller MUST hold withThreadLock(markerPath, …). The entire
@@ -542,13 +558,10 @@ function writeMigrationMarker(stateDir: string): void {
  * Migrate thread entries and logs from the old global layout to per-workspace layout.
  *
  * Gated by a per-workspace marker at {stateDir}/migration-state.json so the
- * legacy global→workspace merge runs once per workspace and subsequent
- * commands are silent no-ops. Without the gate, every command re-merged the
- * full legacy file and (in the matchingEntries loop below) re-created
- * synthetic run records for migrated threads lacking one; combined with
- * pruneRuns capping the workspace at maxRunsPerWorkspace and evicting
- * oldest-first, the ancient-dated synthetic runs were perpetually recreated
- * and pruned, logging "created N run record(s)" on every command.
+ * merge runs once per workspace; subsequent commands return at the marker
+ * gate. The whole merge body holds withThreadLock(markerPath) to serialize
+ * concurrent first-touch invocations against each other's `<file>.tmp`
+ * writes.
  *
  * @param cwd - The current working directory to migrate state for
  * @param globalDataDir - Override for the global data directory (for testing). Defaults to config.dataDir.
@@ -559,42 +572,16 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   const stateDir = join(dataDir, "workspaces", workspaceDirName(cwd));
   const markerPath = join(stateDir, MIGRATION_STATE_FILENAME);
 
-  // 0. Fast-path marker check OUTSIDE the migration lock. This is the
-  // steady-state case (already migrated) and we don't want every command
-  // to acquire/release a lock. The race window is narrow and resolved by
-  // the re-check inside the lock below.
-  const earlyMarker = readMigrationMarker(stateDir);
-  if (earlyMarker) {
-    if (earlyMarker.schemaVersion === STATE_SCHEMA_VERSION) return;
-    if (earlyMarker.schemaVersion > STATE_SCHEMA_VERSION) {
-      throw new Error(
-        `[codex] Refusing to run migration: workspace ${stateDir} was written by a newer schema version (${earlyMarker.schemaVersion} > ${STATE_SCHEMA_VERSION}). ` +
-        `This binary would downgrade the state. Upgrade codex-collab or move the workspace state aside.`,
-      );
-    }
-    // earlyMarker.schemaVersion < current → fall through (future migrations slot here).
-  }
+  // Steady-state fast path: read the marker without taking the lock. The
+  // race window against a concurrent first-touch is resolved by re-checking
+  // the marker after acquiring the lock below.
+  if (markerSaysSkip(stateDir)) return;
 
-  // Ensure stateDir exists so we can place the lock file.
   if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 
-  // Serialize the entire migration so two concurrent first-touch invocations
-  // cannot race on saveThreadIndex / createRun temp file paths (each writes
-  // a fixed "<file>.tmp" then renames; two simultaneous writers would
-  // ENOENT-crash one of them) or double-stamp the marker.
   withThreadLock(markerPath, () => {
-    // Re-check the marker under the lock: another process may have just
-    // finished migration while we were waiting.
-    const marker = readMigrationMarker(stateDir);
-    if (marker) {
-      if (marker.schemaVersion === STATE_SCHEMA_VERSION) return;
-      if (marker.schemaVersion > STATE_SCHEMA_VERSION) {
-        throw new Error(
-          `[codex] Refusing to run migration: workspace ${stateDir} was written by a newer schema version (${marker.schemaVersion} > ${STATE_SCHEMA_VERSION}). ` +
-          `This binary would downgrade the state. Upgrade codex-collab or move the workspace state aside.`,
-        );
-      }
-    }
+    // Re-check under the lock — another process may have just finished.
+    if (markerSaysSkip(stateDir)) return;
 
     runMigration(cwd, dataDir, globalThreadsFile, stateDir);
   });
@@ -650,7 +637,7 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
   const wsRoot = resolveWorkspaceDir(cwd);
   const matchingEntries: [string, ThreadMappingEntry][] = [];
   for (const [shortId, entry] of Object.entries(globalMapping)) {
-    if (entry.cwd && (entry.cwd === wsRoot || entry.cwd.startsWith(wsRoot + sep))) {
+    if (entry.cwd && isPathInside(entry.cwd, wsRoot)) {
       matchingEntries.push([shortId, entry]);
     }
   }
@@ -798,11 +785,7 @@ export function removeLegacyGlobalThread(
 
     let changed = false;
     for (const [shortId, entry] of Object.entries(globalMapping)) {
-      if (
-        entry.threadId === threadId &&
-        entry.cwd &&
-        (entry.cwd === wsRoot || entry.cwd.startsWith(wsRoot + sep))
-      ) {
+      if (entry.threadId === threadId && entry.cwd && isPathInside(entry.cwd, wsRoot)) {
         delete globalMapping[shortId];
         changed = true;
       }

@@ -1,7 +1,7 @@
 // src/config.ts — Configuration for codex-collab
 
 import { homedir } from "os";
-import { join, basename, resolve } from "path";
+import { join, basename, resolve, sep } from "path";
 import { createHash } from "crypto";
 import { realpathSync, existsSync, readFileSync, readdirSync } from "fs";
 import { spawnSync } from "child_process";
@@ -33,6 +33,15 @@ const DEFAULT_DISPLAY_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 // more migrated threads than maxRunsPerWorkspace).
 export const STATE_SCHEMA_VERSION = 1;
 export const MIGRATION_STATE_FILENAME = "migration-state.json";
+
+/**
+ * True iff `candidate` is the same path as `root` or lives inside `root`.
+ * Caller should pass absolute paths; comparison is string-based using the
+ * platform separator (so "/a/b" is NOT inside "/a/bb").
+ */
+export function isPathInside(candidate: string, root: string): boolean {
+  return candidate === root || candidate.startsWith(root + sep);
+}
 
 // ─── Config object ──────────────────────────────────────────────────────────
 

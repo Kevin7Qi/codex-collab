@@ -23,8 +23,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { join, resolve, sep } from "path";
-import { config } from "../config";
+import { join, resolve } from "path";
+import { config, isPathInside } from "../config";
 import {
   die,
   parseOptions,
@@ -214,11 +214,9 @@ export function resolveReadableLogPath(
   const latest = getLatestRun(stateDir, shortId);
   if (latest && latest.logFile) {
     const fallback = resolve(stateDir, latest.logFile);
-    const wsRoot = resolve(logsDir);
-    const legacyRoot = resolve(globalLogsDir);
-    const withinWs = fallback === wsRoot || fallback.startsWith(wsRoot + sep);
-    const withinLegacy = fallback === legacyRoot || fallback.startsWith(legacyRoot + sep);
-    if ((withinWs || withinLegacy) && existsSync(fallback)) return fallback;
+    const confined = isPathInside(fallback, resolve(logsDir))
+      || isPathInside(fallback, resolve(globalLogsDir));
+    if (confined && existsSync(fallback)) return fallback;
   }
   return wsLog; // let the caller's existing not-found handling fire
 }
