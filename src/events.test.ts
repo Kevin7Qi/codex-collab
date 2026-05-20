@@ -89,7 +89,7 @@ describe("EventDispatcher", () => {
   test("review output survives a terminal final_answer sign-off", () => {
     // Real reviews end with both the structured review (an exitedReviewMode
     // item carrying the full body) AND a short final_answer agentMessage
-    // ("Bottom line: …"). Pre-fix, getFinalAnswerOutput() preferred the short
+    // ("Bottom line: …"). Pre-fix, getTurnOutput() preferred the short
     // final_answer over the full review — the entire review body was dropped
     // from TurnResult.output (and thus from the run-ledger output field and
     // the CLI's stdout under --content-only). The full review must win.
@@ -108,7 +108,7 @@ describe("EventDispatcher", () => {
       turnId: "turn1",
     });
 
-    const output = dispatcher.getFinalAnswerOutput();
+    const output = dispatcher.getTurnOutput();
     expect(output).toContain("Finding 20");
     expect(output.length).toBeGreaterThanOrEqual(fullReview.length);
   });

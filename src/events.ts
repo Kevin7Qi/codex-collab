@@ -149,7 +149,7 @@ export class EventDispatcher {
    *  2. `finalAnswerOutput` — agentMessage items with phase `"final_answer"`;
    *     for normal run turns this excludes intermediate planning/status noise.
    *  3. `accumulatedOutput` — fall back when neither of the above was seen. */
-  getFinalAnswerOutput(): string {
+  getTurnOutput(): string {
     return this.reviewOutput || this.finalAnswerOutput || this.accumulatedOutput;
   }
 

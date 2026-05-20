@@ -737,6 +737,12 @@ describe("migrateGlobalState", () => {
     live.aaa11111.lastStatus = "running";
     saveThreadIndex(wsStateDir, live);
 
+    // Remove the migration marker to force the merge code path to re-execute.
+    // Without this, the second migrateGlobalState call short-circuits at the
+    // marker gate and never reaches the lastStatus assignment under test —
+    // making the assertion below pass for the wrong reason.
+    rmSync(join(wsStateDir, MIGRATION_STATE_FILENAME));
+
     // The next command re-triggers migrateGlobalState (it runs on every
     // command via getWorkspacePaths). It must NOT reinterpret already-migrated
     // live workspace state through the legacy-status mapper.
@@ -1001,10 +1007,21 @@ describe("migrateGlobalState", () => {
     rmSync(join(wsStateDir, "runs", initialRuns[0]));
 
     // Second pass with the marker present must NOT recreate the synthetic run
-    // (this is the root cause #2 fix: the churn loop is broken).
-    migrateGlobalState(cwdDir, globalDir);
+    // (this is the root cause #2 fix: the churn loop is broken). It must also
+    // be SILENT — pre-fix, the migration banner ("[codex] Migrated N thread(s)
+    // …, created N run record(s)") fired on every command and is the visible
+    // symptom users reported.
+    const originalError = console.error;
+    const logs: string[] = [];
+    console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    try {
+      migrateGlobalState(cwdDir, globalDir);
+    } finally {
+      console.error = originalError;
+    }
 
     expect(readdirSync(join(wsStateDir, "runs")).filter(f => f.endsWith(".json"))).toEqual([]);
+    expect(logs.filter(l => l.startsWith("[codex]"))).toEqual([]);
   });
 
   test("refuses to run when the marker schemaVersion is newer (downgrade guard)", () => {

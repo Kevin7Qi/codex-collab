@@ -23,14 +23,15 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, sep } from "path";
+import { config } from "../config";
 import {
   die,
   parseOptions,
   validateIdOrDie,
   progress,
   formatAge,
-  isProcessAlive,
+  isThreadProcessAlive,
   removePidFile,
   withClient,
   tryArchive,
@@ -136,7 +137,7 @@ export async function handleThreads(args: string[]): Promise<void> {
 
   // Detect stale "running" status: if the owning process is dead, mark as interrupted.
   for (const e of entries) {
-    if (e.lastStatus === "running" && !isProcessAlive(ws.pidsDir, e.shortId)) {
+    if (e.lastStatus === "running" && !isThreadProcessAlive(ws.pidsDir, e.shortId)) {
       updateThreadStatus(ws.threadsFile, e.threadId, "interrupted");
       e.lastStatus = "interrupted";
       removePidFile(ws.pidsDir, e.shortId);
@@ -192,16 +193,32 @@ export async function handleThreads(args: string[]): Promise<void> {
  * file is created. With the migration marker stamped, migration won't retry
  * the copy — so without this fallback, `output` and `progress` would return
  * an empty/missing-file diagnostic even though the log content still exists
- * at the legacy path. (Per-pruneRuns convention, run record `logFile` may be
- * relative; `resolve(stateDir, …)` handles both absolute and relative cases.)
+ * at the legacy path. (Run records created by normal turns store `logFile`
+ * as a workspace-relative `logs/<shortId>.log` — see commands/shared.ts's
+ * createRun call; legacy/migration synthetic records may instead carry an
+ * absolute global path. `resolve(stateDir, …)` handles both cases.)
+ *
+ * The fallback is confined to the workspace `logsDir` or the legacy
+ * `globalLogsDir` (defaults to `~/.codex-collab/logs`) so a corrupted or
+ * adversarial run record cannot point us at arbitrary filesystem paths
+ * (mirrors the confinement in pruneRuns' resolveLogFile).
  */
-export function resolveReadableLogPath(stateDir: string, logsDir: string, shortId: string): string {
+export function resolveReadableLogPath(
+  stateDir: string,
+  logsDir: string,
+  shortId: string,
+  globalLogsDir: string = config.logsDir,
+): string {
   const wsLog = join(logsDir, `${shortId}.log`);
   if (existsSync(wsLog)) return wsLog;
   const latest = getLatestRun(stateDir, shortId);
   if (latest && latest.logFile) {
     const fallback = resolve(stateDir, latest.logFile);
-    if (existsSync(fallback)) return fallback;
+    const wsRoot = resolve(logsDir);
+    const legacyRoot = resolve(globalLogsDir);
+    const withinWs = fallback === wsRoot || fallback.startsWith(wsRoot + sep);
+    const withinLegacy = fallback === legacyRoot || fallback.startsWith(legacyRoot + sep);
+    if ((withinWs || withinLegacy) && existsSync(fallback)) return fallback;
   }
   return wsLog; // let the caller's existing not-found handling fire
 }

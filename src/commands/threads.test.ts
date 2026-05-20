@@ -38,17 +38,22 @@ describe("applyDiscoverLimit", () => {
 describe("resolveReadableLogPath", () => {
   let stateDir: string;
   let logsDir: string;
+  let legacyLogsDir: string;
   let legacyLog: string;
 
   beforeEach(() => {
-    stateDir = join(tmpdir(), `codex-resolvable-log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    stateDir = join(tmpdir(), `codex-resolvable-log-${suffix}`);
     logsDir = join(stateDir, "logs");
-    legacyLog = join(stateDir, "legacy.log"); // stand-in for an out-of-workspace path
+    legacyLogsDir = join(tmpdir(), `codex-resolvable-legacy-${suffix}`);
+    legacyLog = join(legacyLogsDir, "abcd1234.log");
     mkdirSync(logsDir, { recursive: true });
+    mkdirSync(legacyLogsDir, { recursive: true });
   });
 
   afterEach(() => {
     if (existsSync(stateDir)) rmSync(stateDir, { recursive: true });
+    if (existsSync(legacyLogsDir)) rmSync(legacyLogsDir, { recursive: true });
   });
 
   function record(shortId: string, logFile: string): RunRecord {
@@ -66,7 +71,7 @@ describe("resolveReadableLogPath", () => {
     writeFileSync(ws, "ws content");
     writeFileSync(legacyLog, "legacy content");
     createRun(stateDir, record("abcd1234", legacyLog));
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234")).toBe(ws);
+    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(ws);
   });
 
   test("falls back to the run record's logFile when the workspace log is absent", () => {
@@ -74,17 +79,34 @@ describe("resolveReadableLogPath", () => {
     // the run record points at the legacy global location, which still exists.
     writeFileSync(legacyLog, "legacy content");
     createRun(stateDir, record("abcd1234", legacyLog));
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234")).toBe(legacyLog);
+    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(legacyLog);
   });
 
   test("returns the workspace path (for downstream not-found handling) when neither file exists", () => {
     createRun(stateDir, record("abcd1234", legacyLog)); // logFile points nowhere
     const expected = join(logsDir, "abcd1234.log");
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234")).toBe(expected);
+    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(expected);
   });
 
   test("returns the workspace path when no run record exists", () => {
     const expected = join(logsDir, "abcd1234.log");
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234")).toBe(expected);
+    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(expected);
+  });
+
+  test("refuses fallback paths outside both workspace and legacy logs roots", () => {
+    // Confinement: a run record carrying an arbitrary absolute path (corrupted
+    // state, adversarial input, file moved aside) must not let `output` or
+    // `progress` happily print contents from anywhere on the filesystem.
+    const evilDir = join(tmpdir(), `codex-resolvable-evil-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(evilDir, { recursive: true });
+    const evilLog = join(evilDir, "outside.log");
+    writeFileSync(evilLog, "should not be readable");
+    try {
+      createRun(stateDir, record("abcd1234", evilLog));
+      const expected = join(logsDir, "abcd1234.log");
+      expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(expected);
+    } finally {
+      rmSync(evilDir, { recursive: true });
+    }
   });
 });

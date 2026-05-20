@@ -356,7 +356,7 @@ async function executeTurn(
     // spec — items are only populated on thread/resume or thread/fork.
     // Use final answer output (excludes intermediate planning/status messages).
     // Falls back to full accumulated output if no final_answer phase was seen.
-    const output = opts.dispatcher.getFinalAnswerOutput();
+    const output = opts.dispatcher.getTurnOutput();
 
     return {
       status: completedTurn.turn.status as TurnResult["status"],
@@ -373,7 +373,7 @@ async function executeTurn(
       opts.dispatcher.flush();
       return {
         status: "interrupted",
-        output: opts.dispatcher.getFinalAnswerOutput(),
+        output: opts.dispatcher.getTurnOutput(),
         reasoning: turnReasoning,
         filesChanged: opts.dispatcher.getFilesChanged(),
         commandsRun: opts.dispatcher.getCommandsRun(),

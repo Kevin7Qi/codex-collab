@@ -507,8 +507,10 @@ function readMigrationMarker(stateDir: string): { schemaVersion: number } | null
  * marker exists) cannot race on the shared `${markerPath}.tmp` path —
  * without the lock, one process's writeFileSync would clobber the other's
  * temp file before its rename, and the losing renameSync would throw
- * ENOENT and crash the command. Matches the existing convention used by
- * saveThreadIndex/updateThreadMeta/etc.
+ * ENOENT and crash the command. Other state files (threads.json, runs/*)
+ * rely on their callers to hold withThreadLock; this helper takes the lock
+ * itself because writeMigrationMarker is invoked from migrateGlobalState
+ * outside any existing lock scope.
  */
 function writeMigrationMarker(stateDir: string): void {
   if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
@@ -531,11 +533,11 @@ function writeMigrationMarker(stateDir: string): void {
  * Gated by a per-workspace marker at {stateDir}/migration-state.json so the
  * legacy global→workspace merge runs once per workspace and subsequent
  * commands are silent no-ops. Without the gate, every command re-merged the
- * full legacy file and (per threads.ts:599-627) re-created synthetic run
- * records for migrated threads lacking one; combined with pruneRuns capping
- * the workspace at maxRunsPerWorkspace and evicting oldest-first, the
- * ancient-dated synthetic runs were perpetually recreated and pruned,
- * logging "created N run record(s)" on every command.
+ * full legacy file and (in the matchingEntries loop below) re-created
+ * synthetic run records for migrated threads lacking one; combined with
+ * pruneRuns capping the workspace at maxRunsPerWorkspace and evicting
+ * oldest-first, the ancient-dated synthetic runs were perpetually recreated
+ * and pruned, logging "created N run record(s)" on every command.
  *
  * @param cwd - The current working directory to migrate state for
  * @param globalDataDir - Override for the global data directory (for testing). Defaults to config.dataDir.
