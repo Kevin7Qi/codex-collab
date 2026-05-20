@@ -862,8 +862,11 @@ export function readPidFile(pidsDir: string, shortId: string): number | null {
  *  PID file as alive (pre-PID-tracking threads, or write-failed PID files);
  *  treats an unreadable or invalid PID file as dead (already logged by
  *  `readPidFile`). When a valid PID is present, returns false on ESRCH and
- *  true on EPERM (process exists but we can't signal it). */
-export function isProcessAlive(pidsDir: string, shortId: string): boolean {
+ *  true on EPERM (process exists but we can't signal it).
+ *
+ *  Distinct from the lower-level `isProcessAlive(pid)` in src/process.ts,
+ *  which only does the signal-0 check and takes a PID directly. */
+export function isThreadProcessAlive(pidsDir: string, shortId: string): boolean {
   const pid = readPidFile(pidsDir, shortId);
   if (pid === null) {
     // null can mean "no file" (treat as alive — pre-PID-tracking thread) or

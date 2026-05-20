@@ -10,7 +10,7 @@ import {
   applyUserConfig,
   turnOverrides,
   formatDuration,
-  isProcessAlive,
+  isThreadProcessAlive,
   defaultOptions,
   VALID_REVIEW_MODES,
   type Options,
@@ -1134,18 +1134,18 @@ describe("formatDuration", () => {
   });
 });
 
-// ─── isProcessAlive ────────────────────────────────────────────────────────
+// ─── isThreadProcessAlive ──────────────────────────────────────────────────
 
-describe("isProcessAlive", () => {
+describe("isThreadProcessAlive", () => {
   test("missing PID file returns true (safety default)", () => {
     const pidsDir = freshTmpDir("pids-missing");
-    expect(isProcessAlive(pidsDir, "nosuchthread")).toBe(true);
+    expect(isThreadProcessAlive(pidsDir, "nosuchthread")).toBe(true);
   });
 
   test("PID of current process returns true", () => {
     const pidsDir = freshTmpDir("pids-alive");
     writeFileSync(join(pidsDir, "thread1"), String(process.pid));
-    expect(isProcessAlive(pidsDir, "thread1")).toBe(true);
+    expect(isThreadProcessAlive(pidsDir, "thread1")).toBe(true);
   });
 
   test("PID of dead process returns false", async () => {
@@ -1155,24 +1155,24 @@ describe("isProcessAlive", () => {
     await deadProc.exited; // wait for the process to fully terminate
     const deadPid = deadProc.pid;
     writeFileSync(join(pidsDir, "thread2"), String(deadPid));
-    expect(isProcessAlive(pidsDir, "thread2")).toBe(false);
+    expect(isThreadProcessAlive(pidsDir, "thread2")).toBe(false);
   });
 
   test("invalid PID in file returns false", () => {
     const pidsDir = freshTmpDir("pids-invalid");
     writeFileSync(join(pidsDir, "thread4"), "not-a-number");
-    expect(isProcessAlive(pidsDir, "thread4")).toBe(false);
+    expect(isThreadProcessAlive(pidsDir, "thread4")).toBe(false);
   });
 
   test("negative PID in file returns false", () => {
     const pidsDir = freshTmpDir("pids-negative");
     writeFileSync(join(pidsDir, "thread5"), "-1");
-    expect(isProcessAlive(pidsDir, "thread5")).toBe(false);
+    expect(isThreadProcessAlive(pidsDir, "thread5")).toBe(false);
   });
 
   test("zero PID in file returns false", () => {
     const pidsDir = freshTmpDir("pids-zero");
     writeFileSync(join(pidsDir, "thread6"), "0");
-    expect(isProcessAlive(pidsDir, "thread6")).toBe(false);
+    expect(isThreadProcessAlive(pidsDir, "thread6")).toBe(false);
   });
 });

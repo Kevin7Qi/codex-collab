@@ -489,7 +489,7 @@ export type RunPhase =
   | "starting" | "reviewing" | "editing" | "verifying"
   | "running" | "investigating" | "finalizing";
 
-export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type RunStatus = "running" | "completed" | "failed" | "cancelled";
 
 export interface RunRecord {
   runId: string;

@@ -677,7 +677,14 @@ async function main() {
         // Approval responses bypass the queue to prevent deadlocks when
         // queued behind an RPC request awaiting the same approval.
         if (!tryRouteApprovalResponse(socket, line)) {
-          messageQueue = messageQueue.then(() => processMessage(socket, line));
+          // Log unexpected rejections so the queue doesn't silently swallow
+          // them; the queue itself recovers because we re-assign with `.then`
+          // on the previous (now-resolved) promise.
+          messageQueue = messageQueue
+            .then(() => processMessage(socket, line))
+            .catch((err) => {
+              process.stderr.write(`[broker-server] processMessage failed: ${err instanceof Error ? err.message : String(err)}\n`);
+            });
         }
       }
     });
