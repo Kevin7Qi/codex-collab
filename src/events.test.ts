@@ -86,6 +86,33 @@ describe("EventDispatcher", () => {
     expect(dispatcher.getAccumulatedOutput()).toBe("Code looks great");
   });
 
+  test("review output survives a terminal final_answer sign-off", () => {
+    // Real reviews end with both the structured review (an exitedReviewMode
+    // item carrying the full body) AND a short final_answer agentMessage
+    // ("Bottom line: …"). Pre-fix, getFinalAnswerOutput() preferred the short
+    // final_answer over the full review — the entire review body was dropped
+    // from TurnResult.output (and thus from the run-ledger output field and
+    // the CLI's stdout under --content-only). The full review must win.
+    const dispatcher = new EventDispatcher("test-review-finalanswer", TEST_LOG_DIR);
+    const fullReview = Array.from({ length: 40 }, (_, i) =>
+      `Finding ${i + 1}: detailed substantive review content.`).join("\n");
+
+    dispatcher.handleItemCompleted({
+      item: { type: "exitedReviewMode", id: "review-1", review: fullReview },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+    dispatcher.handleItemCompleted({
+      item: { type: "agentMessage", id: "fa-1", phase: "final_answer", text: "Bottom line: looks good overall." },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    const output = dispatcher.getFinalAnswerOutput();
+    expect(output).toContain("Finding 20");
+    expect(output.length).toBeGreaterThanOrEqual(fullReview.length);
+  });
+
   test("handles mid-turn error notifications", () => {
     const lines: string[] = [];
     const dispatcher = new EventDispatcher("test-error", TEST_LOG_DIR, (line) => lines.push(line));

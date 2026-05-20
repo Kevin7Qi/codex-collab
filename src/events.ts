@@ -15,6 +15,10 @@ type ProgressCallback = (line: string) => void;
 export class EventDispatcher {
   private accumulatedOutput = "";
   private finalAnswerOutput = "";
+  /** Set from `exitedReviewMode.review`. For review turns this IS the
+   *  deliverable; it takes precedence over the short final_answer sign-off
+   *  Codex tags on at the end (which used to shadow the full review body). */
+  private reviewOutput = "";
   private filesChanged: FileChange[] = [];
   private commandsRun: CommandExec[] = [];
   private logBuffer: string[] = [];
@@ -110,6 +114,7 @@ export class EventDispatcher {
       }
       case "exitedReviewMode": {
         this.accumulatedOutput = item.review;
+        this.reviewOutput = item.review;
         this.log(`review output (${item.review.length} chars)`);
         break;
       }
@@ -137,10 +142,15 @@ export class EventDispatcher {
     return this.accumulatedOutput;
   }
 
-  /** Get only the final answer output (agentMessage items with phase "final_answer").
-   *  Falls back to full accumulated output if no final_answer phase was seen. */
+  /** Output for `TurnResult.output`, with precedence:
+   *  1. `reviewOutput` — set from an `exitedReviewMode` item; for review turns
+   *     this is the structured deliverable and must NOT be shadowed by the
+   *     short `final_answer` sign-off Codex emits at the end.
+   *  2. `finalAnswerOutput` — agentMessage items with phase `"final_answer"`;
+   *     for normal run turns this excludes intermediate planning/status noise.
+   *  3. `accumulatedOutput` — fall back when neither of the above was seen. */
   getFinalAnswerOutput(): string {
-    return this.finalAnswerOutput || this.accumulatedOutput;
+    return this.reviewOutput || this.finalAnswerOutput || this.accumulatedOutput;
   }
 
   getFilesChanged(): FileChange[] {
@@ -164,6 +174,7 @@ export class EventDispatcher {
   reset(): void {
     this.accumulatedOutput = "";
     this.finalAnswerOutput = "";
+    this.reviewOutput = "";
     this.filesChanged = [];
     this.commandsRun = [];
     this.lastPhase.clear();
