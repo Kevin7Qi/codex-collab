@@ -11,6 +11,7 @@ import {
   updateThreadStatus,
   withThreadLock,
   removeLegacyGlobalThread,
+  getLatestRun,
 } from "../threads";
 import { resolveWorkspaceDir } from "../config";
 import type { AppServerClient } from "../client";
@@ -22,7 +23,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import {
   die,
   parseOptions,
@@ -179,6 +180,32 @@ export async function handleThreads(args: string[]): Promise<void> {
 // output
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve a thread's log path for reading, preferring the workspace-local
+ * file but falling back to the run record's `logFile` if the workspace file
+ * is absent.
+ *
+ * This handles the migration edge case: if `migrateGlobalState`'s
+ * `copyFileSync` from the legacy `{dataDir}/logs` to `{stateDir}/logs` ever
+ * fails (rare — transient I/O or restrictive source perms), the run record's
+ * `logFile` falls back to the legacy global path while no workspace-local
+ * file is created. With the migration marker stamped, migration won't retry
+ * the copy — so without this fallback, `output` and `progress` would return
+ * an empty/missing-file diagnostic even though the log content still exists
+ * at the legacy path. (Per-pruneRuns convention, run record `logFile` may be
+ * relative; `resolve(stateDir, …)` handles both absolute and relative cases.)
+ */
+export function resolveReadableLogPath(stateDir: string, logsDir: string, shortId: string): string {
+  const wsLog = join(logsDir, `${shortId}.log`);
+  if (existsSync(wsLog)) return wsLog;
+  const latest = getLatestRun(stateDir, shortId);
+  if (latest && latest.logFile) {
+    const fallback = resolve(stateDir, latest.logFile);
+    if (existsSync(fallback)) return fallback;
+  }
+  return wsLog; // let the caller's existing not-found handling fire
+}
+
 /** Resolve a positional ID arg to a log file path, or die with an error. */
 function resolveLogPath(positional: string[], usage: string, ws: ReturnType<typeof getWorkspacePaths>): string {
   const id = positional[0];
@@ -187,7 +214,7 @@ function resolveLogPath(positional: string[], usage: string, ws: ReturnType<type
   const threadId = resolveThreadId(ws.threadsFile, id);
   const shortId = findShortId(ws.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
-  return join(ws.logsDir, `${shortId}.log`);
+  return resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId);
 }
 
 export async function handleOutput(args: string[]): Promise<void> {
