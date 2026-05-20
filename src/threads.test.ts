@@ -20,6 +20,7 @@ import {
   removeLegacyGlobalThread,
 } from "./threads";
 import type { RunRecord, ThreadMapping } from "./types";
+import { STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
 import { rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -957,5 +958,99 @@ describe("migrateGlobalState", () => {
     // No `.corrupt.<ts>` backup file should have been created.
     const backups = readdirSync(globalDir).filter(f => f.startsWith("threads.json.corrupt."));
     expect(backups).toEqual([]);
+  });
+
+  // ─── migration marker (schema version gate) ──────────────────────────────
+  // Root cause: migrateGlobalState ran on every command via getWorkspacePaths
+  // and re-did one-time work (synthetic-run backfill at threads.ts:599-627)
+  // every pass. Combined with pruneRuns capping the workspace at 50 runs and
+  // evicting oldest-first, the ancient-dated synthetic runs were perpetually
+  // recreated and pruned, logging "created N run record(s)" on every command.
+  // The marker stamps "migration done for this workspace" so subsequent calls
+  // are silent no-ops.
+
+  test("writes the migration marker after a clean completion", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: { threadId: "thr_a", createdAt: "2026-01-01T00:00:00Z", cwd: wsRoot, lastStatus: "completed" },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const markerPath = join(wsStateDir, MIGRATION_STATE_FILENAME);
+    expect(existsSync(markerPath)).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath, "utf-8"));
+    expect(marker.schemaVersion).toBe(STATE_SCHEMA_VERSION);
+    expect(typeof marker.migratedAt).toBe("string");
+  });
+
+  test("is a silent no-op when the marker is present and current (kills the churn)", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: { threadId: "thr_a", createdAt: "2026-01-01T00:00:00Z", cwd: wsRoot, lastStatus: "completed" },
+    });
+
+    // First pass migrates and stamps the marker.
+    migrateGlobalState(cwdDir, globalDir);
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const initialRuns = readdirSync(join(wsStateDir, "runs")).filter(f => f.endsWith(".json"));
+    expect(initialRuns).toHaveLength(1);
+
+    // Simulate pruneRuns evicting the ancient-dated synthetic run.
+    rmSync(join(wsStateDir, "runs", initialRuns[0]));
+
+    // Second pass with the marker present must NOT recreate the synthetic run
+    // (this is the root cause #2 fix: the churn loop is broken).
+    migrateGlobalState(cwdDir, globalDir);
+
+    expect(readdirSync(join(wsStateDir, "runs")).filter(f => f.endsWith(".json"))).toEqual([]);
+  });
+
+  test("refuses to run when the marker schemaVersion is newer (downgrade guard)", () => {
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: { threadId: "thr_a", createdAt: "2026-01-01T00:00:00Z", cwd: wsRoot, lastStatus: "completed" },
+    });
+
+    // Pre-write a marker claiming a future schema version: an older binary
+    // must refuse rather than risk rewriting newer-format state.
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    mkdirSync(wsStateDir, { recursive: true });
+    writeFileSync(
+      join(wsStateDir, MIGRATION_STATE_FILENAME),
+      JSON.stringify({ schemaVersion: STATE_SCHEMA_VERSION + 1, migratedAt: "2099-01-01T00:00:00Z" }),
+    );
+
+    expect(() => migrateGlobalState(cwdDir, globalDir)).toThrow(/newer schema version|downgrade/i);
+  });
+
+  test("treats a corrupt marker as absent and re-migrates + re-stamps", () => {
+    // If the marker file ever gets corrupted (truncated, hand-edited),
+    // refusing on it would be a soft-DOS. Behavior: log a warning, ignore the
+    // marker, re-run migration, re-stamp the marker cleanly.
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: { threadId: "thr_a", createdAt: "2026-01-01T00:00:00Z", cwd: wsRoot, lastStatus: "completed" },
+    });
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    mkdirSync(wsStateDir, { recursive: true });
+    const markerPath = join(wsStateDir, MIGRATION_STATE_FILENAME);
+    writeFileSync(markerPath, "{ this is not, valid json");
+
+    expect(() => migrateGlobalState(cwdDir, globalDir)).not.toThrow();
+
+    const marker = JSON.parse(readFileSync(markerPath, "utf-8"));
+    expect(marker.schemaVersion).toBe(STATE_SCHEMA_VERSION);
+    expect(Object.keys(loadThreadIndex(wsStateDir))).toContain("aaa11111");
+  });
+
+  test("stamps the marker even when there is no legacy file to migrate", () => {
+    // Fresh install with no legacy global state: migration is trivially done.
+    // The marker should still be written so subsequent commands skip the check.
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    expect(existsSync(join(wsStateDir, MIGRATION_STATE_FILENAME))).toBe(true);
   });
 });

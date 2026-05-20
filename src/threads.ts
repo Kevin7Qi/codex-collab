@@ -11,7 +11,7 @@ import {
 } from "fs";
 import { randomBytes, createHash } from "crypto";
 import { basename, dirname, join, resolve, sep } from "path";
-import { config, validateId, resolveWorkspaceDir } from "./config";
+import { config, validateId, resolveWorkspaceDir, STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
 import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus, ThreadMapping, ThreadMappingEntry } from "./types";
 
 // ─── Advisory file lock ────────────────────────────────────────────────────
@@ -479,9 +479,63 @@ function workspaceDirName(cwd: string): string {
 }
 
 /**
+ * Read the per-workspace migration marker, returning null if absent or
+ * unparseable. Corrupt markers are logged and treated as absent so migration
+ * re-runs and re-stamps cleanly (refusing on a corrupt marker would be a
+ * soft-DOS for the user).
+ */
+function readMigrationMarker(stateDir: string): { schemaVersion: number } | null {
+  const markerPath = join(stateDir, MIGRATION_STATE_FILENAME);
+  if (!existsSync(markerPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(markerPath, "utf-8"));
+    if (parsed && typeof parsed === "object" && typeof parsed.schemaVersion === "number") {
+      return parsed as { schemaVersion: number };
+    }
+    console.error(`[codex] Warning: migration marker at ${markerPath} has unexpected shape; re-running migration.`);
+  } catch (e) {
+    console.error(`[codex] Warning: migration marker at ${markerPath} unparseable (${e instanceof Error ? e.message : e}); re-running migration.`);
+  }
+  return null;
+}
+
+/**
+ * Atomically stamp the per-workspace migration marker.
+ *
+ * Serialized via withThreadLock(markerPath, …) so two concurrent
+ * `codex-collab` commands first-touching the same workspace (before the
+ * marker exists) cannot race on the shared `${markerPath}.tmp` path —
+ * without the lock, one process's writeFileSync would clobber the other's
+ * temp file before its rename, and the losing renameSync would throw
+ * ENOENT and crash the command. Matches the existing convention used by
+ * saveThreadIndex/updateThreadMeta/etc.
+ */
+function writeMigrationMarker(stateDir: string): void {
+  if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const markerPath = join(stateDir, MIGRATION_STATE_FILENAME);
+  withThreadLock(markerPath, () => {
+    const tmpPath = markerPath + ".tmp";
+    const payload = JSON.stringify(
+      { schemaVersion: STATE_SCHEMA_VERSION, migratedAt: new Date().toISOString() },
+      null,
+      2,
+    );
+    writeFileSync(tmpPath, payload, { mode: 0o600 });
+    renameSync(tmpPath, markerPath);
+  });
+}
+
+/**
  * Migrate thread entries and logs from the old global layout to per-workspace layout.
- * Idempotent and merging — existing per-workspace state does not block missing
- * legacy entries from being copied in later.
+ *
+ * Gated by a per-workspace marker at {stateDir}/migration-state.json so the
+ * legacy global→workspace merge runs once per workspace and subsequent
+ * commands are silent no-ops. Without the gate, every command re-merged the
+ * full legacy file and (per threads.ts:599-627) re-created synthetic run
+ * records for migrated threads lacking one; combined with pruneRuns capping
+ * the workspace at maxRunsPerWorkspace and evicting oldest-first, the
+ * ancient-dated synthetic runs were perpetually recreated and pruned,
+ * logging "created N run record(s)" on every command.
  *
  * @param cwd - The current working directory to migrate state for
  * @param globalDataDir - Override for the global data directory (for testing). Defaults to config.dataDir.
@@ -489,12 +543,30 @@ function workspaceDirName(cwd: string): string {
 export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   const dataDir = globalDataDir ?? config.dataDir;
   const globalThreadsFile = join(dataDir, "threads.json");
-
-  // 1. Check if global threads.json exists
-  if (!existsSync(globalThreadsFile)) return;
-
-  // 2. Compute per-workspace state dir and load any existing workspace index.
   const stateDir = join(dataDir, "workspaces", workspaceDirName(cwd));
+
+  // 0. Marker gate. Current → silent return. Newer → refuse loudly so an
+  // older binary cannot rewrite newer-format state.
+  const marker = readMigrationMarker(stateDir);
+  if (marker) {
+    if (marker.schemaVersion === STATE_SCHEMA_VERSION) return;
+    if (marker.schemaVersion > STATE_SCHEMA_VERSION) {
+      throw new Error(
+        `[codex] Refusing to run migration: workspace ${stateDir} was written by a newer schema version (${marker.schemaVersion} > ${STATE_SCHEMA_VERSION}). ` +
+        `This binary would downgrade the state. Upgrade codex-collab or move the workspace state aside.`,
+      );
+    }
+    // marker.schemaVersion < current → fall through (future migrations slot here).
+  }
+
+  // 1. Check if global threads.json exists. No legacy file = nothing to do;
+  // stamp the marker so the next command short-circuits at the gate above.
+  if (!existsSync(globalThreadsFile)) {
+    writeMigrationMarker(stateDir);
+    return;
+  }
+
+  // 2. Load any existing workspace index.
   const index: ThreadIndex = loadThreadIndex(stateDir);
 
   // 3. Load the global thread mapping directly. We deliberately do NOT use
@@ -526,7 +598,10 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
     console.error(`[codex] Skipping migration: legacy global threads file is unparseable (${e instanceof Error ? e.message : String(e)})`);
     return;
   }
-  if (Object.keys(globalMapping).length === 0) return;
+  if (Object.keys(globalMapping).length === 0) {
+    writeMigrationMarker(stateDir);
+    return;
+  }
 
   // 4. Filter entries where cwd matches or is within the workspace root
   const wsRoot = resolveWorkspaceDir(cwd);
@@ -537,7 +612,10 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
     }
   }
 
-  if (matchingEntries.length === 0) return;
+  if (matchingEntries.length === 0) {
+    writeMigrationMarker(stateDir);
+    return;
+  }
 
   // 5. Merge per-workspace thread index and run records
   const globalLogsDir = join(dataDir, "logs");
@@ -640,6 +718,9 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   if (migrated > 0 || updated > 0 || createdRuns > 0) {
     console.error(`[codex] Migrated ${migrated} thread(s), refreshed ${updated} thread(s), created ${createdRuns} run record(s) from global state to workspace ${wsRoot}`);
   }
+
+  // 8. Stamp the marker so subsequent commands skip the entire merge.
+  writeMigrationMarker(stateDir);
 }
 
 /**

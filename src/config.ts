@@ -24,6 +24,16 @@ const MODEL_ALIASES: Record<string, string> = {
 const VALID_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
 const DEFAULT_DISPLAY_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
+// ─── Workspace state schema version ─────────────────────────────────────────
+// Bumped whenever the on-disk shape of a workspace state dir
+// ({stateDir}/threads.json, runs/*.json) changes in a way that needs migration.
+// Persisted per-workspace in {stateDir}/migration-state.json so the legacy
+// global→workspace migration runs once and subsequent commands skip it
+// (avoids the synthetic-run churn against pruneRuns when the workspace has
+// more migrated threads than maxRunsPerWorkspace).
+export const STATE_SCHEMA_VERSION = 1;
+export const MIGRATION_STATE_FILENAME = "migration-state.json";
+
 // ─── Config object ──────────────────────────────────────────────────────────
 
 export const config = {
