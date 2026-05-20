@@ -161,4 +161,14 @@ describe("CLI global options before command", () => {
     expect([0, 1]).toContain(exitCode);
     if (exitCode === 0) expect(stdout).toContain("Usage:");
   });
+
+  it("pre-command flags are forwarded to the command's parseOptions", () => {
+    // Without preserving pre-command args, `--reasoning invalid` would be
+    // silently discarded and the command would run with default reasoning.
+    // parseOptions rejects "invalid" with a specific error, so observing that
+    // error proves the flag actually made it through.
+    const { stderr, exitCode } = run("--reasoning", "invalid", "run", "prompt");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Invalid reasoning level");
+  });
 });

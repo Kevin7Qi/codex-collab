@@ -1070,4 +1070,61 @@ describe("migrateGlobalState", () => {
     const wsStateDir = computeWsStateDir(globalDir, cwdDir);
     expect(existsSync(join(wsStateDir, MIGRATION_STATE_FILENAME))).toBe(true);
   });
+
+  test("many concurrent first-touch invocations do not race on temp files", async () => {
+    // Spin up N child processes that all first-touch the same workspace
+    // before the migration marker exists, and run migrateGlobalState
+    // simultaneously. Pre-fix, two processes hitting the unlocked
+    // saveThreadIndex / createRun / writeMigrationMarker writes could race
+    // on their shared "<file>.tmp" filenames — one rename would
+    // ENOENT-crash the loser. With migrateGlobalState wrapped in
+    // withThreadLock(markerPath, …), one acquires, completes, releases;
+    // the rest observe the stamped marker and short-circuit. Spawning
+    // many children at once raises the chance of catching the race in
+    // CI environments where bun startup happens to align.
+    const wsRoot = cwdDir;
+    writeGlobalThreads(globalDir, {
+      aaa11111: { threadId: "thr_a", createdAt: "2026-01-01T00:00:00Z", cwd: wsRoot, lastStatus: "completed" },
+      bbb22222: { threadId: "thr_b", createdAt: "2026-01-01T00:00:00Z", cwd: wsRoot, lastStatus: "completed" },
+      ccc33333: { threadId: "thr_c", createdAt: "2026-01-01T00:00:00Z", cwd: wsRoot, lastStatus: "completed" },
+    });
+
+    const script = `
+      import { migrateGlobalState } from ${JSON.stringify(join(import.meta.dir, "threads.ts"))};
+      migrateGlobalState(${JSON.stringify(cwdDir)}, ${JSON.stringify(globalDir)});
+    `;
+    const { spawn } = await import("child_process");
+    const runOne = () => new Promise<{ code: number | null; stderr: string }>((resolve) => {
+      const child = spawn("bun", ["-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (b) => { stderr += b.toString(); });
+      child.on("close", (code) => resolve({ code, stderr }));
+    });
+
+    const N = 8;
+    const results = await Promise.all(Array.from({ length: N }, runOne));
+
+    // No child may crash. Pre-fix, the racing losers would exit non-zero
+    // with ENOENT on a temp-file rename (or "Cannot acquire lock" from
+    // the rename-into-existing-tmp path).
+    for (const r of results) {
+      expect(r.code).toBe(0);
+      expect(r.stderr).not.toMatch(/Error.*ENOENT/);
+      expect(r.stderr).not.toMatch(/at migrateGlobalState/);
+      expect(r.stderr).not.toMatch(/Cannot acquire lock/);
+    }
+
+    // Only one child should emit the "Migrated …" banner — the rest must
+    // observe the marker and silently short-circuit. Without
+    // serialization, multiple children could race past the marker check
+    // and each emit its own banner.
+    const banners = results.filter(r => r.stderr.includes("[codex] Migrated"));
+    expect(banners.length).toBe(1);
+
+    // State after migration must be intact and consistent.
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    const index = loadThreadIndex(wsStateDir);
+    expect(Object.keys(index).sort()).toEqual(["aaa11111", "bbb22222", "ccc33333"]);
+    expect(existsSync(join(wsStateDir, MIGRATION_STATE_FILENAME))).toBe(true);
+  }, 30000);
 });

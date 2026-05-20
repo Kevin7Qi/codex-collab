@@ -502,29 +502,22 @@ function readMigrationMarker(stateDir: string): { schemaVersion: number } | null
 /**
  * Atomically stamp the per-workspace migration marker.
  *
- * Serialized via withThreadLock(markerPath, …) so two concurrent
- * `codex-collab` commands first-touching the same workspace (before the
- * marker exists) cannot race on the shared `${markerPath}.tmp` path —
- * without the lock, one process's writeFileSync would clobber the other's
- * temp file before its rename, and the losing renameSync would throw
- * ENOENT and crash the command. Other state files (threads.json, runs/*)
- * rely on their callers to hold withThreadLock; this helper takes the lock
- * itself because writeMigrationMarker is invoked from migrateGlobalState
- * outside any existing lock scope.
+ * Caller MUST hold withThreadLock(markerPath, …). The entire
+ * migrateGlobalState body runs under that lock so saveThreadIndex /
+ * createRun and this marker write all share serialization without
+ * needing a nested (and non-reentrant) acquisition here.
  */
 function writeMigrationMarker(stateDir: string): void {
   if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const markerPath = join(stateDir, MIGRATION_STATE_FILENAME);
-  withThreadLock(markerPath, () => {
-    const tmpPath = markerPath + ".tmp";
-    const payload = JSON.stringify(
-      { schemaVersion: STATE_SCHEMA_VERSION, migratedAt: new Date().toISOString() },
-      null,
-      2,
-    );
-    writeFileSync(tmpPath, payload, { mode: 0o600 });
-    renameSync(tmpPath, markerPath);
-  });
+  const tmpPath = markerPath + ".tmp";
+  const payload = JSON.stringify(
+    { schemaVersion: STATE_SCHEMA_VERSION, migratedAt: new Date().toISOString() },
+    null,
+    2,
+  );
+  writeFileSync(tmpPath, payload, { mode: 0o600 });
+  renameSync(tmpPath, markerPath);
 }
 
 /**
@@ -546,21 +539,51 @@ export function migrateGlobalState(cwd: string, globalDataDir?: string): void {
   const dataDir = globalDataDir ?? config.dataDir;
   const globalThreadsFile = join(dataDir, "threads.json");
   const stateDir = join(dataDir, "workspaces", workspaceDirName(cwd));
+  const markerPath = join(stateDir, MIGRATION_STATE_FILENAME);
 
-  // 0. Marker gate. Current → silent return. Newer → refuse loudly so an
-  // older binary cannot rewrite newer-format state.
-  const marker = readMigrationMarker(stateDir);
-  if (marker) {
-    if (marker.schemaVersion === STATE_SCHEMA_VERSION) return;
-    if (marker.schemaVersion > STATE_SCHEMA_VERSION) {
+  // 0. Fast-path marker check OUTSIDE the migration lock. This is the
+  // steady-state case (already migrated) and we don't want every command
+  // to acquire/release a lock. The race window is narrow and resolved by
+  // the re-check inside the lock below.
+  const earlyMarker = readMigrationMarker(stateDir);
+  if (earlyMarker) {
+    if (earlyMarker.schemaVersion === STATE_SCHEMA_VERSION) return;
+    if (earlyMarker.schemaVersion > STATE_SCHEMA_VERSION) {
       throw new Error(
-        `[codex] Refusing to run migration: workspace ${stateDir} was written by a newer schema version (${marker.schemaVersion} > ${STATE_SCHEMA_VERSION}). ` +
+        `[codex] Refusing to run migration: workspace ${stateDir} was written by a newer schema version (${earlyMarker.schemaVersion} > ${STATE_SCHEMA_VERSION}). ` +
         `This binary would downgrade the state. Upgrade codex-collab or move the workspace state aside.`,
       );
     }
-    // marker.schemaVersion < current → fall through (future migrations slot here).
+    // earlyMarker.schemaVersion < current → fall through (future migrations slot here).
   }
 
+  // Ensure stateDir exists so we can place the lock file.
+  if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+
+  // Serialize the entire migration so two concurrent first-touch invocations
+  // cannot race on saveThreadIndex / createRun temp file paths (each writes
+  // a fixed "<file>.tmp" then renames; two simultaneous writers would
+  // ENOENT-crash one of them) or double-stamp the marker.
+  withThreadLock(markerPath, () => {
+    // Re-check the marker under the lock: another process may have just
+    // finished migration while we were waiting.
+    const marker = readMigrationMarker(stateDir);
+    if (marker) {
+      if (marker.schemaVersion === STATE_SCHEMA_VERSION) return;
+      if (marker.schemaVersion > STATE_SCHEMA_VERSION) {
+        throw new Error(
+          `[codex] Refusing to run migration: workspace ${stateDir} was written by a newer schema version (${marker.schemaVersion} > ${STATE_SCHEMA_VERSION}). ` +
+          `This binary would downgrade the state. Upgrade codex-collab or move the workspace state aside.`,
+        );
+      }
+    }
+
+    runMigration(cwd, dataDir, globalThreadsFile, stateDir);
+  });
+}
+
+/** Core migration body. Caller MUST hold withThreadLock(markerPath, …). */
+function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, stateDir: string): void {
   // 1. Check if global threads.json exists. No legacy file = nothing to do;
   // stamp the marker so the next command short-circuits at the gate above.
   if (!existsSync(globalThreadsFile)) {

@@ -188,8 +188,13 @@ function extractCommand(args: string[]): { command: string; rest: string[] } {
       if (VALUE_FLAGS.has(arg)) i++;
       continue;
     }
-    // First non-flag token is the command; the rest is its argv slice.
-    return { command: arg, rest: args.slice(i + 1) };
+    // First non-flag token is the command. Preserve any options that
+    // appeared *before* the command — `args.slice(i + 1)` alone would drop
+    // them, so `codex-collab --dir /repo run "…"` would silently run in the
+    // wrong workspace. parseOptions is unordered, so the resulting rest may
+    // safely interleave pre- and post-command flags.
+    const rest = args.slice(0, i).concat(args.slice(i + 1));
+    return { command: arg, rest };
   }
   // Reached end of args with no command found — bare flags only. Mirror the
   // pre-existing "Unknown option" error for genuinely unknown flags so
