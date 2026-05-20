@@ -22,6 +22,7 @@ import {
   writePidFile,
   removePidFile,
   setActiveThreadId,
+  setActiveReviewThreadId,
   setActiveShortId,
   setActiveTurnId,
   setActiveWsPaths,
@@ -108,6 +109,7 @@ export async function handleReview(args: string[]): Promise<void> {
         timeoutMs: options.timeout * 1000,
         killSignalsDir: ws.killSignalsDir,
         onTurnId: (id) => setActiveTurnId(id),
+        onReviewThreadId: (id) => setActiveReviewThreadId(id),
         ...turnOverrides(options),
       });
 
@@ -118,6 +120,7 @@ export async function handleReview(args: string[]): Promise<void> {
       throw e;
     } finally {
       setActiveThreadId(undefined);
+      setActiveReviewThreadId(undefined);
       setActiveShortId(undefined);
       setActiveTurnId(undefined);
       setActiveWsPaths(undefined);

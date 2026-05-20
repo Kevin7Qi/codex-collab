@@ -422,6 +422,62 @@ describe("run ledger", () => {
     pruneRuns(testDir, 5);
   });
 
+  test("pruneRuns never deletes a running run, even when its startedAt is older", () => {
+    // A long-running invocation (no completedAt) whose startedAt is the
+    // oldest in the workspace would, under naive activityAt sort, be the
+    // first prune candidate — even though it's still emitting events and
+    // its terminal recordRunFailure/recordTerminalRunState would later
+    // look up a runId whose JSON had been deleted.
+    const activeOldest = makeRun({
+      runId: "run-active",
+      startedAt: "2026-01-01T00:00:00Z",
+      completedAt: null,
+      status: "running",
+    });
+    const completedNewer1 = makeRun({
+      runId: "run-completed-1",
+      startedAt: "2026-01-05T00:00:00Z",
+      completedAt: "2026-01-05T00:01:00Z",
+    });
+    const completedNewer2 = makeRun({
+      runId: "run-completed-2",
+      startedAt: "2026-01-06T00:00:00Z",
+      completedAt: "2026-01-06T00:01:00Z",
+    });
+    const completedNewer3 = makeRun({
+      runId: "run-completed-3",
+      startedAt: "2026-01-07T00:00:00Z",
+      completedAt: "2026-01-07T00:01:00Z",
+    });
+    createRun(testDir, activeOldest);
+    createRun(testDir, completedNewer1);
+    createRun(testDir, completedNewer2);
+    createRun(testDir, completedNewer3);
+
+    pruneRuns(testDir, 2);
+
+    // Active run must survive; the oldest completed run is the actual victim.
+    const remaining = listRuns(testDir).map(r => r.runId);
+    expect(remaining).toContain("run-active");
+    expect(remaining).not.toContain("run-completed-1");
+  });
+
+  test("pruneRuns leaves the workspace temporarily above the limit when all candidates are running", () => {
+    // Edge case: if every run that would be evicted is still running, prefer
+    // exceeding the cap to losing live data. The next prune (after some
+    // complete) will bring the count back down.
+    for (let i = 0; i < 5; i++) {
+      createRun(testDir, makeRun({
+        runId: `run-${i}`,
+        startedAt: new Date(Date.UTC(2026, 0, i + 1)).toISOString(),
+        completedAt: null,
+        status: "running",
+      }));
+    }
+    pruneRuns(testDir, 2);
+    expect(listRuns(testDir).length).toBe(5);
+  });
+
   test("pruneRuns prefers completedAt over startedAt for sort", () => {
     // Older startedAt but later completedAt: a long-running run that started
     // first but finished last. Should NOT be pruned ahead of a short run that

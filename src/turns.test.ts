@@ -395,6 +395,54 @@ describe("runReview", () => {
     expect(result.output).toBe("Review: looks good");
   });
 
+  test("on local kill signal during a review, turn/interrupt is sent to the review subthread", async () => {
+    // Without the interrupt in the KillSignalError branch, broker-backed
+    // reviews would close their socket on kill but keep running on the
+    // shared app-server until the orphan watchdog fires. The interrupt
+    // must also use the review subthread (not the caller's parent) for
+    // the same reason as the timeout path.
+    const interruptCalls: Array<{ threadId: string; turnId: string }> = [];
+    const { client, emit } = buildMockClient((method, params) => {
+      if (method === "review/start") {
+        // Don't emit turn/completed — wait for the kill signal to fire.
+        return {
+          turn: { id: "review-turn-kill", items: [], status: "inProgress", error: null },
+          reviewThreadId: "review-thr-kill",
+        };
+      }
+      if (method === "turn/interrupt") {
+        interruptCalls.push(params as { threadId: string; turnId: string });
+        return null;
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    void emit;
+
+    const dispatcher = new EventDispatcher("test-review-kill", TEST_LOG_DIR, () => {});
+
+    // Drop a kill signal file after a brief delay so the awaiter picks it up.
+    setTimeout(() => {
+      writeFileSync(join(TEST_KILL_DIR, "thr-parent"), "*");
+    }, 50);
+
+    const result = await runReview(
+      client,
+      "thr-parent",
+      { type: "uncommittedChanges" },
+      {
+        dispatcher,
+        approvalHandler: autoApproveHandler,
+        timeoutMs: 5000, // not the timeout path — kill signal fires first
+        killSignalsDir: TEST_KILL_DIR,
+      },
+    );
+
+    expect(result.status).toBe("interrupted");
+    expect(interruptCalls).toHaveLength(1);
+    expect(interruptCalls[0].threadId).toBe("review-thr-kill");
+    expect(interruptCalls[0].turnId).toBe("review-turn-kill");
+  });
+
   test("on timeout, turn/interrupt targets the review subthread, not the parent", async () => {
     // Reviews run on a subthread distinct from the caller's threadId.
     // Earlier code only retained params.threadId for the cleanup interrupt,

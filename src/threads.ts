@@ -385,24 +385,42 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
     return null;
   };
 
-  type Entry = { file: string; activityAt: string; logFile: string | null; logPath: string | null };
+  type Entry = { file: string; activityAt: string; logFile: string | null; logPath: string | null; running: boolean };
   const entries: Entry[] = [];
   for (const file of files) {
     try {
       const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
       const activityAt = record.completedAt ?? record.startedAt;
       const logFile = record.logFile || null;
-      entries.push({ file, activityAt, logFile, logPath: resolveLogFile(logFile) });
+      entries.push({
+        file,
+        activityAt,
+        logFile,
+        logPath: resolveLogFile(logFile),
+        running: record.status === "running",
+      });
     } catch (e) {
       // Corrupt files count toward the total; delete them first
       console.error(`[codex] Warning: cannot read run file ${file} during prune: ${e instanceof Error ? e.message : e}`);
-      entries.push({ file, activityAt: "1970-01-01T00:00:00Z", logFile: null, logPath: null });
+      entries.push({ file, activityAt: "1970-01-01T00:00:00Z", logFile: null, logPath: null, running: false });
     }
   }
 
-  entries.sort((a, b) => new Date(a.activityAt).getTime() - new Date(b.activityAt).getTime());
+  // Stable sort that puts running runs after everything else, so they survive
+  // pruning even when their startedAt is older than recently-completed runs.
+  // The terminal update for an active long-running invocation would otherwise
+  // find its JSON gone and lose the run ledger / log.
+  entries.sort((a, b) => {
+    if (a.running !== b.running) return a.running ? 1 : -1;
+    return new Date(a.activityAt).getTime() - new Date(b.activityAt).getTime();
+  });
 
-  const toDelete = entries.length - limit;
+  // Never delete a running run, even if doing so means the workspace stays
+  // momentarily above the cap. The next prune (after the run completes) will
+  // bring it back down.
+  let toDelete = entries.length - limit;
+  while (toDelete > 0 && entries[toDelete - 1].running) toDelete--;
+  if (toDelete <= 0) return;
   const survivors = entries.slice(toDelete);
   // Logs referenced by surviving runs must NOT be deleted — multiple runs
   // share a thread's log file.

@@ -8,6 +8,7 @@ import { updateThreadStatus, updateRun } from "./threads";
 import {
   activeClient,
   activeThreadId,
+  activeReviewThreadId,
   activeShortId,
   activeTurnId,
   activeWsPaths,
@@ -56,9 +57,12 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
   // Try to interrupt the active turn before disconnecting (prevents
   // orphaned turns when using the broker — closing the socket alone
   // only disconnects from the broker, the turn keeps running).
-  if (activeClient && activeThreadId && activeTurnId) {
+  // For reviews the actual turn runs on a review subthread distinct from
+  // activeThreadId; route the interrupt there when we know it.
+  const interruptThreadId = activeReviewThreadId ?? activeThreadId;
+  if (activeClient && interruptThreadId && activeTurnId) {
     try {
-      await activeClient.request("turn/interrupt", { threadId: activeThreadId, turnId: activeTurnId });
+      await activeClient.request("turn/interrupt", { threadId: interruptThreadId, turnId: activeTurnId });
     } catch (e) {
       // Best effort — may fail if turn already completed
       if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("already")) {

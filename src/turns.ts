@@ -84,6 +84,10 @@ export interface TurnOptions {
   /** Called with the turn ID once the turn/start (or review/start) response arrives.
    *  Used by the CLI signal handler to send turn/interrupt on Ctrl-C. */
   onTurnId?: (turnId: string) => void;
+  /** Called with the review subthread ID once review/start responds. Lets the
+   *  CLI signal handler target the right thread for `turn/interrupt`. Never
+   *  fires for normal turns. */
+  onReviewThreadId?: (reviewThreadId: string) => void;
 }
 
 export interface ReviewOptions extends TurnOptions {
@@ -317,6 +321,7 @@ async function executeTurn(
     const { turn } = startResponse;
     if (typeof startResponse.reviewThreadId === "string") {
       interruptThreadId = startResponse.reviewThreadId;
+      opts.onReviewThreadId?.(startResponse.reviewThreadId);
     }
 
     // turnId is now known — notify caller and replay buffered notifications
@@ -382,6 +387,23 @@ async function executeTurn(
     if (e instanceof KillSignalError) {
       opts.dispatcher.flushOutput();
       opts.dispatcher.flush();
+      // Tell the server to stop too. Without this, broker-backed runs
+      // close the client socket but leave the turn running on the
+      // shared app-server, holding the broker stream busy until the
+      // orphan watchdog fires. The separate `kill` command may have
+      // already issued an interrupt — `not found` / `already` errors
+      // from this best-effort retry are expected.
+      if (turnId !== null) {
+        try {
+          await client.request("turn/interrupt", { threadId: interruptThreadId, turnId });
+        } catch (interruptErr) {
+          if (interruptErr instanceof Error
+              && !interruptErr.message.includes("not found")
+              && !interruptErr.message.includes("already")) {
+            console.error(`[codex] Warning: could not interrupt turn on kill: ${interruptErr.message}`);
+          }
+        }
+      }
       return {
         status: "interrupted",
         output: opts.dispatcher.getTurnOutput(),
