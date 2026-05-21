@@ -1081,10 +1081,12 @@ describe("turnOverrides", () => {
     opts.reasoning = "low";
     opts.dir = "/tmp/proj";
     opts.approval = "on-failure";
+    opts.sandbox = "danger-full-access";
     opts.explicit.add("model");
     opts.explicit.add("reasoning");
     opts.explicit.add("dir");
     opts.explicit.add("approval");
+    opts.explicit.add("sandbox");
 
     const overrides = turnOverrides(opts);
     expect(overrides).toEqual({
@@ -1092,7 +1094,41 @@ describe("turnOverrides", () => {
       effort: "low",
       cwd: "/tmp/proj",
       approvalPolicy: "on-failure",
+      sandboxPolicy: { type: "dangerFullAccess" },
     });
+  });
+
+  // Regression: resuming a thread with a new -s must carry the sandbox as a
+  // turn-context override. thread/resume's `sandbox` is ignored for a thread
+  // already loaded in the long-lived (broker) app-server, so the per-turn
+  // sandboxPolicy is the only thing that actually re-applies the new mode.
+  test("resumed thread: explicit sandbox forwarded as sandboxPolicy", () => {
+    const opts = defaultOptions();
+    opts.resumeId = "abc12345";
+    opts.sandbox = "workspace-write";
+    opts.explicit.add("sandbox");
+
+    const overrides = turnOverrides(opts);
+    expect(overrides).toEqual({ sandboxPolicy: { type: "workspaceWrite" } });
+  });
+
+  test("resumed thread: read-only sandbox maps to readOnly policy", () => {
+    const opts = defaultOptions();
+    opts.resumeId = "abc12345";
+    opts.sandbox = "read-only";
+    opts.explicit.add("sandbox");
+
+    const overrides = turnOverrides(opts);
+    expect(overrides).toEqual({ sandboxPolicy: { type: "readOnly" } });
+  });
+
+  test("resumed thread: non-explicit sandbox is not forwarded", () => {
+    const opts = defaultOptions();
+    opts.resumeId = "abc12345";
+    opts.sandbox = "workspace-write"; // the default, never typed on CLI
+
+    const overrides = turnOverrides(opts);
+    expect("sandboxPolicy" in overrides).toBe(false);
   });
 });
 

@@ -723,6 +723,15 @@ export async function startOrResumeThread(
 // Turn overrides and result printing
 // ---------------------------------------------------------------------------
 
+/** Map a kebab-case sandbox mode to the app-server's sandboxPolicy wire shape. */
+export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
+  switch (mode) {
+    case "read-only": return { type: "readOnly" };
+    case "workspace-write": return { type: "workspaceWrite" };
+    case "danger-full-access": return { type: "dangerFullAccess" };
+  }
+}
+
 /** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
 export function turnOverrides(opts: Options) {
   if (!opts.resumeId) {
@@ -736,6 +745,10 @@ export function turnOverrides(opts: Options) {
   if (opts.explicit.has("model")) o.model = opts.model;
   if (opts.explicit.has("reasoning")) o.effort = opts.reasoning;
   if (opts.explicit.has("approval")) o.approvalPolicy = opts.approval;
+  // thread/resume's `sandbox` is ignored once the thread is loaded in a
+  // long-lived (broker) app-server, so carry an explicit -s as a per-turn
+  // sandboxPolicy override — the only path that re-applies the new mode.
+  if (opts.explicit.has("sandbox")) o.sandboxPolicy = sandboxPolicyFor(opts.sandbox);
   return o;
 }
 

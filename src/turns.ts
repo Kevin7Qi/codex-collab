@@ -102,6 +102,10 @@ export interface TurnOptions {
   model?: string;
   effort?: ReasoningEffort;
   approvalPolicy?: ApprovalPolicy;
+  /** Per-turn sandbox override (wire shape, e.g. {type:"workspaceWrite"}).
+   *  Re-applies the sandbox on resume, where thread/resume's `sandbox` is
+   *  ignored for a thread already loaded in the long-lived app-server. */
+  sandboxPolicy?: unknown;
   /** Directory for kill signal files. Defaults to config.killSignalsDir. */
   killSignalsDir?: string;
   /** Called with the turn ID once the turn/start (or review/start) response arrives.
@@ -134,6 +138,7 @@ export async function runTurn(
     model: opts.model,
     effort: opts.effort,
     approvalPolicy: opts.approvalPolicy,
+    sandboxPolicy: opts.sandboxPolicy,
   };
 
   return executeTurn(client, "turn/start", params, opts);
