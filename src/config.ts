@@ -120,20 +120,28 @@ export function validateId(id: string): string {
   return id;
 }
 
+// The workspace root for a given cwd is constant for a process's lifetime, but
+// a single command resolves it several times (resolveStateDir, workspaceDirName,
+// and the migration cwd-scope filter all call this on every invocation). Cache
+// by cwd so the `git` subprocess spawns at most once per cwd instead of 2-3×.
+const workspaceDirCache = new Map<string, string>();
+
 /**
  * Find workspace root by running `git rev-parse --show-toplevel`.
  * If not in a git repo, returns the resolved (realpath) cwd.
+ * Memoized per cwd — the result is stable within a process.
  */
 export function resolveWorkspaceDir(cwd: string): string {
+  const cached = workspaceDirCache.get(cwd);
+  if (cached !== undefined) return cached;
   const result = spawnSync("git", ["rev-parse", "--show-toplevel"], {
     cwd,
     encoding: "utf-8",
     timeout: 5000,
   });
-  if (result.status === 0 && result.stdout) {
-    return result.stdout.trim();
-  }
-  return resolve(cwd);
+  const wsRoot = result.status === 0 && result.stdout ? result.stdout.trim() : resolve(cwd);
+  workspaceDirCache.set(cwd, wsRoot);
+  return wsRoot;
 }
 
 /**
