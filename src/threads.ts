@@ -620,12 +620,18 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
   try {
     const parsed = JSON.parse(content);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      console.error(`[codex] Skipping migration: legacy global threads file is not a JSON object (${globalThreadsFile})`);
+      // Terminal corruption (unlike a fixable I/O error above): stamp the
+      // marker so this doesn't re-log and re-lock on every command. The file
+      // is left in place for inspection; remove the per-workspace marker to
+      // retry after repairing it.
+      console.error(`[codex] Skipping migration: legacy global threads file is not a JSON object (${globalThreadsFile}); leaving it in place. Remove ${join(stateDir, MIGRATION_STATE_FILENAME)} to retry after repair.`);
+      writeMigrationMarker(stateDir);
       return;
     }
     globalMapping = parsed;
   } catch (e) {
-    console.error(`[codex] Skipping migration: legacy global threads file is unparseable (${e instanceof Error ? e.message : String(e)})`);
+    console.error(`[codex] Skipping migration: legacy global threads file is unparseable (${e instanceof Error ? e.message : String(e)}); leaving it in place. Remove ${join(stateDir, MIGRATION_STATE_FILENAME)} to retry after repair.`);
+    writeMigrationMarker(stateDir);
     return;
   }
   if (Object.keys(globalMapping).length === 0) {

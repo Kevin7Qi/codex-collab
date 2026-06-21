@@ -724,6 +724,45 @@ describe("migrateGlobalState", () => {
     expect(betaRun!.completedAt).toBe("2026-01-04T00:00:00Z");
   });
 
+  test("assigns a new short ID when a legacy short ID collides with an existing workspace entry", () => {
+    // A pre-existing per-workspace entry already occupies short ID "abc12345".
+    const wsRoot = cwdDir;
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    mkdirSync(wsStateDir, { recursive: true });
+    saveThreadIndex(wsStateDir, {
+      abc12345: {
+        threadId: "thr_existing",
+        name: null,
+        model: null,
+        cwd: wsRoot,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    });
+
+    // Legacy global entry reuses the same short ID but points at a different thread.
+    writeGlobalThreads(globalDir, {
+      abc12345: {
+        threadId: "thr_legacy",
+        createdAt: "2026-02-01T00:00:00Z",
+        updatedAt: "2026-02-02T00:00:00Z",
+        cwd: wsRoot,
+        lastStatus: "completed",
+      },
+    });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const index = loadThreadIndex(wsStateDir);
+    // The existing entry keeps its short ID and thread.
+    expect(index.abc12345.threadId).toBe("thr_existing");
+    // The legacy entry is migrated under a freshly generated, non-colliding ID.
+    const legacyShortId = Object.entries(index).find(([, e]) => e.threadId === "thr_legacy")?.[0];
+    expect(legacyShortId).toBeDefined();
+    expect(legacyShortId).not.toBe("abc12345");
+    expect(Object.keys(index)).toHaveLength(2);
+  });
+
   test("copies log files to per-workspace logs dir", () => {
     const wsRoot = cwdDir;
     writeGlobalThreads(globalDir, {
@@ -1020,6 +1059,32 @@ describe("migrateGlobalState", () => {
     // No `.corrupt.<ts>` backup file should have been created.
     const backups = readdirSync(globalDir).filter(f => f.startsWith("threads.json.corrupt."));
     expect(backups).toEqual([]);
+  });
+
+  test("stamps the marker on corrupt legacy file so it does not re-log every command", () => {
+    // Terminal corruption is a permanent state for this binary; without the
+    // marker, migrateGlobalState (run from getWorkspacePaths on every command)
+    // would re-parse, re-fail, and re-log indefinitely. The marker makes the
+    // second pass a silent no-op while leaving the legacy file untouched.
+    writeFileSync(join(globalDir, "threads.json"), "{ this is not, valid json", { mode: 0o600 });
+
+    migrateGlobalState(cwdDir, globalDir);
+
+    const wsStateDir = computeWsStateDir(globalDir, cwdDir);
+    expect(existsSync(join(wsStateDir, MIGRATION_STATE_FILENAME))).toBe(true);
+
+    // Second pass with the marker present must be silent (no churn) and must
+    // not have touched the corrupt legacy file.
+    const originalError = console.error;
+    const logs: string[] = [];
+    console.error = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    try {
+      migrateGlobalState(cwdDir, globalDir);
+    } finally {
+      console.error = originalError;
+    }
+    expect(logs.filter(l => l.startsWith("[codex]"))).toEqual([]);
+    expect(existsSync(join(globalDir, "threads.json"))).toBe(true);
   });
 
   // ─── migration marker (schema version gate) ──────────────────────────────
