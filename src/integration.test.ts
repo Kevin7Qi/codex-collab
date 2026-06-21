@@ -26,7 +26,10 @@ interface RunResult {
 
 function runCli(args: string[], env?: Record<string, string>): RunResult {
   const result = Bun.spawnSync(["bun", "run", CLI, ...args], {
-    env: { ...process.env, ...env },
+    // Short broker idle timeout so any detached broker self-exits in seconds
+    // instead of lingering for 30 min. HOME stays opt-in per caller so the
+    // gated live test keeps the real ~/.codex auth.
+    env: { ...process.env, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000", ...env },
     timeout: 10_000,
   });
   return {
@@ -137,7 +140,9 @@ describe("health command", () => {
     // so we only verify the command is recognized — not that it completes.
     // Full end-to-end health check is in the live integration suite below.
     const result = Bun.spawnSync(["bun", "run", CLI, "health"], {
-      env: process.env,
+      // Isolated HOME so this never spawns a broker in the real ~/.codex-collab,
+      // and a short idle timeout so that broker self-exits in seconds.
+      env: { ...process.env, HOME: TEST_DATA_DIR, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000" },
       timeout: 3_000,
     });
     const combined = result.stdout.toString() + result.stderr.toString();

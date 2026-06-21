@@ -1,11 +1,23 @@
 // CLI invocation tests — spawn bun to exercise argument parsing and commands
 
-import { describe, it, expect, setDefaultTimeout } from "bun:test";
+import { describe, it, expect, setDefaultTimeout, afterAll } from "bun:test";
 import { spawnSync } from "child_process";
+import { mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 setDefaultTimeout(10_000);
 
 const CLI = "src/cli.ts";
+
+// Isolated HOME so commands that spawn a broker (e.g. `health`) never touch the
+// real ~/.codex-collab, plus a short broker idle timeout so any detached broker
+// self-exits in seconds instead of lingering for 30 min and orphaning across runs.
+const TEST_HOME = mkdtempSync(join(tmpdir(), "codex-collab-cli-home-"));
+
+afterAll(() => {
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 function run(...args: string[]): { stdout: string; stderr: string; exitCode: number } {
   const result = spawnSync("bun", ["run", CLI, ...args], {
@@ -13,6 +25,7 @@ function run(...args: string[]): { stdout: string; stderr: string; exitCode: num
     cwd: import.meta.dir + "/..",
     stdio: ["pipe", "pipe", "pipe"],
     timeout: 5000,
+    env: { ...process.env, HOME: TEST_HOME, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000" },
   });
   return {
     stdout: (result.stdout ?? "") as string,

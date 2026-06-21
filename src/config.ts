@@ -61,7 +61,17 @@ export const config = {
   // Timeouts
   defaultTimeout: 1200, // seconds — turn completion (20 min)
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
-  defaultBrokerIdleTimeout: 30 * 60 * 1000, // 30 min in ms
+  // Broker idle timeout (ms) before a detached broker self-exits. Overridable
+  // via CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS so tests can make brokers exit in
+  // seconds instead of lingering for 30 min and orphaning across test runs.
+  get defaultBrokerIdleTimeout(): number {
+    const raw = process.env.CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS;
+    if (raw !== undefined) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 30 * 60 * 1000; // 30 min in ms
+  },
 
   // Limits
   maxRunsPerWorkspace: 50,
