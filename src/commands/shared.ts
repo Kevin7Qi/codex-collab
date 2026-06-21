@@ -43,6 +43,7 @@ import {
 } from "fs";
 import { resolve, join, dirname } from "path";
 import type {
+  ThreadForkParams,
   ThreadStartResponse,
   Model,
   TurnResult,
@@ -619,34 +620,61 @@ export async function startOrResumeThread(
       validateId(opts.resumeId);
       threadId = opts.resumeId;
     }
-    shortId = findShortId(ws.threadsFile, threadId) ?? opts.resumeId;
-    const resumeParams: Record<string, unknown> = {
-      threadId,
-      persistExtendedHistory: false,
-    };
-    // Only forward flags that were explicitly provided on the command line
-    if (opts.explicit.has("model")) resumeParams.model = opts.model;
-    if (opts.explicit.has("dir")) resumeParams.cwd = opts.dir;
-    if (opts.explicit.has("approval")) resumeParams.approvalPolicy = opts.approval;
-    if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
-    // Forced overrides from caller (e.g., review forces sandbox to read-only)
-    if (extraStartParams) Object.assign(resumeParams, extraStartParams);
-    effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
-    // Ensure the thread is in our local index (may not be if it was created externally)
-    if (!findShortId(ws.threadsFile, threadId)) {
+
+    if (isReview) {
+      const forkParams: ThreadForkParams = {
+        threadId,
+        ephemeral: true,
+      };
+      if (opts.explicit.has("model")) forkParams.model = opts.model;
+      if (opts.explicit.has("dir")) forkParams.cwd = opts.dir;
+      if (opts.explicit.has("approval")) forkParams.approvalPolicy = opts.approval;
+      // Reviews must run in read-only mode. `thread/resume.sandbox` is not
+      // reliable for already-loaded broker threads, and `review/start` has no
+      // per-turn sandbox override, so fork the resumed context into a fresh
+      // read-only review thread.
+      Object.assign(forkParams, extraStartParams ?? {});
+      effective = await client.request<ThreadStartResponse>("thread/fork", forkParams);
+      threadId = effective.thread.id;
       registerThread(ws.threadsFile, threadId, {
         model: effective.model,
-        cwd: opts.dir,
+        cwd: effective.cwd ?? opts.dir,
         preview,
       });
-      shortId = findShortId(ws.threadsFile, threadId) ?? shortId;
+      const resolvedShortId = findShortId(ws.threadsFile, threadId);
+      if (!resolvedShortId) die(`Internal error: forked review thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
+      shortId = resolvedShortId;
+      isNewThread = true;
     } else {
-      // Refresh stored metadata so `threads` stays accurate after resume
-      updateThreadMeta(ws.threadsFile, threadId, {
-        model: effective.model,
-        ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
-        ...(preview ? { preview } : {}),
-      });
+      shortId = findShortId(ws.threadsFile, threadId) ?? opts.resumeId;
+      const resumeParams: Record<string, unknown> = {
+        threadId,
+        persistExtendedHistory: false,
+      };
+      // Only forward flags that were explicitly provided on the command line
+      if (opts.explicit.has("model")) resumeParams.model = opts.model;
+      if (opts.explicit.has("dir")) resumeParams.cwd = opts.dir;
+      if (opts.explicit.has("approval")) resumeParams.approvalPolicy = opts.approval;
+      if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
+      // Forced overrides from caller (e.g., review forces sandbox to read-only)
+      if (extraStartParams) Object.assign(resumeParams, extraStartParams);
+      effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+      // Ensure the thread is in our local index (may not be if it was created externally)
+      if (!findShortId(ws.threadsFile, threadId)) {
+        registerThread(ws.threadsFile, threadId, {
+          model: effective.model,
+          cwd: opts.dir,
+          preview,
+        });
+        shortId = findShortId(ws.threadsFile, threadId) ?? shortId;
+      } else {
+        // Refresh stored metadata so `threads` stays accurate after resume
+        updateThreadMeta(ws.threadsFile, threadId, {
+          model: effective.model,
+          ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
+          ...(preview ? { preview } : {}),
+        });
+      }
     }
   } else {
     const startParams: Record<string, unknown> = {

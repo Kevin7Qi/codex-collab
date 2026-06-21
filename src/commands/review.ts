@@ -85,7 +85,7 @@ export async function handleReview(args: string[]): Promise<void> {
       console.error(`[codex] Reviewing (thread ${shortId})...`);
     } else {
       if (options.resumeId) {
-        progress(`Resumed thread ${shortId} for review`);
+        progress(`Forked thread ${shortId} for read-only review`);
       } else {
         progress(`Thread ${shortId} started for review (${effective.model}, read-only)`);
       }

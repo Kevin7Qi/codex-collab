@@ -64,9 +64,9 @@ codex-collab review --mode commit --ref abc1234 -d /path/to/project --content-on
 codex-collab review "Focus on security issues in auth" -d /path/to/project --content-only
 ```
 
-**Reviews are one-shot.** Each `review` call runs a single review inside a transient review sub-thread and exits — you cannot continue the review itself or ask the reviewer follow-up questions. For follow-ups on findings, use `run --resume <id>` on the same thread; the review is part of the thread's history.
+**Reviews are one-shot.** Each `review` call runs a single review inside a transient review sub-thread and exits — you cannot continue the review itself or ask the reviewer follow-up questions. For follow-ups on findings, use `run --resume <id>` with the relevant review output in the prompt.
 
-`review --resume <id>` is useful for running a review on a task thread Codex has already been working in (the thread persists and its context carries over). `review` with no `--resume` creates an ephemeral thread that disappears after the review — use this for standalone reviews with no prior context.
+`review --resume <id>` is useful for running a review with context from a task thread Codex has already been working in. It forks that context into an ephemeral read-only review thread, so the original task thread is not reconfigured or mutated. `review` with no `--resume` creates an ephemeral thread that disappears after the review — use this for standalone reviews with no prior context.
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
@@ -82,9 +82,9 @@ When consecutive tasks relate to the same project, resume the existing thread. C
 
 **If the user asks to continue or follow up on a prior task but you don't have the thread ID in context**, follow this discovery flow:
 
-1. `codex-collab threads --discover --json` — see top 5 recent threads (server + local).
-2. If unsure which thread is right, `codex-collab peek <id> --json` to see the last exchange of a candidate.
-3. For very long threads where peek alone isn't enough, spawn a subagent with `codex-collab peek <id> --limit 100 --full --json` and ask it to summarize. This keeps the firehose out of your own context.
+1. `codex-collab threads --discover` — see top 5 recent threads (server + local).
+2. If unsure which thread is right, `codex-collab peek <id>` to see the last exchange of a candidate.
+3. For very long threads where peek alone isn't enough, spawn a subagent with `codex-collab peek <id> --limit 100 --full` and ask it to summarize. This keeps the firehose out of your own context.
 4. `codex-collab run --resume <id> "..."` to continue.
 
 Only run `--discover` when a resume is actually wanted — it's a lookup performed on demand.
@@ -178,9 +178,8 @@ codex-collab progress <id>              # Recent activity (tail of log)
 codex-collab threads                    # List threads (current session)
 codex-collab threads --all              # List all threads (no display limit)
 codex-collab threads --discover         # Discover threads from Codex server (top 5 by default)
-codex-collab threads --json             # List threads (JSON)
 codex-collab peek <id>                  # Show last exchange (default) from server
-codex-collab peek <id> --limit 10 --full --json  # Show 10 raw items as JSON
+codex-collab peek <id> --limit 10 --full  # Show 10 items including non-message types
 codex-collab kill <id>                  # Stop a running thread
 codex-collab delete <id>               # Archive thread, delete local files
 codex-collab clean                      # Delete old logs and stale mappings

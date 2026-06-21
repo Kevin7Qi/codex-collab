@@ -8,15 +8,18 @@ import {
   pickBestModel,
   validateGitRef,
   applyUserConfig,
+  startOrResumeThread,
   turnOverrides,
   formatDuration,
   isThreadProcessAlive,
   defaultOptions,
   VALID_REVIEW_MODES,
+  type WorkspacePaths,
   type Options,
 } from "./shared";
 import { config } from "../config";
-import type { Model } from "../types";
+import type { AppServerClient } from "../client";
+import type { Model, ThreadStartResponse } from "../types";
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -26,6 +29,50 @@ function freshTmpDir(name: string): string {
   const dir = join(tmpRoot, name);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function freshWorkspace(name: string): WorkspacePaths {
+  const stateDir = freshTmpDir(name);
+  const ws = {
+    stateDir,
+    threadsFile: join(stateDir, "threads.json"),
+    logsDir: join(stateDir, "logs"),
+    approvalsDir: join(stateDir, "approvals"),
+    killSignalsDir: join(stateDir, "kill-signals"),
+    pidsDir: join(stateDir, "pids"),
+    runsDir: join(stateDir, "runs"),
+  };
+  for (const dir of [ws.logsDir, ws.approvalsDir, ws.killSignalsDir, ws.pidsDir, ws.runsDir]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  return ws;
+}
+
+function threadStartResponse(threadId: string, cwd: string): ThreadStartResponse {
+  return {
+    thread: {
+      id: threadId,
+      preview: "",
+      modelProvider: "openai",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: { type: "idle" },
+      path: null,
+      cwd,
+      cliVersion: "0.1.0",
+      source: "mock",
+      name: null,
+      agentNickname: null,
+      agentRole: null,
+      gitInfo: null,
+      turns: [],
+    },
+    model: "gpt-5.3-codex",
+    modelProvider: "openai",
+    cwd,
+    approvalPolicy: "never",
+    sandbox: { type: "readOnly" },
+  };
 }
 
 beforeEach(() => {
@@ -1009,6 +1056,68 @@ console.log("should not reach here");
     expect(result.stderr.toString()).toContain("Invalid JSON");
     expect(result.stderr.toString()).toContain("config.json");
     expect(result.stdout.toString()).not.toContain("should not reach here");
+  });
+});
+
+// ─── startOrResumeThread ───────────────────────────────────────────────────
+
+describe("startOrResumeThread", () => {
+  test("review --resume forks source context into an ephemeral read-only review thread", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const sourceThreadId = "01900000000070008000000000000001";
+    const forkedThreadId = "01900000000070008000000000000002";
+    const client: AppServerClient = {
+      request: async <T,>(method: string, params?: unknown): Promise<T> => {
+        calls.push({ method, params });
+        if (method === "thread/fork") {
+          return threadStartResponse(forkedThreadId, "/tmp/review-project") as T;
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      },
+      notify: () => {},
+      on: () => () => {},
+      onAny: () => () => {},
+      onRequest: () => () => {},
+      respond: () => {},
+      onClose: () => () => {},
+      close: async () => {},
+      userAgent: "mock",
+      brokerBusy: false,
+    };
+    const opts = defaultOptions();
+    opts.resumeId = sourceThreadId;
+    opts.model = "gpt-5";
+    opts.dir = "/tmp/review-project";
+    opts.approval = "on-request";
+    opts.sandbox = "danger-full-access";
+    opts.explicit.add("model");
+    opts.explicit.add("dir");
+    opts.explicit.add("approval");
+    opts.explicit.add("sandbox");
+
+    const result = await startOrResumeThread(
+      client,
+      opts,
+      freshWorkspace("review-resume-fork"),
+      { sandbox: "read-only" },
+      "Review PR",
+      true,
+    );
+
+    expect(result.threadId).toBe(forkedThreadId);
+    expect(result.shortId).not.toBe(sourceThreadId);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({
+      method: "thread/fork",
+      params: {
+        threadId: sourceThreadId,
+        ephemeral: true,
+        model: "gpt-5",
+        cwd: "/tmp/review-project",
+        approvalPolicy: "on-request",
+        sandbox: "read-only",
+      },
+    });
   });
 });
 

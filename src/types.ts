@@ -114,6 +114,18 @@ export interface ThreadResumeParams {
 
 export type ThreadResumeResponse = ThreadStartResponse;
 
+export interface ThreadForkParams {
+  threadId: string;
+  model?: string;
+  cwd?: string;
+  approvalPolicy?: ApprovalPolicy;
+  sandbox?: string | null;
+  config?: Record<string, unknown>;
+  ephemeral?: boolean;
+}
+
+export type ThreadForkResponse = ThreadStartResponse;
+
 export interface ThreadListParams {
   cursor?: string;
   limit?: number;
