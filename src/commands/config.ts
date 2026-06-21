@@ -116,6 +116,7 @@ export async function handleHealth(_args: string[]): Promise<void> {
     die("codex CLI not found. Install: npm install -g @openai/codex");
   }
 
+  console.log(`  codex-collab: ${config.clientVersion}`);
   console.log(`  bun:   ${Bun.version}`);
   // `where` on Windows returns multiple matches; show only the first
   console.log(`  codex: ${which.stdout.toString().trim().split("\n")[0].trim()}`);

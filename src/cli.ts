@@ -81,8 +81,12 @@ process.on("SIGTERM", () => handleShutdownSignal(143));
 // Help text
 // ---------------------------------------------------------------------------
 
+function printVersion() {
+  console.log(`codex-collab ${config.clientVersion}`);
+}
+
 function showHelp() {
-  console.log(`codex-collab — Claude + Codex collaboration tool
+  console.log(`codex-collab ${config.clientVersion} — Claude + Codex collaboration tool
 
 Usage: codex-collab <command> [options]
 
@@ -104,6 +108,7 @@ Commands:
   clean                   Delete old logs and stale mappings
   delete <id>             Archive thread, delete local files
   health                  Check prerequisites
+  version                 Print version
 
 Options:
   -m, --model <model>     Model name (default: auto — latest available)
@@ -121,6 +126,7 @@ Options:
   --limit <n>             Number of items shown (peek, threads commands)
   --full                  Include all item types (peek command)
   --content-only          Print only result text (no progress lines)
+  -v, --version           Print version and exit
 
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
@@ -215,6 +221,11 @@ function extractCommand(args: string[]): { command: string; rest: string[] } {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  if (rawArgs.includes("--version") || rawArgs.includes("-v")) {
+    printVersion();
+    process.exit(0);
+  }
+
   if (rawArgs.length === 0) {
     showHelp();
     process.exit(0);
@@ -231,7 +242,7 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
-    "peek",
+    "peek", "version",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -279,6 +290,8 @@ async function main() {
       return (await import("./commands/config")).handleHealth(rest);
     case "peek":
       return (await import("./commands/peek")).handlePeek(rest);
+    case "version":
+      return printVersion();
   }
 }
 

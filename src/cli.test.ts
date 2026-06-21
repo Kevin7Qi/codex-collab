@@ -5,6 +5,7 @@ import { spawnSync } from "child_process";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import pkg from "../package.json";
 
 setDefaultTimeout(10_000);
 
@@ -37,6 +38,28 @@ function run(...args: string[]): { stdout: string; stderr: string; exitCode: num
 // ---------------------------------------------------------------------------
 // Valid commands
 // ---------------------------------------------------------------------------
+
+describe("CLI version", () => {
+  const expected = `codex-collab ${pkg.version}`;
+
+  it("--version prints version and exits 0", () => {
+    const { stdout, exitCode } = run("--version");
+    expect(exitCode).toBe(0);
+    expect(stdout.trim()).toBe(expected);
+  });
+
+  it("-v prints version and exits 0", () => {
+    const { stdout, exitCode } = run("-v");
+    expect(exitCode).toBe(0);
+    expect(stdout.trim()).toBe(expected);
+  });
+
+  it("version command prints version and exits 0", () => {
+    const { stdout, exitCode } = run("version");
+    expect(exitCode).toBe(0);
+    expect(stdout.trim()).toBe(expected);
+  });
+});
 
 describe("CLI valid commands", () => {
   it("--help prints usage and exits 0", () => {
