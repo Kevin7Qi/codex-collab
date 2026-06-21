@@ -1710,6 +1710,65 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 10_000);
 
+    test("orphan fast turn (completed before response) does NOT hold the stream slot", async () => {
+      // Regression: when a streaming client disconnects mid-request AND its
+      // turn/completed lands before the turn/start response is processed (the
+      // fast-turn race), the orphan path must NOT reserve the stream slot — the
+      // turn is already done, so there is nothing to unwind. Reserving would
+      // pin the broker busy until the watchdog fires (ORPHAN_WATCHDOG_MS = idle
+      // timeout), forcing every other client onto direct connections meanwhile.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      // completeBeforeResponse: the single turn/completed (turn-001) is written
+      // before the turn/start response; turnDelay holds the response so the
+      // client can disconnect after the completion but before the response
+      // lands. sendTurnCompleted:false ensures NO second completion is sent
+      // after the response — that's what production does (one completion per
+      // turn), and a second completion would mask the bug by naturally
+      // releasing the (incorrect) orphan reservation.
+      const mockDir = createMockCodex(tempDir, {
+        completeBeforeResponse: true,
+        sendTurnCompleted: false,
+        turnDelay: 300,
+      });
+
+      const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 5000 });
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        void client1.request("turn/start", {
+          threadId: "thread-fast-orphan",
+          input: [{ type: "text", text: "go" }],
+        }).catch(() => undefined);
+
+        // Disconnect after turn/completed is processed (sent first) but before
+        // the delayed turn/start response arrives.
+        await new Promise((r) => setTimeout(r, 50));
+        await client1.close();
+        // Let the response land (turnDelay=300ms) and the orphan branch run.
+        await new Promise((r) => setTimeout(r, 500));
+
+        // The slot must be free: a second streaming client must NOT get busy.
+        const client2 = await TestClient.connectAndInit(sockPath);
+        let result: unknown;
+        let busyErr: { code?: number } | null = null;
+        try {
+          result = await client2.request("turn/start", {
+            threadId: "thread-fast-orphan-2",
+            input: [{ type: "text", text: "ok" }],
+          });
+        } catch (err) {
+          busyErr = err as { code?: number };
+        }
+        expect(busyErr).toBeNull();
+        expect(result).toBeDefined();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 10_000);
+
     test("review client disconnect before review/start response interrupts the review subthread", async () => {
       // Regression: the orphan path read params.threadId (parent) and sent
       // turn/interrupt there, while the actual review turn runs on the

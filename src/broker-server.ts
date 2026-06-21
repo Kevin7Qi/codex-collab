@@ -592,7 +592,15 @@ async function main() {
           ? (resultObj.reviewThreadId as string)
           : undefined;
         const interruptThreadId = reviewThreadId ?? parentThreadId;
-        if (turnId && interruptThreadId) {
+        if (turnId && interruptThreadId && completedStreamTurnIds.has(turnId)) {
+          // Fast turn: turn/completed already landed during the request (same
+          // race the normal streaming path guards via `alreadyCompleted`). The
+          // turn is done — there is nothing to unwind, so do NOT reserve the
+          // slot. Reserving here would hold the stream until the watchdog fires
+          // (up to ORPHAN_WATCHDOG_MS, default the idle timeout), forcing every
+          // other client onto direct connections in the meantime.
+          completedStreamTurnIds.delete(turnId);
+        } else if (turnId && interruptThreadId) {
           // Reserve BEFORE the interrupt so the slot stays held even when
           // turn/interrupt succeeds; the natural turn/completed (or the
           // watchdog) is what releases the reservation. Keyed on every
