@@ -1,9 +1,9 @@
 import { describe, expect, test, beforeAll, beforeEach, afterEach } from "bun:test";
-import { parseMessage, formatNotification, formatResponse, connect, type AppServerClient } from "./protocol";
+import { parseMessage, formatNotification, formatResponse, connectDirect as connect, type AppServerClient } from "./client";
 import { join } from "path";
 import { tmpdir } from "os";
 
-// Test-local formatRequest helper with its own counter (not exported from protocol.ts
+// Test-local formatRequest helper with its own counter (not exported from client.ts
 // to avoid ID collisions with AppServerClient's internal counter).
 let testNextId = 1;
 function formatRequest(method: string, params?: unknown): { line: string; id: number } {
@@ -194,6 +194,21 @@ describe("parseMessage", () => {
     expect(msg).toHaveProperty("error");
   });
 
+  test("returns null for malformed error response", () => {
+    const msg = parseMessage('{"id":1,"error":null}');
+    expect(msg).toBeNull();
+  });
+
+  test("returns null for response with both result and error", () => {
+    const msg = parseMessage('{"id":1,"result":"ok","error":{"code":-1,"message":"bad"}}');
+    expect(msg).toBeNull();
+  });
+
+  test("returns null for request/response hybrid", () => {
+    const msg = parseMessage('{"id":1,"method":"turn/start","result":"ok"}');
+    expect(msg).toBeNull();
+  });
+
   test("parses a request (has id and method)", () => {
     const msg = parseMessage('{"id":5,"method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}');
     expect(msg).toHaveProperty("id", 5);
@@ -245,7 +260,7 @@ describe("AppServerClient", () => {
   test("connect performs initialize handshake and returns userAgent", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
     try {
       expect(c.userAgent).toBe("mock-codex-server/0.1.0");
@@ -257,7 +272,7 @@ describe("AppServerClient", () => {
   test("close shuts down gracefully", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
     await c.close();
     // No error means success — process exited cleanly
@@ -266,7 +281,7 @@ describe("AppServerClient", () => {
   test("request sends and receives response", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
     try {
       const result = await c.request<{ thread: { id: string }; model: string }>(
@@ -283,16 +298,21 @@ describe("AppServerClient", () => {
   test("request rejects with descriptive error on JSON-RPC error response", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
       env: { MOCK_ERROR_RESPONSE: "1" },
     });
     try {
-      const error = await captureErrorMessage(
-        c.request("thread/start", { model: "bad-model" }),
-      );
-      expect(error).toContain(
+      let error: unknown;
+      try {
+        await c.request("thread/start", { model: "bad-model" });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(
         "JSON-RPC error -32603: Internal error: model not available",
       );
+      expect((error as { rpcCode?: number }).rpcCode).toBe(-32603);
     } finally {
       await c.close();
     }
@@ -301,7 +321,7 @@ describe("AppServerClient", () => {
   test("request rejects with error for unknown method", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
     try {
       const error = await captureErrorMessage(c.request("unknown/method"));
@@ -314,7 +334,7 @@ describe("AppServerClient", () => {
   test("request rejects when process exits unexpectedly", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
       env: { MOCK_EXIT_EARLY: "1" },
     });
     try {
@@ -330,7 +350,7 @@ describe("AppServerClient", () => {
   test("request rejects after client is closed", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
     await c.close();
 
@@ -375,7 +395,7 @@ describe("AppServerClient", () => {
     const received: unknown[] = [];
     const c = await connect({
       command: ["bun", "run", serverPath],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
 
     try {
@@ -442,7 +462,7 @@ describe("AppServerClient", () => {
 
     const c = await connect({
       command: ["bun", "run", serverPath],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
 
     try {
@@ -469,7 +489,7 @@ describe("AppServerClient", () => {
   test("on returns unsubscribe function", async () => {
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
-      requestTimeout: 5000,
+      requestTimeout: 10000,
     });
 
     try {

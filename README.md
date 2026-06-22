@@ -46,6 +46,28 @@ After installation, **reopen your terminal** so the updated PATH takes effect, t
 
 The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and adds a binary shim to your PATH. Once installed, Claude discovers the skill automatically.
 
+### Upgrading
+
+To upgrade an existing install, pull the latest version and rerun the installer:
+
+```bash
+git pull
+./install.sh
+codex-collab health
+```
+
+On Windows:
+
+```powershell
+git pull
+powershell -ExecutionPolicy Bypass -File install.ps1
+codex-collab health
+```
+
+The installer replaces the installed skill bundle and binary shim. Existing configuration, templates, thread history, and run logs under `~/.codex-collab/` are preserved. Treat `~/.claude/skills/codex-collab/` as installer-managed: manual edits there may be overwritten on upgrade.
+
+When upgrading from older versions, codex-collab automatically migrates thread state to the per-workspace layout on first use. No manual state migration is required. The old `jobs` command remains available as a deprecated alias for `threads`.
+
 <details>
 <summary>Development mode</summary>
 
@@ -80,11 +102,14 @@ codex-collab run --resume <id> "now check error handling" --content-only
 |---------|-------------|
 | `run "prompt" [opts]` | Start thread, send prompt, wait, print output |
 | `review [opts]` | Code review (PR, uncommitted, commit) |
-| `jobs [--json] [--all]` | List threads (`--limit <n>` to cap) |
+| `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server) |
 | `kill <id>` | Interrupt running thread |
 | `output <id>` | Full log for thread |
 | `progress <id>` | Recent activity (tail of log) |
+| `peek <id>` | Show recent conversation slice from server |
+| `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |
+| `templates` | List available prompt templates |
 | `health` | Check dependencies |
 
 <details>
@@ -112,9 +137,15 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
+| `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
+| `--json` | JSON output for supported commands (`threads`, `peek`) |
+| `--all` | List all threads with no display limit |
+| `--discover` | Query Codex server for threads not in the local index |
+| `--limit <n>` | Limit items shown by `threads` or `peek` |
+| `--full` | Include all item types in `peek` output (default shows messages only) |
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
 | `--timeout <sec>` | Turn timeout (default: 1200) |
-| `--base <branch>` | Base branch for PR review (default: main) |
+| `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 
 </details>
 

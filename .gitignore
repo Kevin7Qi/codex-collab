@@ -42,6 +42,7 @@ docs/
 .ripgreprc
 .mcp.json
 .claude/
+.codex
 
 # Bare git repo artifacts
 HEAD

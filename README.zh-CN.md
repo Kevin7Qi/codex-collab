@@ -46,6 +46,28 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并添加可执行文件到 PATH。完成后 Claude 即可自动发现该技能。
 
+### 升级
+
+升级已有安装时，拉取最新代码并重新运行安装脚本即可：
+
+```bash
+git pull
+./install.sh
+codex-collab health
+```
+
+Windows:
+
+```powershell
+git pull
+powershell -ExecutionPolicy Bypass -File install.ps1
+codex-collab health
+```
+
+安装脚本会替换已安装的 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下已有的配置、模板、会话历史和运行日志都会保留。请将 `~/.claude/skills/codex-collab/` 视为安装脚本管理的目录：升级时其中的手动修改可能会被覆盖。
+
+从旧版本升级时，codex-collab 会在首次使用时自动把会话状态迁移到按工作区划分的新布局，无需手动迁移状态。旧的 `jobs` 命令仍可作为 `threads` 的已弃用别名使用。
+
 <details>
 <summary>开发模式</summary>
 
@@ -80,11 +102,14 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 |------|------|
 | `run "prompt" [opts]` | 新建会话、发送提示、等待完成并输出结果 |
 | `review [opts]` | 代码审查（PR、未提交更改、指定 commit） |
-| `jobs [--json] [--all]` | 列出会话（`--limit <n>` 限制数量） |
+| `threads [--json] [--all]` | 列出会话（`--limit <n>` 限制数量，`--discover` 扫描服务器） |
 | `kill <id>` | 中断运行中的会话 |
 | `output <id>` | 查看会话完整日志 |
 | `progress <id>` | 查看近期活动（日志尾部） |
+| `peek <id>` | 从服务器查看最近的会话片段 |
+| `config [key] [value]` | 查看或设置持久化默认值 |
 | `models` | 列出可用模型 |
+| `templates` | 列出可用提示词模板 |
 | `health` | 检查依赖项 |
 
 <details>
@@ -112,9 +137,15 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | `--ref <hash>` | 指定 commit 哈希（配合 `--mode commit`） |
 | `--resume <id>` | 恢复已有会话 |
 | `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted（默认: never） |
+| `--template <name>` | 提示词模板（run 命令；优先使用 `~/.codex-collab/templates/`，然后使用内置模板） |
+| `--json` | 对支持的命令输出 JSON（`threads`、`peek`） |
+| `--all` | 列出全部会话，不限制显示数量 |
+| `--discover` | 从 Codex 服务器查询本地索引中没有的会话 |
+| `--limit <n>` | 限制 `threads` 或 `peek` 显示的条目数 |
+| `--full` | 在 `peek` 输出中包含所有条目类型（默认只显示消息） |
 | `--content-only` | 隐藏进度输出；配合 `output` 时仅返回正文内容 |
 | `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200） |
-| `--base <branch>` | PR 审查的基准分支（默认: main） |
+| `--base <branch>` | PR 审查的基准分支（默认: 自动检测默认分支） |
 
 </details>
 

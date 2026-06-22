@@ -1,4 +1,4 @@
-// src/protocol.ts — JSON-RPC client for Codex app server
+// src/client.ts — JSON-RPC client for Codex app server
 
 import { spawn } from "bun";
 import { spawnSync } from "child_process";
@@ -12,7 +12,12 @@ import type {
   InitializeParams,
   InitializeResponse,
 } from "./types";
+import { RpcError } from "./types";
 import { config } from "./config";
+
+const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
+
+export type { RequestId } from "./types";
 
 /** Format a JSON-RPC-style notification (no id, no response). Returns newline-terminated JSON.
  *  Note: Codex app server protocol omits the standard `jsonrpc: "2.0"` field. */
@@ -35,9 +40,41 @@ export function parseMessage(line: string): JsonRpcMessage | null {
 
     const hasMethod = "method" in raw && typeof raw.method === "string";
     const hasId = "id" in raw && (typeof raw.id === "string" || typeof raw.id === "number");
+    const hasResult = "result" in raw;
+    const hasError = "error" in raw;
 
     if (!hasMethod && !hasId) {
       console.error(`[codex] Warning: ignoring non-protocol message: ${line.slice(0, 200)}`);
+      return null;
+    }
+
+    if (hasId && !hasMethod) {
+      if (hasResult === hasError) {
+        console.error(`[codex] Warning: ignoring malformed response: ${line.slice(0, 200)}`);
+        return null;
+      }
+      if (hasError) {
+        const error = (raw as { error?: unknown }).error;
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          typeof (error as { code?: unknown }).code !== "number" ||
+          typeof (error as { message?: unknown }).message !== "string"
+        ) {
+          console.error(`[codex] Warning: ignoring malformed error response: ${line.slice(0, 200)}`);
+          return null;
+        }
+      }
+      return raw as JsonRpcMessage;
+    }
+
+    if (hasMethod && hasId && (hasResult || hasError)) {
+      console.error(`[codex] Warning: ignoring malformed request/response hybrid: ${line.slice(0, 200)}`);
+      return null;
+    }
+
+    if (hasMethod && !hasId && (hasResult || hasError)) {
+      console.error(`[codex] Warning: ignoring malformed notification/response hybrid: ${line.slice(0, 200)}`);
       return null;
     }
 
@@ -53,19 +90,22 @@ export function parseMessage(line: string): JsonRpcMessage | null {
 // ---------------------------------------------------------------------------
 
 /** Pending request tracker. */
-interface PendingRequest {
+export interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
 /** Handler for server-sent notifications. */
-type NotificationHandler = (params: unknown) => void;
+export type NotificationHandler = (params: unknown) => void;
+
+/** Handler for any server-sent notification, including the method name. */
+export type AnyNotificationHandler = (method: string, params: unknown) => void;
 
 /** Handler for server-sent requests (e.g. approval requests). Returns the result to send back. */
-type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
+export type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
 
-/** Options for connect(). */
+/** Options for connectDirect(). */
 export interface ConnectOptions {
   /** Command to spawn. Defaults to ["codex", "app-server"]. */
   command?: string[];
@@ -77,7 +117,7 @@ export interface ConnectOptions {
   requestTimeout?: number;
 }
 
-/** The client interface returned by connect(). */
+/** The client interface returned by connectDirect(). */
 export interface AppServerClient {
   /** Send a request and wait for a response. Rejects on timeout, error, or process exit. */
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
@@ -85,11 +125,19 @@ export interface AppServerClient {
   notify(method: string, params?: unknown): void;
   /** Register a handler for server-sent notifications. Returns an unsubscribe function. */
   on(method: string, handler: NotificationHandler): () => void;
+  /** Register a wildcard handler that fires for every server-sent notification.
+   *  Used by the broker to forward all notifications to clients without an
+   *  allowlist of method names — new methods added by Codex's protocol must
+   *  pass through automatically. Returns an unsubscribe function. */
+  onAny(handler: AnyNotificationHandler): () => void;
   /** Register a handler for server-sent requests (e.g. approval). One handler per method;
    *  new registrations replace previous ones. Returns an unsubscribe function. */
   onRequest(method: string, handler: ServerRequestHandler): () => void;
   /** Send a response to a server-sent request. */
   respond(id: RequestId, result: unknown): void;
+  /** Register a callback invoked when the connection closes unexpectedly
+   *  (e.g. the app-server process exits). Not called on intentional close(). */
+  onClose(handler: () => void): () => void;
   /** Close the connection and terminate the server process.
    *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL.
    *  On Windows: close stdin, then immediately terminate the process tree
@@ -97,25 +145,28 @@ export interface AppServerClient {
   close(): Promise<void>;
   /** The user-agent string from the initialize handshake. */
   userAgent: string;
+  /** True when the broker reported it is busy serving another client's turn.
+   *  Always false for direct connections. */
+  brokerBusy: boolean;
 }
 
 /** Type guard: message is a response (has id + result). */
-function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
+export function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
   return "id" in msg && "result" in msg && !("method" in msg);
 }
 
 /** Type guard: message is an error response (has id + error). */
-function isError(msg: JsonRpcMessage): msg is JsonRpcError {
+export function isError(msg: JsonRpcMessage): msg is JsonRpcError {
   return "id" in msg && "error" in msg && !("method" in msg);
 }
 
 /** Type guard: message is a request (has id + method). */
-function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
+export function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
   return "id" in msg && "method" in msg && !("result" in msg) && !("error" in msg);
 }
 
 /** Type guard: message is a notification (has method, no id). */
-function isNotification(msg: JsonRpcMessage): msg is JsonRpcNotification {
+export function isNotification(msg: JsonRpcMessage): msg is JsonRpcNotification {
   return "method" in msg && !("id" in msg);
 }
 
@@ -123,7 +174,7 @@ function isNotification(msg: JsonRpcMessage): msg is JsonRpcNotification {
  * Spawn the Codex app-server process, perform the initialize handshake,
  * and return an AppServerClient for request/response communication.
  */
-export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
+export async function connectDirect(opts?: ConnectOptions): Promise<AppServerClient> {
   const command = opts?.command ?? ["codex", "app-server"];
   const requestTimeout = opts?.requestTimeout ?? config.requestTimeout;
 
@@ -136,6 +187,10 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
         stderr: "pipe",
         cwd: opts?.cwd,
         env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+        // On Windows, `codex` resolves to `codex.cmd` and Bun.spawn wraps it
+        // with `cmd.exe /c`, which would otherwise show a console window for
+        // the lifetime of the broker's app-server.
+        windowsHide: true,
       });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -149,6 +204,7 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
   // Internal state
   const pending = new Map<RequestId, PendingRequest>();
   const notificationHandlers = new Map<string, Set<NotificationHandler>>();
+  const anyNotificationHandlers = new Set<AnyNotificationHandler>();
   const requestHandlers = new Map<string, ServerRequestHandler>();
   let closed = false;
   let exited = false;
@@ -195,7 +251,10 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
         clearTimeout(entry.timer);
         pending.delete(msg.id);
         const e = msg.error;
-        entry.reject(new Error(`JSON-RPC error ${e.code}: ${e.message}${e.data ? ` (${JSON.stringify(e.data)})` : ""}`));
+        entry.reject(new RpcError(
+          `JSON-RPC error ${e.code}: ${e.message}${e.data ? ` (${JSON.stringify(e.data)})` : ""}`,
+          e.code,
+        ));
       }
       return;
     }
@@ -209,11 +268,16 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
             (res) => write(formatResponse(msg.id, res)),
             (err) => {
               const errMsg = err instanceof Error ? err.message : String(err);
+              // Preserve a structured code/data the handler attached to the
+              // Error (e.g. a forwarded client rejection); fall back to the
+              // generic internal-error code otherwise.
+              const errAny = err as { code?: unknown; data?: unknown };
+              const code = typeof errAny?.code === "number" ? errAny.code : -32603;
+              const message = code === -32603 ? `Handler error: ${errMsg}` : errMsg;
               console.error(`[codex] Error in request handler for "${msg.method}": ${errMsg}`);
-              write(JSON.stringify({
-                id: msg.id,
-                error: { code: -32603, message: `Handler error: ${errMsg}` },
-              }) + "\n");
+              const errBody: Record<string, unknown> = { code, message };
+              if (errAny?.data !== undefined) errBody.data = errAny.data;
+              write(JSON.stringify({ id: msg.id, error: errBody }) + "\n");
             },
           );
       } else {
@@ -223,6 +287,15 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     }
 
     if (isNotification(msg)) {
+      // Wildcard handlers fire first, regardless of method, so the broker
+      // forwards every notification — including new ones the protocol adds.
+      for (const h of anyNotificationHandlers) {
+        try {
+          h(msg.method, msg.params);
+        } catch (e) {
+          console.error(`[codex] Error in wildcard notification handler for "${msg.method}": ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       const handlers = notificationHandlers.get(msg.method);
       if (handlers) {
         for (const h of handlers) {
@@ -247,6 +320,12 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_BUFFER_SIZE) {
+          console.error("[codex] App server response buffer exceeded maximum size");
+          rejectAll("App server response buffer exceeded maximum size");
+          try { proc.kill(); } catch {}
+          break;
+        }
 
         let newlineIdx: number;
         while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
@@ -270,11 +349,17 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     }
   })();
 
-  // Monitor process exit: reject all pending requests
+  // Monitor process exit: reject all pending requests and notify close handlers
+  const closeHandlers = new Set<() => void>();
   proc.exited.then(() => {
     exited = true;
     if (!closed) {
       rejectAll("App server process exited unexpectedly");
+      for (const handler of closeHandlers) {
+        try { handler(); } catch (e) {
+          console.error(`[codex] Warning: close handler error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     }
   });
 
@@ -336,6 +421,11 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     };
   }
 
+  function onAny(handler: AnyNotificationHandler): () => void {
+    anyNotificationHandlers.add(handler);
+    return () => { anyNotificationHandlers.delete(handler); };
+  }
+
   /** Register a handler for server-sent requests. Only one handler per method;
    *  a new registration replaces the previous one (with a warning). */
   function onRequest(method: string, handler: ServerRequestHandler): () => void {
@@ -353,6 +443,11 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
 
   function respond(id: RequestId, result: unknown): void {
     write(formatResponse(id, result));
+  }
+
+  function onClose(handler: () => void): () => void {
+    closeHandlers.add(handler);
+    return () => { closeHandlers.delete(handler); };
   }
 
   /** Wait for the process to exit within the given timeout. */
@@ -420,7 +515,10 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
 
   const initParams: InitializeParams = {
     clientInfo: { name: config.clientName, title: null, version: config.clientVersion },
-    capabilities: null,
+    capabilities: {
+      experimentalApi: false,
+      optOutNotificationMethods: ["item/reasoning/textDelta"],
+    },
   };
 
   let initResult: InitializeResponse;
@@ -436,9 +534,12 @@ export async function connect(opts?: ConnectOptions): Promise<AppServerClient> {
     request,
     notify,
     on,
+    onAny,
     onRequest,
     respond,
+    onClose,
     close,
     userAgent: initResult.userAgent,
+    brokerBusy: false,
   };
 }

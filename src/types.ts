@@ -63,6 +63,8 @@ export interface ThreadStartParams {
   config?: Record<string, unknown>;
   experimentalRawEvents: boolean;
   persistExtendedHistory: boolean;
+  ephemeral?: boolean;
+  serviceName?: string;
 }
 
 export interface Thread {
@@ -111,6 +113,18 @@ export interface ThreadResumeParams {
 }
 
 export type ThreadResumeResponse = ThreadStartResponse;
+
+export interface ThreadForkParams {
+  threadId: string;
+  model?: string;
+  cwd?: string;
+  approvalPolicy?: ApprovalPolicy;
+  sandbox?: string | null;
+  config?: Record<string, unknown>;
+  ephemeral?: boolean;
+}
+
+export type ThreadForkResponse = ThreadStartResponse;
 
 export interface ThreadListParams {
   cursor?: string;
@@ -170,6 +184,14 @@ export type CodexErrorInfo =
   | { responseTooManyFailedAttempts: { httpStatusCode: number | null } }
   | "other";
 
+/** Error carrying a JSON-RPC error code for protocol-level error forwarding. */
+export class RpcError extends Error {
+  constructor(message: string, public readonly rpcCode: number) {
+    super(message);
+    this.name = "RpcError";
+  }
+}
+
 export interface TurnError {
   message: string;
   codexErrorInfo?: CodexErrorInfo | null;
@@ -187,7 +209,8 @@ export interface TurnInterruptParams {
 
 // --- Items ---
 
-export type ThreadItem =
+/** Known item types with proper discriminants. */
+export type KnownThreadItem =
   | UserMessageItem
   | AgentMessageItem
   | PlanItem
@@ -199,8 +222,21 @@ export type ThreadItem =
   | ImageViewItem
   | EnteredReviewModeItem
   | ExitedReviewModeItem
-  | ContextCompactionItem
-  | GenericItem;
+  | ContextCompactionItem;
+
+/** Any item from the server — known types narrow via `type` discriminant. */
+export type ThreadItem = KnownThreadItem | GenericItem;
+
+const KNOWN_ITEM_TYPES = new Set([
+  "userMessage", "agentMessage", "plan", "reasoning",
+  "commandExecution", "fileChange", "mcpToolCall", "webSearch",
+  "imageView", "enteredReviewMode", "exitedReviewMode", "contextCompaction",
+]);
+
+/** Narrow a ThreadItem to a known type, enabling discriminated union switches. */
+export function isKnownItem(item: ThreadItem): item is KnownThreadItem {
+  return KNOWN_ITEM_TYPES.has(item.type);
+}
 
 export interface UserMessageItem {
   type: "userMessage";
@@ -431,13 +467,120 @@ export interface CommandExec {
 export interface TurnResult {
   status: "completed" | "interrupted" | "failed";
   output: string;
+  reasoning: string | null;
   filesChanged: FileChange[];
   commandsRun: CommandExec[];
   error?: string;
   durationMs: number;
 }
 
-// --- Short ID mapping ---
+// --- Thread index (local, per-workspace) ---
+
+export interface ThreadIndexEntry {
+  threadId: string;
+  name: string | null;
+  model: string | null;
+  cwd: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Legacy display field preserved while commands finish moving to run ledger. */
+  preview?: string;
+  /** Legacy display field preserved while commands finish moving to run ledger. */
+  lastStatus?: "running" | "completed" | "failed" | "interrupted";
+}
+
+export interface ThreadIndex {
+  [shortId: string]: ThreadIndexEntry;
+}
+
+// --- Run ledger (local, per-workspace) ---
+
+export type RunKind = "task" | "review";
+
+export type RunPhase =
+  | "starting" | "reviewing" | "editing" | "verifying"
+  | "running" | "investigating" | "finalizing";
+
+export type RunStatus = "running" | "completed" | "failed" | "cancelled";
+
+export interface RunRecord {
+  runId: string;
+  threadId: string;
+  shortId: string;
+  kind: RunKind;
+  phase: RunPhase | null;
+  status: RunStatus;
+  sessionId: string | null;
+  logFile: string;
+  logOffset: number;
+  prompt: string | null;
+  model: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  elapsed: string | null;
+  output: string | null;
+  filesChanged: FileChange[] | null;
+  commandsRun: CommandExec[] | null;
+  error: string | null;
+}
+
+// --- Broker state (per-workspace) ---
+
+export interface BrokerState {
+  endpoint: string | null;
+  pid: number | null;
+  sessionDir: string;
+  startedAt: string;
+}
+
+export interface SessionState {
+  sessionId: string;
+  startedAt: string;
+}
+
+export type BrokerEndpointKind = "unix" | "pipe";
+
+export interface ParsedEndpoint {
+  kind: BrokerEndpointKind;
+  path: string;
+}
+
+// --- Structured review output ---
+
+export type ReviewSeverity = "critical" | "high" | "medium" | "low" | "info";
+
+export interface ReviewFinding {
+  severity: ReviewSeverity;
+  file: string;
+  lineStart: number | null;
+  lineEnd: number | null;
+  confidence: number;
+  description: string;
+  recommendation: string;
+}
+
+export type ReviewVerdict = "approve" | "needs-attention" | "request-changes";
+
+export interface StructuredReviewOutput {
+  verdict: ReviewVerdict;
+  summary: string;
+  findings: ReviewFinding[];
+  nextSteps: string[];
+}
+
+// --- Thread naming ---
+
+export interface ThreadSetNameParams {
+  threadId: string;
+  name: string;
+}
+
+export interface ThreadSetNameResponse {
+  threadId: string;
+  name: string;
+}
+
+// --- Short ID mapping (legacy, pending migration) ---
 
 export interface ThreadMappingEntry {
   threadId: string;

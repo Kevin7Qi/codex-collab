@@ -1,163 +1,67 @@
 #!/usr/bin/env bun
 
-// src/cli.ts — codex-collab CLI (app server protocol)
+// src/cli.ts — codex-collab CLI router
 
+import { config } from "./config";
+import type { AppServerClient } from "./client";
+import { updateThreadStatus, updateRun } from "./threads";
+import { tryInterruptTurn } from "./turns";
 import {
-  config,
-  validateId,
-  type ReasoningEffort,
-  type SandboxMode,
-  type ApprovalPolicy,
-} from "./config";
-import { connect, type AppServerClient } from "./protocol";
-import {
-  registerThread,
-  resolveThreadId,
-  findShortId,
-  loadThreadMapping,
-  removeThread,
-  saveThreadMapping,
-  updateThreadMeta,
-  updateThreadStatus,
-  withThreadLock,
-} from "./threads";
-import { runTurn, runReview } from "./turns";
-import { EventDispatcher } from "./events";
-import {
-  autoApproveHandler,
-  InteractiveApprovalHandler,
-  type ApprovalHandler,
-} from "./approvals";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
-import { resolve, join } from "path";
-import type {
-  ReviewTarget,
-  ThreadStartResponse,
-  Model,
-  TurnResult,
-} from "./types";
-
-// ---------------------------------------------------------------------------
-// User config — persistent defaults from ~/.codex-collab/config.json
-// ---------------------------------------------------------------------------
-
-/** Fields users can set in ~/.codex-collab/config.json. */
-interface UserConfig {
-  model?: string;
-  reasoning?: string;
-  sandbox?: string;
-  approval?: string;
-  timeout?: number;
-}
-
-function loadUserConfig(): UserConfig {
-  try {
-    const parsed = JSON.parse(readFileSync(config.configFile, "utf-8"));
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      console.error(`[codex] Warning: config file is not a JSON object — ignoring: ${config.configFile}`);
-      return {};
-    }
-    return parsed as UserConfig;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
-    if (e instanceof SyntaxError) {
-      console.error(`[codex] Warning: invalid JSON in ${config.configFile} — ignoring config`);
-    } else {
-      console.error(`[codex] Warning: could not read config: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    return {};
-  }
-}
-
-function saveUserConfig(cfg: UserConfig): void {
-  try {
-    writeFileSync(config.configFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
-  } catch (e) {
-    die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-/** Apply user config to parsed options — only for fields not set via CLI flags.
- *  Config values are added to `configured` (not `explicit`) so they suppress
- *  auto-detection but are NOT forwarded as overrides on thread resume. */
-function applyUserConfig(options: Options): void {
-  const cfg = loadUserConfig();
-
-  if (!options.explicit.has("model") && typeof cfg.model === "string") {
-    if (/[^a-zA-Z0-9._\-\/:]/.test(cfg.model)) {
-      console.error(`[codex] Warning: ignoring invalid model in config: ${cfg.model}`);
-    } else {
-      options.model = cfg.model;
-      options.configured.add("model");
-    }
-  }
-  if (!options.explicit.has("reasoning") && typeof cfg.reasoning === "string") {
-    if (config.reasoningEfforts.includes(cfg.reasoning as any)) {
-      options.reasoning = cfg.reasoning as ReasoningEffort;
-      options.configured.add("reasoning");
-    } else {
-      console.error(`[codex] Warning: ignoring invalid reasoning in config: ${cfg.reasoning}`);
-    }
-  }
-  if (!options.explicit.has("sandbox") && typeof cfg.sandbox === "string") {
-    if (config.sandboxModes.includes(cfg.sandbox as any)) {
-      options.sandbox = cfg.sandbox as SandboxMode;
-      options.configured.add("sandbox");
-    } else {
-      console.error(`[codex] Warning: ignoring invalid sandbox in config: ${cfg.sandbox}`);
-    }
-  }
-  if (!options.explicit.has("approval") && typeof cfg.approval === "string") {
-    if (config.approvalPolicies.includes(cfg.approval as any)) {
-      options.approval = cfg.approval as ApprovalPolicy;
-      options.configured.add("approval");
-    } else {
-      console.error(`[codex] Warning: ignoring invalid approval in config: ${cfg.approval}`);
-    }
-  }
-  if (!options.explicit.has("timeout") && cfg.timeout !== undefined) {
-    if (typeof cfg.timeout === "number" && Number.isFinite(cfg.timeout) && cfg.timeout > 0) {
-      options.timeout = cfg.timeout;
-    } else {
-      console.error(`[codex] Warning: ignoring invalid timeout in config: ${cfg.timeout}`);
-    }
-  }
-}
+  activeClient,
+  activeThreadId,
+  activeReviewThreadId,
+  activeShortId,
+  activeTurnId,
+  activeWsPaths,
+  activeRunId,
+  shuttingDown,
+  setShuttingDown,
+  removePidFile,
+  VALID_REVIEW_MODES,
+} from "./commands/shared";
 
 // ---------------------------------------------------------------------------
 // Signal handlers — clean up spawned app-server and update thread status
 // ---------------------------------------------------------------------------
 
-let activeClient: AppServerClient | undefined;
-let activeThreadId: string | undefined;
-let activeShortId: string | undefined;
-let shuttingDown = false;
-
 async function handleShutdownSignal(exitCode: number): Promise<void> {
   if (shuttingDown) {
     process.exit(exitCode);
   }
-  shuttingDown = true;
+  setShuttingDown(true);
   console.error("[codex] Shutting down...");
 
   // Update thread status and clean up PID file synchronously before async
   // cleanup — ensures the mapping is written even if client.close() hangs.
-  if (activeThreadId) {
+  if (activeThreadId && activeWsPaths) {
     try {
-      updateThreadStatus(config.threadsFile, activeThreadId, "interrupted");
+      updateThreadStatus(activeWsPaths.threadsFile, activeThreadId, "interrupted");
     } catch (e) {
       console.error(`[codex] Warning: could not update thread status during shutdown: ${e instanceof Error ? e.message : String(e)}`);
     }
+    if (activeRunId) {
+      try {
+        updateRun(activeWsPaths.stateDir, activeRunId, {
+          status: "cancelled",
+          completedAt: new Date().toISOString(),
+          error: "Interrupted by signal",
+        });
+      } catch (e) {
+        console.error(`[codex] Warning: could not update run record during shutdown: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   }
-  if (activeShortId) {
-    removePidFile(activeShortId);
+  if (activeShortId && activeWsPaths) {
+    removePidFile(activeWsPaths.pidsDir, activeShortId);
+  }
+
+  // Interrupt the active turn before disconnecting. Closing the socket
+  // alone only detaches from the broker; the turn would keep running and
+  // hold the broker stream busy. For reviews the turn lives on a review
+  // subthread distinct from activeThreadId — route there when known.
+  const interruptThreadId = activeReviewThreadId ?? activeThreadId;
+  if (activeClient && interruptThreadId && activeTurnId) {
+    await tryInterruptTurn(activeClient, interruptThreadId, activeTurnId);
   }
 
   try {
@@ -174,1142 +78,15 @@ process.on("SIGINT", () => handleShutdownSignal(130));
 process.on("SIGTERM", () => handleShutdownSignal(143));
 
 // ---------------------------------------------------------------------------
-// Argument parsing
-// ---------------------------------------------------------------------------
-
-const rawArgs = process.argv.slice(2);
-
-interface ParsedArgs {
-  command: string;
-  positional: string[];
-  options: Options;
-}
-
-interface Options {
-  reasoning: ReasoningEffort | undefined;
-  model: string | undefined;
-  sandbox: SandboxMode;
-  approval: ApprovalPolicy;
-  dir: string;
-  contentOnly: boolean;
-  json: boolean;
-  timeout: number;
-  limit: number;
-  reviewMode: string | null;
-  reviewRef: string | null;
-  base: string;
-  resumeId: string | null;
-  /** Flags explicitly provided on the command line (forwarded on resume). */
-  explicit: Set<string>;
-  /** Flags set by user config file (suppress auto-detection but NOT forwarded on resume). */
-  configured: Set<string>;
-}
-
-function parseArgs(args: string[]): ParsedArgs {
-  const options: Options = {
-    reasoning: undefined,
-    model: undefined,
-    sandbox: config.defaultSandbox,
-    approval: config.defaultApprovalPolicy,
-    dir: process.cwd(),
-    contentOnly: false,
-    json: false,
-    timeout: config.defaultTimeout,
-    limit: config.jobsListLimit,
-    reviewMode: null,
-    reviewRef: null,
-    base: "main",
-    resumeId: null,
-    explicit: new Set<string>(),
-    configured: new Set<string>(),
-  };
-
-  const positional: string[] = [];
-  let command = "";
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-
-    if (arg === "-h" || arg === "--help") {
-      showHelp();
-      process.exit(0);
-    } else if (arg === "-r" || arg === "--reasoning") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --reasoning requires a value");
-        process.exit(1);
-      }
-      const level = args[++i] as ReasoningEffort;
-      if (!config.reasoningEfforts.includes(level)) {
-        console.error(`Error: Invalid reasoning level: ${level}`);
-        console.error(
-          `Valid options: ${config.reasoningEfforts.join(", ")}`
-        );
-        process.exit(1);
-      }
-      options.reasoning = level;
-      options.explicit.add("reasoning");
-    } else if (arg === "-m" || arg === "--model") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --model requires a value");
-        process.exit(1);
-      }
-      const model = args[++i];
-      if (/[^a-zA-Z0-9._\-\/:]/.test(model)) {
-        console.error(`Error: Invalid model name: ${model}`);
-        process.exit(1);
-      }
-      options.model = model;
-      options.explicit.add("model");
-    } else if (arg === "-s" || arg === "--sandbox") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --sandbox requires a value");
-        process.exit(1);
-      }
-      const mode = args[++i] as SandboxMode;
-      if (!config.sandboxModes.includes(mode)) {
-        console.error(`Error: Invalid sandbox mode: ${mode}`);
-        console.error(
-          `Valid options: ${config.sandboxModes.join(", ")}`
-        );
-        process.exit(1);
-      }
-      options.sandbox = mode;
-      options.explicit.add("sandbox");
-    } else if (arg === "--approval") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --approval requires a value");
-        process.exit(1);
-      }
-      const policy = args[++i] as ApprovalPolicy;
-      if (!config.approvalPolicies.includes(policy)) {
-        console.error(`Error: Invalid approval policy: ${policy}`);
-        console.error(
-          `Valid options: ${config.approvalPolicies.join(", ")}`
-        );
-        process.exit(1);
-      }
-      options.approval = policy;
-      options.explicit.add("approval");
-    } else if (arg === "-d" || arg === "--dir") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --dir requires a value");
-        process.exit(1);
-      }
-      options.dir = resolve(args[++i]);
-      options.explicit.add("dir");
-    } else if (arg === "--content-only") {
-      options.contentOnly = true;
-    } else if (arg === "--json") {
-      options.json = true;
-    } else if (arg === "--timeout") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --timeout requires a value");
-        process.exit(1);
-      }
-      const val = Number(args[++i]);
-      if (!Number.isFinite(val) || val <= 0) {
-        console.error(`Error: Invalid timeout: ${args[i]}`);
-        process.exit(1);
-      }
-      options.timeout = val;
-      options.explicit.add("timeout");
-    } else if (arg === "--limit") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --limit requires a value");
-        process.exit(1);
-      }
-      const val = Number(args[++i]);
-      if (!Number.isFinite(val) || val < 1) {
-        console.error(`Error: Invalid limit: ${args[i]}`);
-        process.exit(1);
-      }
-      options.limit = Math.floor(val);
-    } else if (arg === "--mode") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --mode requires a value");
-        process.exit(1);
-      }
-      const mode = args[++i];
-      if (!VALID_REVIEW_MODES.includes(mode as any)) {
-        console.error(`Error: Invalid review mode: ${mode}`);
-        console.error(`Valid options: ${VALID_REVIEW_MODES.join(", ")}`);
-        process.exit(1);
-      }
-      options.reviewMode = mode;
-    } else if (arg === "--ref") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --ref requires a value");
-        process.exit(1);
-      }
-      options.reviewRef = validateGitRef(args[++i], "ref");
-    } else if (arg === "--base") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --base requires a value");
-        process.exit(1);
-      }
-      options.base = validateGitRef(args[++i], "base branch");
-    } else if (arg === "--resume") {
-      if (i + 1 >= args.length) {
-        console.error("Error: --resume requires a value");
-        process.exit(1);
-      }
-      options.resumeId = args[++i];
-    } else if (arg === "--all") {
-      options.limit = Infinity;
-    } else if (arg === "--unset") {
-      options.explicit.add("unset");
-    } else if (arg.startsWith("-")) {
-      console.error(`Error: Unknown option: ${arg}`);
-      console.error("Run codex-collab --help for usage");
-      process.exit(1);
-    } else {
-      if (!command) {
-        command = arg;
-      } else {
-        positional.push(arg);
-      }
-    }
-  }
-
-  return { command, positional, options };
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Valid review modes for --mode flag. */
-const VALID_REVIEW_MODES = ["pr", "uncommitted", "commit", "custom"] as const;
-
-/** Shell metacharacters that must not appear in git refs. */
-const UNSAFE_REF_CHARS = /[;|&`$()<>\\'"{\s]/;
-
-function die(msg: string): never {
-  console.error(`Error: ${msg}`);
-  process.exit(1);
-}
-
-function validateGitRef(value: string, label: string): string {
-  if (UNSAFE_REF_CHARS.test(value)) die(`Invalid ${label}: ${value}`);
-  return value;
-}
-
-/** Validate ID, using die() for CLI-friendly error output. */
-function validateIdOrDie(id: string): string {
-  try {
-    return validateId(id);
-  } catch {
-    die(`Invalid ID: "${id}"`);
-  }
-}
-
-function progress(text: string): void {
-  console.log(`[codex] ${text}`);
-}
-
-function getApprovalHandler(policy: ApprovalPolicy): ApprovalHandler {
-  if (policy === "never") return autoApproveHandler;
-  return new InteractiveApprovalHandler(config.approvalsDir, progress);
-}
-
-/** Connect to app server, run fn, then close the client (even on error). */
-async function withClient<T>(fn: (client: AppServerClient) => Promise<T>): Promise<T> {
-  const client = await connect();
-  activeClient = client;
-  try {
-    return await fn(client);
-  } finally {
-    try {
-      await client.close();
-    } catch (e) {
-      console.error(`[codex] Warning: cleanup failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    activeClient = undefined;
-  }
-}
-
-function createDispatcher(shortId: string, opts: Options): EventDispatcher {
-  return new EventDispatcher(
-    shortId,
-    config.logsDir,
-    opts.contentOnly ? () => {} : progress,
-  );
-}
-
-/** Pick the best model by following the upgrade chain from the server default,
- *  then preferring a -codex variant if one exists at the latest generation. */
-function pickBestModel(models: Model[]): string | undefined {
-  const byId = new Map(models.map(m => [m.id, m]));
-
-  // Start from the server's default model
-  let current = models.find(m => m.isDefault);
-  if (!current) return undefined;
-
-  // Follow the upgrade chain to the latest generation
-  const visited = new Set<string>();
-  while (current.upgrade && !visited.has(current.id)) {
-    visited.add(current.id);
-    const next = byId.get(current.upgrade);
-    if (!next) break; // upgrade target not in the list
-    current = next;
-  }
-
-  // Prefer -codex variant if available at this generation
-  if (!current.id.endsWith("-codex")) {
-    const codexVariant = byId.get(current.id + "-codex");
-    if (codexVariant && codexVariant.upgrade === null) return codexVariant.id;
-  }
-
-  return current.id;
-}
-
-/** Pick the highest reasoning effort a model supports. */
-function pickHighestEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
-  const available = new Set(supported.map(s => s.reasoningEffort));
-  for (let i = config.reasoningEfforts.length - 1; i >= 0; i--) {
-    if (available.has(config.reasoningEfforts[i])) return config.reasoningEfforts[i];
-  }
-  return undefined;
-}
-
-/** Auto-resolve model and/or reasoning effort when not set by CLI or config. */
-async function resolveDefaults(client: AppServerClient, opts: Options): Promise<void> {
-  const isSet = (key: string) => opts.explicit.has(key) || opts.configured.has(key);
-  const needModel = !isSet("model");
-  const needReasoning = !isSet("reasoning");
-  if (!needModel && !needReasoning) return;
-
-  let models: Model[];
-  try {
-    models = await fetchAllPages<Model>(client, "model/list", { includeHidden: true });
-  } catch (e) {
-    console.error(`[codex] Warning: could not fetch model list (${e instanceof Error ? e.message : String(e)}). Model and reasoning will be determined by the server.`);
-    return;
-  }
-  if (models.length === 0) {
-    console.error(`[codex] Warning: server returned no models. Model and reasoning will be determined by the server.`);
-    return;
-  }
-
-  if (needModel) {
-    opts.model = pickBestModel(models);
-  }
-
-  if (needReasoning) {
-    const modelData = models.find(m => m.id === opts.model);
-    if (modelData?.supportedReasoningEfforts?.length) {
-      opts.reasoning = pickHighestEffort(modelData.supportedReasoningEfforts);
-    }
-  }
-}
-
-/** Try to archive a thread on the server. Returns status string. */
-async function tryArchive(client: AppServerClient, threadId: string): Promise<"archived" | "already_done" | "failed"> {
-  try {
-    await client.request("thread/archive", { threadId });
-    return "archived";
-  } catch (e) {
-    if (e instanceof Error && (e.message.includes("not found") || e.message.includes("archived"))) {
-      return "already_done";
-    }
-    console.error(`[codex] Warning: could not archive thread: ${e instanceof Error ? e.message : String(e)}`);
-    return "failed";
-  }
-}
-
-function resolveReviewTarget(positional: string[], opts: Options): ReviewTarget {
-  const mode = opts.reviewMode ?? "pr";
-
-  if (positional.length > 0) {
-    if (opts.reviewMode !== null && opts.reviewMode !== "custom") {
-      die(`--mode ${opts.reviewMode} does not accept positional arguments.\nUse --mode custom "instructions" for custom reviews.`);
-    }
-    return { type: "custom", instructions: positional.join(" ") };
-  }
-
-  if (mode === "custom") {
-    die('Custom review mode requires instructions.\nUsage: codex-collab review "instructions"');
-  }
-
-  switch (mode) {
-    case "pr":
-      return { type: "baseBranch", branch: opts.base };
-    case "uncommitted":
-      return { type: "uncommittedChanges" };
-    case "commit":
-      return { type: "commit", sha: opts.reviewRef ?? "HEAD" };
-    default:
-      die(`Unknown review mode: ${mode}. Use: ${VALID_REVIEW_MODES.join(", ")}`);
-  }
-}
-
-/** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
-function turnOverrides(opts: Options) {
-  if (!opts.resumeId) {
-    const o: Record<string, unknown> = { cwd: opts.dir, approvalPolicy: opts.approval };
-    if (opts.model) o.model = opts.model;
-    if (opts.reasoning) o.effort = opts.reasoning;
-    return o;
-  }
-  const o: Record<string, unknown> = {};
-  if (opts.explicit.has("dir")) o.cwd = opts.dir;
-  if (opts.explicit.has("model")) o.model = opts.model;
-  if (opts.explicit.has("reasoning")) o.effort = opts.reasoning;
-  if (opts.explicit.has("approval")) o.approvalPolicy = opts.approval;
-  return o;
-}
-
-function formatDuration(ms: number): string {
-  const sec = Math.round(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  const rem = sec % 60;
-  return `${min}m ${rem}s`;
-}
-
-function formatAge(unixTimestamp: number): string {
-  const seconds = Math.round(Date.now() / 1000 - unixTimestamp);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
-  return `${Math.round(seconds / 86400)}d ago`;
-}
-
-function pluralize(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
-}
-
-/** Write a PID file for the current process so cmdJobs can detect stale "running" status. */
-function writePidFile(shortId: string): void {
-  try {
-    writeFileSync(join(config.pidsDir, shortId), String(process.pid), { mode: 0o600 });
-  } catch (e) {
-    console.error(`[codex] Warning: could not write PID file: ${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-/** Remove the PID file for a thread. */
-function removePidFile(shortId: string): void {
-  try {
-    unlinkSync(join(config.pidsDir, shortId));
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.error(`[codex] Warning: could not remove PID file: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-}
-
-/** Check if the process that owns a thread is still alive.
- *  Returns true (assume alive) when the PID file is missing — the thread may
- *  have been started before PID tracking existed, or PID file write may have
- *  failed.  Only returns false when we have a PID and can confirm the process
- *  is gone (ESRCH). */
-function isProcessAlive(shortId: string): boolean {
-  const pidPath = join(config.pidsDir, shortId);
-  let pid: number;
-  try {
-    pid = Number(readFileSync(pidPath, "utf-8").trim());
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return true; // no PID file → assume alive
-    console.error(`[codex] Warning: could not read PID file for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);
-    return true;
-  }
-  if (!Number.isFinite(pid) || pid <= 0) {
-    console.error(`[codex] Warning: PID file for ${shortId} contains invalid value`);
-    return false;
-  }
-  try {
-    process.kill(pid, 0); // signal 0 = existence check
-    return true;
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") return false; // process confirmed dead
-    if (code === "EPERM") return true; // process exists but we can't signal it
-    // Unexpected error — assume alive to avoid incorrectly marking live threads as dead
-    console.error(`[codex] Warning: could not check process for ${shortId}: ${e instanceof Error ? e.message : String(e)}`);
-    return true;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
-
-/** Start or resume a thread, returning threadId, shortId, and effective config. */
-async function startOrResumeThread(
-  client: AppServerClient,
-  opts: Options,
-  extraStartParams?: Record<string, unknown>,
-  preview?: string,
-): Promise<{ threadId: string; shortId: string; effective: ThreadStartResponse }> {
-  if (opts.resumeId) {
-    const threadId = resolveThreadId(config.threadsFile, opts.resumeId);
-    const shortId = findShortId(config.threadsFile, threadId) ?? opts.resumeId;
-    const resumeParams: Record<string, unknown> = {
-      threadId,
-      persistExtendedHistory: false,
-    };
-    // Only forward flags that were explicitly provided on the command line
-    if (opts.explicit.has("model")) resumeParams.model = opts.model;
-    if (opts.explicit.has("dir")) resumeParams.cwd = opts.dir;
-    if (opts.explicit.has("approval")) resumeParams.approvalPolicy = opts.approval;
-    if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
-    // Forced overrides from caller (e.g., review forces sandbox to read-only)
-    if (extraStartParams) Object.assign(resumeParams, extraStartParams);
-    const effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
-    // Refresh stored metadata so `jobs` stays accurate after resume
-    updateThreadMeta(config.threadsFile, threadId, {
-      model: effective.model,
-      ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
-      ...(preview ? { preview } : {}),
-    });
-    return { threadId, shortId, effective };
-  }
-
-  const startParams: Record<string, unknown> = {
-    cwd: opts.dir,
-    approvalPolicy: opts.approval,
-    sandbox: opts.sandbox,
-    experimentalRawEvents: false,
-    persistExtendedHistory: false,
-    ...extraStartParams,
-  };
-  if (opts.model) startParams.model = opts.model;
-  const effective = await client.request<ThreadStartResponse>(
-    "thread/start",
-    startParams,
-  );
-  const threadId = effective.thread.id;
-  registerThread(config.threadsFile, threadId, {
-    model: effective.model,
-    cwd: opts.dir,
-    preview,
-  });
-  const shortId = findShortId(config.threadsFile, threadId);
-  if (!shortId) die(`Internal error: thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
-  return { threadId, shortId, effective };
-}
-
-/** Print turn result and return the appropriate exit code. */
-function printResult(
-  result: TurnResult,
-  shortId: string,
-  label: string,
-  contentOnly: boolean,
-): number {
-  if (!contentOnly) {
-    progress(`${label} ${result.status} (${formatDuration(result.durationMs)}${result.filesChanged.length > 0 ? `, ${pluralize(result.filesChanged.length, "file")} changed` : ""})`);
-    if (result.output) console.log("\n--- Result ---");
-  }
-
-  if (result.output) console.log(result.output);
-  if (result.error) console.error(`\nError: ${result.error}`);
-  if (!contentOnly) console.error(`\nThread: ${shortId}`);
-
-  return result.status === "completed" ? 0 : 1;
-}
-
-async function cmdRun(positional: string[], opts: Options) {
-  if (positional.length === 0) {
-    die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
-  }
-
-  const prompt = positional.join(" ");
-
-  const exitCode = await withClient(async (client) => {
-    await resolveDefaults(client, opts);
-
-    const { threadId, shortId, effective } = await startOrResumeThread(client, opts, undefined, prompt);
-
-    if (opts.contentOnly) {
-      console.error(`[codex] Running (thread ${shortId})...`);
-    } else {
-      if (opts.resumeId) {
-        progress(`Resumed thread ${shortId} (${effective.model})`);
-      } else {
-        progress(`Thread ${shortId} started (${effective.model}, ${opts.sandbox})`);
-      }
-      progress("Turn started");
-    }
-
-    updateThreadStatus(config.threadsFile, threadId, "running");
-    activeThreadId = threadId;
-    activeShortId = shortId;
-    writePidFile(shortId);
-
-    const dispatcher = createDispatcher(shortId, opts);
-
-    try {
-      const result = await runTurn(
-        client,
-        threadId,
-        [{ type: "text", text: prompt }],
-        {
-          dispatcher,
-          approvalHandler: getApprovalHandler(effective.approvalPolicy),
-          timeoutMs: opts.timeout * 1000,
-          ...turnOverrides(opts),
-        },
-      );
-
-      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-      return printResult(result, shortId, "Turn", opts.contentOnly);
-    } catch (e) {
-      updateThreadStatus(config.threadsFile, threadId, "failed");
-      throw e;
-    } finally {
-      activeThreadId = undefined;
-      activeShortId = undefined;
-      removePidFile(shortId);
-    }
-  });
-
-  process.exit(exitCode);
-}
-
-async function cmdReview(positional: string[], opts: Options) {
-  const target = resolveReviewTarget(positional, opts);
-
-  const exitCode = await withClient(async (client) => {
-    await resolveDefaults(client, opts);
-
-    let reviewPreview: string;
-    switch (target.type) {
-      case "custom": reviewPreview = target.instructions; break;
-      case "baseBranch": reviewPreview = `Review PR (base: ${target.branch})`; break;
-      case "uncommittedChanges": reviewPreview = "Review uncommitted changes"; break;
-      case "commit": reviewPreview = `Review commit ${target.sha}`; break;
-    }
-    const { threadId, shortId, effective } = await startOrResumeThread(
-      client, opts, { sandbox: "read-only" }, reviewPreview,
-    );
-
-    if (opts.contentOnly) {
-      console.error(`[codex] Reviewing (thread ${shortId})...`);
-    } else {
-      if (opts.resumeId) {
-        progress(`Resumed thread ${shortId} for review`);
-      } else {
-        progress(`Thread ${shortId} started for review (${effective.model}, read-only)`);
-      }
-    }
-
-    updateThreadStatus(config.threadsFile, threadId, "running");
-    activeThreadId = threadId;
-    activeShortId = shortId;
-    writePidFile(shortId);
-
-    const dispatcher = createDispatcher(shortId, opts);
-
-    // Note: effort (reasoning level) is not forwarded to reviews — the review/start
-    // protocol does not accept an effort parameter (unlike turn/start).
-    try {
-      const result = await runReview(client, threadId, target, {
-        dispatcher,
-        approvalHandler: getApprovalHandler(effective.approvalPolicy),
-        timeoutMs: opts.timeout * 1000,
-        ...turnOverrides(opts),
-      });
-
-      updateThreadStatus(config.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
-      return printResult(result, shortId, "Review", opts.contentOnly);
-    } catch (e) {
-      updateThreadStatus(config.threadsFile, threadId, "failed");
-      throw e;
-    } finally {
-      activeThreadId = undefined;
-      activeShortId = undefined;
-      removePidFile(shortId);
-    }
-  });
-
-  process.exit(exitCode);
-}
-
-/** Fetch all pages of a paginated endpoint. */
-async function fetchAllPages<T>(
-  client: AppServerClient,
-  method: string,
-  baseParams?: Record<string, unknown>,
-): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | undefined;
-  do {
-    const params: Record<string, unknown> = { ...baseParams };
-    if (cursor) params.cursor = cursor;
-    const page = await client.request<{ data: T[]; nextCursor: string | null }>(method, params);
-    items.push(...page.data);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return items;
-}
-
-async function cmdJobs(opts: Options) {
-  const mapping = loadThreadMapping(config.threadsFile);
-
-  // Build entries sorted by updatedAt (most recent first), falling back to createdAt
-  let entries = Object.entries(mapping)
-    .map(([shortId, entry]) => ({ shortId, ...entry }))
-    .sort((a, b) => {
-      const ta = new Date(a.updatedAt ?? a.createdAt).getTime();
-      const tb = new Date(b.updatedAt ?? b.createdAt).getTime();
-      return tb - ta;
-    });
-
-  // Detect stale "running" status: if the owning process is dead, mark as interrupted.
-  for (const e of entries) {
-    if (e.lastStatus === "running" && !isProcessAlive(e.shortId)) {
-      updateThreadStatus(config.threadsFile, e.threadId, "interrupted");
-      e.lastStatus = "interrupted";
-      removePidFile(e.shortId);
-    }
-  }
-
-  if (opts.limit !== Infinity) entries = entries.slice(0, opts.limit);
-
-  if (opts.json) {
-    const enriched = entries.map(e => ({
-      shortId: e.shortId,
-      threadId: e.threadId,
-      status: e.lastStatus ?? "unknown",
-      model: e.model ?? null,
-      cwd: e.cwd ?? null,
-      preview: e.preview ?? null,
-      createdAt: e.createdAt,
-      updatedAt: e.updatedAt ?? e.createdAt,
-    }));
-    console.log(JSON.stringify(enriched, null, 2));
-  } else {
-    if (entries.length === 0) {
-      console.log("No threads found.");
-      return;
-    }
-    for (const e of entries) {
-      const status = e.lastStatus ?? "idle";
-      const ts = new Date(e.updatedAt ?? e.createdAt).getTime() / 1000;
-      const age = formatAge(ts);
-      const model = e.model ? ` (${e.model})` : "";
-      const preview = e.preview ? ` ${e.preview.slice(0, 50)}` : "";
-      console.log(
-        `  ${e.shortId}  ${status.padEnd(12)} ${age.padEnd(8)} ${e.cwd ?? ""}${model}${preview}`,
-      );
-    }
-  }
-}
-
-async function cmdKill(positional: string[]) {
-  const id = positional[0];
-  if (!id) die("Usage: codex-collab kill <id>");
-  validateIdOrDie(id);
-
-  const threadId = resolveThreadId(config.threadsFile, id);
-  const shortId = findShortId(config.threadsFile, threadId);
-
-  // Skip kill for threads that have already reached a terminal status
-  if (shortId) {
-    const mapping = loadThreadMapping(config.threadsFile);
-    const localStatus = mapping[shortId]?.lastStatus;
-    if (localStatus && localStatus !== "running") {
-      progress(`Thread ${id} is already ${localStatus}`);
-      return;
-    }
-  }
-
-  // Write kill signal file so the running process can detect the kill
-  let killSignalWritten = false;
-  const signalPath = join(config.killSignalsDir, threadId);
-  try {
-    writeFileSync(signalPath, "", { mode: 0o600 });
-    killSignalWritten = true;
-  } catch (e) {
-    console.error(
-      `[codex] Warning: could not write kill signal: ${e instanceof Error ? e.message : String(e)}. ` +
-      `The running process may not detect the kill.`,
-    );
-  }
-
-  // Try to interrupt the active turn on the server (immediate effect).
-  // The kill signal file handles the case where the run process is polling.
-  let serverInterrupted = false;
-  await withClient(async (client) => {
-    try {
-      const { thread } = await client.request<{
-        thread: {
-          id: string;
-          status: { type: string };
-          turns: Array<{ id: string; status: string }>;
-        };
-      }>("thread/read", { threadId, includeTurns: true });
-
-      if (thread.status.type === "active") {
-        const activeTurn = thread.turns?.find(
-          (t) => t.status === "inProgress",
-        );
-        if (activeTurn) {
-          await client.request("turn/interrupt", {
-            threadId,
-            turnId: activeTurn.id,
-          });
-          serverInterrupted = true;
-          progress(`Interrupted turn ${activeTurn.id}`);
-        }
-      }
-    } catch (e) {
-      if (e instanceof Error && !e.message.includes("not found")) {
-        console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
-      }
-    }
-  });
-
-  if (killSignalWritten || serverInterrupted) {
-    updateThreadStatus(config.threadsFile, threadId, "interrupted");
-    if (shortId) removePidFile(shortId);
-    progress(`Stopped thread ${id}`);
-  } else {
-    progress(`Could not signal thread ${id} — try again.`);
-  }
-}
-
-/** Resolve a positional ID arg to a log file path, or die with an error. */
-function resolveLogPath(positional: string[], usage: string): string {
-  const id = positional[0];
-  if (!id) die(usage);
-  validateIdOrDie(id);
-  const threadId = resolveThreadId(config.threadsFile, id);
-  const shortId = findShortId(config.threadsFile, threadId);
-  if (!shortId) die(`Thread not found: ${id}`);
-  return join(config.logsDir, `${shortId}.log`);
-}
-
-async function cmdOutput(positional: string[], opts: Options) {
-  const logPath = resolveLogPath(positional, "Usage: codex-collab output <id>");
-  if (!existsSync(logPath)) die(`No log file for thread`);
-  const content = readFileSync(logPath, "utf-8");
-  if (opts.contentOnly) {
-    // Extract agent output blocks from the log.
-    // Log format: "<ISO-timestamp> agent output:\n<content>\n<<END_AGENT_OUTPUT>>"
-    // Using an explicit end marker avoids false positives when model output contains timestamps.
-    const tsPrefix = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
-    const lines = content.split("\n");
-    let inAgentOutput = false;
-    for (const line of lines) {
-      if (line === "<<END_AGENT_OUTPUT>>") {
-        inAgentOutput = false;
-        continue;
-      }
-      if (tsPrefix.test(line)) {
-        inAgentOutput = line.includes(" agent output:");
-        continue;
-      }
-      if (inAgentOutput) {
-        console.log(line);
-      }
-    }
-  } else {
-    console.log(content);
-  }
-}
-
-async function cmdProgress(positional: string[]) {
-  const logPath = resolveLogPath(positional, "Usage: codex-collab progress <id>");
-  if (!existsSync(logPath)) {
-    console.log("No activity yet.");
-    return;
-  }
-
-  // Show last 20 lines
-  const lines = readFileSync(logPath, "utf-8").trim().split("\n");
-  console.log(lines.slice(-20).join("\n"));
-}
-
-async function cmdModels() {
-  const allModels = await withClient((client) =>
-    fetchAllPages<Model>(client, "model/list", { includeHidden: true }),
-  );
-
-  for (const m of allModels) {
-    const efforts =
-      m.supportedReasoningEfforts?.map((o) => o.reasoningEffort).join(", ") ?? "";
-    console.log(
-      `  ${m.id.padEnd(25)} ${(m.description ?? "").slice(0, 50).padEnd(52)} ${efforts}`,
-    );
-  }
-}
-
-async function cmdApproveOrDecline(
-  decision: "accept" | "decline",
-  positional: string[],
-) {
-  const approvalId = positional[0];
-  const verb = decision === "accept" ? "approve" : "decline";
-  if (!approvalId) die(`Usage: codex-collab ${verb} <approval-id>`);
-  validateIdOrDie(approvalId);
-
-  const requestPath = join(config.approvalsDir, `${approvalId}.json`);
-  if (!existsSync(requestPath))
-    die(`No pending approval: ${approvalId}`);
-
-  const decisionPath = join(config.approvalsDir, `${approvalId}.decision`);
-  try {
-    writeFileSync(decisionPath, decision, { mode: 0o600 });
-  } catch (e) {
-    die(`Failed to write approval decision: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  console.log(
-    `${decision === "accept" ? "Approved" : "Declined"}: ${approvalId}`,
-  );
-}
-
-/** Delete files older than maxAgeMs in the given directory. Returns count deleted. */
-function deleteOldFiles(dir: string, maxAgeMs: number): number {
-  if (!existsSync(dir)) return 0;
-  const now = Date.now();
-  let deleted = 0;
-  for (const file of readdirSync(dir)) {
-    const path = join(dir, file);
-    try {
-      if (now - Bun.file(path).lastModified > maxAgeMs) {
-        unlinkSync(path);
-        deleted++;
-      }
-    } catch (e) {
-      if (e instanceof Error && (e as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`[codex] Warning: could not delete ${path}: ${e.message}`);
-      }
-    }
-  }
-  return deleted;
-}
-
-async function cmdClean() {
-  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-  const oneDayMs = 24 * 60 * 60 * 1000;
-
-  const logsDeleted = deleteOldFiles(config.logsDir, sevenDaysMs);
-  const approvalsDeleted = deleteOldFiles(config.approvalsDir, oneDayMs);
-  const killSignalsDeleted = deleteOldFiles(config.killSignalsDir, oneDayMs);
-  const pidsDeleted = deleteOldFiles(config.pidsDir, oneDayMs);
-
-  // Clean stale thread mappings — use log file mtime as proxy for last
-  // activity so recently-used threads aren't pruned just because they
-  // were created more than 7 days ago.
-  let mappingsRemoved = 0;
-  withThreadLock(config.threadsFile, () => {
-    const mapping = loadThreadMapping(config.threadsFile);
-    const now = Date.now();
-    for (const [shortId, entry] of Object.entries(mapping)) {
-      try {
-        let lastActivity = new Date(entry.createdAt).getTime();
-        if (Number.isNaN(lastActivity)) lastActivity = 0;
-        const logPath = join(config.logsDir, `${shortId}.log`);
-        if (existsSync(logPath)) {
-          lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
-        }
-        if (now - lastActivity > sevenDaysMs) {
-          delete mapping[shortId];
-          mappingsRemoved++;
-        }
-      } catch (e) {
-        console.error(`[codex] Warning: skipping mapping ${shortId}: ${e instanceof Error ? e.message : e}`);
-      }
-    }
-    if (mappingsRemoved > 0) {
-      saveThreadMapping(config.threadsFile, mapping);
-    }
-  });
-
-  const parts: string[] = [];
-  if (logsDeleted > 0) parts.push(`${logsDeleted} log files deleted`);
-  if (approvalsDeleted > 0)
-    parts.push(`${approvalsDeleted} approval files deleted`);
-  if (killSignalsDeleted > 0)
-    parts.push(`${killSignalsDeleted} kill signal files deleted`);
-  if (pidsDeleted > 0)
-    parts.push(`${pidsDeleted} stale PID files deleted`);
-  if (mappingsRemoved > 0)
-    parts.push(`${mappingsRemoved} stale mappings removed`);
-
-  if (parts.length === 0) {
-    console.log("Nothing to clean.");
-  } else {
-    console.log(`Cleaned: ${parts.join(", ")}.`);
-  }
-}
-
-async function cmdDelete(positional: string[]) {
-  const id = positional[0];
-  if (!id) die("Usage: codex-collab delete <id>");
-  validateIdOrDie(id);
-
-  const threadId = resolveThreadId(config.threadsFile, id);
-  const shortId = findShortId(config.threadsFile, threadId);
-
-  // If the thread is currently running, stop it first before archiving
-  const localStatus = shortId ? loadThreadMapping(config.threadsFile)[shortId]?.lastStatus : undefined;
-  if (localStatus === "running") {
-    const signalPath = join(config.killSignalsDir, threadId);
-    try {
-      writeFileSync(signalPath, "", { mode: 0o600 });
-    } catch (e) {
-      console.error(
-        `[codex] Warning: could not write kill signal: ${e instanceof Error ? e.message : String(e)}. ` +
-        `The running process may not detect the delete.`,
-      );
-    }
-  }
-
-  let archiveResult: "archived" | "already_done" | "failed" = "failed";
-  try {
-    archiveResult = await withClient(async (client) => {
-      // Interrupt active turn before archiving (only if running)
-      if (localStatus === "running") {
-        try {
-          const { thread } = await client.request<{
-            thread: {
-              id: string;
-              status: { type: string };
-              turns: Array<{ id: string; status: string }>;
-            };
-          }>("thread/read", { threadId, includeTurns: true });
-
-          if (thread.status.type === "active") {
-            const activeTurn = thread.turns?.find(
-              (t) => t.status === "inProgress",
-            );
-            if (activeTurn) {
-              await client.request("turn/interrupt", {
-                threadId,
-                turnId: activeTurn.id,
-              });
-            }
-          }
-        } catch (e) {
-          if (e instanceof Error && !e.message.includes("not found") && !e.message.includes("archived")) {
-            console.error(`[codex] Warning: could not read/interrupt thread during delete: ${e.message}`);
-          }
-        }
-      }
-
-      return tryArchive(client, threadId);
-    });
-  } catch (e) {
-    if (e instanceof Error && !e.message.includes("not found")) {
-      console.error(`[codex] Warning: could not archive on server: ${e.message}`);
-    }
-  }
-
-  if (shortId) {
-    removePidFile(shortId);
-    const logPath = join(config.logsDir, `${shortId}.log`);
-    if (existsSync(logPath)) unlinkSync(logPath);
-    removeThread(config.threadsFile, shortId);
-  }
-
-  if (archiveResult === "failed") {
-    progress(`Deleted local data for thread ${id} (server archive failed)`);
-  } else {
-    progress(`Deleted thread ${id}`);
-  }
-}
-
-async function cmdConfig(positional: string[], opts: Options) {
-  const VALID_KEYS: Record<string, { validate: (v: string) => boolean; hint: string }> = {
-    model:     { validate: v => !/[^a-zA-Z0-9._\-\/:]/.test(v), hint: "model name (e.g. gpt-5.4, gpt-5.3-codex)" },
-    reasoning: { validate: v => (config.reasoningEfforts as readonly string[]).includes(v), hint: config.reasoningEfforts.join(", ") },
-    sandbox:   { validate: v => (config.sandboxModes as readonly string[]).includes(v), hint: config.sandboxModes.join(", ") },
-    approval:  { validate: v => (config.approvalPolicies as readonly string[]).includes(v), hint: config.approvalPolicies.join(", ") },
-    timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0; }, hint: "seconds (e.g. 1200)" },
-  };
-
-  const cfg = loadUserConfig();
-
-  // No args → show current config, or --unset to clear all
-  if (positional.length === 0) {
-    if (opts.explicit.has("unset")) {
-      saveUserConfig({});
-      console.log("All config values cleared. Using auto-detected defaults.");
-      return;
-    }
-    if (Object.keys(cfg).length === 0) {
-      console.log("No user config set. Using auto-detected defaults.");
-      console.log(`\nConfig file: ${config.configFile}`);
-      console.log(`\nAvailable keys: ${Object.keys(VALID_KEYS).join(", ")}`);
-      console.log("Set a value:   codex-collab config <key> <value>");
-      console.log("Unset a value: codex-collab config <key> --unset");
-    } else {
-      for (const [k, v] of Object.entries(cfg)) {
-        console.log(`  ${k}: ${v}`);
-      }
-      console.log(`\nConfig file: ${config.configFile}`);
-    }
-    return;
-  }
-
-  const key = positional[0];
-  if (!Object.hasOwn(VALID_KEYS, key)) {
-    die(`Unknown config key: ${key}\nValid keys: ${Object.keys(VALID_KEYS).join(", ")}`);
-  }
-
-  // Unset
-  if (opts.explicit.has("unset")) {
-    delete (cfg as Record<string, unknown>)[key];
-    saveUserConfig(cfg);
-    console.log(`Unset ${key} (will use auto-detected default)`);
-    return;
-  }
-
-  // Key only → show value
-  if (positional.length === 1) {
-    const val = (cfg as Record<string, unknown>)[key];
-    if (val !== undefined) {
-      console.log(`${key}: ${val}`);
-    } else {
-      console.log(`${key}: (not set — auto-detected)`);
-    }
-    return;
-  }
-
-  const value = positional[1];
-
-  // Validate and set
-  const spec = VALID_KEYS[key];
-  if (!spec.validate(value)) {
-    die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
-  }
-
-  (cfg as Record<string, unknown>)[key] = key === "timeout" ? Number(value) : value;
-  saveUserConfig(cfg);
-  console.log(`Set ${key}: ${value}`);
-}
-
-async function cmdHealth() {
-  const findCmd = process.platform === "win32" ? "where" : "which";
-  const which = Bun.spawnSync([findCmd, "codex"]);
-  if (which.exitCode !== 0) {
-    die("codex CLI not found. Install: npm install -g @openai/codex");
-  }
-
-  console.log(`  bun:   ${Bun.version}`);
-  // `where` on Windows returns multiple matches; show only the first
-  console.log(`  codex: ${which.stdout.toString().trim().split("\n")[0].trim()}`);
-
-  try {
-    const userAgent = await withClient(async (client) => client.userAgent);
-    console.log(`  app-server: OK (${userAgent})`);
-  } catch (e) {
-    console.log(`  app-server: FAILED (${e instanceof Error ? e.message : e})`);
-    process.exit(1);
-  }
-
-  console.log("\nHealth check passed.");
-}
-
-// ---------------------------------------------------------------------------
 // Help text
 // ---------------------------------------------------------------------------
 
+function printVersion() {
+  console.log(`codex-collab ${config.clientVersion}`);
+}
+
 function showHelp() {
-  console.log(`codex-collab — Claude + Codex collaboration tool
+  console.log(`codex-collab ${config.clientVersion} — Claude + Codex collaboration tool
 
 Usage: codex-collab <command> [options]
 
@@ -1318,21 +95,24 @@ Commands:
   run --resume <id> "p"   Resume existing thread with new prompt
   review [opts]           Run code review (PR-style by default)
   review "instructions"   Custom review with specific focus
-  jobs [--json] [--all]   List threads (--limit <n> to cap)
+  threads [--json] [--all] List threads (--limit <n>, --discover)
   kill <id>               Stop a running thread
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
+  peek <id>               Show recent conversation slice from server
   config [key] [value]    Show or set persistent defaults
   models                  List available models
+  templates               List available prompt templates
   approve <id>            Approve a pending request
   decline <id>            Decline a pending request
   clean                   Delete old logs and stale mappings
   delete <id>             Archive thread, delete local files
   health                  Check prerequisites
+  version                 Print version
 
 Options:
   -m, --model <model>     Model name (default: auto — latest available)
-  -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: auto — highest available)
+  -r, --reasoning <lvl>   Reasoning: ${config.defaultDisplayReasoningEfforts.join(", ")} (default: auto — highest available)
   -s, --sandbox <mode>    Sandbox: ${config.sandboxModes.join(", ")}
                           (default: ${config.defaultSandbox})
   -d, --dir <path>        Working directory (default: cwd)
@@ -1341,8 +121,12 @@ Options:
   --approval <policy>     Approval: ${config.approvalPolicies.join(", ")} (default: ${config.defaultApprovalPolicy})
   --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
-  --base <branch>         Base branch for PR review (default: main)
+  --base <branch>         Base branch for PR review (default: auto-detected default branch)
+  --template <name>       Prompt template (run command; checks ~/.codex-collab/templates/ first)
+  --limit <n>             Number of items shown (peek, threads commands)
+  --full                  Include all item types (peek command)
   --content-only          Print only result text (no progress lines)
+  -v, --version           Print version and exit
 
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
@@ -1350,38 +134,115 @@ Examples:
   codex-collab review -d /path/to/project --content-only
   codex-collab review --mode uncommitted -d /path/to/project --content-only
   codex-collab review "Focus on security issues" --content-only
-  codex-collab jobs --json
+  codex-collab threads --json
   codex-collab kill abc123
   codex-collab health
 `);
 }
 
 // ---------------------------------------------------------------------------
+// Argument pre-scan: extract command name and check for --help
+// ---------------------------------------------------------------------------
+
+const rawArgs = process.argv.slice(2);
+
+// Flags that consume the next argument as their value. Used only by the
+// pre-scan so `codex-collab --dir /repo run "…"` finds `run` rather than
+// stopping at `--dir` and reporting an unknown-option error; the real
+// validation happens in commands/shared.ts parseOptions. Keep in sync with
+// the value-taking branches there.
+const VALUE_FLAGS = new Set([
+  "-r", "--reasoning",
+  "-m", "--model",
+  "-s", "--sandbox",
+  "--approval",
+  "-d", "--dir",
+  "--timeout",
+  "--limit",
+  "--mode",
+  "--ref",
+  "--base",
+  "--resume",
+  "--template",
+]);
+
+// Boolean flags recognized by commands/shared.ts parseOptions. Combined with
+// VALUE_FLAGS this lets the pre-scan tell "unknown flag" (real error) from
+// "known flag but no command followed" (degenerate but not unknown).
+const BOOLEAN_FLAGS = new Set([
+  "--content-only",
+  "--json",
+  "--all",
+  "--discover",
+  "--full",
+  "--unset",
+]);
+
+function extractCommand(args: string[]): { command: string; rest: string[] } {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "-h" || arg === "--help") {
+      showHelp();
+      process.exit(0);
+    }
+    if (arg.startsWith("-")) {
+      // `--name=value` is one token; `--name value` is two — only skip the
+      // following arg in the latter case, and only for known value-flags.
+      if (VALUE_FLAGS.has(arg)) i++;
+      continue;
+    }
+    // First non-flag token is the command. Preserve any options that
+    // appeared *before* the command — `args.slice(i + 1)` alone would drop
+    // them, so `codex-collab --dir /repo run "…"` would silently run in the
+    // wrong workspace. parseOptions is unordered, so the resulting rest may
+    // safely interleave pre- and post-command flags.
+    const rest = args.slice(0, i).concat(args.slice(i + 1));
+    return { command: arg, rest };
+  }
+  // Reached end of args with no command found — bare flags only. Mirror the
+  // pre-existing "Unknown option" error for genuinely unknown flags so
+  // `codex-collab --bogus` still exits 1, but tolerate known flags missing
+  // their command (the empty-command help path below handles those).
+  for (const arg of args) {
+    if (!arg.startsWith("-")) continue;
+    // Strip `--name=value` so we match the option name, not the joined token.
+    const name = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (name === "-h" || name === "--help") continue;
+    if (VALUE_FLAGS.has(name) || BOOLEAN_FLAGS.has(name)) continue;
+    console.error(`Error: Unknown option: ${arg}`);
+    console.error("Run codex-collab --help for usage");
+    process.exit(1);
+  }
+  return { command: "", rest: [] };
+}
+
+// ---------------------------------------------------------------------------
 // Main dispatch
 // ---------------------------------------------------------------------------
 
-/** Ensure data directories exist (called only for commands that need them).
- *  Config getters throw if the home directory cannot be determined, producing a clear error. */
-function ensureDataDirs(): void {
-  mkdirSync(config.logsDir, { recursive: true });
-  mkdirSync(config.approvalsDir, { recursive: true });
-  mkdirSync(config.killSignalsDir, { recursive: true });
-  mkdirSync(config.pidsDir, { recursive: true });
-}
-
 async function main() {
+  if (rawArgs.includes("--version") || rawArgs.includes("-v")) {
+    printVersion();
+    process.exit(0);
+  }
+
   if (rawArgs.length === 0) {
     showHelp();
     process.exit(0);
   }
 
-  const { command, positional, options } = parseArgs(rawArgs);
+  const { command, rest } = extractCommand(rawArgs);
 
-  // Validate command before setting up data directories.
-  // Keep in sync with the switch below.
+  if (!command) {
+    showHelp();
+    process.exit(0);
+  }
+
+  // Validate command
   const knownCommands = new Set([
-    "run", "review", "jobs", "kill", "output", "progress",
-    "config", "models", "approve", "decline", "clean", "delete", "health",
+    "run", "review", "threads", "jobs", "kill", "output", "progress",
+    "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
+    "peek", "version",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -1389,44 +250,48 @@ async function main() {
     process.exit(1);
   }
 
-  // Create data directories for commands that need them
-  const noDataDirCommands = new Set(["health", "models"]);
-  if (!noDataDirCommands.has(command)) {
-    ensureDataDirs();
-  }
-
-  // Apply user config for commands that use options
-  if (command === "run" || command === "review") {
-    applyUserConfig(options);
+  // Handle --help after a command (e.g., "codex-collab run --help")
+  if (rest.includes("-h") || rest.includes("--help")) {
+    showHelp();
+    process.exit(0);
   }
 
   switch (command) {
     case "run":
-      return cmdRun(positional, options);
+      return (await import("./commands/run")).handleRun(rest);
     case "review":
-      return cmdReview(positional, options);
+      return (await import("./commands/review")).handleReview(rest);
+    case "threads":
+      return (await import("./commands/threads")).handleThreads(rest);
     case "jobs":
-      return cmdJobs(options);
+      console.error("[codex] Warning: 'jobs' is deprecated, use 'threads'");
+      return (await import("./commands/threads")).handleThreads(rest);
     case "kill":
-      return cmdKill(positional);
+      return (await import("./commands/kill")).handleKill(rest);
     case "output":
-      return cmdOutput(positional, options);
+      return (await import("./commands/threads")).handleOutput(rest);
     case "progress":
-      return cmdProgress(positional);
+      return (await import("./commands/threads")).handleProgress(rest);
     case "config":
-      return cmdConfig(positional, options);
+      return (await import("./commands/config")).handleConfig(rest);
     case "models":
-      return cmdModels();
+      return (await import("./commands/config")).handleModels(rest);
+    case "templates":
+      return (await import("./commands/config")).handleTemplates(rest);
     case "approve":
-      return cmdApproveOrDecline("accept", positional);
+      return (await import("./commands/approve")).handleApprove(rest);
     case "decline":
-      return cmdApproveOrDecline("decline", positional);
+      return (await import("./commands/approve")).handleDecline(rest);
     case "clean":
-      return cmdClean();
+      return (await import("./commands/threads")).handleClean(rest);
     case "delete":
-      return cmdDelete(positional);
+      return (await import("./commands/threads")).handleDelete(rest);
     case "health":
-      return cmdHealth();
+      return (await import("./commands/config")).handleHealth(rest);
+    case "peek":
+      return (await import("./commands/peek")).handlePeek(rest);
+    case "version":
+      return printVersion();
   }
 }
 

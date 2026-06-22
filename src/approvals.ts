@@ -27,29 +27,49 @@ export const autoApproveHandler: ApprovalHandler = {
 /** Max time to wait for a human approval decision before giving up. */
 const APPROVAL_TIMEOUT_MS = 3_600_000; // 1 hour
 
+function shellQuote(value: string): string {
+  if (process.platform === "win32") {
+    return `'${value.replace(/'/g, "''")}'`;
+  }
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 /** File-based IPC approval handler. Writes a .json request file, then polls for
  *  a .decision file created by `codex-collab approve/decline` in a separate process. */
 export class InteractiveApprovalHandler implements ApprovalHandler {
+  private workspaceDir?: string;
+  private pollIntervalMs: number;
+
   constructor(
     private approvalsDir: string,
     private onProgress: (line: string) => void,
-    private pollIntervalMs = 1000,
+    workspaceDirOrPollInterval?: string | number,
+    pollIntervalMs = 1000,
   ) {
-    if (!existsSync(approvalsDir)) mkdirSync(approvalsDir, { recursive: true });
+    if (typeof workspaceDirOrPollInterval === "number") {
+      this.pollIntervalMs = workspaceDirOrPollInterval;
+    } else {
+      this.workspaceDir = workspaceDirOrPollInterval;
+      this.pollIntervalMs = pollIntervalMs;
+    }
+    if (!existsSync(approvalsDir)) mkdirSync(approvalsDir, { recursive: true, mode: 0o700 });
   }
 
   async handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
     const id = validateId(req.approvalId ?? req.itemId);
+    const cwd = this.workspaceDir ?? req.cwd;
+    const dirFlag = cwd ? ` -d ${shellQuote(cwd)}` : "";
     this.onProgress(`APPROVAL NEEDED`);
     this.onProgress(`  Command: ${req.command ?? "(no command)"}`);
     if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
-    this.onProgress(`  Approve: codex-collab approve ${id}`);
-    this.onProgress(`  Decline: codex-collab decline ${id}`);
+    this.onProgress(`  Approve: codex-collab approve ${id}${dirFlag}`);
+    this.onProgress(`  Decline: codex-collab decline ${id}${dirFlag}`);
 
     this.writeRequestFile(id, {
       type: "commandExecution",
       command: req.command,
       cwd: req.cwd,
+      workspaceDir: cwd,
       reason: req.reason,
       threadId: req.threadId,
       turnId: req.turnId,
@@ -60,15 +80,18 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
 
   async handleFileChangeApproval(req: FileChangeApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
     const id = validateId(req.itemId);
+    const cwd = this.workspaceDir ?? req.grantRoot;
+    const dirFlag = cwd ? ` -d ${shellQuote(cwd)}` : "";
     this.onProgress(`APPROVAL NEEDED (file change)`);
     if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
-    this.onProgress(`  Approve: codex-collab approve ${id}`);
-    this.onProgress(`  Decline: codex-collab decline ${id}`);
+    this.onProgress(`  Approve: codex-collab approve ${id}${dirFlag}`);
+    this.onProgress(`  Decline: codex-collab decline ${id}${dirFlag}`);
 
     this.writeRequestFile(id, {
       type: "fileChange",
       reason: req.reason,
       grantRoot: req.grantRoot,
+      workspaceDir: cwd,
       threadId: req.threadId,
       turnId: req.turnId,
     });

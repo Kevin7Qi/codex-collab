@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { EventDispatcher } from "./events";
+import { EventDispatcher, inferPhaseFromLog } from "./events";
 import { mkdirSync, rmSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -84,6 +84,33 @@ describe("EventDispatcher", () => {
     });
 
     expect(dispatcher.getAccumulatedOutput()).toBe("Code looks great");
+  });
+
+  test("review output survives a terminal final_answer sign-off", () => {
+    // Real reviews end with both the structured review (an exitedReviewMode
+    // item carrying the full body) AND a short final_answer agentMessage
+    // ("Bottom line: …"). Pre-fix, getTurnOutput() preferred the short
+    // final_answer over the full review — the entire review body was dropped
+    // from TurnResult.output (and thus from the run-ledger output field and
+    // the CLI's stdout under --content-only). The full review must win.
+    const dispatcher = new EventDispatcher("test-review-finalanswer", TEST_LOG_DIR);
+    const fullReview = Array.from({ length: 40 }, (_, i) =>
+      `Finding ${i + 1}: detailed substantive review content.`).join("\n");
+
+    dispatcher.handleItemCompleted({
+      item: { type: "exitedReviewMode", id: "review-1", review: fullReview },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+    dispatcher.handleItemCompleted({
+      item: { type: "agentMessage", id: "fa-1", phase: "final_answer", text: "Bottom line: looks good overall." },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    const output = dispatcher.getTurnOutput();
+    expect(output).toContain("Finding 20");
+    expect(output.length).toBeGreaterThanOrEqual(fullReview.length);
   });
 
   test("handles mid-turn error notifications", () => {
@@ -179,5 +206,118 @@ describe("EventDispatcher", () => {
 
     expect(dispatcher.getCommandsRun()).toHaveLength(1);
     expect(dispatcher.getFilesChanged()).toHaveLength(1);
+  });
+});
+
+describe("phase dedup", () => {
+  test("emits first progress for a phase", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-phase1", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.emitProgress("Starting thread abc", { phase: "starting", threadId: "t1" });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("Starting thread abc");
+  });
+
+  test("skips consecutive same phase for same thread", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-phase2", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.emitProgress("Starting thread abc", { phase: "starting", threadId: "t1" });
+    dispatcher.emitProgress("Starting another thing", { phase: "starting", threadId: "t1" });
+
+    expect(lines).toHaveLength(1);
+  });
+
+  test("emits when phase changes", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-phase3", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.emitProgress("Starting thread", { phase: "starting", threadId: "t1" });
+    dispatcher.emitProgress("Editing files", { phase: "editing", threadId: "t1" });
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("Starting thread");
+    expect(lines[1]).toContain("Editing files");
+  });
+
+  test("different threads are tracked independently", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-phase4", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.emitProgress("Starting thread", { phase: "starting", threadId: "t1" });
+    dispatcher.emitProgress("Starting thread", { phase: "starting", threadId: "t2" });
+
+    expect(lines).toHaveLength(2);
+  });
+
+  test("reset clears phase dedup state", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-phase-reset", TEST_LOG_DIR, (line) => lines.push(line));
+
+    // Emit a phase, then reset, then emit the same phase again — should NOT be suppressed
+    dispatcher.emitProgress("Starting thread", { phase: "starting", threadId: "t1" });
+    expect(lines).toHaveLength(1);
+
+    dispatcher.reset();
+
+    dispatcher.emitProgress("Starting thread again", { phase: "starting", threadId: "t1" });
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain("Starting thread again");
+  });
+
+  test("emits without dedup when no phase/threadId provided", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("test-phase5", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.emitProgress("Some progress line");
+    dispatcher.emitProgress("Some progress line");
+
+    expect(lines).toHaveLength(2);
+  });
+});
+
+describe("inferPhaseFromLog", () => {
+  test("infers starting", () => {
+    expect(inferPhaseFromLog("[codex] Starting thread")).toBe("starting");
+    expect(inferPhaseFromLog("[codex] Thread abc started")).toBe("starting");
+  });
+
+  test("infers reviewing", () => {
+    expect(inferPhaseFromLog("[codex] Reviewing changes")).toBe("reviewing");
+    expect(inferPhaseFromLog("[codex] Code review in progress")).toBe("reviewing");
+  });
+
+  test("infers editing", () => {
+    expect(inferPhaseFromLog("[codex] Editing src/foo.ts")).toBe("editing");
+    expect(inferPhaseFromLog("[codex] File edited successfully")).toBe("editing");
+  });
+
+  test("infers verifying", () => {
+    expect(inferPhaseFromLog("[codex] Verifying output")).toBe("verifying");
+    expect(inferPhaseFromLog("[codex] Checking results")).toBe("verifying");
+  });
+
+  test("infers running", () => {
+    expect(inferPhaseFromLog("[codex] Running: npm test")).toBe("running");
+    expect(inferPhaseFromLog("[codex] Executing command")).toBe("running");
+    expect(inferPhaseFromLog("[codex] Execute build step")).toBe("running");
+  });
+
+  test("infers investigating", () => {
+    expect(inferPhaseFromLog("[codex] Investigating error")).toBe("investigating");
+    expect(inferPhaseFromLog("[codex] Investigate the root cause")).toBe("investigating");
+  });
+
+  test("infers finalizing", () => {
+    expect(inferPhaseFromLog("[codex] Turn completed")).toBe("finalizing");
+    expect(inferPhaseFromLog("[codex] Finalizing output")).toBe("finalizing");
+    expect(inferPhaseFromLog("[codex] Task complete")).toBe("finalizing");
+  });
+
+  test("returns null for unrecognized lines", () => {
+    expect(inferPhaseFromLog("[codex] some random output")).toBeNull();
+    expect(inferPhaseFromLog("")).toBeNull();
   });
 });
