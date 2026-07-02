@@ -10,7 +10,7 @@ import {
   type TurnResult, type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
   type ErrorNotificationParams, type AutoApprovalReviewParams,
   type CommandApprovalRequest, type FileChangeApprovalRequest,
-  type ApprovalPolicy, type ReasoningEffort,
+  type ApprovalPolicy, type ApprovalsReviewer, type ReasoningEffort,
 } from "./types";
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
@@ -65,6 +65,10 @@ export interface TurnOptions {
   model?: string;
   effort?: ReasoningEffort;
   approvalPolicy?: ApprovalPolicy;
+  /** Per-turn approval reviewer override ("auto_review" = Guardian). Like
+   *  sandboxPolicy below, per-turn is the reliable application path when the
+   *  thread is already loaded in the long-lived (broker) app-server. */
+  approvalsReviewer?: ApprovalsReviewer;
   /** Per-turn sandbox override (wire shape, e.g. {type:"workspaceWrite"}).
    *  Re-applies the sandbox on resume, where thread/resume's `sandbox` is
    *  ignored for a thread already loaded in the long-lived app-server. */
@@ -101,6 +105,7 @@ export async function runTurn(
     model: opts.model,
     effort: opts.effort,
     approvalPolicy: opts.approvalPolicy,
+    approvalsReviewer: opts.approvalsReviewer,
     sandboxPolicy: opts.sandboxPolicy,
   };
 

@@ -1442,3 +1442,33 @@ describe("Guardian event routing", () => {
     expect(lines.some(l => l.includes("rm -rf /"))).toBe(false);
   });
 });
+
+describe("per-turn approvalsReviewer forwarding", () => {
+  test("runTurn forwards approvalsReviewer into turn/start params", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const { client, emit } = buildMockClient((method, params) => {
+      if (method === "turn/start") {
+        captured = params as Record<string, unknown>;
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 20);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("reviewer-fwd", TEST_LOG_DIR, () => {});
+    await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
+
+    // Guardian routing must reach the wire: on a thread already loaded in the
+    // long-lived broker app-server, the per-turn param is the reliable path
+    // (thread/resume-level settings can be ignored, like sandbox).
+    expect(captured?.approvalsReviewer).toBe("auto_review");
+    expect(captured?.approvalPolicy).toBe("on-request");
+  });
+});
