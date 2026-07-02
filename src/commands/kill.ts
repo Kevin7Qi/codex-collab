@@ -1,7 +1,6 @@
 // src/commands/kill.ts — kill command handler
 
 import {
-  legacyResolveThreadId as resolveThreadId,
   legacyFindShortId as findShortId,
   loadThreadMapping,
   updateThreadStatus,
@@ -12,6 +11,7 @@ import {
   die,
   parseOptions,
   validateIdOrDie,
+  resolveThreadIdOrDie,
   progress,
   withClient,
   readPidFile,
@@ -26,7 +26,7 @@ export async function handleKill(args: string[]): Promise<void> {
   if (!id) die("Usage: codex-collab kill <id>");
   validateIdOrDie(id);
 
-  const threadId = resolveThreadId(ws.threadsFile, id);
+  const threadId = resolveThreadIdOrDie(ws.threadsFile, id);
   const shortId = findShortId(ws.threadsFile, threadId);
 
   // Skip kill for threads that have already reached a terminal status
@@ -58,36 +58,43 @@ export async function handleKill(args: string[]): Promise<void> {
 
   // Try to interrupt the active turn on the server (immediate effect).
   // The kill signal file handles the case where the run process is polling.
+  // A connection-level failure (broker spawn, codex binary missing) must not
+  // abort the command — the signal file is already written and the polling
+  // run will still die, so fall through to report that.
   let serverInterrupted = false;
-  await withClient(async (client) => {
-    try {
-      const { thread } = await client.request<{
-        thread: {
-          id: string;
-          status: { type: string };
-          turns: Array<{ id: string; status: string }>;
-        };
-      }>("thread/read", { threadId, includeTurns: true });
+  try {
+    await withClient(async (client) => {
+      try {
+        const { thread } = await client.request<{
+          thread: {
+            id: string;
+            status: { type: string };
+            turns: Array<{ id: string; status: string }>;
+          };
+        }>("thread/read", { threadId, includeTurns: true });
 
-      if (thread.status.type === "active") {
-        const activeTurn = thread.turns?.find(
-          (t) => t.status === "inProgress",
-        );
-        if (activeTurn) {
-          await client.request("turn/interrupt", {
-            threadId,
-            turnId: activeTurn.id,
-          });
-          serverInterrupted = true;
-          progress(`Interrupted turn ${activeTurn.id}`);
+        if (thread.status.type === "active") {
+          const activeTurn = thread.turns?.find(
+            (t) => t.status === "inProgress",
+          );
+          if (activeTurn) {
+            await client.request("turn/interrupt", {
+              threadId,
+              turnId: activeTurn.id,
+            });
+            serverInterrupted = true;
+            progress(`Interrupted turn ${activeTurn.id}`);
+          }
+        }
+      } catch (e) {
+        if (e instanceof Error && !e.message.includes("not found")) {
+          console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
         }
       }
-    } catch (e) {
-      if (e instanceof Error && !e.message.includes("not found")) {
-        console.error(`[codex] Warning: could not read/interrupt thread: ${e.message}`);
-      }
-    }
-  }, options.dir);
+    }, options.dir);
+  } catch (e) {
+    console.error(`[codex] Warning: could not reach app server: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   if (killSignalWritten || serverInterrupted) {
     updateThreadStatus(ws.threadsFile, threadId, "interrupted");

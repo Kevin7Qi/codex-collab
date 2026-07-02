@@ -112,7 +112,7 @@ Commands:
 
 Options:
   -m, --model <model>     Model name (default: auto — latest available)
-  -r, --reasoning <lvl>   Reasoning: ${config.defaultDisplayReasoningEfforts.join(", ")} (default: auto — highest available)
+  -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: auto — highest available)
   -s, --sandbox <mode>    Sandbox: ${config.sandboxModes.join(", ")}
                           (default: ${config.defaultSandbox})
   -d, --dir <path>        Working directory (default: cwd)
@@ -126,7 +126,11 @@ Options:
   --limit <n>             Number of items shown (peek, threads commands)
   --full                  Include all item types (peek command)
   --content-only          Print only result text (no progress lines)
-  -v, --version           Print version and exit
+  --json                  JSON output (threads, peek commands)
+  --all                   List all threads without the display limit
+  --discover              Merge server-side threads into the local list (threads)
+  --                      End of options; remaining args are prompt text
+  -v, --version           Print version and exit (before the command only)
 
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
@@ -185,6 +189,13 @@ function extractCommand(args: string[]): { command: string; rest: string[] } {
       showHelp();
       process.exit(0);
     }
+    // Only honored before the command: `run "prompt" -v` should surface an
+    // unknown-option error rather than silently printing the version and
+    // exiting 0 (dangerous in scripts that expect the run to happen).
+    if (arg === "-v" || arg === "--version") {
+      printVersion();
+      process.exit(0);
+    }
     if (arg.startsWith("-")) {
       // `--name=value` is one token; `--name value` is two — only skip the
       // following arg in the latter case, and only for known value-flags.
@@ -204,6 +215,7 @@ function extractCommand(args: string[]): { command: string; rest: string[] } {
   // `codex-collab --bogus` still exits 1, but tolerate known flags missing
   // their command (the empty-command help path below handles those).
   for (const arg of args) {
+    if (arg === "--") break; // end of options — nothing after is a flag
     if (!arg.startsWith("-")) continue;
     // Strip `--name=value` so we match the option name, not the joined token.
     const name = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
@@ -221,11 +233,6 @@ function extractCommand(args: string[]): { command: string; rest: string[] } {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  if (rawArgs.includes("--version") || rawArgs.includes("-v")) {
-    printVersion();
-    process.exit(0);
-  }
-
   if (rawArgs.length === 0) {
     showHelp();
     process.exit(0);
@@ -250,8 +257,10 @@ async function main() {
     process.exit(1);
   }
 
-  // Handle --help after a command (e.g., "codex-collab run --help")
-  if (rest.includes("-h") || rest.includes("--help")) {
+  // Handle --help after a command (e.g., "codex-collab run --help") — but
+  // not past a `--` terminator, where it is positional prompt text.
+  const optionTokens = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
+  if (optionTokens.includes("-h") || optionTokens.includes("--help")) {
     showHelp();
     process.exit(0);
   }

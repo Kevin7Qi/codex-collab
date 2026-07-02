@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 After installation, **reopen your terminal** so the updated PATH takes effect, then run `codex-collab health` to verify.
 
-The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and adds a binary shim to your PATH. Once installed, Claude discovers the skill automatically.
+The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and installs a binary shim (`install.ps1` adds it to your PATH; `install.sh` places it in `~/.local/bin` and prints instructions if that directory is not already on your PATH). Once installed, Claude discovers the skill automatically.
 
 ### Upgrading
 
@@ -111,6 +111,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `models` | List available models |
 | `templates` | List available prompt templates |
 | `health` | Check dependencies |
+| `version` | Print version (also `-v`/`--version` before a command) |
 
 <details>
 <summary>Thread management</summary>
@@ -131,7 +132,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 |------|-------------|
 | `-d, --dir <path>` | Working directory |
 | `-m, --model <model>` | Model name (default: auto — latest available) |
-| `-r, --reasoning <level>` | low, medium, high, xhigh (default: auto — highest for model) |
+| `-r, --reasoning <level>` | none, minimal, low, medium, high, xhigh (default: auto — highest for model) |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
@@ -144,8 +145,9 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--limit <n>` | Limit items shown by `threads` or `peek` |
 | `--full` | Include all item types in `peek` output (default shows messages only) |
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
-| `--timeout <sec>` | Turn timeout (default: 1200) |
+| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483) |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
+| `--` | End of options; remaining arguments are treated as prompt text |
 
 </details>
 

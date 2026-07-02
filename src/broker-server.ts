@@ -34,7 +34,7 @@ const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 
 /** Methods that start a streaming turn — the socket that initiated the stream
  *  owns notifications until turn/completed arrives. */
-const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
+const STREAMING_METHODS = new Set(["turn/start", "review/start"]);
 
 // ─── Argument parsing ───────────────────────────────────────────────────────
 
@@ -212,10 +212,17 @@ async function main() {
           if (r.status === "fulfilled") anySucceeded = true;
           else process.stderr.write(`[broker-server] Warning: orphan-turn interrupt failed for ${targets[i].threadId}/${targets[i].turnId}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}\n`);
         });
+        // Ownership may have moved during the interrupt RPCs: the orphan can
+        // complete naturally (handler releases it) and a new client can claim
+        // a fresh stream. In that case the failed interrupts only prove the
+        // *old* turn was already gone — shutting down would kill the new
+        // client's healthy in-flight turn, so only shut down if still owner.
+        const stillOwned = activeStreamSocket !== null && activeStreamTargets === ownedTargets;
         releaseOwnershipIfStillOurs();
-        // If every interrupt failed, the app-server is likely unhealthy.
-        // Shutdown forces ensureConnection to respawn next time.
-        if (!anySucceeded && targets.length > 0) {
+        // If every interrupt failed while we still owned the stream, the
+        // app-server is likely unhealthy. Shutdown forces ensureConnection
+        // to respawn next time.
+        if (!anySucceeded && targets.length > 0 && stillOwned) {
           process.stderr.write("[broker-server] Orphan-turn interrupt failed entirely — shutting down so the next invocation respawns\n");
           if (!shutdownInitiated) {
             shutdownInitiated = true;
@@ -289,16 +296,13 @@ async function main() {
         }
         activeStreamSocket = null;
         activeStreamTargets = null;
-        if (target && activeRequestSocket === target) {
-          activeRequestSocket = null;
-          // Also clear the streaming flag — otherwise the busy state in
-          // `initialize` (computed as `activeStreamSocket !== null ||
-          // activeRequestIsStreaming`) stays true forever for fast turns
-          // that complete before the turn/start response is processed.
-          // Subsequent clients would see busy=true and fall back to direct
-          // connections, defeating broker reuse until the broker restarts.
-          activeRequestIsStreaming = false;
-        }
+        // Deliberately do NOT clear activeRequestSocket/activeRequestIsStreaming
+        // here. When a request is pending, this completion is either (a) the
+        // pending request's own fast turn — its response settles moments later
+        // and the request path clears both flags on every settle branch — or
+        // (b) a stale orphan turn completing naturally, in which case clearing
+        // would free the slot while the unrelated request is still in flight,
+        // letting a second client interleave a stream on the shared app-server.
         // Also cancel any orphan-turn watchdog; the turn ended naturally.
         if (orphanWatchdog) {
           clearTimeout(orphanWatchdog);
@@ -365,7 +369,20 @@ async function main() {
     } catch (e) {
       process.stderr.write(`[broker-server] Warning: app-server close failed: ${e instanceof Error ? e.message : String(e)}\n`);
     }
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    // Bound the close wait: a client that never drains its half-closed socket
+    // (or a platform quirk that drops the close callback) must not wedge
+    // shutdown — the signal/idle paths that call this expect to reach
+    // process.exit(). Destroy stragglers once the grace period lapses.
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        for (const socket of sockets) socket.destroy();
+        resolve();
+      }, 2000);
+      server.close(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
     if (listenTarget.kind === "unix") {
       try {
         fs.unlinkSync(listenTarget.path);
@@ -385,13 +402,7 @@ async function main() {
   // queue. This prevents deadlocks when a client's approval response is queued
   // behind an RPC request that the app-server can't complete until the approval
   // is received.
-  function tryRouteApprovalResponse(socket: net.Socket, line: string): boolean {
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      return false;
-    }
+  function tryRouteApprovalResponse(socket: net.Socket, parsed: Record<string, unknown>): boolean {
     if (typeof parsed !== "object" || parsed === null) return false;
     // Approval responses have id but no method
     if (parsed.id === undefined || "method" in parsed) return false;
@@ -429,23 +440,10 @@ async function main() {
 
   // Processes a single JSON-RPC message from a client socket. Extracted from
   // the data handler so messages can be chained via a per-socket Promise
-  // queue, preventing async reentrancy on the shared buffer.
-  async function processMessage(socket: net.Socket, line: string): Promise<void> {
+  // queue, preventing async reentrancy on the shared buffer. The message is
+  // parsed once in the data handler and shared with the approval fast-path.
+  async function processMessage(socket: net.Socket, message: Record<string, unknown>): Promise<void> {
     resetIdleTimer();
-
-    let message: Record<string, unknown>;
-    try {
-      message = JSON.parse(line);
-    } catch (err) {
-      send(socket, {
-        id: null,
-        error: buildJsonRpcError(
-          -32700,
-          `Invalid JSON: ${(err as Error).message}`,
-        ),
-      });
-      return;
-    }
 
     // Handle initialize locally — don't forward to app-server
     if (message.id !== undefined && message.method === "initialize") {
@@ -476,33 +474,14 @@ async function main() {
       return;
     }
 
-    // Route responses (id + result/error, no method) to pending forwarded
-    // requests (e.g. approval request responses from the client).
+    // Responses (id + result/error, no method) that reach the queue were
+    // already checked against pendingForwardedRequests by the fast-path in
+    // the data handler, which consumes every match — so this can only be an
+    // unknown or expired forwarded-request id.
     if (message.id !== undefined && !("method" in message)) {
-      const reqId = String(message.id);
-      const entry = pendingForwardedRequests.get(reqId);
-      if (entry) {
-        if (entry.target !== socket) {
-          process.stderr.write(
-            `[broker-server] Warning: forwarded response id=${reqId} from wrong socket — ignoring\n`,
-          );
-          return;
-        }
-        pendingForwardedRequests.delete(reqId);
-        clearTimeout(entry.timer);
-        if ("result" in message) {
-          entry.resolve(message.result);
-        } else if ("error" in message) {
-          const errObj = message.error as Record<string, unknown> | undefined;
-          entry.reject(new Error((errObj?.message as string) ?? "Client error"));
-        } else {
-          entry.reject(new Error("Malformed forwarded response: missing both 'result' and 'error'"));
-        }
-      } else {
-        process.stderr.write(
-          `[broker-server] Warning: received response for unknown/expired forwarded request id=${reqId}\n`,
-        );
-      }
+      process.stderr.write(
+        `[broker-server] Warning: received response for unknown/expired forwarded request id=${String(message.id)}\n`,
+      );
       return;
     }
 
@@ -644,7 +623,11 @@ async function main() {
         const newTurn = (result as Record<string, unknown>)?.turn as Record<string, unknown> | undefined;
         const newTurnId = typeof newTurn?.id === "string" ? newTurn.id : null;
         const alreadyCompleted = newTurnId !== null && completedStreamTurnIds.has(newTurnId);
-        if (!alreadyCompleted) {
+        // An empty targets map (response without turn.id) must not claim
+        // ownership: turn/completed matches by thread ID, so nothing could
+        // ever release the slot and the broker would stay busy until the
+        // owner disconnects.
+        if (!alreadyCompleted && streamTargets.size > 0) {
           activeStreamSocket = socket;
           activeStreamTargets = streamTargets;
         }
@@ -703,14 +686,26 @@ async function main() {
         if (line) lines.push(line);
       }
       for (const line of lines) {
+        // Parse once here; both the approval fast-path and the queued
+        // handler receive the parsed message.
+        let message: Record<string, unknown>;
+        try {
+          message = JSON.parse(line);
+        } catch (err) {
+          send(socket, {
+            id: null,
+            error: buildJsonRpcError(-32700, `Invalid JSON: ${(err as Error).message}`),
+          });
+          continue;
+        }
         // Approval responses bypass the queue to prevent deadlocks when
         // queued behind an RPC request awaiting the same approval.
-        if (!tryRouteApprovalResponse(socket, line)) {
+        if (!tryRouteApprovalResponse(socket, message)) {
           // Log unexpected rejections so the queue doesn't silently swallow
           // them; the queue itself recovers because we re-assign with `.then`
           // on the previous (now-resolved) promise.
           messageQueue = messageQueue
-            .then(() => processMessage(socket, line))
+            .then(() => processMessage(socket, message))
             .catch((err) => {
               process.stderr.write(`[broker-server] processMessage failed: ${err instanceof Error ? err.message : String(err)}\n`);
             });

@@ -29,8 +29,8 @@ codex-collab health
 | `src/broker-client.ts` | Socket-based client for connecting to the broker server |
 | `src/broker-server.ts` | Detached broker server process (multiplexes JSON-RPC between clients and app-server) |
 | `src/process.ts` | Process spawn/lifecycle utilities |
-| `src/git.ts` | Git operations (diff, log, status) |
-| `src/reviews.ts` | Review validation, structured output parsing |
+| `src/lock.ts` | Advisory file locks (sync/async, single-winner stale breaking) |
+| `src/git.ts` | Git operations (default-branch detection for reviews) |
 | `SKILL.md` | Claude Code skill definition |
 
 ## Dependencies

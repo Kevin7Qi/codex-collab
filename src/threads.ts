@@ -6,76 +6,34 @@
 
 import {
   readFileSync, writeFileSync, existsSync, mkdirSync, renameSync,
-  openSync, closeSync, unlinkSync, statSync, readdirSync, rmSync,
+  unlinkSync, readdirSync, rmSync,
   copyFileSync, realpathSync,
 } from "fs";
 import { randomBytes, createHash } from "crypto";
-import { basename, dirname, join, resolve, sep } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { config, validateId, resolveWorkspaceDir, isPathInside, STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
+import { acquireLockSync, LockTimeoutError } from "./lock";
 import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus, ThreadMapping, ThreadMappingEntry } from "./types";
 
 // ─── Advisory file lock ────────────────────────────────────────────────────
 
 /**
- * Acquire an advisory file lock using O_CREAT|O_EXCL on a .lock file.
- * Returns a release function. Spins with short sleeps on contention.
- *
- * If the lock cannot be acquired after ~30s, checks the lock file age.
- * Only force-breaks locks older than 60s (likely orphaned by a crashed process).
+ * Acquire an advisory file lock on `filePath + ".lock"` (see src/lock.ts for
+ * the acquisition/stale-break semantics). Returns a release function.
  */
 function acquireLock(filePath: string): () => void {
   const lockPath = filePath + ".lock";
-  const maxAttempts = 600; // ~30s at 50ms avg sleep
-  const staleLockThresholdMs = 60_000;
-  let fd: number | undefined;
-
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      fd = openSync(lockPath, "wx");
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw new Error(`Cannot create lock file ${lockPath}: ${(e as Error).message}`);
-      }
-      Bun.sleepSync(30 + Math.random() * 40);
+  try {
+    return acquireLockSync(lockPath);
+  } catch (e) {
+    if (e instanceof LockTimeoutError) {
+      throw new Error(
+        `Cannot acquire lock on ${filePath}: ${e.message}. ` +
+        `If this persists, manually delete ${lockPath}`,
+      );
     }
+    throw new Error(`Cannot create lock file ${lockPath}: ${(e as Error).message}`);
   }
-  if (fd === undefined) {
-    // Check if lock is stale (older than threshold)
-    try {
-      const stat = statSync(lockPath);
-      const ageMs = Date.now() - stat.mtimeMs;
-      if (ageMs < staleLockThresholdMs) {
-        throw new Error(
-          `Cannot acquire lock on ${filePath}: lock held for ${Math.round(ageMs / 1000)}s (not yet stale). ` +
-          `If this persists, manually delete ${lockPath}`,
-        );
-      }
-      // Lock is stale — force acquire with O_EXCL after unlink
-      unlinkSync(lockPath);
-    } catch (e) {
-      if (e instanceof Error && e.message.startsWith("Cannot acquire lock")) throw e;
-      // statSync/unlinkSync failed (e.g. ENOENT race) — retry once with O_EXCL
-    }
-    try {
-      fd = openSync(lockPath, "wx");
-    } catch (e) {
-      throw new Error(`Cannot acquire lock on ${filePath}: ${(e as Error).message}`);
-    }
-  }
-
-  return () => {
-    try { closeSync(fd!); } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`[codex] Warning: lock fd close failed: ${(e as Error).message}`);
-      }
-    }
-    try { unlinkSync(lockPath); } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`[codex] Warning: lock cleanup failed: ${(e as Error).message}`);
-      }
-    }
-  };
 }
 
 /** Acquire the thread file lock, run fn, then release. */
@@ -190,8 +148,9 @@ export function resolveThreadId(
 ): { shortId: string; threadId: string } | null {
   const index = loadThreadIndex(stateDir);
 
-  // 1. Exact short ID match
-  if (index[id]) return { shortId: id, threadId: index[id].threadId };
+  // 1. Exact short ID match (hasOwn: `index[id]` alone would hit
+  // Object.prototype members for IDs like "constructor")
+  if (Object.hasOwn(index, id)) return { shortId: id, threadId: index[id].threadId };
 
   // 2. Prefix match
   const prefixMatches = Object.entries(index).filter(([k]) => k.startsWith(id));
@@ -387,17 +346,24 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
 
   type Entry = { file: string; activityAt: string; logFile: string | null; logPath: string | null; running: boolean };
   const entries: Entry[] = [];
+  // A record can say "running" forever if its process died without writing a
+  // terminal state (SIGKILL, crash, power loss — nothing reconciles the run
+  // ledger afterwards). Treat "running" records with no activity for a day
+  // as dead so they don't leak past the cap permanently.
+  const staleRunningHorizonMs = 24 * 60 * 60 * 1000;
   for (const file of files) {
     try {
       const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
       const activityAt = record.completedAt ?? record.startedAt;
       const logFile = record.logFile || null;
+      const activityMs = new Date(activityAt).getTime();
+      const staleRunning = Number.isFinite(activityMs) && Date.now() - activityMs > staleRunningHorizonMs;
       entries.push({
         file,
         activityAt,
         logFile,
         logPath: resolveLogFile(logFile),
-        running: record.status === "running",
+        running: record.status === "running" && !staleRunning,
       });
     } catch (e) {
       // Corrupt files count toward the total; delete them first
@@ -424,6 +390,22 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   const survivingLogs = new Set<string>();
   for (const e of entries) {
     if (!victimFiles.has(e.file) && e.logPath) survivingLogs.add(e.logPath);
+  }
+  // Also protect logs referenced by live thread-index entries: a thread can
+  // outlive all of its run records (index retention is `clean`'s 7-day
+  // policy, run retention is the 50-record cap), and `output`/`progress`
+  // still read logs/{shortId}.log for it.
+  try {
+    const index = JSON.parse(readFileSync(threadsFilePath(stateDir), "utf-8"));
+    if (typeof index === "object" && index !== null && !Array.isArray(index)) {
+      for (const shortId of Object.keys(index)) {
+        survivingLogs.add(resolve(stateDir, "logs", `${shortId}.log`));
+      }
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[codex] Warning: could not read thread index during prune: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   for (const victim of victims) {
@@ -474,18 +456,28 @@ function mapLegacyThreadStatus(lastStatus?: string): ThreadIndexEntry["lastStatu
   }
 }
 
+/** Canonicalize a path for workspace-scope comparisons. When the path does
+ *  not exist (deleted dirs, dangling entries), canonicalize the deepest
+ *  existing ancestor and re-append the remainder — a plain resolve() would
+ *  leave a symlinked prefix (macOS /var → /private/var) unresolved and
+ *  break prefix comparisons against canonical roots. */
+function canonicalizePath(p: string): string {
+  const resolved = resolve(p);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    const parent = dirname(resolved);
+    if (parent === resolved) return resolved; // filesystem root
+    return join(canonicalizePath(parent), basename(resolved));
+  }
+}
+
 /**
  * Compute the workspace-specific slug-hash suffix for a given cwd.
  * Mirrors the logic in resolveStateDir but returns only the directory name.
  */
 function workspaceDirName(cwd: string): string {
-  const wsRoot = resolveWorkspaceDir(cwd);
-  let canonical: string;
-  try {
-    canonical = realpathSync(wsRoot);
-  } catch {
-    canonical = resolve(wsRoot);
-  }
+  const canonical = canonicalizePath(resolveWorkspaceDir(cwd));
   const slug = basename(canonical).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
   const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
   return `${slug}-${hash}`;
@@ -639,11 +631,15 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
     return;
   }
 
-  // 4. Filter entries where cwd matches or is within the workspace root
+  // 4. Filter entries where cwd matches or is within the workspace root.
+  // Canonicalize the stored cwd too: wsRoot is canonical (git physical path
+  // or realpath'd fallback), while legacy entries recorded raw process.cwd()
+  // values that may be symlinked forms of the same directory (e.g. macOS
+  // /var vs /private/var).
   const wsRoot = resolveWorkspaceDir(cwd);
   const matchingEntries: [string, ThreadMappingEntry][] = [];
   for (const [shortId, entry] of Object.entries(globalMapping)) {
-    if (entry.cwd && isPathInside(entry.cwd, wsRoot)) {
+    if (entry.cwd && isPathInside(canonicalizePath(entry.cwd), wsRoot)) {
       matchingEntries.push([shortId, entry]);
     }
   }
@@ -791,7 +787,7 @@ export function removeLegacyGlobalThread(
 
     let changed = false;
     for (const [shortId, entry] of Object.entries(globalMapping)) {
-      if (entry.threadId === threadId && entry.cwd && isPathInside(entry.cwd, wsRoot)) {
+      if (entry.threadId === threadId && entry.cwd && isPathInside(canonicalizePath(entry.cwd), wsRoot)) {
         delete globalMapping[shortId];
         changed = true;
       }
@@ -924,8 +920,10 @@ export function legacyRegisterThread(
 export function legacyResolveThreadId(threadsFile: string, idOrPrefix: string): string {
   const mapping = loadThreadMapping(threadsFile);
 
-  // Exact short ID match
-  if (mapping[idOrPrefix]) return mapping[idOrPrefix].threadId;
+  // Exact short ID match (hasOwn: `mapping[idOrPrefix]` alone would hit
+  // Object.prototype members for IDs like "constructor", returning
+  // undefined as the threadId instead of falling through to "not found")
+  if (Object.hasOwn(mapping, idOrPrefix)) return mapping[idOrPrefix].threadId;
 
   // Short ID prefix match
   const matches = Object.entries(mapping).filter(([k]) => k.startsWith(idOrPrefix));

@@ -9,6 +9,7 @@ import {
   fetchAllPages,
   loadUserConfig,
   saveUserConfig,
+  MAX_TIMEOUT_SECONDS,
 } from "./shared";
 
 // ---------------------------------------------------------------------------
@@ -19,11 +20,11 @@ export async function handleConfig(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
 
   const VALID_KEYS: Record<string, { validate: (v: string) => boolean; hint: string }> = {
-    model:     { validate: v => !/[^a-zA-Z0-9._\-\/:]/.test(v), hint: "model name (e.g. gpt-5.4, gpt-5.3-codex)" },
+    model:     { validate: v => v.length > 0 && !/[^a-zA-Z0-9._\-\/:]/.test(v), hint: "model name (e.g. gpt-5.4, gpt-5.3-codex)" },
     reasoning: { validate: v => (config.reasoningEfforts as readonly string[]).includes(v), hint: config.reasoningEfforts.join(", ") },
     sandbox:   { validate: v => (config.sandboxModes as readonly string[]).includes(v), hint: config.sandboxModes.join(", ") },
     approval:  { validate: v => (config.approvalPolicies as readonly string[]).includes(v), hint: config.approvalPolicies.join(", ") },
-    timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0; }, hint: "seconds (e.g. 1200)" },
+    timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds, 1-${MAX_TIMEOUT_SECONDS} (e.g. 1200)` },
   };
 
   const cfg = loadUserConfig();
@@ -91,10 +92,13 @@ export async function handleConfig(args: string[]): Promise<void> {
 // models
 // ---------------------------------------------------------------------------
 
-export async function handleModels(_args: string[]): Promise<void> {
+export async function handleModels(args: string[]): Promise<void> {
+  // Parse for -d/--dir support and so unknown flags error like every other
+  // command instead of being silently ignored.
+  const { options } = parseOptions(args);
   const allModels = await withClient((client) =>
     fetchAllPages<Model>(client, "model/list", { includeHidden: true }),
-  );
+  options.dir);
 
   for (const m of allModels) {
     const efforts =
@@ -109,7 +113,8 @@ export async function handleModels(_args: string[]): Promise<void> {
 // health
 // ---------------------------------------------------------------------------
 
-export async function handleHealth(_args: string[]): Promise<void> {
+export async function handleHealth(args: string[]): Promise<void> {
+  const { options } = parseOptions(args);
   const findCmd = process.platform === "win32" ? "where" : "which";
   const which = Bun.spawnSync([findCmd, "codex"]);
   if (which.exitCode !== 0) {
@@ -122,7 +127,7 @@ export async function handleHealth(_args: string[]): Promise<void> {
   console.log(`  codex: ${which.stdout.toString().trim().split("\n")[0].trim()}`);
 
   try {
-    const userAgent = await withClient(async (client) => client.userAgent);
+    const userAgent = await withClient(async (client) => client.userAgent, options.dir);
     console.log(`  app-server: OK (${userAgent})`);
   } catch (e) {
     console.log(`  app-server: FAILED (${e instanceof Error ? e.message : e})`);
@@ -136,7 +141,8 @@ export async function handleHealth(_args: string[]): Promise<void> {
 // templates
 // ---------------------------------------------------------------------------
 
-export function handleTemplates(_args: string[]): void {
+export function handleTemplates(args: string[]): void {
+  parseOptions(args); // reject unknown flags like every other command
   const templates = listTemplates();
 
   if (templates.length === 0) {

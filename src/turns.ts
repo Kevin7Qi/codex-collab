@@ -11,7 +11,6 @@ import {
   type ErrorNotificationParams,
   type CommandApprovalRequest, type FileChangeApprovalRequest,
   type ApprovalPolicy, type ReasoningEffort,
-  type ReasoningItem,
 } from "./types";
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
@@ -56,42 +55,6 @@ export async function tryInterruptTurn(
       console.error(`[codex] Warning: ${prefix}: ${e.message}`);
     }
   }
-}
-
-/**
- * Extract a single reasoning string from a completed reasoning item.
- * Joins summary and content arrays with newlines, deduplicates identical sections.
- */
-export function extractReasoning(item: ReasoningItem): string | null {
-  const parts: string[] = [];
-  if (item.summary?.length) parts.push(...item.summary);
-  if (item.content?.length) parts.push(...item.content);
-  if (parts.length === 0) return null;
-  // Deduplicate identical sections (preserve order)
-  const seen = new Set<string>();
-  const unique: string[] = [];
-  for (const p of parts) {
-    if (!seen.has(p)) {
-      seen.add(p);
-      unique.push(p);
-    }
-  }
-  return unique.join("\n");
-}
-
-/** Merge multiple reasoning strings, deduplicating identical sections. */
-function mergeReasoningStrings(existing: string | null, addition: string): string {
-  if (!existing) return addition;
-  const allParts = [...existing.split("\n"), ...addition.split("\n")];
-  const seen = new Set<string>();
-  const unique: string[] = [];
-  for (const p of allParts) {
-    if (!seen.has(p)) {
-      seen.add(p);
-      unique.push(p);
-    }
-  }
-  return unique.join("\n");
 }
 
 export interface TurnOptions {
@@ -201,9 +164,6 @@ async function executeTurn(
   const notificationBuffer: BufferedNotification[] = [];
   let turnId: string | null = null;
 
-  // --- Turn-level structured capture ---
-  let turnReasoning: string | null = null;
-
   // --- Completion inference ---
   let inferenceTimer: ReturnType<typeof setTimeout> | undefined;
   let inferenceResolver: (() => void) | null = null;
@@ -224,18 +184,11 @@ async function executeTurn(
     }
   }
 
-  // Process an item/completed notification for reasoning extraction & completion inference
+  // Process an item/completed notification for completion inference
   function processItemCompleted(itemParams: ItemCompletedParams): void {
     const { item } = itemParams;
     if (!isKnownItem(item)) return;
 
-    // Reasoning extraction
-    if (item.type === "reasoning") {
-      const extracted = extractReasoning(item);
-      if (extracted) {
-        turnReasoning = mergeReasoningStrings(turnReasoning, extracted);
-      }
-    }
     // Completion inference: agentMessage with phase "final_answer" (normal turns)
     // or exitedReviewMode (reviews) starts the debounce timer. Work-in-progress
     // items (command execution, file changes, non-final agent messages) clear
@@ -256,7 +209,7 @@ async function executeTurn(
 
   // AbortController for cancelling in-flight approval polls on turn completion/timeout
   const abortController = new AbortController();
-  const unsubs = registerEventHandlers(client, opts, abortController.signal);
+  const unsubs = registerApprovalHandlers(client, opts, abortController.signal);
 
   // For reviews the running turn fires its item events on the review
   // subthread (set below after the start response returns). Predicate is
@@ -269,34 +222,87 @@ async function executeTurn(
     belongsToTurn(p, threadId, expectedTurnId)
     || (reviewSubthreadId !== null && belongsToTurn(p, reviewSubthreadId, expectedTurnId));
 
-  // Wire up item/started interception for completion inference — if new work
-  // starts after a final_answer, cancel the inference timer to avoid premature
-  // completion synthesis. Reasoning items are excluded: the model can begin a
-  // reasoning trace concurrent with or after the final answer without that
-  // implying further work.
-  unsubs.push(
-    client.on("item/started", (params) => {
-      const p = params as ItemStartedParams;
-      if (turnId !== null && belongsToActiveTurn(p, turnId) && inferenceResolver) {
-        const item = p.item as { type?: string } | undefined;
-        if (item?.type !== "reasoning") clearInferenceTimer();
-      }
-    }),
-  );
-
-  // Wire up item/completed interception for reasoning & structured capture.
-  // This runs alongside the dispatcher's handler (registered in registerEventHandlers).
-  unsubs.push(
-    client.on("item/completed", (params) => {
-      const p = params as ItemCompletedParams;
-      if (turnId !== null) {
-        if (belongsToActiveTurn(p, turnId)) {
-          processItemCompleted(p);
+  // Route a notification to the dispatcher and the completion-inference
+  // logic, dropping events that belong to a different turn. On a shared
+  // (broker) app-server, an orphaned turn from a previous client can still
+  // be emitting items — without this filter its output would contaminate
+  // this run's captured output, log, and persisted RunRecord. Events that
+  // don't carry routing info are processed (fail-open) so protocol additions
+  // aren't silently dropped.
+  function routeNotification(method: string, params: unknown): void {
+    const routing = params as { threadId?: unknown; turnId?: unknown };
+    if (
+      turnId !== null &&
+      typeof routing?.threadId === "string" &&
+      typeof routing?.turnId === "string" &&
+      !belongsToActiveTurn({ threadId: routing.threadId, turnId: routing.turnId }, turnId)
+    ) {
+      return;
+    }
+    switch (method) {
+      case "item/started": {
+        const p = params as ItemStartedParams;
+        opts.dispatcher.handleItemStarted(p);
+        // Completion inference: if new non-reasoning work starts after a
+        // final_answer, cancel the inference timer to avoid premature
+        // completion synthesis. Reasoning items are excluded: the model can
+        // begin a reasoning trace concurrent with or after the final answer
+        // without that implying further work.
+        if (inferenceResolver) {
+          const item = p.item as { type?: string } | undefined;
+          if (item?.type !== "reasoning") clearInferenceTimer();
         }
-      } else {
-        // Buffer — will be replayed once turnId is known
-        notificationBuffer.push({ method: "item/completed", params });
+        break;
       }
+      case "item/completed": {
+        const p = params as ItemCompletedParams;
+        opts.dispatcher.handleItemCompleted(p);
+        processItemCompleted(p);
+        break;
+      }
+      case "item/agentMessage/delta":
+      case "item/commandExecution/outputDelta":
+        opts.dispatcher.handleDelta(method, params as DeltaParams);
+        break;
+      case "error":
+        opts.dispatcher.handleError(params as ErrorNotificationParams);
+        break;
+    }
+  }
+
+  for (const method of [
+    "item/started",
+    "item/completed",
+    "item/agentMessage/delta",
+    "item/commandExecution/outputDelta",
+    "error",
+  ]) {
+    unsubs.push(
+      client.on(method, (params) => {
+        if (turnId === null) {
+          // Buffer — replayed in arrival order once turnId is known, so
+          // fast-turn events that beat the turn/start response are still
+          // filtered and processed exactly once.
+          notificationBuffer.push({ method, params });
+          return;
+        }
+        routeNotification(method, params);
+      }),
+    );
+  }
+
+  // Detect connection loss mid-turn. Neither completion.waitFor nor the
+  // inference promise fires when the app-server or broker dies, so without
+  // this the CLI would silently wait the full turn timeout (default 20 min)
+  // and then report a misleading "Turn timed out".
+  let connectionLost: ((err: Error) => void) | null = null;
+  const connectionLossPromise = new Promise<never>((_resolve, reject) => {
+    connectionLost = reject;
+  });
+  connectionLossPromise.catch(() => {}); // avoid unhandled rejection if no race is pending
+  unsubs.push(
+    client.onClose(() => {
+      connectionLost?.(new Error("Connection to Codex lost mid-turn (app-server or broker exited)"));
     }),
   );
 
@@ -315,15 +321,22 @@ async function executeTurn(
   const killAbort = new AbortController();
 
   // Remove leftover signals from a previous (crashed) run while preserving
-  // fresh ones from a concurrent `kill`. Modern `kill` writes our PID or
-  // "*"; a different PID is stale. Empty content (legacy `kill`) and old
-  // wildcards fall back to a wall-clock mtime check — process.uptime would
-  // mis-classify a kill issued just before this process started.
+  // fresh ones from a concurrent `kill`. Modern `kill` writes the target
+  // run's PID or "*". A different PID is only stale if that process is gone
+  // — a live PID means the signal targets a concurrent run on this thread
+  // (possible via the broker-busy → direct-connection fallback) and deleting
+  // it would make that kill silently never land. Empty content (legacy
+  // `kill`) and wildcards fall back to a wall-clock mtime check —
+  // process.uptime would mis-classify a kill issued just before this
+  // process started.
   const myPid = String(process.pid);
   try {
     const content = readFileSync(signalPath, "utf-8").trim();
     if (content && content !== "*" && content !== myPid) {
-      unlinkSync(signalPath);
+      const pid = Number(content);
+      if (!Number.isInteger(pid) || pid <= 0 || !isPidAlive(pid)) {
+        unlinkSync(signalPath);
+      }
     } else if (!content || content === "*") {
       const st = statSync(signalPath);
       if (st.mtimeMs < Date.now() - STALE_KILL_SIGNAL_MS) unlinkSync(signalPath);
@@ -349,6 +362,7 @@ async function executeTurn(
     const startResponse = await Promise.race([
       client.request<TurnStartResponse & { reviewThreadId?: string }>(method, params),
       killSignal,
+      connectionLossPromise,
     ]);
     const { turn } = startResponse;
     if (typeof startResponse.reviewThreadId === "string") {
@@ -373,12 +387,7 @@ async function executeTurn(
     });
 
     for (const buffered of notificationBuffer) {
-      if (buffered.method === "item/completed") {
-        const p = buffered.params as ItemCompletedParams;
-        if (belongsToActiveTurn(p, turnId)) {
-          processItemCompleted(p);
-        }
-      }
+      routeNotification(buffered.method, buffered.params);
     }
     notificationBuffer.length = 0;
 
@@ -397,6 +406,7 @@ async function executeTurn(
         } as TurnCompletedParams;
       }),
       killSignal,
+      connectionLossPromise,
     ]);
 
     opts.dispatcher.flushOutput();
@@ -413,7 +423,6 @@ async function executeTurn(
     return {
       status: completedTurn.turn.status as TurnResult["status"],
       output,
-      reasoning: turnReasoning,
       filesChanged: opts.dispatcher.getFilesChanged(),
       commandsRun: opts.dispatcher.getCommandsRun(),
       error: completedTurn.turn.error?.message,
@@ -435,7 +444,6 @@ async function executeTurn(
       return {
         status: "interrupted",
         output: opts.dispatcher.getTurnOutput(),
-        reasoning: turnReasoning,
         filesChanged: opts.dispatcher.getFilesChanged(),
         commandsRun: opts.dispatcher.getCommandsRun(),
         error: "Thread killed by user",
@@ -452,8 +460,15 @@ async function executeTurn(
     killAbort.abort();
     abortController.abort();
     for (const unsub of unsubs) unsub();
-    // Clean up signal file
-    try { unlinkSync(signalPath); } catch (e) {
+    // Clean up the signal file — but only if it targets this run. A signal
+    // tagged with another live run's PID belongs to that run; deleting it
+    // here would make its kill silently never land.
+    try {
+      const content = readFileSync(signalPath, "utf-8").trim();
+      if (content === "" || content === "*" || content === myPid) {
+        unlinkSync(signalPath);
+      }
+    } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
         console.error(`[codex] Warning: could not clean up kill signal: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -461,45 +476,24 @@ async function executeTurn(
   }
 }
 
+/** True iff a process with the given PID exists (EPERM counts as alive). */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 /**
- * Register notification and approval request handlers on the client.
+ * Register approval request handlers on the client. Notification routing
+ * lives in executeTurn, where it can filter by the active turn.
  * Returns an array of unsubscribe functions for cleanup.
  */
-function registerEventHandlers(client: AppServerClient, opts: TurnOptions, signal: AbortSignal): Array<() => void> {
-  const { dispatcher, approvalHandler } = opts;
+function registerApprovalHandlers(client: AppServerClient, opts: TurnOptions, signal: AbortSignal): Array<() => void> {
+  const { approvalHandler } = opts;
   const unsubs: Array<() => void> = [];
-
-  // Notification handlers
-  unsubs.push(
-    client.on("item/started", (params) => {
-      dispatcher.handleItemStarted(params as ItemStartedParams);
-    }),
-  );
-
-  unsubs.push(
-    client.on("item/completed", (params) => {
-      dispatcher.handleItemCompleted(params as ItemCompletedParams);
-    }),
-  );
-
-  // Delta notifications
-  for (const method of [
-    "item/agentMessage/delta",
-    "item/commandExecution/outputDelta",
-  ]) {
-    unsubs.push(
-      client.on(method, (params) => {
-        dispatcher.handleDelta(method, params as DeltaParams);
-      }),
-    );
-  }
-
-  // Mid-turn error notifications (e.g. retryable API errors)
-  unsubs.push(
-    client.on("error", (params) => {
-      dispatcher.handleError(params as ErrorNotificationParams);
-    }),
-  );
 
   // Approval requests (server -> client requests expecting a response).
   // The AppServerClient.onRequest handler returns the result directly;

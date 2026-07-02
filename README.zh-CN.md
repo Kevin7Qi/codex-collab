@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 安装完成后，**重新打开终端**以使 PATH 生效，然后运行 `codex-collab health` 验证安装。
 
-安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并添加可执行文件到 PATH。完成后 Claude 即可自动发现该技能。
+安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并安装可执行文件（`install.ps1` 会将其加入 PATH；`install.sh` 会放置在 `~/.local/bin`，若该目录不在 PATH 中会打印提示）。完成后 Claude 即可自动发现该技能。
 
 ### 升级
 
@@ -111,6 +111,7 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | `models` | 列出可用模型 |
 | `templates` | 列出可用提示词模板 |
 | `health` | 检查依赖项 |
+| `version` | 打印版本号（也可在命令前使用 `-v`/`--version`） |
 
 <details>
 <summary>会话管理</summary>
@@ -131,7 +132,7 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 |------|------|
 | `-d, --dir <path>` | 工作目录 |
 | `-m, --model <model>` | 模型名称（默认: 自动选择最新可用模型） |
-| `-r, --reasoning <level>` | low, medium, high, xhigh（默认: 自动选择模型支持的最高级别） |
+| `-r, --reasoning <level>` | none, minimal, low, medium, high, xhigh（默认: 自动选择模型支持的最高级别） |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access（默认: workspace-write；review 始终使用 read-only） |
 | `--mode <mode>` | 审查模式: pr, uncommitted, commit, custom |
 | `--ref <hash>` | 指定 commit 哈希（配合 `--mode commit`） |
@@ -144,8 +145,9 @@ codex-collab run --resume <id> "现在检查错误处理" --content-only
 | `--limit <n>` | 限制 `threads` 或 `peek` 显示的条目数 |
 | `--full` | 在 `peek` 输出中包含所有条目类型（默认只显示消息） |
 | `--content-only` | 隐藏进度输出；配合 `output` 时仅返回正文内容 |
-| `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200） |
+| `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200，最大 2147483） |
 | `--base <branch>` | PR 审查的基准分支（默认: 自动检测默认分支） |
+| `--` | 选项结束标记；其后的参数一律视为提示词文本 |
 
 </details>
 

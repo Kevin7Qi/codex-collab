@@ -15,7 +15,6 @@ import {
   createDispatcher,
   getApprovalHandler,
   getWorkspacePaths,
-  turnOverrides,
   recordTerminalRunState,
   recordRunFailure,
   progress,
@@ -100,8 +99,10 @@ export async function handleReview(args: string[]): Promise<void> {
 
     const dispatcher = createDispatcher(shortId, ws.logsDir, options);
 
-    // Note: effort (reasoning level) is not forwarded to reviews — the review/start
-    // protocol does not accept an effort parameter (unlike turn/start).
+    // Note: model/cwd/approval/sandbox already reached the server via the
+    // thread start/fork params in startOrResumeThread; review/start itself
+    // only accepts {threadId, target, delivery}, so there are no per-turn
+    // overrides to spread here (runReview would discard them).
     try {
       const result = await runReview(client, threadId, target, {
         dispatcher,
@@ -110,7 +111,6 @@ export async function handleReview(args: string[]): Promise<void> {
         killSignalsDir: ws.killSignalsDir,
         onTurnId: (id) => setActiveTurnId(id),
         onReviewThreadId: (id) => setActiveReviewThreadId(id),
-        ...turnOverrides(options),
       });
 
       return recordTerminalRunState(ws, threadId, runId, result, "Review", options.contentOnly);

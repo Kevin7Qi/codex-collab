@@ -1,12 +1,12 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { runTurn, runReview, belongsToTurn, extractReasoning } from "./turns";
+import { runTurn, runReview, belongsToTurn } from "./turns";
 import { EventDispatcher } from "./events";
 import { autoApproveHandler } from "./approvals";
 import type { ApprovalHandler } from "./approvals";
 import type { AppServerClient } from "./client";
 import type {
   TurnCompletedParams, TurnStartResponse,
-  ReviewStartResponse, ReasoningItem,
+  ReviewStartResponse,
 } from "./types";
 import { mkdirSync, rmSync, existsSync, writeFileSync, utimesSync } from "fs";
 import { join } from "path";
@@ -40,6 +40,8 @@ interface MockClientKit {
   emit(method: string, params: unknown): void;
   /** Access registered server-request handlers (for approval wiring tests). */
   requestHandlers: RequestHandlerMap;
+  /** Simulate an unexpected connection loss (fires onClose handlers). */
+  triggerClose(): void;
 }
 
 /**
@@ -52,12 +54,17 @@ function buildMockClient(
 ): MockClientKit {
   const notificationHandlers: NotificationMap = new Map();
   const requestHandlers: RequestHandlerMap = new Map();
+  const closeHandlers = new Set<() => void>();
 
   function emit(method: string, params: unknown): void {
     const handlers = notificationHandlers.get(method);
     if (handlers) {
       for (const h of handlers) h(params);
     }
+  }
+
+  function triggerClose(): void {
+    for (const h of closeHandlers) h();
   }
 
   const client: AppServerClient = {
@@ -82,13 +89,16 @@ function buildMockClient(
       return () => { requestHandlers.delete(method); };
     },
     respond() {},
-    onClose() { return () => {}; },
+    onClose(handler: () => void) {
+      closeHandlers.add(handler);
+      return () => { closeHandlers.delete(handler); };
+    },
     async close() {},
     userAgent: "mock/1.0",
     brokerBusy: false,
   };
 
-  return { client, emit, requestHandlers };
+  return { client, emit, requestHandlers, triggerClose };
 }
 
 /** Standard turn/completed notification payload. */
@@ -1027,177 +1037,7 @@ describe("belongsToTurn", () => {
 // Reasoning extraction
 // ---------------------------------------------------------------------------
 
-describe("reasoning extraction", () => {
-  test("extracts reasoning from completed reasoning item", () => {
-    const item: ReasoningItem = {
-      type: "reasoning",
-      id: "r-1",
-      summary: ["The user wants to refactor the code"],
-      content: ["I should start by reading the file", "Then apply changes"],
-    };
-    const result = extractReasoning(item);
-    expect(result).toBe("The user wants to refactor the code\nI should start by reading the file\nThen apply changes");
-  });
-
-  test("deduplicates identical reasoning sections", () => {
-    const item: ReasoningItem = {
-      type: "reasoning",
-      id: "r-2",
-      summary: ["Think about the problem", "Plan the approach"],
-      content: ["Think about the problem", "Execute the plan"],
-    };
-    const result = extractReasoning(item);
-    expect(result).toBe("Think about the problem\nPlan the approach\nExecute the plan");
-  });
-
-  test("returns null when no reasoning content", () => {
-    const item: ReasoningItem = {
-      type: "reasoning",
-      id: "r-3",
-      summary: [],
-      content: [],
-    };
-    expect(extractReasoning(item)).toBeNull();
-  });
-
-  test("handles summary-only reasoning", () => {
-    const item: ReasoningItem = {
-      type: "reasoning",
-      id: "r-4",
-      summary: ["Just a summary"],
-      content: [],
-    };
-    expect(extractReasoning(item)).toBe("Just a summary");
-  });
-
-  test("handles content-only reasoning", () => {
-    const item: ReasoningItem = {
-      type: "reasoning",
-      id: "r-5",
-      summary: [],
-      content: ["Just content"],
-    };
-    expect(extractReasoning(item)).toBe("Just content");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Reasoning in turn result (integration)
-// ---------------------------------------------------------------------------
-
-describe("reasoning in turn result", () => {
-  test("captures reasoning from item/completed during turn", async () => {
-    const { client, emit } = buildMockClient((method) => {
-      if (method === "turn/start") {
-        setTimeout(() => {
-          emit("item/completed", {
-            item: {
-              type: "reasoning", id: "r-1",
-              summary: ["Analyzing the request"],
-              content: ["Need to check the files first"],
-            },
-            threadId: "thr-1",
-            turnId: "turn-1",
-          });
-          emit("item/agentMessage/delta", {
-            threadId: "thr-1", turnId: "turn-1", itemId: "msg-1",
-            delta: "Here is the answer",
-          });
-        }, 20);
-        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 80);
-        return inProgressTurn("turn-1");
-      }
-      throw new Error(`Unexpected method: ${method}`);
-    });
-
-    const dispatcher = new EventDispatcher("test-reasoning-capture", TEST_LOG_DIR, () => {});
-
-    const result = await runTurn(client, "thr-1", [{ type: "text", text: "think hard" }], {
-      dispatcher,
-      approvalHandler: autoApproveHandler,
-      timeoutMs: 5000,
-      killSignalsDir: TEST_KILL_DIR,
-    });
-
-    expect(result.status).toBe("completed");
-    expect(result.reasoning).toBe("Analyzing the request\nNeed to check the files first");
-    expect(result.output).toBe("Here is the answer");
-  });
-
-  test("merges multiple reasoning items without duplicates", async () => {
-    const { client, emit } = buildMockClient((method) => {
-      if (method === "turn/start") {
-        setTimeout(() => {
-          emit("item/completed", {
-            item: {
-              type: "reasoning", id: "r-1",
-              summary: ["Step one"],
-              content: ["Detail A"],
-            },
-            threadId: "thr-1",
-            turnId: "turn-1",
-          });
-          emit("item/completed", {
-            item: {
-              type: "reasoning", id: "r-2",
-              summary: ["Step one"],
-              content: ["Detail B"],
-            },
-            threadId: "thr-1",
-            turnId: "turn-1",
-          });
-        }, 20);
-        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 80);
-        return inProgressTurn("turn-1");
-      }
-      throw new Error(`Unexpected method: ${method}`);
-    });
-
-    const dispatcher = new EventDispatcher("test-reasoning-merge", TEST_LOG_DIR, () => {});
-
-    const result = await runTurn(client, "thr-1", [{ type: "text", text: "think" }], {
-      dispatcher,
-      approvalHandler: autoApproveHandler,
-      timeoutMs: 5000,
-      killSignalsDir: TEST_KILL_DIR,
-    });
-
-    expect(result.reasoning).toBe("Step one\nDetail A\nDetail B");
-  });
-
-  test("reasoning is null when no reasoning items", async () => {
-    const { client, emit } = buildMockClient((method) => {
-      if (method === "turn/start") {
-        setTimeout(() => {
-          emit("item/agentMessage/delta", {
-            threadId: "thr-1", turnId: "turn-1", itemId: "msg-1",
-            delta: "No reasoning here",
-          });
-        }, 20);
-        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
-        return inProgressTurn("turn-1");
-      }
-      throw new Error(`Unexpected method: ${method}`);
-    });
-
-    const dispatcher = new EventDispatcher("test-no-reasoning", TEST_LOG_DIR, () => {});
-
-    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
-      dispatcher,
-      approvalHandler: autoApproveHandler,
-      timeoutMs: 5000,
-      killSignalsDir: TEST_KILL_DIR,
-    });
-
-    expect(result.reasoning).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Notification buffering
-// ---------------------------------------------------------------------------
-
-describe("notification buffering", () => {
+describe("notification buffering and turn filtering", () => {
   test("replays buffered item/completed after turnId is known", async () => {
     // Simulate: item/completed arrives BEFORE the turn/start response resolves.
     // The mock fires item/completed synchronously during the request handler,
@@ -1207,9 +1047,8 @@ describe("notification buffering", () => {
         // Fire item/completed synchronously before returning the response
         emit("item/completed", {
           item: {
-            type: "reasoning", id: "r-early",
-            summary: ["Early reasoning"],
-            content: ["Buffered content"],
+            type: "agentMessage", id: "msg-early",
+            text: "Buffered final answer", phase: "final_answer",
           },
           threadId: "thr-1",
           turnId: "turn-1",
@@ -1230,18 +1069,17 @@ describe("notification buffering", () => {
     });
 
     expect(result.status).toBe("completed");
-    expect(result.reasoning).toBe("Early reasoning\nBuffered content");
+    expect(result.output).toBe("Buffered final answer");
   });
 
-  test("buffered notifications for different thread are ignored", async () => {
+  test("buffered notifications for a different thread are ignored", async () => {
     const { client, emit } = buildMockClient((method) => {
       if (method === "turn/start") {
         // Fire item/completed for a different thread
         emit("item/completed", {
           item: {
-            type: "reasoning", id: "r-other",
-            summary: ["Other thread reasoning"],
-            content: [],
+            type: "agentMessage", id: "msg-other",
+            text: "Foreign output", phase: "final_answer",
           },
           threadId: "thr-OTHER",
           turnId: "turn-1",
@@ -1261,13 +1099,87 @@ describe("notification buffering", () => {
       killSignalsDir: TEST_KILL_DIR,
     });
 
-    expect(result.reasoning).toBeNull();
+    expect(result.output).toBe("");
+  });
+
+  test("live events from a foreign turn do not contaminate output or captures", async () => {
+    // Regression: on a shared (broker) app-server, an orphaned turn from a
+    // previous client can still emit items mid-run. Those must not land in
+    // this run's output, filesChanged, or commandsRun.
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          // Our turn's final answer
+          emit("item/completed", {
+            item: { type: "agentMessage", id: "m-ours", text: "Ours", phase: "final_answer" },
+            threadId: "thr-1", turnId: "turn-1",
+          });
+          // Foreign turn's events arriving interleaved (turnId differs)
+          emit("item/completed", {
+            item: { type: "agentMessage", id: "m-foreign", text: "Foreign", phase: "final_answer" },
+            threadId: "thr-1", turnId: "turn-FOREIGN",
+          });
+          emit("item/completed", {
+            item: {
+              type: "fileChange", id: "fc-foreign",
+              changes: [{ path: "evil.ts", kind: { type: "add", move_path: null }, diff: "+1" }],
+              status: "completed",
+            },
+            threadId: "thr-OTHER", turnId: "turn-FOREIGN",
+          });
+          emit("item/agentMessage/delta", {
+            threadId: "thr-OTHER", turnId: "turn-FOREIGN", itemId: "m-foreign", delta: "sneaky",
+          });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 80);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-foreign-filter", TEST_LOG_DIR, () => {});
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.output).toBe("Ours");
+    expect(result.filesChanged).toHaveLength(0);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Completion inference
-// ---------------------------------------------------------------------------
+describe("connection loss", () => {
+  test("rejects promptly when the connection dies mid-turn", async () => {
+    // Regression: without the onClose race, a dead app-server/broker left the
+    // CLI waiting for the full turn timeout before a misleading
+    // "Turn timed out" error.
+    const { client, triggerClose } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => triggerClose(), 30);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("test-conn-loss", TEST_LOG_DIR, () => {});
+
+    const started = Date.now();
+    await expect(
+      runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+        dispatcher,
+        approvalHandler: autoApproveHandler,
+        timeoutMs: 60_000,
+        killSignalsDir: TEST_KILL_DIR,
+      }),
+    ).rejects.toThrow("Connection to Codex lost");
+    // Must fail fast, not wait out the 60s turn timeout
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
 
 describe("completion inference", () => {
   test("infers completion when turn/completed is lost after agentMessage completes", async () => {

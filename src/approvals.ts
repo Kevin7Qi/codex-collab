@@ -34,6 +34,13 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+export interface InteractiveApprovalOptions {
+  /** Workspace dir echoed in the approve/decline hint (falls back to the request's cwd). */
+  workspaceDir?: string;
+  /** Decision-file poll interval in ms (default 1000; tests use small values). */
+  pollIntervalMs?: number;
+}
+
 /** File-based IPC approval handler. Writes a .json request file, then polls for
  *  a .decision file created by `codex-collab approve/decline` in a separate process. */
 export class InteractiveApprovalHandler implements ApprovalHandler {
@@ -43,15 +50,10 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
   constructor(
     private approvalsDir: string,
     private onProgress: (line: string) => void,
-    workspaceDirOrPollInterval?: string | number,
-    pollIntervalMs = 1000,
+    opts?: InteractiveApprovalOptions,
   ) {
-    if (typeof workspaceDirOrPollInterval === "number") {
-      this.pollIntervalMs = workspaceDirOrPollInterval;
-    } else {
-      this.workspaceDir = workspaceDirOrPollInterval;
-      this.pollIntervalMs = pollIntervalMs;
-    }
+    this.workspaceDir = opts?.workspaceDir;
+    this.pollIntervalMs = opts?.pollIntervalMs ?? 1000;
     if (!existsSync(approvalsDir)) mkdirSync(approvalsDir, { recursive: true, mode: 0o700 });
   }
 
@@ -136,6 +138,9 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
           decision = readFileSync(decisionPath, "utf-8").trim();
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code === "ENOENT") continue;
+          // Remove the request/decision files before propagating — otherwise
+          // the orphaned request lingers until `clean`'s 1-day sweep.
+          cleanup();
           throw e;
         }
         cleanup();
