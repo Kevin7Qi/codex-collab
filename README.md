@@ -19,7 +19,8 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 - **Event-driven progress** — Streams progress lines as Codex works, so Claude sees what's happening in real time.
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
 - **Thread reuse** — Resume existing threads to send follow-up prompts, build on previous responses, or steer the work in a new direction.
-- **Approval control** — Configurable approval policies for tool calls: auto-approve, interactive, or deny.
+- **Approval control** — Configurable approval policies for tool calls: auto-approve, interactive, deny, or Codex's Guardian auto-reviewer (`--approval auto`).
+- **Memory isolation** — Threads created by codex-collab are excluded from Codex's memory feature by default (`thread/memoryMode/set mode=disabled`), so agent-driven sessions don't shape Codex's learned picture of how *you* work. Opt back in per-run with `--memory` or persistently with `config memory true`. Resumed threads are never touched — the flag is persistent per-thread, and a thread you created yourself should keep feeding your memory. Scope note: this governs Codex's *local* memory consolidation (`~/.codex/memories`); the `personality` feature is explicit user config (not learned) and unaffected, and anything learned server-side from API traffic is outside any client's control.
 
 ## Installation
 
@@ -137,7 +138,8 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
-| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
+| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations need `approve`/`decline` |
+| `--memory` | Let Codex's memory feature learn from threads this run creates (default: excluded) |
 | `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
 | `--json` | JSON output for supported commands (`threads`, `peek`) |
 | `--all` | List all threads with no display limit |
@@ -174,7 +176,7 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `reasoning`, `sandbox`, `approval`, `timeout`
+Available keys: `model`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 

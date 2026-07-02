@@ -5,7 +5,7 @@ import { join } from "path";
 import {
   isKnownItem,
   type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
-  type ErrorNotificationParams,
+  type ErrorNotificationParams, type AutoApprovalReviewParams,
   type FileChange, type CommandExec,
 } from "./types";
 
@@ -121,6 +121,49 @@ export class EventDispatcher {
     // No per-character logging — accumulated text is logged at flush
   }
 
+  /** Surface Guardian (auto_review) approval reviews in the progress stream
+   *  so autonomous permit/reject decisions stay auditable. Observed 0.142
+   *  payload: `action.command` (what's under review) and `review.{status,
+   *  riskLevel, rationale}` (the verdict) — but the protocol is [UNSTABLE],
+   *  so extraction is best-effort with flat-field fallbacks and degrades to
+   *  a generic line rather than dropping the event. */
+  handleAutoApprovalReview(method: string, params: AutoApprovalReviewParams): void {
+    const str = (v: unknown): string | null => {
+      if (typeof v === "string" && v.length > 0) return v;
+      // Enum-shaped objects like { type: "approved" }
+      if (v !== null && typeof v === "object" && typeof (v as { type?: unknown }).type === "string") {
+        return (v as { type: string }).type;
+      }
+      return null;
+    };
+    const pick = (obj: Record<string, unknown> | undefined, ...keys: string[]): string | null => {
+      for (const key of keys) {
+        const found = str(obj?.[key]);
+        if (found) return found;
+      }
+      return null;
+    };
+    const action = params.action as Record<string, unknown> | undefined;
+    const review = params.review as Record<string, unknown> | undefined;
+
+    const subject = pick(action, "command", "description") ?? pick(params, "command", "reason", "summary");
+    const clipped = subject && subject.length > 120 ? subject.slice(0, 117) + "..." : subject;
+
+    if (method.endsWith("/completed")) {
+      const decision = pick(review, "status") ?? pick(params, "decision", "verdict", "outcome", "status");
+      const risk = pick(review, "riskLevel");
+      const verdict = `${decision ?? "review completed"}${risk ? ` (${risk} risk)` : ""}`;
+      this.progress(`Guardian ${verdict}${clipped ? `: ${clipped}` : ""}`);
+      // Full payload in the log — the progress line is lossy and the exact
+      // decision trail (rationale, decisionSource) matters for auditing an
+      // autonomous approval.
+      this.log(`guardian review completed: ${safeStringify(params)}`);
+    } else {
+      this.progress(`Guardian reviewing approval request${clipped ? `: ${clipped}` : ""}`);
+      this.log(`guardian review started: ${safeStringify(params)}`);
+    }
+  }
+
   handleError(params: ErrorNotificationParams): void {
     const retry = params.willRetry ? " (will retry)" : "";
     this.progress(`Error: ${params.error.message}${retry}`);
@@ -187,5 +230,17 @@ export class EventDispatcher {
     this.logBuffer.push(`${ts} ${entry}`);
     // Auto-flush every 20 entries
     if (this.logBuffer.length >= 20) this.flush();
+  }
+}
+
+/** JSON.stringify that never throws (circular refs) and bounds entry size —
+ *  used for logging unstable payloads whose shape we don't control. */
+function safeStringify(value: unknown): string {
+  try {
+    const s = JSON.stringify(value);
+    if (s === undefined) return String(value);
+    return s.length > 2000 ? s.slice(0, 2000) + "…" : s;
+  } catch {
+    return "[unserializable]";
   }
 }

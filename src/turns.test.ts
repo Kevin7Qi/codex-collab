@@ -1403,3 +1403,72 @@ describe("structured capture from item/completed", () => {
     expect(result.filesChanged).toHaveLength(1);
   });
 });
+
+describe("Guardian event routing", () => {
+  test("autoApprovalReview notifications reach the dispatcher; foreign-turn ones are filtered", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/autoApprovalReview/started", {
+            threadId: "thr-1", turnId: "turn-1", itemId: "i1", command: "touch guard.txt",
+          });
+          emit("item/autoApprovalReview/completed", {
+            threadId: "thr-1", turnId: "turn-1", itemId: "i1", decision: "approved", command: "touch guard.txt",
+          });
+          // Orphaned turn on the shared app-server — must not surface here
+          emit("item/autoApprovalReview/completed", {
+            threadId: "thr-other", turnId: "turn-other", itemId: "i9", decision: "rejected", command: "rm -rf /",
+          });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("guardian-routing", TEST_LOG_DIR, (line) => lines.push(line));
+
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(lines.some(l => l.includes("Guardian reviewing") && l.includes("touch guard.txt"))).toBe(true);
+    expect(lines.some(l => l.includes("Guardian approved"))).toBe(true);
+    expect(lines.some(l => l.includes("rm -rf /"))).toBe(false);
+  });
+});
+
+describe("per-turn approvalsReviewer forwarding", () => {
+  test("runTurn forwards approvalsReviewer into turn/start params", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const { client, emit } = buildMockClient((method, params) => {
+      if (method === "turn/start") {
+        captured = params as Record<string, unknown>;
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 20);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const dispatcher = new EventDispatcher("reviewer-fwd", TEST_LOG_DIR, () => {});
+    await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
+
+    // Guardian routing must reach the wire: on a thread already loaded in the
+    // long-lived broker app-server, the per-turn param is the reliable path
+    // (thread/resume-level settings can be ignored, like sandbox).
+    expect(captured?.approvalsReviewer).toBe("auto_review");
+    expect(captured?.approvalPolicy).toBe("on-request");
+  });
+});

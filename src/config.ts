@@ -54,6 +54,11 @@ export const config = {
 
   // Approval policies accepted by the Codex app server
   approvalPolicies: ["never", "on-request", "on-failure", "untrusted"] as const,
+  // CLI/config approval modes: server policies plus "auto", which maps to
+  // approvalPolicy "on-request" reviewed by Codex's Guardian subagent
+  // (approvalsReviewer "auto_review") with the interactive flow as the
+  // escalation path.
+  approvalModes: ["never", "on-request", "on-failure", "untrusted", "auto"] as const,
   defaultApprovalPolicy: "never" as const,
 
   // Timeouts
@@ -107,6 +112,7 @@ Object.freeze(config);
 export type ReasoningEffort = (typeof config.reasoningEfforts)[number];
 export type SandboxMode = (typeof config.sandboxModes)[number];
 export type ApprovalPolicy = (typeof config.approvalPolicies)[number];
+export type ApprovalMode = (typeof config.approvalModes)[number];
 
 // ─── Pure utility functions ─────────────────────────────────────────────────
 

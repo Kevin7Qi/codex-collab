@@ -10,6 +10,7 @@ import {
   applyUserConfig,
   startOrResumeThread,
   turnOverrides,
+  resolveApproval,
   formatDuration,
   isThreadProcessAlive,
   defaultOptions,
@@ -703,6 +704,43 @@ describe("parseOptions: --full and explicit --limit", () => {
 
 // ─── pickBestModel ────────────────────────────────────────────────────────
 
+describe("parseOptions: --approval auto and --memory", () => {
+  test("--approval auto is accepted and marked explicit", () => {
+    const { options } = parseOptions(["run", "task", "--approval", "auto"]);
+    expect(options.approval).toBe("auto");
+    expect(options.explicit.has("approval")).toBe(true);
+  });
+
+  test("--memory opts in and is marked explicit", () => {
+    const { options } = parseOptions(["run", "task", "--memory"]);
+    expect(options.memory).toBe(true);
+    expect(options.explicit.has("memory")).toBe(true);
+  });
+
+  test("memory defaults to false (created threads excluded from Codex memory)", () => {
+    const { options } = parseOptions(["run", "task"]);
+    expect(options.memory).toBe(false);
+  });
+});
+
+describe("resolveApproval", () => {
+  test("auto maps to on-request reviewed by the Guardian subagent", () => {
+    expect(resolveApproval("auto")).toEqual({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
+  });
+
+  test("server policies pass through with the user reviewer (reversibility)", () => {
+    // approvalsReviewer persists per-thread, so an explicit non-auto mode
+    // must actively reset it — otherwise a thread once run with "auto" keeps
+    // Guardian even after the user asks for interactive control.
+    for (const mode of ["never", "on-request", "on-failure", "untrusted"] as const) {
+      expect(resolveApproval(mode)).toEqual({ approvalPolicy: mode, approvalsReviewer: "user" });
+    }
+  });
+});
+
 describe("pickBestModel", () => {
   const m = (id: string, opts: { upgrade?: string; isDefault?: boolean } = {}): Model => ({
     id,
@@ -1135,6 +1173,29 @@ console.log("should not reach here");
     expect(result.stderr.toString()).toContain("config.json");
     expect(result.stdout.toString()).not.toContain("should not reach here");
   });
+
+  test("approval: auto and memory: true from config populate options", () => {
+    const { stdout, exitCode } = runApplyConfig(
+      JSON.stringify({ approval: "auto", memory: true }),
+      [],
+      `{ approval: opts.approval, memory: opts.memory }`,
+    );
+    expect(exitCode).toBe(0);
+    const result = JSON.parse(stdout);
+    expect(result.approval).toBe("auto");
+    expect(result.memory).toBe(true);
+  });
+
+  test("non-boolean memory in config is ignored with a warning", () => {
+    const { stdout, exitCode, stderr } = runApplyConfig(
+      JSON.stringify({ memory: "yes" }),
+      [],
+      `{ memory: opts.memory }`,
+    );
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout).memory).toBe(false);
+    expect(stderr).toContain("invalid memory");
+  });
 });
 
 // ─── startOrResumeThread ───────────────────────────────────────────────────
@@ -1184,6 +1245,8 @@ describe("startOrResumeThread", () => {
 
     expect(result.threadId).toBe(forkedThreadId);
     expect(result.shortId).not.toBe(sourceThreadId);
+    // Exactly one RPC: ephemeral review threads never hit disk, so no
+    // thread/memoryMode/set (the server rejects metadata updates on them).
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({
       method: "thread/fork",
@@ -1193,9 +1256,99 @@ describe("startOrResumeThread", () => {
         model: "gpt-5",
         cwd: "/tmp/review-project",
         approvalPolicy: "on-request",
+        approvalsReviewer: "user",
         sandbox: "read-only",
       },
     });
+  });
+
+  /** Mock client that records calls and answers from a method→response map.
+   *  Unlisted methods resolve to {} so incidental RPCs (thread/name/set)
+   *  don't need enumerating in every test. */
+  function recordingClient(
+    calls: Array<{ method: string; params: unknown }>,
+    respond: Record<string, (params: unknown) => unknown>,
+  ): AppServerClient {
+    return {
+      request: async <T,>(method: string, params?: unknown): Promise<T> => {
+        calls.push({ method, params });
+        const handler = respond[method];
+        return (handler ? handler(params) : {}) as T;
+      },
+      notify: () => {},
+      on: () => () => {},
+      onAny: () => () => {},
+      onRequest: () => () => {},
+      respond: () => {},
+      onClose: () => () => {},
+      close: async () => {},
+      userAgent: "mock",
+      brokerBusy: false,
+    };
+  }
+
+  const newThreadId = "01900000000070008000000000000010";
+
+  test("new thread: disables Codex memory by default, with Guardian reviewer under --approval auto", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const client = recordingClient(calls, {
+      "thread/start": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+    opts.approval = "auto";
+
+    await startOrResumeThread(client, opts, freshWorkspace("new-thread-memory"), undefined, "task", false);
+
+    const start = calls.find(c => c.method === "thread/start");
+    expect(start?.params).toMatchObject({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
+    const memory = calls.find(c => c.method === "thread/memoryMode/set");
+    expect(memory?.params).toEqual({ threadId: newThreadId, mode: "disabled" });
+  });
+
+  test("new thread with --memory: no memoryMode call", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const client = recordingClient(calls, {
+      "thread/start": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+    opts.memory = true;
+
+    await startOrResumeThread(client, opts, freshWorkspace("new-thread-memory-optin"), undefined, "task", false);
+
+    expect(calls.some(c => c.method === "thread/memoryMode/set")).toBe(false);
+  });
+
+  test("memoryMode/set failure is non-fatal (older Codex / capability missing)", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const client = recordingClient(calls, {
+      "thread/start": () => threadStartResponse(newThreadId, "/tmp/proj"),
+      "thread/memoryMode/set": () => { throw new Error("requires experimentalApi capability"); },
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+
+    const result = await startOrResumeThread(client, opts, freshWorkspace("new-thread-memory-fail"), undefined, "task", false);
+    expect(result.threadId).toBe(newThreadId);
+  });
+
+  test("resume: never touches memoryMode on a user-owned thread", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const client = recordingClient(calls, {
+      "thread/resume": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+    opts.resumeId = newThreadId;
+
+    await startOrResumeThread(client, opts, freshWorkspace("resume-no-memory"), undefined, "task", false);
+
+    expect(calls.some(c => c.method === "thread/resume")).toBe(true);
+    expect(calls.some(c => c.method === "thread/memoryMode/set")).toBe(false);
   });
 });
 
@@ -1215,6 +1368,7 @@ describe("turnOverrides", () => {
     expect(overrides).toEqual({
       cwd: "/tmp/test",
       approvalPolicy: "on-request",
+      approvalsReviewer: "user",
       model: "gpt-5",
       effort: "high",
     });
@@ -1229,6 +1383,7 @@ describe("turnOverrides", () => {
     expect(overrides).toEqual({
       cwd: opts.dir,
       approvalPolicy: opts.approval,
+      approvalsReviewer: "user",
     });
     expect("model" in overrides).toBe(false);
     expect("effort" in overrides).toBe(false);
@@ -1281,6 +1436,9 @@ describe("turnOverrides", () => {
       effort: "low",
       cwd: "/tmp/proj",
       approvalPolicy: "on-failure",
+      // Explicit non-auto selection resets a possibly-persisted Guardian
+      // reviewer back to interactive routing (reversibility).
+      approvalsReviewer: "user",
       sandboxPolicy: { type: "dangerFullAccess" },
     });
   });
@@ -1316,6 +1474,41 @@ describe("turnOverrides", () => {
 
     const overrides = turnOverrides(opts);
     expect("sandboxPolicy" in overrides).toBe(false);
+  });
+});
+
+describe("turnOverrides: Guardian auto mode", () => {
+  test("new thread with approval auto sends on-request + auto_review per turn", () => {
+    const opts = defaultOptions();
+    opts.approval = "auto";
+    opts.dir = "/tmp/test";
+    opts.resumeId = null;
+
+    expect(turnOverrides(opts)).toEqual({
+      cwd: "/tmp/test",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
+  });
+
+  test("resumed thread with explicit approval auto forwards both wire params", () => {
+    const opts = defaultOptions();
+    opts.approval = "auto";
+    opts.resumeId = "abc123";
+    opts.explicit.add("approval");
+
+    expect(turnOverrides(opts)).toEqual({
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    });
+  });
+
+  test("resumed thread without explicit approval forwards neither", () => {
+    const opts = defaultOptions();
+    opts.approval = "auto"; // e.g. from config — not explicit, so not forwarded
+    opts.resumeId = "abc123";
+
+    expect(turnOverrides(opts)).toEqual({});
   });
 });
 

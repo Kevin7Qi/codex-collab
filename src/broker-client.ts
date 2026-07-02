@@ -324,7 +324,10 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
         version: config.clientVersion,
       },
       capabilities: {
-        experimentalApi: false,
+        // The broker handles this initialize locally (the app-server sees the
+        // broker's own handshake from client.ts), but keep the declared
+        // capabilities in lockstep with the direct path.
+        experimentalApi: true,
         optOutNotificationMethods: ["item/reasoning/textDelta"],
       },
     });

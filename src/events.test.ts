@@ -208,3 +208,87 @@ describe("EventDispatcher", () => {
     expect(dispatcher.getFilesChanged()).toHaveLength(1);
   });
 });
+
+describe("Guardian auto-approval review events", () => {
+  test("started event renders a progress line with the command", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("guardian1", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/started", {
+      threadId: "t1", turnId: "turn1", itemId: "i1", command: "touch /tmp/file",
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("Guardian reviewing");
+    expect(lines[0]).toContain("touch /tmp/file");
+  });
+
+  test("completed event renders the decision", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("guardian2", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
+      threadId: "t1", turnId: "turn1", itemId: "i1", decision: "approved", command: "touch /tmp/file",
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("Guardian approved");
+    expect(lines[0]).toContain("touch /tmp/file");
+  });
+
+  test("observed 0.142 shape: action.command + review.status/riskLevel", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("guardian-live", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/started", {
+      threadId: "t1", turnId: "turn1", reviewId: "r1", targetItemId: "call_1",
+      review: { status: "inProgress", riskLevel: null, userAuthorization: null, rationale: null },
+      action: { type: "command", source: "unifiedExec", command: "/bin/zsh -lc 'touch canary.txt'", cwd: "/tmp" },
+    });
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
+      threadId: "t1", turnId: "turn1", reviewId: "r1", targetItemId: "call_1", decisionSource: "agent",
+      review: { status: "approved", riskLevel: "low", userAuthorization: "unknown", rationale: "Auto-review returned a low-risk allow decision." },
+      action: { type: "command", source: "unifiedExec", command: "/bin/zsh -lc 'touch canary.txt'", cwd: "/tmp" },
+    });
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toBe("Guardian reviewing approval request: /bin/zsh -lc 'touch canary.txt'");
+    expect(lines[1]).toBe("Guardian approved (low risk): /bin/zsh -lc 'touch canary.txt'");
+  });
+
+  test("enum-shaped decision objects use their type discriminant", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("guardian3", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
+      decision: { type: "rejected" },
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("Guardian rejected");
+  });
+
+  test("degrades to a generic line on an unrecognized payload (UNSTABLE protocol)", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("guardian4", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/started", {});
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {});
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain("Guardian reviewing approval request");
+    expect(lines[1]).toContain("Guardian review completed");
+  });
+
+  test("full payload is written to the log for auditability", () => {
+    const dispatcher = new EventDispatcher("guardian5", TEST_LOG_DIR);
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
+      decision: "approved", command: "rm -rf node_modules",
+    });
+    dispatcher.flush();
+
+    const log = readFileSync(join(TEST_LOG_DIR, "guardian5.log"), "utf-8");
+    expect(log).toContain("guardian review completed");
+    expect(log).toContain("rm -rf node_modules");
+  });
+});

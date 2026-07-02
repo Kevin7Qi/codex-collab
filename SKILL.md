@@ -128,9 +128,18 @@ By default, Codex auto-approves all actions (`--approval never`). For stricter c
 ```bash
 # Require approval for Codex-initiated actions
 codex-collab run "refactor the auth module" --approval on-request --content-only
+
+# Let Codex's Guardian subagent review requests autonomously; only its
+# escalations surface as interactive approvals (best for background runs —
+# no silent block waiting on a human)
+codex-collab run "refactor the auth module" --approval auto --content-only
 ```
 
-When an approval is needed, the progress output will show:
+With `--approval auto`, Guardian decisions appear in the progress stream
+(`Guardian approved: …` / `Guardian rejected: …`) and the full payloads land
+in the thread log for auditing.
+
+When an approval is needed (or Guardian escalates), the progress output will show:
 ```
 [codex] APPROVAL NEEDED
 [codex]   Command: rm -rf node_modules
@@ -210,7 +219,8 @@ codex-collab health                     # Check prerequisites
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
 | `--timeout <sec>` | Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes. Increase for large reviews or complex tasks. |
-| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
+| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations reach `approve`/`decline` |
+| `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
