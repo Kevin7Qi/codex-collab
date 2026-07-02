@@ -97,7 +97,9 @@ Commands:
   review "instructions"   Custom review with specific focus
   threads [--json] [--all] List threads (--limit <n>, --discover)
   kill <id>               Stop a running thread
-  follow <id>             Live view of a running thread; exits on completion
+  follow [id]             Live view of a running thread; exits on completion
+                          (no id: attach to the workspace's active run,
+                          or replay the most recent one)
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server

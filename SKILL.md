@@ -131,7 +131,7 @@ codex-collab run "large refactor task" --detach --approval auto
 # [codex]   Follow:   codex-collab follow a1b2c3d4
 ```
 
-`follow <id>` is a live view of a running thread: it replays the current run so far, then streams events (commands with exit codes, file edits, Guardian decisions, approval prompts) until the run finishes, and exits with the final status (exit 0 = completed). **Suggest the user run `follow` in a separate terminal pane** — it renders a purpose-built, color-coded view and costs zero model context. On an already-finished run it replays that run and exits, so it's also a quick way to review what happened.
+`follow [id]` is a live view of a running thread: it replays the current run so far, then streams events (commands with exit codes, file edits, Guardian decisions, approval prompts) until the run finishes, and exits with the final status (exit 0 = completed). Without an ID it attaches to the workspace's active run (or replays the most recent one), so the user can just type `codex-collab follow`. **Suggest the user run `follow` in a separate terminal pane** — it renders a purpose-built, color-coded view and costs zero model context. On an already-finished run it replays that run and exits, so it's also a quick way to review what happened.
 
 ### Watching for approvals without polling (Monitor pattern)
 
@@ -205,7 +205,8 @@ codex-collab review --resume <id> [options]        # Resume existing thread
 
 ```bash
 codex-collab run "prompt" --detach [options]  # Return once the turn is running
-codex-collab follow <id>                      # Live view; exits on completion
+codex-collab follow                           # Live view of the active run; exits on completion
+codex-collab follow <id>                      # Same, for a specific thread
 ```
 
 ### Reading Output

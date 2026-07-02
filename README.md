@@ -109,7 +109,7 @@ codex-collab follow <id>
 | `review [opts]` | Code review (PR, uncommitted, commit) |
 | `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server) |
 | `kill <id>` | Interrupt running thread |
-| `follow <id>` | Live view of a running thread; exits with its status (replays the last run when already finished) |
+| `follow [id]` | Live view of a running thread; exits with its status (replays the last run when already finished). Without an ID, attaches to the workspace's active run — or replays the most recent one |
 | `output <id>` | Full log for thread |
 | `progress <id>` | Recent activity (tail of log) |
 | `peek <id>` | Show recent conversation slice from server |

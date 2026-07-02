@@ -13,6 +13,7 @@ import { join } from "path";
 import {
   legacyFindShortId as findShortId,
   getLatestRun,
+  listRuns,
   loadRun,
 } from "../threads";
 import { LogEntryParser, renderEntry, renderFinalStatus, type RenderOptions } from "../render";
@@ -63,26 +64,45 @@ function readNewBytes(logPath: string, offset: number): { bytes: Buffer; offset:
   }
 }
 
+/**
+ * Pick the run a bare `follow` should attach to: the newest run that is both
+ * marked running AND whose runner process is alive (a stale `running` record
+ * from a crash shouldn't shadow real work), else the newest run overall
+ * (replay). Exported for tests.
+ */
+export function pickDefaultRun(stateDir: string, pidsDir: string): RunRecord | null {
+  const runs = listRuns(stateDir); // newest first
+  const live = runs.find(r => r.status === "running" && isThreadProcessAlive(pidsDir, r.shortId));
+  return live ?? runs[0] ?? null;
+}
+
 export async function handleFollow(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
-  if (positional.length === 0) {
-    die("No thread ID provided\nUsage: codex-collab follow <id>");
-  }
-
   const ws = getWorkspacePaths(options.dir);
-  const threadId = resolveThreadIdOrDie(ws.threadsFile, positional[0]);
-  const shortId = findShortId(ws.threadsFile, threadId) ?? positional[0];
-  const logPath = join(ws.logsDir, `${shortId}.log`);
 
   const render: RenderOptions = {
     color: process.stdout.isTTY === true && !process.env.NO_COLOR,
     width: (process.stdout.isTTY && process.stdout.columns) || 120,
   };
 
-  const run = getLatestRun(ws.stateDir, shortId);
-  if (!run) {
-    die(`No run history for thread ${shortId}. For the raw log, use: codex-collab output ${shortId}`);
+  let run: RunRecord | null;
+  if (positional.length === 0) {
+    // Bare `follow`: attach to the workspace's active run, or replay the
+    // most recent one when nothing is live.
+    run = pickDefaultRun(ws.stateDir, ws.pidsDir);
+    if (!run) {
+      die("No runs in this workspace yet.\nUsage: codex-collab follow [id]");
+    }
+  } else {
+    const threadId = resolveThreadIdOrDie(ws.threadsFile, positional[0]);
+    const shortId = findShortId(ws.threadsFile, threadId) ?? positional[0];
+    run = getLatestRun(ws.stateDir, shortId);
+    if (!run) {
+      die(`No run history for thread ${shortId}. For the raw log, use: codex-collab output ${shortId}`);
+    }
   }
+  const shortId = run.shortId;
+  const logPath = join(ws.logsDir, `${shortId}.log`);
 
   const started = new Date(run.startedAt).getTime();
   const age = Number.isFinite(started) ? formatAge(Math.round(started / 1000)) : "unknown time";
