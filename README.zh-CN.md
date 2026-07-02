@@ -144,7 +144,7 @@ codex-collab follow --watch
 | `--mode <mode>` | 审查模式: pr, uncommitted, commit, custom |
 | `--ref <hash>` | 指定 commit 哈希（配合 `--mode commit`） |
 | `--resume <id>` | 恢复已有会话 |
-| `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted, auto（默认: never）。`auto` 将审批请求交给 Codex 的 Guardian 审查，仅其上报的请求需要 `approve`/`decline` |
+| `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted, auto（默认: never）。`auto`: Codex 的 Guardian 审查器自主批准或拒绝每个请求——绝不阻塞等待人工；决策以 Guardian 进度行的形式实时展示 |
 | `--memory` | 允许 Codex 的记忆功能学习本次运行创建的会话。默认: 创建的会话会执行 `thread/memoryMode/set mode=disabled`；恢复的会话永不改动（该标记按会话持久保存，你自己创建的会话应继续进入你的记忆）。只作用于 Codex 的*本地*记忆整合（`~/.codex/memories`）——`personality` 属于显式用户配置（非学习所得），不受影响。持久化设置: `config memory true` |
 | `--detach` | （run）在轮次真正开始运行后立即返回；用 `follow <id>` 观看。任务的生命周期与发起它的 shell 解耦 |
 | `-w, --watch` | （follow）运行结束后不退出——继续跟踪每一次新运行（Ctrl-C 停止） |

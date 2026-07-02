@@ -125,6 +125,8 @@ Progress lines stream in real-time during execution:
 
 ## Detached Runs and Following
 
+**When to detach:** default to background `run` — it survives your turn ending and gives you a completion notification for free. Reach for `--detach` in exactly two situations: (1) the turn must outlive this Claude session — background tasks are killed when the session exits or restarts, which interrupts an in-flight turn, while a detached run keeps going and its result is retrievable later with `output <id>`; (2) the user is driving from their own terminal and wants the turn independent of that shell. Don't detach routine tasks: you lose the automatic completion notification (see below for how to get it back).
+
 `run --detach` hands the turn to a detached runner and returns as soon as the turn is actually running — the turn's lifetime is decoupled from the invoking shell, so nothing kills it if the shell or session goes away:
 
 ```bash
@@ -141,7 +143,7 @@ codex-collab run "large refactor task" --detach --approval auto
 
 ### Watching for approvals without polling (Monitor pattern)
 
-**Only arm this when the approval mode can actually block**: `on-request`, `on-failure`, `untrusted` — or `auto` if you want a net for the rare Guardian escalation. Under the default `never` there are no approval requests, and under `auto` Guardian handles nearly all of them; a watcher there is waste.
+**Only arm this when the approval mode can actually block**: `on-request`, `on-failure`, or `untrusted`. Under the default `never` there are no approval requests, and under `auto` Guardian decides everything autonomously (approve or deny — it never blocks on a human), so a watcher there is waste.
 
 When you run codex-collab in background Bash, you're notified when the *process exits* — but an approval request blocks mid-run without exiting. Watch on-disk state instead; both signals below appear regardless of which process owns the run:
 
@@ -162,17 +164,13 @@ By default, Codex auto-approves all actions (`--approval never`). For stricter c
 # Require approval for Codex-initiated actions
 codex-collab run "refactor the auth module" --approval on-request --content-only
 
-# Let Codex's Guardian subagent review requests autonomously; only its
-# escalations surface as interactive approvals (best for background runs —
-# no silent block waiting on a human)
+# Guardian decides each request autonomously — approve or deny, never blocking on a human
 codex-collab run "refactor the auth module" --approval auto --content-only
 ```
 
-With `--approval auto`, Guardian decisions appear in the progress stream
-(`Guardian approved: …` / `Guardian rejected: …`) and the full payloads land
-in the thread log for auditing.
+With `--approval auto`, Guardian approves or **denies** each request on its own — it does not escalate to the interactive flow, so auto runs never block. Its decisions appear in the progress stream (`Guardian approved (low risk): …`) with full payloads in the thread log; judgment calls and denials additionally surface as `Guardian warning: …` lines carrying the risk level, the user-authorization assessment, and the rationale. Note Guardian weighs whether the *user* asked for the action — explicitly user-requested commands get high authorization and are usually approved; it exists to catch the model acting beyond its mandate.
 
-When an approval is needed (or Guardian escalates), the progress output will show:
+Under the interactive policies (`on-request`, `on-failure`, `untrusted`), an approval request shows:
 ```
 [codex] APPROVAL NEEDED
 [codex]   Command: rm -rf node_modules
@@ -262,7 +260,7 @@ codex-collab health                     # Check prerequisites
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
 | `--timeout <sec>` | Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes. Increase for large reviews or complex tasks. |
-| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations reach `approve`/`decline` |
+| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto`: Codex's Guardian reviewer approves or denies each request autonomously — never blocks on a human; decisions and denial rationales stream as Guardian lines |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--detach` | (run) Return once the turn is running; watch with `follow <id>`, stop with `kill <id>`. Decouples turn lifetime from the invoking shell |
 | `-w, --watch` | (follow) Don't exit when the run finishes — keep following each new run, every run shown once in start order (Ctrl-C to stop). For the user's pane, not for agents |

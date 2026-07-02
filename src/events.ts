@@ -174,6 +174,17 @@ export class EventDispatcher {
     }
   }
 
+  /** guardianWarning: a human-facing message about a Guardian decision. Fires
+   *  on denials AND on risky approvals ("Automatic approval review approved
+   *  (risk: medium, authorization: high): <rationale>"). Thread-scoped, no
+   *  turnId. This is the primary audit line for Guardian's judgment calls. */
+  handleGuardianWarning(params: { message?: unknown }): void {
+    const msg = typeof params?.message === "string" && params.message.length > 0
+      ? params.message
+      : "Guardian issued a warning (no message in payload)";
+    this.progress(`Guardian warning: ${msg}`);
+  }
+
   handleError(params: ErrorNotificationParams): void {
     const retry = params.willRetry ? " (will retry)" : "";
     this.progress(`Error: ${params.error.message}${retry}`);

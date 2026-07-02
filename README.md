@@ -144,7 +144,7 @@ codex-collab follow --watch
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
-| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations need `approve`/`decline` |
+| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto`: Codex's Guardian reviewer approves or denies each request autonomously — never blocks on a human; decisions stream as Guardian lines |
 | `--memory` | Let Codex's memory feature learn from threads this run creates. Default: created threads get `thread/memoryMode/set mode=disabled`; resumed threads are never touched (the flag is persistent per-thread, and a thread you created yourself should keep feeding your memory). Governs Codex's *local* memory consolidation (`~/.codex/memories`) only — the `personality` feature is explicit user config (not learned) and unaffected. Persistent form: `config memory true` |
 | `--detach` | (run) Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
 | `-w, --watch` | (follow) Don't exit when the run finishes — keep following each new run (Ctrl-C to stop) |

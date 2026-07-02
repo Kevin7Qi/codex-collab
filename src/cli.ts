@@ -127,8 +127,8 @@ Options:
   --resume <id>           Resume existing thread
   --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout})
   --approval <policy>     Approval: ${config.approvalModes.join(", ")} (default: ${config.defaultApprovalPolicy})
-                          "auto" routes requests to Codex's Guardian reviewer;
-                          only its escalations reach approve/decline
+                          "auto": Codex's Guardian reviewer approves or denies
+                          each request autonomously (never blocks on a human)
   --memory                Let Codex's memory feature learn from threads this
                           run creates (default: created threads are excluded)
   --detach                (run) Return once the turn is running; watch it with

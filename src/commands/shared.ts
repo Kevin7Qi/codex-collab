@@ -902,9 +902,10 @@ export async function startOrResumeThread(
 
 /** Map a CLI approval mode to the app-server's wire params. "auto" generates
  *  approval requests like "on-request" but routes them to Codex's Guardian
- *  subagent (approvalsReviewer "auto_review"), which permits/rejects
- *  autonomously and escalates to this client only when unsure — the
- *  file-based interactive flow stays as that escalation path.
+ *  subagent (approvalsReviewer "auto_review"), which approves or denies
+ *  autonomously — it never escalates to this client, so auto runs never
+ *  block on a human. Decisions and denial rationales surface via the
+ *  autoApprovalReview events and guardianWarning notifications.
  *
  *  Non-auto modes explicitly send approvalsReviewer "user" so selecting them
  *  is reversible: approvalsReviewer persists on the thread, and without the

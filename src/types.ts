@@ -56,9 +56,11 @@ export interface InitializeResponse {
 export type { ApprovalPolicy, SandboxMode, ReasoningEffort } from "./config";
 
 /** Where the app-server routes approval requests for review. "auto_review"
- *  is the Guardian subagent (risk-based auto-permit/reject; escalates to the
- *  client only when unsure). Accepted on thread/start, thread/fork,
- *  thread/resume, and turn/start — no experimentalApi needed. */
+ *  is the Guardian subagent: it approves or DENIES autonomously — it does
+ *  not escalate to the client. Denials surface via the `guardianWarning`
+ *  notification and can be overridden with thread/approveGuardianDeniedAction.
+ *  Accepted on thread/start, thread/fork, thread/resume, and turn/start —
+ *  no experimentalApi needed. */
 export type ApprovalsReviewer = "user" | "auto_review";
 
 export interface Thread {
