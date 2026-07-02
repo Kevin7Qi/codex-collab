@@ -218,3 +218,66 @@ describe("InteractiveApprovalHandler", () => {
     expect(decision).toBe("decline");
   });
 });
+
+describe("pending-approval observer (onPending)", () => {
+  test("fires with the request on block and null on resolution", async () => {
+    const events: Array<unknown> = [];
+    const handler = new InteractiveApprovalHandler(
+      TEST_APPROVALS_DIR,
+      () => {},
+      { pollIntervalMs: 20, onPending: (p) => events.push(p) },
+    );
+
+    const decisionPath = join(TEST_APPROVALS_DIR, "appr-001.decision");
+    const pending = handler.handleCommandApproval(mockCommandRequest);
+    // Wait until the request file exists, then answer it
+    while (!existsSync(join(TEST_APPROVALS_DIR, "appr-001.json"))) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: "appr-001",
+      kind: "commandExecution",
+      summary: "curl https://example.com",
+    });
+
+    writeFileSync(decisionPath, "accept");
+    await pending;
+    expect(events).toHaveLength(2);
+    expect(events[1]).toBeNull();
+  });
+
+  test("fires null on abort so the run record flag can't stick", async () => {
+    const events: Array<unknown> = [];
+    const handler = new InteractiveApprovalHandler(
+      TEST_APPROVALS_DIR,
+      () => {},
+      { pollIntervalMs: 20, onPending: (p) => events.push(p) },
+    );
+
+    const abort = new AbortController();
+    const pending = handler.handleCommandApproval(mockCommandRequest, abort.signal);
+    while (!existsSync(join(TEST_APPROVALS_DIR, "appr-001.json"))) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    abort.abort();
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(events).toHaveLength(2);
+    expect(events[1]).toBeNull();
+  });
+
+  test("observer exceptions do not break the approval flow", async () => {
+    const handler = new InteractiveApprovalHandler(
+      TEST_APPROVALS_DIR,
+      () => {},
+      { pollIntervalMs: 20, onPending: () => { throw new Error("observer boom"); } },
+    );
+
+    const pending = handler.handleCommandApproval(mockCommandRequest);
+    while (!existsSync(join(TEST_APPROVALS_DIR, "appr-001.json"))) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "accept");
+    expect(await pending).toBe("accept");
+  });
+});

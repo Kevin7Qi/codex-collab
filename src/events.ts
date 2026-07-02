@@ -111,6 +111,16 @@ export class EventDispatcher {
     }
   }
 
+  /** Log-only sink for out-of-band lines that already reached the console by
+   *  another path (e.g. approval prompts, which must stay visible even under
+   *  --content-only). Writes the `[codex]`-tagged entry to the thread log so
+   *  observers that don't own this process's stdout — `follow`, Monitor
+   *  scripts, `output` — see the same event stream. */
+  logLine(text: string): void {
+    this.log(`[codex] ${text}`);
+    this.flush();
+  }
+
   handleDelta(method: string, params: DeltaParams): void {
     if (method === "item/agentMessage/delta") {
       this.accumulatedOutput += params.delta;

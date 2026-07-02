@@ -267,7 +267,8 @@ export function loadRun(stateDir: string, runId: string): RunRecord | null {
 
 type RunPatch = Partial<Pick<RunRecord,
   "status" | "phase" | "sessionId" | "completedAt" | "elapsed" |
-  "output" | "filesChanged" | "commandsRun" | "error" | "logOffset"
+  "output" | "filesChanged" | "commandsRun" | "error" | "logOffset" |
+  "pendingApproval"
 >>;
 
 /**

@@ -24,6 +24,7 @@ import {
   pruneRuns,
   migrateGlobalState,
 } from "../threads";
+import type { PendingApproval } from "../types";
 import { EventDispatcher } from "../events";
 import {
   autoApproveHandler,
@@ -96,6 +97,8 @@ export interface Options {
   /** Opt-in: let Codex's memory feature learn from threads this run creates.
    *  Default off — created threads get thread/memoryMode/set mode=disabled. */
   memory: boolean;
+  /** run: hand the turn to a detached runner process and return immediately. */
+  detach: boolean;
   dir: string;
   contentOnly: boolean;
   json: boolean;
@@ -171,6 +174,7 @@ export function defaultOptions(): Options {
     sandbox: config.defaultSandbox,
     approval: config.defaultApprovalPolicy,
     memory: false,
+    detach: false,
     dir: process.cwd(),
     contentOnly: false,
     json: false,
@@ -301,6 +305,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
     } else if (arg === "--memory") {
       options.memory = true;
       options.explicit.add("memory");
+    } else if (arg === "--detach") {
+      options.detach = true;
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
@@ -510,9 +516,30 @@ export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeW
 export function setActiveRunId(id: string | undefined): void { activeRunId = id; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
 
-export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string, workspaceDir?: string): ApprovalHandler {
+export interface ApprovalHandlerContext {
+  workspaceDir?: string;
+  /** Mirrors approval prompts into the thread log so observers that don't
+   *  own this process's stdout (follow, Monitor, output) see them. */
+  dispatcher?: EventDispatcher;
+  /** With runId, mirrors the pending approval into the run record. */
+  stateDir?: string;
+  runId?: string;
+}
+
+export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string, ctx?: ApprovalHandlerContext): ApprovalHandler {
   if (policy === "never") return autoApproveHandler;
-  return new InteractiveApprovalHandler(approvalsDir, progress, { workspaceDir });
+  // Approval prompts must stay on the console even under --content-only
+  // (they're actionable, not progress noise), so this bypasses the
+  // dispatcher's console gate and logs separately.
+  const onProgress = (line: string) => {
+    progress(line);
+    ctx?.dispatcher?.logLine(line);
+  };
+  const { stateDir, runId } = ctx ?? {};
+  const onPending = stateDir && runId
+    ? (pending: PendingApproval | null) => updateRun(stateDir, runId, { pendingApproval: pending })
+    : undefined;
+  return new InteractiveApprovalHandler(approvalsDir, onProgress, { workspaceDir: ctx?.workspaceDir, onPending });
 }
 
 /** Best-effort close that swallows + logs errors. Cleanup runs on every
@@ -813,7 +840,13 @@ export async function startOrResumeThread(
 
   // Create run record (Gap 1 + Gap 5 + Gap 6)
   const prompt = preview ?? null;
-  const runId = generateRunId();
+  // `run --detach` parents pre-generate the runId and pass it down so they
+  // can watch the ledger for this record as the "turn is running" handshake.
+  const injectedRunId = process.env.CODEX_COLLAB_RUN_ID;
+  const runId = injectedRunId && /^[a-zA-Z0-9_-]+$/.test(injectedRunId)
+    ? injectedRunId
+    : generateRunId();
+  delete process.env.CODEX_COLLAB_RUN_ID;
   const sessionId = getCurrentSessionId(ws.stateDir);
   const logPath = join(ws.logsDir, `${shortId}.log`);
   const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;

@@ -121,6 +121,33 @@ Progress lines stream in real-time during execution:
 [codex] Turn completed (2m 14s, 1 file changed)
 ```
 
+## Detached Runs and Following
+
+`run --detach` hands the turn to a detached runner and returns as soon as the turn is actually running — the turn's lifetime is decoupled from the invoking shell, so nothing kills it if the shell or session goes away:
+
+```bash
+codex-collab run "large refactor task" --detach --approval auto
+# [codex] Detached: thread a1b2c3d4 running (gpt-5.4)
+# [codex]   Follow:   codex-collab follow a1b2c3d4
+```
+
+`follow <id>` is a live view of a running thread: it replays the current run so far, then streams events (commands with exit codes, file edits, Guardian decisions, approval prompts) until the run finishes, and exits with the final status (exit 0 = completed). **Suggest the user run `follow` in a separate terminal pane** — it renders a purpose-built, color-coded view and costs zero model context. On an already-finished run it replays that run and exits, so it's also a quick way to review what happened.
+
+### Watching for approvals without polling (Monitor pattern)
+
+When you run codex-collab in background Bash, you're notified when the *process exits* — but an approval request blocks mid-run without exiting. Watch on-disk state instead; both signals below appear regardless of which process owns the run:
+
+- an approval request file appears in `~/.codex-collab/workspaces/<slug>-<hash>/approvals/<id>.json` while a request is pending (and disappears when answered)
+- the run record (`runs/<runId>.json`) carries `"pendingApproval": {id, kind, summary, requestedAt}` while blocked, `null` otherwise
+
+With the Monitor tool, arm a single-shot watcher alongside the background run and keep working — approval appears → notification → `codex-collab approve <id>` → the run continues (no kill/resume cycle, no polling in your context):
+
+```bash
+until [ -n "$(ls <workspace-state>/approvals/*.json 2>/dev/null)" ]; do sleep 2; done; cat <workspace-state>/approvals/*.json
+```
+
+Without Monitor, run that same `until`-loop as a second background Bash command — its *exit* becomes your notification. Prefer `--approval auto` (Guardian) so this machinery is only the escalation net, not the main path.
+
 ## Approvals
 
 By default, Codex auto-approves all actions (`--approval never`). For stricter control:
@@ -174,11 +201,19 @@ codex-collab review "instructions" [options]       # Custom review
 codex-collab review --resume <id> [options]        # Resume existing thread
 ```
 
+### Run (detached)
+
+```bash
+codex-collab run "prompt" --detach [options]  # Return once the turn is running
+codex-collab follow <id>                      # Live view; exits on completion
+```
+
 ### Reading Output
 
 ```bash
 codex-collab output <id>                # Full log for thread
 codex-collab progress <id>              # Recent activity (tail of log)
+codex-collab follow <id>                # Live view of a running thread (or replay of the last run)
 ```
 
 ### Thread Management
@@ -221,6 +256,7 @@ codex-collab health                     # Check prerequisites
 | `--timeout <sec>` | Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes. Increase for large reviews or complex tasks. |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations reach `approve`/`decline` |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
+| `--detach` | (run) Return once the turn is running; watch with `follow <id>`, stop with `kill <id>`. Decouples turn lifetime from the invoking shell |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |

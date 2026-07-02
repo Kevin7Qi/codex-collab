@@ -6,6 +6,7 @@ import type {
   ApprovalDecision,
   CommandApprovalRequest,
   FileChangeApprovalRequest,
+  PendingApproval,
 } from "./types";
 import { validateId } from "./config";
 
@@ -39,6 +40,11 @@ export interface InteractiveApprovalOptions {
   workspaceDir?: string;
   /** Decision-file poll interval in ms (default 1000; tests use small values). */
   pollIntervalMs?: number;
+  /** Fired with the request when an approval starts blocking, and with null
+   *  on every resolution path (decision, abort, timeout, error) — callers
+   *  mirror this into the run record so observers can see a blocked run.
+   *  Exceptions are swallowed; a broken observer must not break approvals. */
+  onPending?: (pending: PendingApproval | null) => void;
 }
 
 /** File-based IPC approval handler. Writes a .json request file, then polls for
@@ -46,6 +52,7 @@ export interface InteractiveApprovalOptions {
 export class InteractiveApprovalHandler implements ApprovalHandler {
   private workspaceDir?: string;
   private pollIntervalMs: number;
+  private onPending?: (pending: PendingApproval | null) => void;
 
   constructor(
     private approvalsDir: string,
@@ -54,7 +61,16 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
   ) {
     this.workspaceDir = opts?.workspaceDir;
     this.pollIntervalMs = opts?.pollIntervalMs ?? 1000;
+    this.onPending = opts?.onPending;
     if (!existsSync(approvalsDir)) mkdirSync(approvalsDir, { recursive: true, mode: 0o700 });
+  }
+
+  private notifyPending(pending: PendingApproval | null): void {
+    try {
+      this.onPending?.(pending);
+    } catch (e) {
+      console.error(`[codex] Warning: pending-approval observer failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   async handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision> {
@@ -75,6 +91,12 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
       reason: req.reason,
       threadId: req.threadId,
       turnId: req.turnId,
+    });
+    this.notifyPending({
+      id,
+      kind: "commandExecution",
+      summary: req.command ?? req.reason ?? null,
+      requestedAt: new Date().toISOString(),
     });
 
     return this.pollForDecision(id, APPROVAL_TIMEOUT_MS, signal);
@@ -97,6 +119,12 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
       threadId: req.threadId,
       turnId: req.turnId,
     });
+    this.notifyPending({
+      id,
+      kind: "fileChange",
+      summary: req.reason ?? null,
+      requestedAt: new Date().toISOString(),
+    });
 
     return this.pollForDecision(id, APPROVAL_TIMEOUT_MS, signal);
   }
@@ -116,6 +144,9 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     const deadline = Date.now() + timeoutMs;
 
     const cleanup = () => {
+      // Every resolution path (decision, abort, timeout, error) runs cleanup,
+      // so this is the single place the pending flag is lowered.
+      this.notifyPending(null);
       for (const path of [decisionPath, requestPath]) {
         try {
           unlinkSync(path);

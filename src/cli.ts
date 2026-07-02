@@ -97,6 +97,7 @@ Commands:
   review "instructions"   Custom review with specific focus
   threads [--json] [--all] List threads (--limit <n>, --discover)
   kill <id>               Stop a running thread
+  follow <id>             Live view of a running thread; exits on completion
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server
@@ -123,6 +124,8 @@ Options:
                           only its escalations reach approve/decline
   --memory                Let Codex's memory feature learn from threads this
                           run creates (default: created threads are excluded)
+  --detach                (run) Return once the turn is running; watch it with
+                          'follow <id>', stop it with 'kill <id>'
   --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: auto-detected default branch)
@@ -185,6 +188,7 @@ const BOOLEAN_FLAGS = new Set([
   "--full",
   "--unset",
   "--memory",
+  "--detach",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {
@@ -252,7 +256,7 @@ async function main() {
 
   // Validate command
   const knownCommands = new Set([
-    "run", "review", "threads", "jobs", "kill", "output", "progress",
+    "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version",
   ]);
@@ -282,6 +286,8 @@ async function main() {
       return (await import("./commands/threads")).handleThreads(rest);
     case "kill":
       return (await import("./commands/kill")).handleKill(rest);
+    case "follow":
+      return (await import("./commands/follow")).handleFollow(rest);
     case "output":
       return (await import("./commands/threads")).handleOutput(rest);
     case "progress":

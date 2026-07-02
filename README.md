@@ -95,6 +95,10 @@ codex-collab review --content-only
 
 # Resume a thread
 codex-collab run --resume <id> "now check error handling" --content-only
+
+# Long task: detach it, watch it live in another pane
+codex-collab run "large refactor" --detach --approval auto
+codex-collab follow <id>
 ```
 
 ## CLI Commands
@@ -105,6 +109,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `review [opts]` | Code review (PR, uncommitted, commit) |
 | `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server) |
 | `kill <id>` | Interrupt running thread |
+| `follow <id>` | Live view of a running thread; exits with its status (replays the last run when already finished) |
 | `output <id>` | Full log for thread |
 | `progress <id>` | Recent activity (tail of log) |
 | `peek <id>` | Show recent conversation slice from server |
@@ -140,6 +145,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations need `approve`/`decline` |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: excluded) |
+| `--detach` | (run) Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
 | `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
 | `--json` | JSON output for supported commands (`threads`, `peek`) |
 | `--all` | List all threads with no display limit |

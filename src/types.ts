@@ -456,6 +456,17 @@ export type RunPhase =
 
 export type RunStatus = "running" | "completed" | "failed" | "cancelled";
 
+/** A pending interactive approval attached to a run — the on-disk signal
+ *  observers (follow, Monitor scripts) use to see a blocked run without
+ *  owning its stdout. */
+export interface PendingApproval {
+  id: string;
+  kind: "commandExecution" | "fileChange";
+  /** Command text or file-change reason — whatever best describes the ask. */
+  summary: string | null;
+  requestedAt: string;
+}
+
 export interface RunRecord {
   runId: string;
   threadId: string;
@@ -475,6 +486,8 @@ export interface RunRecord {
   filesChanged: FileChange[] | null;
   commandsRun: CommandExec[] | null;
   error: string | null;
+  /** Set while an interactive approval is blocking the run; null/absent otherwise. */
+  pendingApproval?: PendingApproval | null;
 }
 
 // --- Broker state (per-workspace) ---
