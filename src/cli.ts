@@ -112,7 +112,7 @@ Commands:
 
 Options:
   -m, --model <model>     Model name (default: auto — latest available)
-  -r, --reasoning <lvl>   Reasoning: ${config.defaultDisplayReasoningEfforts.join(", ")} (default: auto — highest available)
+  -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: auto — highest available)
   -s, --sandbox <mode>    Sandbox: ${config.sandboxModes.join(", ")}
                           (default: ${config.defaultSandbox})
   -d, --dir <path>        Working directory (default: cwd)

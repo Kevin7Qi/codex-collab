@@ -587,7 +587,14 @@ function createMockBroker(
         for (const s of clientSockets) {
           try { s.destroy(); } catch {}
         }
-        server.close(() => resolve());
+        // On macOS, Bun's server.close() callback can fail to fire when a
+        // connection was destroyed with backpressured write data (observed
+        // with the 11MB overflow test) — bound the wait so tests can't hang.
+        const timer = setTimeout(resolve, 2000);
+        server.close(() => {
+          clearTimeout(timer);
+          resolve();
+        });
         try { rmSync(sockPath); } catch {}
       }),
   };

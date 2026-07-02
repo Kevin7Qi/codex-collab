@@ -22,7 +22,6 @@ const MODEL_ALIASES: Record<string, string> = {
 // ─── Effort levels ──────────────────────────────────────────────────────────
 
 const VALID_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
-const DEFAULT_DISPLAY_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
 // ─── Workspace state schema version ─────────────────────────────────────────
 // Bumped whenever the on-disk shape of a workspace state dir
@@ -48,7 +47,6 @@ export function isPathInside(candidate: string, root: string): boolean {
 export const config = {
   // Reasoning effort levels
   reasoningEfforts: VALID_EFFORTS,
-  defaultDisplayReasoningEfforts: DEFAULT_DISPLAY_EFFORTS,
 
   // Sandbox modes
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,
@@ -139,7 +137,19 @@ export function resolveWorkspaceDir(cwd: string): string {
     encoding: "utf-8",
     timeout: 5000,
   });
-  const wsRoot = result.status === 0 && result.stdout ? result.stdout.trim() : resolve(cwd);
+  let wsRoot: string;
+  if (result.status === 0 && result.stdout) {
+    wsRoot = result.stdout.trim();
+  } else {
+    // Canonicalize like git does (it returns the physical path) so state-dir
+    // hashing is stable across symlinked cwds — e.g. macOS's /var → /private/var.
+    const resolved = resolve(cwd);
+    try {
+      wsRoot = realpathSync(resolved);
+    } catch {
+      wsRoot = resolved;
+    }
+  }
   workspaceDirCache.set(cwd, wsRoot);
   return wsRoot;
 }

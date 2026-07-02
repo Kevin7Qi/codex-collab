@@ -51,10 +51,6 @@ describe("config object", () => {
     expect(config.reasoningEfforts).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"]);
   });
 
-  test("has default display reasoning efforts", () => {
-    expect(config.defaultDisplayReasoningEfforts).toEqual(["low", "medium", "high", "xhigh"]);
-  });
-
   test("is frozen", () => {
     expect(Object.isFrozen(config)).toBe(true);
   });
