@@ -1696,3 +1696,23 @@ console.log(JSON.stringify({ r1: r1.runId, r2: r2.runId, envAfterFirst }));
     }
   });
 });
+
+describe("delete --purge", () => {
+  test("parseOptions accepts --purge (default false)", () => {
+    expect(parseOptions(["delete", "abc123"]).options.purge).toBe(false);
+    expect(parseOptions(["delete", "abc123", "--purge"]).options.purge).toBe(true);
+  });
+
+  test("tryServerDelete maps outcomes like tryArchive", async () => {
+    const { tryServerDelete } = require("./shared") as typeof import("./shared");
+    const clientFor = (impl: () => Promise<unknown>): AppServerClient => ({
+      request: (async () => impl()) as AppServerClient["request"],
+      notify: () => {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
+      respond: () => {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
+    });
+
+    expect(await tryServerDelete(clientFor(async () => ({})), "t1")).toBe("deleted");
+    expect(await tryServerDelete(clientFor(async () => { throw new Error("thread not found"); }), "t1")).toBe("already_done");
+    expect(await tryServerDelete(clientFor(async () => { throw new Error("connection lost"); }), "t1")).toBe("failed");
+  });
+});

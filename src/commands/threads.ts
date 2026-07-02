@@ -33,6 +33,7 @@ import {
   removePidFile,
   withClient,
   tryArchive,
+  tryServerDelete,
   getWorkspacePaths,
   fetchAllPages,
   type WorkspacePaths,
@@ -325,9 +326,9 @@ export async function handleDelete(args: string[]): Promise<void> {
     }
   }
 
-  let archiveResult: "archived" | "already_done" | "failed" = "failed";
+  let serverResult: "archived" | "deleted" | "already_done" | "failed" = "failed";
   try {
-    archiveResult = await withClient(async (client) => {
+    serverResult = await withClient(async (client) => {
       // Interrupt active turn before archiving (only if running)
       if (localStatus === "running") {
         try {
@@ -357,11 +358,13 @@ export async function handleDelete(args: string[]): Promise<void> {
         }
       }
 
-      return tryArchive(client, threadId);
+      // --purge: permanent server-side thread/delete — NOT recoverable with
+      // `codex unarchive`. Default: archive, which is.
+      return options.purge ? tryServerDelete(client, threadId) : tryArchive(client, threadId);
     }, options.dir);
   } catch (e) {
     if (e instanceof Error && !e.message.includes("not found")) {
-      console.error(`[codex] Warning: could not archive on server: ${e.message}`);
+      console.error(`[codex] Warning: could not ${options.purge ? "delete" : "archive"} on server: ${e.message}`);
     }
   }
 
@@ -377,10 +380,12 @@ export async function handleDelete(args: string[]): Promise<void> {
     }
   }
 
-  if (archiveResult === "failed") {
-    progress(`Deleted local data for thread ${id} (server archive failed)`);
+  if (serverResult === "failed") {
+    progress(`Deleted local data for thread ${id} (server ${options.purge ? "delete" : "archive"} failed — the thread may still exist server-side)`);
+  } else if (options.purge) {
+    progress(`Permanently deleted thread ${id} (server + local)`);
   } else {
-    progress(`Deleted thread ${id}`);
+    progress(`Deleted thread ${id} (archived server-side; recover with: codex unarchive ${threadId})`);
   }
 }
 

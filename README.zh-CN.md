@@ -125,7 +125,7 @@ codex-collab follow --watch
 
 | 命令 | 说明 |
 |------|------|
-| `delete <id>` | 归档会话，删除本地文件 |
+| `delete <id> [--purge]` | 归档会话（可用 `codex unarchive` 恢复）并删除本地文件；`--purge` 则在服务端永久删除，不可恢复 |
 | `clean` | 清理过期日志和失效映射 |
 | `approve <id>` | 批准待处理的请求 |
 | `decline <id>` | 拒绝待处理的请求 |

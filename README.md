@@ -125,7 +125,7 @@ codex-collab follow --watch
 
 | Command | Description |
 |---------|-------------|
-| `delete <id>` | Archive thread, delete local files |
+| `delete <id> [--purge]` | Archive thread (recoverable via `codex unarchive`) and delete local files; `--purge` permanently deletes it server-side instead |
 | `clean` | Delete old logs and stale mappings |
 | `approve <id>` | Approve a pending request |
 | `decline <id>` | Decline a pending request |

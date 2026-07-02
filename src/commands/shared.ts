@@ -101,6 +101,8 @@ export interface Options {
   detach: boolean;
   /** follow: don't exit when the run finishes — keep watching for the next one. */
   watch: boolean;
+  /** delete: permanently delete the thread server-side instead of archiving. */
+  purge: boolean;
   dir: string;
   contentOnly: boolean;
   json: boolean;
@@ -178,6 +180,7 @@ export function defaultOptions(): Options {
     memory: false,
     detach: false,
     watch: false,
+    purge: false,
     dir: process.cwd(),
     contentOnly: false,
     json: false,
@@ -312,6 +315,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.detach = true;
     } else if (arg === "-w" || arg === "--watch") {
       options.watch = true;
+    } else if (arg === "--purge") {
+      options.purge = true;
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
@@ -1142,6 +1147,21 @@ export async function tryArchive(client: AppServerClient, threadId: string): Pro
       return "already_done";
     }
     console.error(`[codex] Warning: could not archive thread: ${e instanceof Error ? e.message : String(e)}`);
+    return "failed";
+  }
+}
+
+/** Try to permanently delete a thread on the server (thread/delete). Unlike
+ *  archiving, this is NOT recoverable with `codex unarchive`. */
+export async function tryServerDelete(client: AppServerClient, threadId: string): Promise<"deleted" | "already_done" | "failed"> {
+  try {
+    await client.request("thread/delete", { threadId });
+    return "deleted";
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("not found")) {
+      return "already_done";
+    }
+    console.error(`[codex] Warning: could not delete thread on server: ${e instanceof Error ? e.message : String(e)}`);
     return "failed";
   }
 }

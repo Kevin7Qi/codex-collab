@@ -171,7 +171,8 @@ codex-collab progress <id>              # Recent activity (tail of log)
 codex-collab threads [--all|--discover] # List threads (--discover: include server-side, top 5)
 codex-collab peek <id> [--limit N --full] # Recent conversation slice from server
 codex-collab kill <id>                  # Stop a running thread
-codex-collab delete <id>                # Archive thread, delete local files
+codex-collab delete <id>                # Archive thread (recoverable via `codex unarchive`), delete local files
+codex-collab delete <id> --purge        # Permanently delete server-side instead — NOT recoverable; needs explicit user intent
 codex-collab clean                      # Delete old logs and stale mappings
 codex-collab approve <id> | decline <id> # Answer a pending approval
 codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, reasoning, sandbox, approval, timeout, memory)

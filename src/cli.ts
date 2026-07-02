@@ -114,7 +114,8 @@ Commands:
   approve <id>            Approve a pending request
   decline <id>            Decline a pending request
   clean                   Delete old logs and stale mappings
-  delete <id>             Archive thread, delete local files
+  delete <id> [--purge]   Archive thread (recoverable) and delete local files;
+                          --purge permanently deletes it server-side instead
   health                  Check prerequisites
   version                 Print version
 
@@ -199,6 +200,7 @@ const BOOLEAN_FLAGS = new Set([
   "--memory",
   "--detach",
   "-w", "--watch",
+  "--purge",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {
