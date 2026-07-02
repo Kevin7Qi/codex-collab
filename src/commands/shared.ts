@@ -16,11 +16,7 @@ import {
   legacyResolveThreadId as resolveThreadId,
   legacyFindShortId as findShortId,
   legacyUpdateThreadMeta as updateThreadMeta,
-  legacyRemoveThread as removeThread,
   updateThreadStatus,
-  loadThreadMapping,
-  saveThreadMapping,
-  withThreadLock,
   generateRunId,
   createRun,
   updateRun,
@@ -117,8 +113,15 @@ export interface Options {
 /** Valid review modes for --mode flag. */
 export const VALID_REVIEW_MODES = ["pr", "uncommitted", "commit", "custom"] as const;
 
-/** Shell metacharacters that must not appear in git refs. */
-const UNSAFE_REF_CHARS = /[;|&`$()<>\\'"{\s]/;
+/** Max --timeout / config timeout in seconds: the turn timeout feeds
+ *  setTimeout(sec * 1000), and delays beyond 2^31-1 ms overflow the 32-bit
+ *  timer and fire after ~1ms — every turn would instantly "time out". */
+export const MAX_TIMEOUT_SECONDS = 2_147_483;
+
+/** Shell metacharacters that must not appear in git refs. Braces are allowed
+ *  so reflog refs like HEAD@{1} work — git is always invoked with an argv
+ *  array here, never through a shell. */
+const UNSAFE_REF_CHARS = /[;|&`$()<>\\'"\s]/;
 
 export function die(msg: string): never {
   console.error(`Error: ${msg}`);
@@ -126,7 +129,9 @@ export function die(msg: string): never {
 }
 
 export function validateGitRef(value: string, label: string): string {
-  if (UNSAFE_REF_CHARS.test(value)) die(`Invalid ${label}: ${value}`);
+  // A leading dash is an option-injection primitive for whatever git
+  // invocation ultimately receives the ref.
+  if (!value || value.startsWith("-") || UNSAFE_REF_CHARS.test(value)) die(`Invalid ${label}: ${value}`);
   return value;
 }
 
@@ -136,6 +141,17 @@ export function validateIdOrDie(id: string): string {
     return validateId(id);
   } catch {
     die(`Invalid ID: "${id}"`);
+  }
+}
+
+/** Resolve a user-supplied thread ID or exit with a friendly error.
+ *  "Thread not found" and "Ambiguous prefix" are user mistakes and should
+ *  print as `Error: …`, not escape to main()'s `Fatal: …` handler. */
+export function resolveThreadIdOrDie(threadsFile: string, id: string): string {
+  try {
+    return resolveThreadId(threadsFile, id);
+  } catch (e) {
+    die(e instanceof Error ? e.message : String(e));
   }
 }
 
@@ -167,21 +183,57 @@ export function defaultOptions(): Options {
   };
 }
 
+/** True iff argv[i+1] exists and is usable as the value of the flag at
+ *  argv[i]. A next token that looks like another flag is rejected — silently
+ *  swallowing it surfaces later as a baffling downstream error (e.g.
+ *  `--template --content-only` failing with "Template not found:
+ *  --content-only"). Negative numbers pass through so numeric flags can
+ *  report their own, more specific validation error. */
+function hasFlagValue(argv: string[], i: number): boolean {
+  const next = argv[i + 1];
+  if (next === undefined) return false;
+  return !(next.length > 1 && next.startsWith("-") && !/^-\d/.test(next));
+}
+
 export function parseOptions(args: string[]): { positional: string[]; options: Options } {
   const options = defaultOptions();
   const positional: string[] = [];
 
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
+  // Expand `--name=value` into two tokens so every flag branch handles just
+  // the space-separated form. Tokens after the `--` end-of-options
+  // terminator are left verbatim.
+  const argv: string[] = [];
+  let terminated = false;
+  for (const arg of args) {
+    if (terminated || arg === "--") {
+      terminated = true;
+      argv.push(arg);
+    } else if (arg.startsWith("--") && arg.includes("=")) {
+      const eq = arg.indexOf("=");
+      argv.push(arg.slice(0, eq), arg.slice(eq + 1));
+    } else {
+      argv.push(arg);
+    }
+  }
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+
+    if (arg === "--") {
+      // End of options: everything after is positional (allows prompts and
+      // review instructions that start with a dash).
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
 
     if (arg === "-h" || arg === "--help") {
       options.help = true;
     } else if (arg === "-r" || arg === "--reasoning") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --reasoning requires a value");
         process.exit(1);
       }
-      const level = args[++i] as ReasoningEffort;
+      const level = argv[++i] as ReasoningEffort;
       if (!config.reasoningEfforts.includes(level)) {
         console.error(`Error: Invalid reasoning level: ${level}`);
         console.error(
@@ -192,23 +244,23 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.reasoning = level;
       options.explicit.add("reasoning");
     } else if (arg === "-m" || arg === "--model") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --model requires a value");
         process.exit(1);
       }
-      const model = args[++i];
-      if (/[^a-zA-Z0-9._\-\/:]/.test(model)) {
+      const model = argv[++i];
+      if (!model || /[^a-zA-Z0-9._\-\/:]/.test(model)) {
         console.error(`Error: Invalid model name: ${model}`);
         process.exit(1);
       }
       options.model = model;
       options.explicit.add("model");
     } else if (arg === "-s" || arg === "--sandbox") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --sandbox requires a value");
         process.exit(1);
       }
-      const mode = args[++i] as SandboxMode;
+      const mode = argv[++i] as SandboxMode;
       if (!config.sandboxModes.includes(mode)) {
         console.error(`Error: Invalid sandbox mode: ${mode}`);
         console.error(
@@ -219,11 +271,11 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.sandbox = mode;
       options.explicit.add("sandbox");
     } else if (arg === "--approval") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --approval requires a value");
         process.exit(1);
       }
-      const policy = args[++i] as ApprovalPolicy;
+      const policy = argv[++i] as ApprovalPolicy;
       if (!config.approvalPolicies.includes(policy)) {
         console.error(`Error: Invalid approval policy: ${policy}`);
         console.error(
@@ -234,46 +286,46 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.approval = policy;
       options.explicit.add("approval");
     } else if (arg === "-d" || arg === "--dir") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --dir requires a value");
         process.exit(1);
       }
-      options.dir = resolve(args[++i]);
+      options.dir = resolve(argv[++i]);
       options.explicit.add("dir");
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
       options.json = true;
     } else if (arg === "--timeout") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --timeout requires a value");
         process.exit(1);
       }
-      const val = Number(args[++i]);
-      if (!Number.isFinite(val) || val <= 0) {
-        console.error(`Error: Invalid timeout: ${args[i]}`);
+      const val = Number(argv[++i]);
+      if (!Number.isFinite(val) || val <= 0 || val > MAX_TIMEOUT_SECONDS) {
+        console.error(`Error: Invalid timeout: ${argv[i]} (must be 1-${MAX_TIMEOUT_SECONDS} seconds)`);
         process.exit(1);
       }
       options.timeout = val;
       options.explicit.add("timeout");
     } else if (arg === "--limit") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --limit requires a value");
         process.exit(1);
       }
-      const val = Number(args[++i]);
+      const val = Number(argv[++i]);
       if (!Number.isFinite(val) || val < 1) {
-        console.error(`Error: Invalid limit: ${args[i]}`);
+        console.error(`Error: Invalid limit: ${argv[i]}`);
         process.exit(1);
       }
       options.limit = Math.floor(val);
       options.explicit.add("limit");
     } else if (arg === "--mode") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --mode requires a value");
         process.exit(1);
       }
-      const mode = args[++i];
+      const mode = argv[++i];
       if (!VALID_REVIEW_MODES.includes(mode as any)) {
         console.error(`Error: Invalid review mode: ${mode}`);
         console.error(`Valid options: ${VALID_REVIEW_MODES.join(", ")}`);
@@ -281,24 +333,24 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       }
       options.reviewMode = mode;
     } else if (arg === "--ref") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --ref requires a value");
         process.exit(1);
       }
-      options.reviewRef = validateGitRef(args[++i], "ref");
+      options.reviewRef = validateGitRef(argv[++i], "ref");
     } else if (arg === "--base") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --base requires a value");
         process.exit(1);
       }
-      options.base = validateGitRef(args[++i], "base branch");
+      options.base = validateGitRef(argv[++i], "base branch");
       options.explicit.add("base");
     } else if (arg === "--resume") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --resume requires a value");
         process.exit(1);
       }
-      options.resumeId = args[++i];
+      options.resumeId = argv[++i];
     } else if (arg === "--all") {
       options.limit = Infinity;
       options.explicit.add("limit");
@@ -307,11 +359,11 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
     } else if (arg === "--full") {
       options.full = true;
     } else if (arg === "--template") {
-      if (i + 1 >= args.length) {
+      if (!hasFlagValue(argv, i)) {
         console.error("Error: --template requires a name");
         process.exit(1);
       }
-      options.template = args[++i];
+      options.template = argv[++i];
     } else if (arg === "--unset") {
       options.explicit.add("unset");
     } else if (arg.startsWith("-")) {
@@ -378,7 +430,7 @@ export function applyUserConfig(options: Options): void {
   const cfg = loadUserConfig();
 
   if (!options.explicit.has("model") && typeof cfg.model === "string") {
-    if (/[^a-zA-Z0-9._\-\/:]/.test(cfg.model)) {
+    if (!cfg.model || /[^a-zA-Z0-9._\-\/:]/.test(cfg.model)) {
       console.error(`[codex] Warning: ignoring invalid model in config: ${cfg.model}`);
     } else {
       options.model = resolveModel(cfg.model);
@@ -410,7 +462,7 @@ export function applyUserConfig(options: Options): void {
     }
   }
   if (!options.explicit.has("timeout") && cfg.timeout !== undefined) {
-    if (typeof cfg.timeout === "number" && Number.isFinite(cfg.timeout) && cfg.timeout > 0) {
+    if (typeof cfg.timeout === "number" && Number.isFinite(cfg.timeout) && cfg.timeout > 0 && cfg.timeout <= MAX_TIMEOUT_SECONDS) {
       options.timeout = cfg.timeout;
     } else {
       console.error(`[codex] Warning: ignoring invalid timeout in config: ${cfg.timeout}`);
@@ -560,6 +612,10 @@ function pickHighestEffort(supported: Array<{ reasoningEffort: string }>): Reaso
 
 /** Auto-resolve model and/or reasoning effort when not set by CLI or config. */
 export async function resolveDefaults(client: AppServerClient, opts: Options): Promise<void> {
+  // Resume paths forward only *explicitly provided* flags to the server
+  // (see turnOverrides / startOrResumeThread) — auto-detected values would
+  // be discarded, so the paginated model/list fetch is a wasted round-trip.
+  if (opts.resumeId) return;
   const isSet = (key: string) => opts.explicit.has(key) || opts.configured.has(key);
   const needModel = !isSet("model");
   const needReasoning = !isSet("reasoning");
@@ -613,8 +669,13 @@ export async function startOrResumeThread(
     try {
       threadId = resolveThreadId(ws.threadsFile, opts.resumeId);
     } catch (e) {
-      if (e instanceof Error && e.message.includes("Ambiguous")) {
-        throw e; // Let user see the ambiguity error
+      // Only "not found" falls through to the raw-ID path. Everything else
+      // must surface: ambiguity so the user can disambiguate, and index
+      // corruption because bailOnCorruptThreads has just renamed the index
+      // aside and its message explains how to recover — swallowing it here
+      // used to replace that with a baffling server-side "thread not found".
+      if (!(e instanceof Error && e.message.startsWith("Thread not found"))) {
+        throw e;
       }
       // Thread not found locally — treat as raw server thread ID
       validateId(opts.resumeId);

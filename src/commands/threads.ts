@@ -1,14 +1,11 @@
 // src/commands/threads.ts — threads, output, progress, delete, clean commands
 
-import { validateId } from "../config";
 import {
   legacyRegisterThread as registerThread,
-  legacyResolveThreadId as resolveThreadId,
   legacyFindShortId as findShortId,
   legacyRemoveThread as removeThread,
   loadThreadMapping,
   saveThreadMapping,
-  updateThreadStatus,
   withThreadLock,
   removeLegacyGlobalThread,
   getLatestRun,
@@ -29,6 +26,7 @@ import {
   die,
   parseOptions,
   validateIdOrDie,
+  resolveThreadIdOrDie,
   progress,
   formatAge,
   isThreadProcessAlive,
@@ -88,8 +86,10 @@ async function discoverThreads(client: AppServerClient, ws: WorkspacePaths, cwd:
     // Server timestamps are epoch seconds (not milliseconds)
     const createdAt = thread.createdAt ? new Date(thread.createdAt * 1000).toISOString() : new Date().toISOString();
     const updatedAt = thread.updatedAt ? new Date(thread.updatedAt * 1000).toISOString() : createdAt;
+    // thread/list exposes only the provider ("openai"), not a model name —
+    // storing it as `model` made discovered threads display a provider where
+    // local threads show a model. Leave model unset instead.
     registerThread(ws.threadsFile, thread.id, {
-      model: thread.modelProvider ?? undefined,
       cwd: thread.cwd ?? cwd,
       preview: thread.preview ?? thread.name ?? undefined,
       createdAt,
@@ -135,10 +135,26 @@ export async function handleThreads(args: string[]): Promise<void> {
       return tb - ta;
     });
 
-  // Detect stale "running" status: if the owning process is dead, mark as interrupted.
-  for (const e of entries) {
-    if (e.lastStatus === "running" && !isThreadProcessAlive(ws.pidsDir, e.shortId)) {
-      updateThreadStatus(ws.threadsFile, e.threadId, "interrupted");
+  // Detect stale "running" status: if the owning process is dead, mark as
+  // interrupted. Batched under one lock — a per-entry updateThreadStatus
+  // would acquire the lock and rewrite the whole index once per stale entry.
+  const stale = entries.filter(
+    (e) => e.lastStatus === "running" && !isThreadProcessAlive(ws.pidsDir, e.shortId),
+  );
+  if (stale.length > 0) {
+    withThreadLock(ws.threadsFile, () => {
+      const fresh = loadThreadMapping(ws.threadsFile);
+      const now = new Date().toISOString();
+      for (const e of stale) {
+        const entry = fresh[e.shortId];
+        if (entry && entry.lastStatus === "running") {
+          entry.lastStatus = "interrupted";
+          entry.updatedAt = now;
+        }
+      }
+      saveThreadMapping(ws.threadsFile, fresh);
+    });
+    for (const e of stale) {
       e.lastStatus = "interrupted";
       removePidFile(ws.pidsDir, e.shortId);
     }
@@ -226,7 +242,7 @@ function resolveLogPath(positional: string[], usage: string, ws: ReturnType<type
   const id = positional[0];
   if (!id) die(usage);
   validateIdOrDie(id);
-  const threadId = resolveThreadId(ws.threadsFile, id);
+  const threadId = resolveThreadIdOrDie(ws.threadsFile, id);
   const shortId = findShortId(ws.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
   return resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId);
@@ -292,7 +308,7 @@ export async function handleDelete(args: string[]): Promise<void> {
   if (!id) die("Usage: codex-collab delete <id>");
   validateIdOrDie(id);
 
-  const threadId = resolveThreadId(ws.threadsFile, id);
+  const threadId = resolveThreadIdOrDie(ws.threadsFile, id);
   const shortId = findShortId(ws.threadsFile, threadId);
 
   // If the thread is currently running, stop it first before archiving

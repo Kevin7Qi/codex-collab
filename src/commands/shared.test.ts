@@ -611,6 +611,67 @@ describe("parseOptions", () => {
   });
 });
 
+describe("parseOptions: end-of-options, =-form, and value guards", () => {
+  test("-- terminates option parsing; the rest is positional", () => {
+    const { positional, options } = parseOptions(["--content-only", "--", "--explain", "-v", "what do these flags do"]);
+    expect(options.contentOnly).toBe(true);
+    expect(positional).toEqual(["--explain", "-v", "what do these flags do"]);
+  });
+
+  test("--name=value form is expanded", () => {
+    const { options } = parseOptions(["--model=gpt-5", "--timeout=90"]);
+    expect(options.model).toBe("gpt-5");
+    expect(options.timeout).toBe(90);
+  });
+
+  test("tokens after -- are not =-expanded", () => {
+    const { positional } = parseOptions(["--", "--foo=bar"]);
+    expect(positional).toEqual(["--foo=bar"]);
+  });
+
+  test("a value flag does not swallow a following flag", () => {
+    // --template --content-only used to yield template="--content-only" and
+    // drop the boolean, surfacing later as "Template not found: --content-only".
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { parseOptions } from "./src/commands/shared";
+        parseOptions(["--template", "--content-only", "prompt"]);
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("--template requires a name");
+  });
+
+  test("--timeout rejects values that would overflow the 32-bit timer", () => {
+    // setTimeout(sec * 1000) with sec > 2_147_483 clamps to ~1ms, making
+    // every turn instantly "time out".
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { parseOptions } from "./src/commands/shared";
+        parseOptions(["--timeout", "3000000"]);
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("Invalid timeout");
+  });
+
+  test("--model rejects the empty string", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { parseOptions } from "./src/commands/shared";
+        parseOptions(["-m", ""]);
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+  });
+});
+
 describe("parseOptions: --full and explicit --limit", () => {
   test("--full sets full=true", () => {
     const { options } = parseOptions(["--full"]);
@@ -830,16 +891,33 @@ describe("validateGitRef", () => {
     expect(result.exitCode).toBe(1);
   });
 
-  test("rejects curly braces", () => {
+  test("rejects a leading dash (option injection into downstream git)", () => {
     const result = Bun.spawnSync({
       cmd: ["bun", "-e", `
         import { validateGitRef } from "./src/commands/shared";
-        validateGitRef("main{0}", "ref");
+        validateGitRef("--output=/tmp/x", "ref");
       `],
       cwd: process.cwd(),
       stderr: "pipe",
     });
     expect(result.exitCode).toBe(1);
+  });
+
+  test("rejects an empty ref", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { validateGitRef } from "./src/commands/shared";
+        validateGitRef("", "ref");
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+  });
+
+  test("accepts reflog refs like HEAD@{1}", () => {
+    // Braces are safe: git is always invoked with an argv array, never a shell.
+    expect(validateGitRef("HEAD@{1}", "ref")).toBe("HEAD@{1}");
   });
 });
 

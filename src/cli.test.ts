@@ -59,6 +59,14 @@ describe("CLI version", () => {
     expect(exitCode).toBe(0);
     expect(stdout.trim()).toBe(expected);
   });
+
+  it("-v after a command is an unknown option, not a silent version no-op", () => {
+    // Regression: `run "prompt" -v` used to print the version and exit 0
+    // without running anything — dangerous in scripts expecting the run.
+    const { stderr, exitCode } = run("run", "test prompt", "-v");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("Unknown option: -v");
+  });
 });
 
 describe("CLI valid commands", () => {
