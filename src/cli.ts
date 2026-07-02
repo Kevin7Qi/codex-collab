@@ -97,9 +97,10 @@ Commands:
   review "instructions"   Custom review with specific focus
   threads [--json] [--all] List threads (--limit <n>, --discover)
   kill <id>               Stop a running thread
-  follow [id]             Live view of a running thread; exits on completion
+  follow [id] [--watch]   Live view of a running thread; exits on completion
                           (no id: attach to the workspace's active run,
-                          or replay the most recent one)
+                          or replay the most recent one; --watch: keep the
+                          pane open and pick up each new run automatically)
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server
@@ -128,6 +129,8 @@ Options:
                           run creates (default: created threads are excluded)
   --detach                (run) Return once the turn is running; watch it with
                           'follow <id>', stop it with 'kill <id>'
+  -w, --watch             (follow) Don't exit when the run finishes — keep
+                          following each new run (Ctrl-C to stop)
   --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: auto-detected default branch)
@@ -191,6 +194,7 @@ const BOOLEAN_FLAGS = new Set([
   "--unset",
   "--memory",
   "--detach",
+  "-w", "--watch",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {

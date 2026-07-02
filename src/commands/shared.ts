@@ -99,6 +99,8 @@ export interface Options {
   memory: boolean;
   /** run: hand the turn to a detached runner process and return immediately. */
   detach: boolean;
+  /** follow: don't exit when the run finishes — keep watching for the next one. */
+  watch: boolean;
   dir: string;
   contentOnly: boolean;
   json: boolean;
@@ -175,6 +177,7 @@ export function defaultOptions(): Options {
     approval: config.defaultApprovalPolicy,
     memory: false,
     detach: false,
+    watch: false,
     dir: process.cwd(),
     contentOnly: false,
     json: false,
@@ -307,6 +310,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.explicit.add("memory");
     } else if (arg === "--detach") {
       options.detach = true;
+    } else if (arg === "-w" || arg === "--watch") {
+      options.watch = true;
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {

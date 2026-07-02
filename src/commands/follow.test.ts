@@ -3,7 +3,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { pickDefaultRun } from "./follow";
+import { pickDefaultRun, nextUnseenRun } from "./follow";
 import { createRun } from "../threads";
 import type { RunRecord, RunStatus } from "../types";
 
@@ -61,5 +61,37 @@ describe("pickDefaultRun", () => {
   test("returns null when the workspace has no runs", () => {
     const { stateDir, pidsDir } = freshDirs("empty");
     expect(pickDefaultRun(stateDir, pidsDir)).toBeNull();
+  });
+});
+
+describe("nextUnseenRun (watch mode)", () => {
+  test("returns unseen runs oldest-first so none are skipped under concurrency", () => {
+    const { stateDir } = freshDirs("watch-order");
+    createRun(stateDir, record("r-1", "dddd0001", "completed", "2026-07-02T10:00:00.000Z"));
+    createRun(stateDir, record("r-2", "dddd0002", "completed", "2026-07-02T11:00:00.000Z"));
+    createRun(stateDir, record("r-3", "dddd0003", "running", "2026-07-02T12:00:00.000Z"));
+
+    const seen = new Set<string>();
+    // Two runs finished while we were attached elsewhere: both must surface,
+    // in start order — not just the newest.
+    expect(nextUnseenRun(stateDir, seen, null)?.runId).toBe("r-1");
+    seen.add("r-1");
+    expect(nextUnseenRun(stateDir, seen, null)?.runId).toBe("r-2");
+    seen.add("r-2");
+    expect(nextUnseenRun(stateDir, seen, null)?.runId).toBe("r-3");
+    seen.add("r-3");
+    expect(nextUnseenRun(stateDir, seen, null)).toBeNull();
+  });
+
+  test("scoped watch only surfaces runs of that thread", () => {
+    const { stateDir } = freshDirs("watch-scoped");
+    createRun(stateDir, record("r-mine", "eeee0001", "completed", "2026-07-02T10:00:00.000Z"));
+    createRun(stateDir, record("r-other", "eeee0002", "running", "2026-07-02T11:00:00.000Z"));
+
+    const seen = new Set<string>();
+    expect(nextUnseenRun(stateDir, seen, "eeee0001")?.runId).toBe("r-mine");
+    seen.add("r-mine");
+    // The other thread's run never appears in a scoped watch
+    expect(nextUnseenRun(stateDir, seen, "eeee0001")).toBeNull();
   });
 });

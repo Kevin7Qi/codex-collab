@@ -131,7 +131,9 @@ codex-collab run "large refactor task" --detach --approval auto
 # [codex]   Follow:   codex-collab follow a1b2c3d4
 ```
 
-`follow [id]` is a live view of a running thread: it replays the current run so far, then streams events (commands with exit codes, file edits, Guardian decisions, approval prompts) until the run finishes, and exits with the final status (exit 0 = completed). Without an ID it attaches to the workspace's active run (or replays the most recent one), so the user can just type `codex-collab follow`. **Suggest the user run `follow` in a separate terminal pane** — it renders a purpose-built, color-coded view and costs zero model context. On an already-finished run it replays that run and exits, so it's also a quick way to review what happened.
+`follow [id]` is a live view of a running thread: it replays the current run so far, then streams events (commands with exit codes, file edits, Guardian decisions, approval prompts) until the run finishes, and exits with the final status (exit 0 = completed). Without an ID it attaches to the workspace's active run (or replays the most recent one), so the user can just type `codex-collab follow`. On an already-finished run it replays that run and exits, so it's also a quick way to review what happened.
+
+**For a multi-turn Claude ⇄ Codex conversation, suggest the user keep `codex-collab follow --watch` open in a separate terminal pane** — it doesn't exit between turns: each new run is picked up automatically (every run shown exactly once, in start order, even across concurrent threads; runs that finished while another was displayed appear as quick replays). It renders a purpose-built, color-coded view, costs zero model context, and stops with Ctrl-C. Scope it to one thread with `follow <id> --watch` when multiple threads run in parallel and the user wants a dedicated pane per thread.
 
 ### Watching for approvals without polling (Monitor pattern)
 
@@ -207,6 +209,7 @@ codex-collab review --resume <id> [options]        # Resume existing thread
 codex-collab run "prompt" --detach [options]  # Return once the turn is running
 codex-collab follow                           # Live view of the active run; exits on completion
 codex-collab follow <id>                      # Same, for a specific thread
+codex-collab follow --watch                   # Keep the pane open across runs (Ctrl-C to stop)
 ```
 
 ### Reading Output
