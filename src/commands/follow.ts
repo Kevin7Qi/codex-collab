@@ -11,7 +11,6 @@
 // detached — and survives broker handoffs.
 
 import { openSync, readSync, closeSync, fstatSync } from "fs";
-import { join } from "path";
 import {
   legacyFindShortId as findShortId,
   getLatestRun,
@@ -19,6 +18,7 @@ import {
   listRunsForThread,
   loadRun,
 } from "../threads";
+import { resolveReadableLogPath } from "./threads";
 import { LogEntryParser, renderEntry, renderFinalStatus, type RenderOptions } from "../render";
 import type { RunRecord } from "../types";
 import {
@@ -37,10 +37,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Read bytes [offset, size) from the log. Returns the new offset and the
- *  raw bytes (decoded by the caller's streaming decoder, so multi-byte
- *  characters split across reads survive). */
-function readNewBytes(logPath: string, offset: number): { bytes: Buffer; offset: number } {
+/** Read bytes [offset, min(size, maxOffset)) from the log. Returns the new
+ *  offset and the raw bytes (decoded by the caller's streaming decoder, so
+ *  multi-byte characters split across reads survive). `maxOffset` bounds a
+ *  replay to this run's own section of a shared thread log. */
+function readNewBytes(logPath: string, offset: number, maxOffset: number | null = null): { bytes: Buffer; offset: number } {
   let fd: number;
   try {
     fd = openSync(logPath, "r");
@@ -49,7 +50,8 @@ function readNewBytes(logPath: string, offset: number): { bytes: Buffer; offset:
     throw e;
   }
   try {
-    const size = fstatSync(fd).size;
+    let size = fstatSync(fd).size;
+    if (maxOffset !== null && maxOffset < size) size = maxOffset;
     if (size <= offset) {
       // A shrunk file means the log was cleaned/rotated under us — restart
       // from its current end rather than re-printing unrelated old content.
@@ -78,6 +80,23 @@ export function pickDefaultRun(stateDir: string, pidsDir: string): RunRecord | n
   const runs = listRuns(stateDir); // newest first
   const live = runs.find(r => r.status === "running" && isThreadProcessAlive(pidsDir, r.shortId));
   return live ?? runs[0] ?? null;
+}
+
+/**
+ * Where this run's section of the shared thread log ends: the smallest
+ * logOffset of any LATER run on the same thread, or null (unbounded — this
+ * run owns the log's tail). Runs on one thread append to one log file, so a
+ * replay that read to EOF would swallow the next run's entries and the
+ * watch loop would then render them a second time. Exported for tests.
+ */
+export function replayBound(stateDir: string, run: RunRecord): number | null {
+  let bound: number | null = null;
+  for (const r of listRunsForThread(stateDir, run.shortId)) {
+    if (r.runId !== run.runId && r.logOffset > run.logOffset && (bound === null || r.logOffset < bound)) {
+      bound = r.logOffset;
+    }
+  }
+  return bound;
 }
 
 /**
@@ -110,7 +129,10 @@ interface FollowOutcome {
  *  (replay + live tail). Prints the header and the final status line. */
 async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptions): Promise<FollowOutcome> {
   const shortId = run.shortId;
-  const logPath = join(ws.logsDir, `${shortId}.log`);
+  // Same resolution as `output`: prefer the workspace log, fall back to the
+  // run record's logFile for migrated runs whose log lives elsewhere.
+  const logPath = resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId);
+  let bound = replayBound(ws.stateDir, run);
 
   const started = new Date(run.startedAt).getTime();
   const age = Number.isFinite(started) ? formatAge(Math.round(started / 1000)) : "unknown time";
@@ -134,8 +156,11 @@ async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptio
   };
 
   const finish = (rec: RunRecord): FollowOutcome => {
-    // Drain whatever the writer flushed after the terminal-state update.
-    const tail = readNewBytes(logPath, offset);
+    // Drain whatever the writer flushed after the terminal-state update —
+    // bounded to this run's log section (a later run on the same thread may
+    // already have appended past it).
+    bound = replayBound(ws.stateDir, run);
+    const tail = readNewBytes(logPath, offset, bound);
     show(tail.bytes);
     for (const entry of parser.drain()) {
       for (const line of renderEntry(entry, render)) console.log(line);
@@ -154,12 +179,15 @@ async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptio
   }
 
   while (true) {
-    const next = readNewBytes(logPath, offset);
+    const next = readNewBytes(logPath, offset, bound);
     offset = next.offset;
     show(next.bytes);
 
     const rec = loadRun(ws.stateDir, run.runId) ?? run;
     if (rec.status !== "running") return finish(rec);
+    // A follow-up run on this thread may register mid-follow; refresh the
+    // bound so the live tail never crosses into its section.
+    bound = replayBound(ws.stateDir, run);
 
     // Run says running but its runner process is gone: don't sit forever on
     // a log that will never terminate. (A missing PID file reads as alive —

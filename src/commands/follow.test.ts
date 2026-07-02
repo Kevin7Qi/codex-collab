@@ -95,3 +95,33 @@ describe("nextUnseenRun (watch mode)", () => {
     expect(nextUnseenRun(stateDir, seen, "eeee0001")).toBeNull();
   });
 });
+
+describe("replayBound (shared thread log)", () => {
+  test("bounds a run's replay at the next run's logOffset on the same thread", () => {
+    const { stateDir } = freshDirs("replay-bound");
+    const r1 = { ...record("r-1", "ffff0001", "completed", "2026-07-03T10:00:00.000Z"), logOffset: 0 };
+    const r2 = { ...record("r-2", "ffff0001", "completed", "2026-07-03T11:00:00.000Z"), logOffset: 500 };
+    const r3 = { ...record("r-3", "ffff0001", "running", "2026-07-03T12:00:00.000Z"), logOffset: 900 };
+    createRun(stateDir, r1);
+    createRun(stateDir, r2);
+    createRun(stateDir, r3);
+
+    const { replayBound } = require("./follow") as typeof import("./follow");
+    // r1's replay must stop where r2 begins — not swallow r2+r3's entries
+    expect(replayBound(stateDir, r1)).toBe(500);
+    expect(replayBound(stateDir, r2)).toBe(900);
+    // The newest run owns the log tail
+    expect(replayBound(stateDir, r3)).toBeNull();
+  });
+
+  test("runs on other threads don't bound this one", () => {
+    const { stateDir } = freshDirs("replay-bound-other");
+    const mine = { ...record("r-a", "aaaa9001", "completed", "2026-07-03T10:00:00.000Z"), logOffset: 0 };
+    const other = { ...record("r-b", "bbbb9001", "completed", "2026-07-03T11:00:00.000Z"), logOffset: 700 };
+    createRun(stateDir, mine);
+    createRun(stateDir, other);
+
+    const { replayBound } = require("./follow") as typeof import("./follow");
+    expect(replayBound(stateDir, mine)).toBeNull();
+  });
+});
