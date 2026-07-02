@@ -35,7 +35,7 @@ codex-collab run "investigate the auth module" -d /path/to/project --content-onl
 **IMPORTANT — Execution rules for ALL `codex-collab` Bash commands:**
 - Always use `dangerouslyDisableSandbox=true` — the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist.
 - For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: read the completed task's output (the notification includes it or use `Read` on the output file), then present the results to the user.
-- For all other commands (`kill`, `threads`, `progress`, `output`, `approve`, `decline`, `clean`, `delete`, `models`, `health`): run in the **foreground** — they complete in seconds.
+- For all other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
 
 If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or:
 
@@ -205,7 +205,7 @@ codex-collab health                     # Check prerequisites
 | Flag | Description |
 |------|-------------|
 | `-m, --model <model>` | Model name (default: auto — latest available) |
-| `-r, --reasoning <level>` | Reasoning effort: low, medium, high, xhigh (default: auto — highest for model) |
+| `-r, --reasoning <level>` | Reasoning effort: none, minimal, low, medium, high, xhigh (default: auto — highest for model) |
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
@@ -213,6 +213,7 @@ codex-collab health                     # Check prerequisites
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted (default: never) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
+| `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 | `--all` | List all threads with no display limit (threads command) |
 | `--discover` | Query Codex server for threads not in local index (threads command) |
 | `--json` | JSON output (threads, peek commands) |
@@ -220,6 +221,7 @@ codex-collab health                     # Check prerequisites
 | `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
 | `--content-only` | Print only result text (no progress lines) |
 | `--limit <n>` | Limit items shown |
+| `--` | End of options; remaining arguments are treated as prompt text |
 
 ## Templates
 

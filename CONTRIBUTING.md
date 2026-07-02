@@ -54,8 +54,8 @@ The codebase is organized into focused modules:
 | `src/types.ts` | Protocol types (JSON-RPC, threads, turns, items, approvals) |
 | `src/config.ts` | Configuration constants, workspace resolution |
 | `src/process.ts` | Process spawn/lifecycle utilities |
-| `src/git.ts` | Git operations (diff, log, status) |
-| `src/reviews.ts` | Review validation, structured output parsing |
+| `src/lock.ts` | Advisory file locks (sync/async, single-winner stale breaking) |
+| `src/git.ts` | Git operations (default-branch detection for reviews) |
 
 ## Pull Requests
 

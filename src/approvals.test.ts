@@ -48,7 +48,7 @@ describe("InteractiveApprovalHandler", () => {
     const handler = new InteractiveApprovalHandler(
       TEST_APPROVALS_DIR,
       (line) => lines.push(line),
-      100, // 100ms poll interval for testing
+      { pollIntervalMs: 100 }, // fast poll for testing
     );
 
     // Write decision file after a short delay
@@ -66,7 +66,7 @@ describe("InteractiveApprovalHandler", () => {
   });
 
   test("returns decline when decision file says decline", async () => {
-    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
+    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, { pollIntervalMs: 100 });
 
     setTimeout(() => {
       writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "decline");
@@ -81,7 +81,7 @@ describe("InteractiveApprovalHandler", () => {
     const handler = new InteractiveApprovalHandler(
       TEST_APPROVALS_DIR,
       (line) => lines.push(line),
-      100,
+      { pollIntervalMs: 100 },
     );
 
     setTimeout(() => {
@@ -96,7 +96,7 @@ describe("InteractiveApprovalHandler", () => {
   });
 
   test("uses itemId as fallback when approvalId is null", async () => {
-    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
+    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, { pollIntervalMs: 100 });
 
     const reqWithNullApprovalId: CommandApprovalRequest = {
       ...mockCommandRequest,
@@ -112,7 +112,7 @@ describe("InteractiveApprovalHandler", () => {
   });
 
   test("writes request file with correct content", async () => {
-    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
+    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, { pollIntervalMs: 100 });
 
     // Start the approval but write decision after verifying request file
     setTimeout(() => {
@@ -133,7 +133,7 @@ describe("InteractiveApprovalHandler", () => {
 
   test("creates approvalsDir if it does not exist", async () => {
     const nestedDir = join(TEST_APPROVALS_DIR, "nested", "deep");
-    const handler = new InteractiveApprovalHandler(nestedDir, () => {}, 100);
+    const handler = new InteractiveApprovalHandler(nestedDir, () => {}, { pollIntervalMs: 100 });
 
     expect(existsSync(nestedDir)).toBe(true);
   });
@@ -143,7 +143,7 @@ describe("InteractiveApprovalHandler", () => {
     const handler = new InteractiveApprovalHandler(
       TEST_APPROVALS_DIR,
       (line) => lines.push(line),
-      100,
+      { pollIntervalMs: 100 },
     );
 
     setTimeout(() => {
@@ -160,8 +160,7 @@ describe("InteractiveApprovalHandler", () => {
     const handler = new InteractiveApprovalHandler(
       TEST_APPROVALS_DIR,
       (line) => lines.push(line),
-      "/project with spaces",
-      100,
+      { workspaceDir: "/project with spaces", pollIntervalMs: 100 },
     );
 
     setTimeout(() => {
@@ -182,8 +181,7 @@ describe("InteractiveApprovalHandler", () => {
     const handler = new InteractiveApprovalHandler(
       TEST_APPROVALS_DIR,
       (line) => lines.push(line),
-      workspace,
-      100,
+      { workspaceDir: workspace, pollIntervalMs: 100 },
     );
 
     setTimeout(() => {
@@ -196,7 +194,7 @@ describe("InteractiveApprovalHandler", () => {
   });
 
   test("cleans up request file on abort", async () => {
-    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
+    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, { pollIntervalMs: 100 });
     const controller = new AbortController();
 
     // Abort after request file is written
@@ -210,7 +208,7 @@ describe("InteractiveApprovalHandler", () => {
   });
 
   test("treats unknown decision text as decline", async () => {
-    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, 100);
+    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, { pollIntervalMs: 100 });
 
     setTimeout(() => {
       writeFileSync(join(TEST_APPROVALS_DIR, "appr-001.decision"), "garbage");

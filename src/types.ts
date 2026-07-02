@@ -55,18 +55,6 @@ export interface InitializeResponse {
 
 export type { ApprovalPolicy, SandboxMode, ReasoningEffort } from "./config";
 
-export interface ThreadStartParams {
-  model?: string;
-  cwd?: string;
-  approvalPolicy?: ApprovalPolicy;
-  sandbox?: string | null;
-  config?: Record<string, unknown>;
-  experimentalRawEvents: boolean;
-  persistExtendedHistory: boolean;
-  ephemeral?: boolean;
-  serviceName?: string;
-}
-
 export interface Thread {
   id: string;
   preview: string;
@@ -102,18 +90,6 @@ export interface ThreadStartResponse {
   reasoningEffort?: string;
 }
 
-export interface ThreadResumeParams {
-  threadId: string;
-  model?: string;
-  cwd?: string;
-  approvalPolicy?: ApprovalPolicy;
-  sandbox?: string | null;
-  config?: Record<string, unknown>;
-  persistExtendedHistory: boolean;
-}
-
-export type ThreadResumeResponse = ThreadStartResponse;
-
 export interface ThreadForkParams {
   threadId: string;
   model?: string;
@@ -122,31 +98,6 @@ export interface ThreadForkParams {
   sandbox?: string | null;
   config?: Record<string, unknown>;
   ephemeral?: boolean;
-}
-
-export type ThreadForkResponse = ThreadStartResponse;
-
-export interface ThreadListParams {
-  cursor?: string;
-  limit?: number;
-  sortKey?: "created_at" | "updated_at";
-  sourceKinds?: string[];
-  archived?: boolean;
-  cwd?: string;
-}
-
-export interface ThreadListResponse {
-  data: Thread[];
-  nextCursor: string | null;
-}
-
-export interface ThreadReadParams {
-  threadId: string;
-  includeTurns: boolean;
-}
-
-export interface ThreadReadResponse {
-  thread: Thread;
 }
 
 // --- Turns ---
@@ -200,11 +151,6 @@ export interface TurnError {
 
 export interface TurnStartResponse {
   turn: Turn;
-}
-
-export interface TurnInterruptParams {
-  threadId: string;
-  turnId: string;
 }
 
 // --- Items ---
@@ -425,12 +371,6 @@ export type ApprovalDecision = "accept" | "acceptForSession" | "decline" | "canc
 
 // --- Model list ---
 
-export interface ModelListParams {
-  limit?: number;
-  cursor?: string;
-  includeHidden?: boolean;
-}
-
 export interface Model {
   id: string;
   model: string;
@@ -443,11 +383,6 @@ export interface Model {
   inputModalities: string[];
   supportsPersonality: boolean;
   isDefault: boolean;
-}
-
-export interface ModelListResponse {
-  data: Model[];
-  nextCursor: string | null;
 }
 
 // --- Turn result (our own type, not protocol) ---
@@ -542,41 +477,6 @@ export type BrokerEndpointKind = "unix" | "pipe";
 export interface ParsedEndpoint {
   kind: BrokerEndpointKind;
   path: string;
-}
-
-// --- Structured review output ---
-
-export type ReviewSeverity = "critical" | "high" | "medium" | "low" | "info";
-
-export interface ReviewFinding {
-  severity: ReviewSeverity;
-  file: string;
-  lineStart: number | null;
-  lineEnd: number | null;
-  confidence: number;
-  description: string;
-  recommendation: string;
-}
-
-export type ReviewVerdict = "approve" | "needs-attention" | "request-changes";
-
-export interface StructuredReviewOutput {
-  verdict: ReviewVerdict;
-  summary: string;
-  findings: ReviewFinding[];
-  nextSteps: string[];
-}
-
-// --- Thread naming ---
-
-export interface ThreadSetNameParams {
-  threadId: string;
-  name: string;
-}
-
-export interface ThreadSetNameResponse {
-  threadId: string;
-  name: string;
 }
 
 // --- Short ID mapping (legacy, pending migration) ---

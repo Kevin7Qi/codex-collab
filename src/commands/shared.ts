@@ -495,7 +495,7 @@ export function setShuttingDown(val: boolean): void { shuttingDown = val; }
 
 export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string, workspaceDir?: string): ApprovalHandler {
   if (policy === "never") return autoApproveHandler;
-  return new InteractiveApprovalHandler(approvalsDir, progress, workspaceDir);
+  return new InteractiveApprovalHandler(approvalsDir, progress, { workspaceDir });
 }
 
 /** Best-effort close that swallows + logs errors. Cleanup runs on every
