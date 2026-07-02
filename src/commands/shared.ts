@@ -693,6 +693,22 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
 // Thread start/resume
 // ---------------------------------------------------------------------------
 
+/** RunId injected by a `run --detach` parent (its ledger-handshake key).
+ *  Sticky for this process's lifetime so the broker-busy retry re-creates
+ *  the SAME record the parent is watching, but removed from the environment
+ *  immediately so grandchildren (e.g. Codex itself invoking codex-collab
+ *  inside the turn) can't collide with it. */
+let stickyInjectedRunId: string | null | undefined;
+
+function consumeInjectedRunId(): string | null {
+  const fromEnv = process.env.CODEX_COLLAB_RUN_ID;
+  if (fromEnv !== undefined) {
+    delete process.env.CODEX_COLLAB_RUN_ID;
+    stickyInjectedRunId = /^[a-zA-Z0-9_-]+$/.test(fromEnv) ? fromEnv : null;
+  }
+  return stickyInjectedRunId ?? null;
+}
+
 /** Start or resume a thread, returning threadId, shortId, runId, and effective config. */
 export async function startOrResumeThread(
   client: AppServerClient,
@@ -840,13 +856,7 @@ export async function startOrResumeThread(
 
   // Create run record (Gap 1 + Gap 5 + Gap 6)
   const prompt = preview ?? null;
-  // `run --detach` parents pre-generate the runId and pass it down so they
-  // can watch the ledger for this record as the "turn is running" handshake.
-  const injectedRunId = process.env.CODEX_COLLAB_RUN_ID;
-  const runId = injectedRunId && /^[a-zA-Z0-9_-]+$/.test(injectedRunId)
-    ? injectedRunId
-    : generateRunId();
-  delete process.env.CODEX_COLLAB_RUN_ID;
+  const runId = consumeInjectedRunId() ?? generateRunId();
   const sessionId = getCurrentSessionId(ws.stateDir);
   const logPath = join(ws.logsDir, `${shortId}.log`);
   const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -992,6 +1002,10 @@ export function recordTerminalRunState(
       filesChanged: result.filesChanged,
       commandsRun: result.commandsRun,
       error: result.error ?? null,
+      // A kill/timeout can end the run while the approval poll is asleep and
+      // the process exits before its cleanup tick — never leave a terminal
+      // record claiming an approval is still pending.
+      pendingApproval: null,
     });
   } catch (e) {
     console.error(`[codex] CRITICAL: could not save run state for ${runId}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1023,6 +1037,9 @@ export function recordRunFailure(
       status: "failed",
       completedAt: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
+      // Same guarantee as recordTerminalRunState: terminal records never
+      // claim a pending approval.
+      pendingApproval: null,
     });
   } catch (e) {
     console.error(`[codex] Warning: could not record run failure for ${runId}: ${e instanceof Error ? e.message : String(e)}`);

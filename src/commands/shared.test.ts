@@ -14,10 +14,13 @@ import {
   formatDuration,
   isThreadProcessAlive,
   defaultOptions,
+  recordTerminalRunState,
+  recordRunFailure,
   VALID_REVIEW_MODES,
   type WorkspacePaths,
   type Options,
 } from "./shared";
+import { createRun, loadRun } from "../threads";
 import { config } from "../config";
 import type { AppServerClient } from "../client";
 import type { Model, ThreadStartResponse } from "../types";
@@ -1590,5 +1593,106 @@ describe("isThreadProcessAlive", () => {
     const pidsDir = freshTmpDir("pids-zero");
     writeFileSync(join(pidsDir, "thread6"), "0");
     expect(isThreadProcessAlive(pidsDir, "thread6")).toBe(false);
+  });
+});
+
+// ─── PR #13 review fixes ────────────────────────────────────────────────────
+
+describe("stripDetachFlag", () => {
+  const { stripDetachFlag } = require("./run") as typeof import("./run");
+
+  test("removes --detach and --detach=value spellings", () => {
+    expect(stripDetachFlag(["prompt", "--detach", "-s", "read-only"])).toEqual(["prompt", "-s", "read-only"]);
+    // --detach=true re-entering detachRun forever was a review finding
+    expect(stripDetachFlag(["--detach=true", "prompt"])).toEqual(["prompt"]);
+    expect(stripDetachFlag(["--detach=false", "prompt"])).toEqual(["prompt"]);
+  });
+
+  test("tokens after -- are prompt text and survive verbatim", () => {
+    expect(stripDetachFlag(["--detach", "--", "--detach", "--detach=true"]))
+      .toEqual(["--", "--detach", "--detach=true"]);
+  });
+});
+
+describe("terminal run state clears pendingApproval", () => {
+  function runningRecordWithPending(ws: WorkspacePaths, runId: string): void {
+    createRun(ws.stateDir, {
+      runId, threadId: "t-1", shortId: "aaaa1111", kind: "task",
+      phase: "running", status: "running", sessionId: null,
+      logFile: "logs/aaaa1111.log", logOffset: 0, prompt: "p", model: "m",
+      startedAt: new Date().toISOString(), completedAt: null, elapsed: null,
+      output: null, filesChanged: null, commandsRun: null, error: null,
+      pendingApproval: { id: "call_x", kind: "commandExecution", summary: "touch x", requestedAt: new Date().toISOString() },
+    });
+  }
+
+  test("recordTerminalRunState never leaves a pending approval on a terminal record", () => {
+    const ws = freshWorkspace("terminal-clears-pending");
+    runningRecordWithPending(ws, "run-term-1");
+    // Killed mid-approval: the poll's cleanup tick may never run before exit
+    recordTerminalRunState(ws, "t-1", "run-term-1", {
+      status: "interrupted", output: "", filesChanged: [], commandsRun: [], durationMs: 1000,
+    }, "Turn", true);
+    expect(loadRun(ws.stateDir, "run-term-1")?.pendingApproval).toBeNull();
+  });
+
+  test("recordRunFailure never leaves a pending approval on a failed record", () => {
+    const ws = freshWorkspace("failure-clears-pending");
+    runningRecordWithPending(ws, "run-fail-1");
+    recordRunFailure(ws, "t-1", "run-fail-1", new Error("boom"));
+    expect(loadRun(ws.stateDir, "run-fail-1")?.pendingApproval).toBeNull();
+  });
+});
+
+describe("injected runId (detach handshake)", () => {
+  test("sticky across startOrResumeThread calls in one process; removed from env", () => {
+    // Subprocess: the sticky module state must not leak into other tests.
+    const script = join(process.cwd(), `_injected_runid_test_${process.pid}.ts`);
+    const stateRoot = freshTmpDir("injected-runid");
+    writeFileSync(script, `
+import { mkdirSync } from "fs";
+import { join } from "path";
+import { defaultOptions, startOrResumeThread } from "./src/commands/shared";
+
+const client: any = {
+  request: async (method: string) => {
+    if (method === "thread/start") return {
+      thread: { id: "0190000000007000800000000000002" + String(callNo++), preview: "", modelProvider: "openai",
+        createdAt: Date.now(), updatedAt: Date.now(), status: { type: "idle" }, path: null, cwd: "/tmp",
+        cliVersion: "0", source: "mock", gitInfo: null, turns: [] },
+      model: "m", modelProvider: "openai", cwd: "/tmp", approvalPolicy: "never", sandbox: {},
+    };
+    return {};
+  },
+  notify() {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
+  respond() {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
+};
+let callNo = 0;
+
+function ws(name: string) {
+  const stateDir = join(${JSON.stringify(stateRoot)}, name);
+  const w = { stateDir, threadsFile: join(stateDir, "threads.json"), logsDir: join(stateDir, "logs"),
+    approvalsDir: join(stateDir, "approvals"), killSignalsDir: join(stateDir, "kill-signals"),
+    pidsDir: join(stateDir, "pids"), runsDir: join(stateDir, "runs") };
+  for (const d of Object.values(w)) if (d !== w.threadsFile) mkdirSync(d, { recursive: true });
+  return w;
+}
+
+process.env.CODEX_COLLAB_RUN_ID = "run-injected-e2e";
+const r1 = await startOrResumeThread(client, { ...defaultOptions(), dir: "/tmp" }, ws("a"), undefined, "p", false);
+const envAfterFirst = process.env.CODEX_COLLAB_RUN_ID ?? null;
+// Simulates the broker-busy retry: same process, env already consumed
+const r2 = await startOrResumeThread(client, { ...defaultOptions(), dir: "/tmp" }, ws("b"), undefined, "p", false);
+console.log(JSON.stringify({ r1: r1.runId, r2: r2.runId, envAfterFirst }));
+`);
+    try {
+      const result = Bun.spawnSync({ cmd: ["bun", "run", script], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const out = JSON.parse(result.stdout.toString().trim().split("\n").pop()!);
+      expect(out.r1).toBe("run-injected-e2e");
+      expect(out.r2).toBe("run-injected-e2e"); // retry re-creates the SAME record the parent watches
+      expect(out.envAfterFirst).toBeNull();    // grandchildren must not inherit it
+    } finally {
+      rmSync(script, { force: true });
+    }
   });
 });

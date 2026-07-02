@@ -3,7 +3,7 @@
 import { spawn as childSpawn } from "node:child_process";
 import { openSync, closeSync, readFileSync } from "fs";
 import { join } from "path";
-import { updateThreadStatus, generateRunId, loadRun } from "../threads";
+import { updateThreadStatus, generateRunId, loadRun, updateRun } from "../threads";
 import { runTurn } from "../turns";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
 import { wrapBrokerBusy } from "../broker";
@@ -30,9 +30,29 @@ import {
   setActiveRunId,
 } from "./shared";
 
-/** How long the detach parent waits for the child's run record to appear.
+/** How long the detach parent waits for the child's turn to start.
  *  Covers a cold broker spawn + app-server handshake + model/list fetch. */
 const DETACH_HANDSHAKE_TIMEOUT_MS = 60_000;
+
+/** How long a `failed` record may persist before the parent gives up on it.
+ *  The broker-busy fallback records a transient failure, reconnects
+ *  directly, and re-creates the same record — don't report the transient. */
+const DETACH_FAILED_GRACE_MS = 10_000;
+
+/** Remove the --detach flag (both `--detach` and `--detach=x` spellings —
+ *  the latter would make the child re-enter detachRun forever) from the args
+ *  re-executed by the detached child. Tokens after a `--` terminator are
+ *  prompt text and survive verbatim. Exported for tests. */
+export function stripDetachFlag(args: string[]): string[] {
+  const out: string[] = [];
+  let terminated = false;
+  for (const arg of args) {
+    if (arg === "--") terminated = true;
+    if (!terminated && (arg === "--detach" || arg.startsWith("--detach="))) continue;
+    out.push(arg);
+  }
+  return out;
+}
 
 /**
  * Hand the turn to a detached runner and return once it's actually running.
@@ -40,24 +60,15 @@ const DETACH_HANDSHAKE_TIMEOUT_MS = 60_000;
  * The child is this same CLI re-executed without `--detach`, in its own
  * process group (a Ctrl-C in the invoking shell must not kill the turn),
  * with stdout/stderr captured to a per-run file for post-mortems. The
- * handshake is the run ledger itself: the parent pre-generates the runId,
- * passes it via CODEX_COLLAB_RUN_ID, and waits for the child's createRun —
- * which happens only after thread/start succeeded, so "record exists" means
- * "turn is running", not merely "child started".
+ * handshake is the run ledger: the parent pre-generates the runId, passes it
+ * via CODEX_COLLAB_RUN_ID, and waits for the record to advance past phase
+ * "starting" — the child bumps the phase when turn/start responds, so
+ * success here means "turn is running", not merely "thread was created".
  */
 async function detachRun(args: string[], options: ReturnType<typeof parseOptions>["options"]): Promise<never> {
   const ws = getWorkspacePaths(options.dir);
   const runId = generateRunId();
-
-  // Strip --detach (only before a `--` terminator — after it, the token is
-  // prompt text and must survive verbatim).
-  const childArgs: string[] = [];
-  let terminated = false;
-  for (const arg of args) {
-    if (arg === "--") terminated = true;
-    if (!terminated && arg === "--detach") continue;
-    childArgs.push(arg);
-  }
+  const childArgs = stripDetachFlag(args);
 
   const detachLog = join(ws.logsDir, `detached-${runId}.log`);
   const logFd = openSync(detachLog, "a");
@@ -74,30 +85,65 @@ async function detachRun(args: string[], options: ReturnType<typeof parseOptions
   let childExited = false;
   proc.once("exit", () => { childExited = true; });
 
+  const logTail = (): string => {
+    try {
+      return readFileSync(detachLog, "utf-8").trim().split("\n").slice(-15).join("\n");
+    } catch {
+      return "";
+    }
+  };
+  const dieWithRunnerOutput: (reason: string) => never = (reason) => {
+    const tail = logTail();
+    die(`${reason}${tail ? `\nRunner output (${detachLog}):\n${tail}` : `\nNo runner output captured (${detachLog}).`}`);
+  };
+
   const deadline = Date.now() + DETACH_HANDSHAKE_TIMEOUT_MS;
+  let failedSince: number | null = null;
   while (Date.now() < deadline) {
     const rec = loadRun(ws.stateDir, runId);
     if (rec) {
-      progress(`Detached: thread ${rec.shortId} running${rec.model ? ` (${rec.model})` : ""}`);
-      progress(`  Follow:   codex-collab follow ${rec.shortId}`);
-      progress(`  Output:   codex-collab output ${rec.shortId}`);
-      progress(`  Kill:     codex-collab kill ${rec.shortId}`);
-      process.exit(0);
+      // Record exists = thread/start succeeded. Now wait for the turn:
+      // the child bumps phase past "starting" when turn/start responds.
+      if (rec.status === "running" && rec.phase !== "starting") {
+        progress(`Detached: thread ${rec.shortId} running${rec.model ? ` (${rec.model})` : ""}`);
+        progress(`  Follow:   codex-collab follow ${rec.shortId}`);
+        progress(`  Output:   codex-collab output ${rec.shortId}`);
+        progress(`  Kill:     codex-collab kill ${rec.shortId}`);
+        process.exit(0);
+      }
+      if (rec.status === "completed") {
+        // Turn finished before we even noticed it start — report done.
+        progress(`Detached run already completed: thread ${rec.shortId}`);
+        progress(`  Output:   codex-collab output ${rec.shortId}`);
+        process.exit(0);
+      }
+      if (rec.status === "cancelled") {
+        dieWithRunnerOutput(`Detached run was interrupted before the turn started (thread ${rec.shortId}).`);
+      }
+      if (rec.status === "failed") {
+        // Grace period: the broker-busy fallback records a transient failure
+        // and then re-creates this same record via the retained runId.
+        failedSince ??= Date.now();
+        if (Date.now() - failedSince > DETACH_FAILED_GRACE_MS) {
+          dieWithRunnerOutput(`Detached run failed to start${rec.error ? `: ${rec.error}` : "."}`);
+        }
+      } else {
+        failedSince = null;
+      }
+      if (childExited && rec.status === "running" && rec.phase === "starting") {
+        // Child died between creating the record and turn/start — the record
+        // will sit in "starting" forever.
+        dieWithRunnerOutput(`Detached runner died before the turn started (thread ${rec.shortId}).`);
+      }
+    } else if (childExited) {
+      // A child that died before creating the record will never hand-shake —
+      // fail fast with its captured output instead of waiting out the timeout.
+      dieWithRunnerOutput("Detached runner exited before the turn started.");
     }
-    // A child that died before creating the record will never hand-shake —
-    // fail fast with its captured output instead of waiting out the timeout.
-    if (childExited) break;
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  let tail = "";
-  try {
-    tail = readFileSync(detachLog, "utf-8").trim().split("\n").slice(-15).join("\n");
-  } catch { /* no output captured */ }
-  die(
-    `Detached runner ${childExited ? "exited before the turn started" : `did not start a turn within ${DETACH_HANDSHAKE_TIMEOUT_MS / 1000}s`}.` +
-    (tail ? `\nRunner output (${detachLog}):\n${tail}` : `\nNo runner output captured (${detachLog}).`),
-  );
+  dieWithRunnerOutput(`Detached runner did not start a turn within ${DETACH_HANDSHAKE_TIMEOUT_MS / 1000}s.`);
 }
 
 export async function handleRun(args: string[]): Promise<void> {
@@ -170,7 +216,17 @@ export async function handleRun(args: string[]): Promise<void> {
           }),
           timeoutMs: options.timeout * 1000,
           killSignalsDir: ws.killSignalsDir,
-          onTurnId: (id) => setActiveTurnId(id),
+          onTurnId: (id) => {
+            setActiveTurnId(id);
+            // Advance past "starting" — the detach parent's signal that the
+            // turn is actually running (turn/start responded), and useful
+            // state for `threads`/`follow` regardless of detach.
+            try {
+              updateRun(ws.stateDir, runId, { phase: "running" });
+            } catch (e) {
+              console.error(`[codex] Warning: could not update run phase: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
           ...turnOverrides(options),
         },
       );
