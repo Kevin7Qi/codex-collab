@@ -450,12 +450,18 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     return () => { closeHandlers.delete(handler); };
   }
 
-  /** Wait for the process to exit within the given timeout. */
+  /** Wait for the process to exit within the given timeout. The timer is
+   *  cleared when the process wins the race — a leftover armed timer keeps
+   *  the event loop alive, delaying CLI exit by up to the timeout for
+   *  commands that don't call process.exit (kill, threads, peek, models). */
   function waitForExit(timeoutMs: number): Promise<boolean> {
-    return Promise.race([
-      proc.exited.then(() => true),
-      new Promise<false>((r) => setTimeout(() => r(false), timeoutMs)),
-    ]);
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      proc.exited.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
   }
 
   async function close(): Promise<void> {
@@ -480,7 +486,7 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
       // the tree, potentially leaving the real app-server alive.
       if (proc.pid) {
         try {
-          const r = spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000 });
+          const r = spawnSync("taskkill", ["/PID", String(proc.pid), "/T", "/F"], { stdio: "pipe", timeout: 5000, windowsHide: true });
           // status 128: process already exited; null: spawnSync timed out
           if (r.status !== 0 && r.status !== null && r.status !== 128) {
             const msg = r.stderr?.toString().trim();

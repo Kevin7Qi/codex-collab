@@ -116,13 +116,17 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
             (res) => write(formatResponse(msg.id, res)),
             (err) => {
               const errMsg = err instanceof Error ? err.message : String(err);
+              // Preserve a structured code/data the handler attached to the
+              // Error, matching connectDirect — otherwise approval rejections
+              // through the broker path flatten to a generic -32603 while the
+              // direct path keeps the original error class.
+              const errAny = err as { code?: unknown; data?: unknown };
+              const code = typeof errAny?.code === "number" ? errAny.code : -32603;
+              const message = code === -32603 ? `Handler error: ${errMsg}` : errMsg;
               console.error(`[broker-client] Error in request handler for "${msg.method}": ${errMsg}`);
-              write(
-                JSON.stringify({
-                  id: msg.id,
-                  error: { code: -32603, message: `Handler error: ${errMsg}` },
-                }) + "\n",
-              );
+              const errBody: Record<string, unknown> = { code, message };
+              if (errAny?.data !== undefined) errBody.data = errAny.data;
+              write(JSON.stringify({ id: msg.id, error: errBody }) + "\n");
             },
           );
       } else {
@@ -212,6 +216,14 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
         reject(new Error("Client is closed"));
         return;
       }
+      // Mirror connectDirect's `exited` guard: after an unexpected socket
+      // close, write() silently no-ops on the dead socket — without this
+      // check the request would sit in `pending` for the full 30s timeout
+      // (e.g. blocking Ctrl-C shutdown's turn/interrupt on a dead broker).
+      if (unexpectedCloseNotified || socket.destroyed) {
+        reject(new Error("Broker connection closed"));
+        return;
+      }
 
       const id = nextId++;
       const msg: Record<string, unknown> = { id, method };
@@ -283,13 +295,21 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     closed = true;
     rejectAll("Client closed");
     socket.end();
-    // Wait for the socket to fully close
+    // Wait for the socket to fully close. Clear the safety timer once the
+    // close lands so a leftover armed timer can't keep the event loop alive.
     await new Promise<void>((resolve) => {
-      socket.on("close", resolve);
-      // If already destroyed, resolve immediately
-      if (socket.destroyed) resolve();
-      // Safety timeout
-      setTimeout(resolve, 1000);
+      const timer = setTimeout(resolve, 1000);
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      // If already destroyed, the close event may have fired before we could
+      // subscribe — resolve immediately.
+      if (socket.destroyed) {
+        done();
+        return;
+      }
+      socket.once("close", done);
     });
   }
 

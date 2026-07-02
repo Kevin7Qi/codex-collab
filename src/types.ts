@@ -467,7 +467,6 @@ export interface CommandExec {
 export interface TurnResult {
   status: "completed" | "interrupted" | "failed";
   output: string;
-  reasoning: string | null;
   filesChanged: FileChange[];
   commandsRun: CommandExec[];
   error?: string;
