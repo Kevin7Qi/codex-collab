@@ -8,6 +8,7 @@ import {
   type ReasoningEffort,
   type SandboxMode,
   type ApprovalPolicy,
+  type ApprovalMode,
 } from "../config";
 import { type AppServerClient, connectDirect } from "../client";
 import { ensureConnection, getCurrentSessionId, isBrokerBusyError } from "../broker";
@@ -44,6 +45,7 @@ import type {
   Model,
   TurnResult,
   RunRecord,
+  ApprovalsReviewer,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -90,7 +92,10 @@ export interface Options {
   reasoning: ReasoningEffort | undefined;
   model: string | undefined;
   sandbox: SandboxMode;
-  approval: ApprovalPolicy;
+  approval: ApprovalMode;
+  /** Opt-in: let Codex's memory feature learn from threads this run creates.
+   *  Default off — created threads get thread/memoryMode/set mode=disabled. */
+  memory: boolean;
   dir: string;
   contentOnly: boolean;
   json: boolean;
@@ -165,6 +170,7 @@ export function defaultOptions(): Options {
     model: undefined,
     sandbox: config.defaultSandbox,
     approval: config.defaultApprovalPolicy,
+    memory: false,
     dir: process.cwd(),
     contentOnly: false,
     json: false,
@@ -275,11 +281,11 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
         console.error("Error: --approval requires a value");
         process.exit(1);
       }
-      const policy = argv[++i] as ApprovalPolicy;
-      if (!config.approvalPolicies.includes(policy)) {
+      const policy = argv[++i] as ApprovalMode;
+      if (!config.approvalModes.includes(policy)) {
         console.error(`Error: Invalid approval policy: ${policy}`);
         console.error(
-          `Valid options: ${config.approvalPolicies.join(", ")}`
+          `Valid options: ${config.approvalModes.join(", ")}`
         );
         process.exit(1);
       }
@@ -292,6 +298,9 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       }
       options.dir = resolve(argv[++i]);
       options.explicit.add("dir");
+    } else if (arg === "--memory") {
+      options.memory = true;
+      options.explicit.add("memory");
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
@@ -390,8 +399,9 @@ export interface UserConfig {
   model?: string;
   reasoning?: ReasoningEffort;
   sandbox?: SandboxMode;
-  approval?: ApprovalPolicy;
+  approval?: ApprovalMode;
   timeout?: number;
+  memory?: boolean;
 }
 
 export function loadUserConfig(): UserConfig {
@@ -454,11 +464,18 @@ export function applyUserConfig(options: Options): void {
     }
   }
   if (!options.explicit.has("approval") && typeof cfg.approval === "string") {
-    if (cfg.approval && config.approvalPolicies.includes(cfg.approval)) {
+    if (cfg.approval && config.approvalModes.includes(cfg.approval)) {
       options.approval = cfg.approval;
       options.configured.add("approval");
     } else {
       console.error(`[codex] Warning: ignoring invalid approval in config: ${cfg.approval}`);
+    }
+  }
+  if (!options.explicit.has("memory") && cfg.memory !== undefined) {
+    if (typeof cfg.memory === "boolean") {
+      options.memory = cfg.memory;
+    } else {
+      console.error(`[codex] Warning: ignoring invalid memory in config: ${cfg.memory}`);
     }
   }
   if (!options.explicit.has("timeout") && cfg.timeout !== undefined) {
@@ -689,7 +706,7 @@ export async function startOrResumeThread(
       };
       if (opts.explicit.has("model")) forkParams.model = opts.model;
       if (opts.explicit.has("dir")) forkParams.cwd = opts.dir;
-      if (opts.explicit.has("approval")) forkParams.approvalPolicy = opts.approval;
+      if (opts.explicit.has("approval")) Object.assign(forkParams, resolveApproval(opts.approval));
       // Reviews must run in read-only mode. `thread/resume.sandbox` is not
       // reliable for already-loaded broker threads, and `review/start` has no
       // per-turn sandbox override, so fork the resumed context into a fresh
@@ -715,7 +732,7 @@ export async function startOrResumeThread(
       // Only forward flags that were explicitly provided on the command line
       if (opts.explicit.has("model")) resumeParams.model = opts.model;
       if (opts.explicit.has("dir")) resumeParams.cwd = opts.dir;
-      if (opts.explicit.has("approval")) resumeParams.approvalPolicy = opts.approval;
+      if (opts.explicit.has("approval")) Object.assign(resumeParams, resolveApproval(opts.approval));
       if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
       // Forced overrides from caller (e.g., review forces sandbox to read-only)
       if (extraStartParams) Object.assign(resumeParams, extraStartParams);
@@ -740,7 +757,7 @@ export async function startOrResumeThread(
   } else {
     const startParams: Record<string, unknown> = {
       cwd: opts.dir,
-      approvalPolicy: opts.approval,
+      ...resolveApproval(opts.approval),
       sandbox: opts.sandbox,
       experimentalRawEvents: false,
       persistExtendedHistory: false,
@@ -763,6 +780,24 @@ export async function startOrResumeThread(
     if (!resolvedShortId) die(`Internal error: thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
     shortId = resolvedShortId;
     isNewThread = true;
+  }
+
+  // Keep threads codex-collab creates out of Codex's memory consolidation
+  // (~/.codex/memories) unless the user opts in with --memory: an agent
+  // driving Codex on the user's behalf shouldn't shape Codex's learned
+  // picture of how the user works. Only ever set on threads WE create —
+  // memoryMode is a persistent per-thread flag, so setting it on a resumed
+  // user-owned thread would silently exclude that thread from the user's
+  // own memory. Review threads are skipped: they're ephemeral (never
+  // written to disk, so structurally outside memory ingestion) and the
+  // server rejects metadata updates on them. Non-fatal: requires the
+  // experimentalApi capability and Codex ≥ 0.142.
+  if (isNewThread && !isReview && !opts.memory) {
+    try {
+      await client.request("thread/memoryMode/set", { threadId, mode: "disabled" });
+    } catch (e) {
+      console.error(`[codex] Warning: could not exclude thread from Codex memory: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   // Name new threads (non-fatal on failure)
@@ -812,6 +847,19 @@ export async function startOrResumeThread(
 // Turn overrides and result printing
 // ---------------------------------------------------------------------------
 
+/** Map a CLI approval mode to the app-server's wire params. "auto" generates
+ *  approval requests like "on-request" but routes them to Codex's Guardian
+ *  subagent (approvalsReviewer "auto_review"), which permits/rejects
+ *  autonomously and escalates to this client only when unsure — the
+ *  file-based interactive flow stays as that escalation path. */
+export function resolveApproval(mode: ApprovalMode): {
+  approvalPolicy: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
+} {
+  if (mode === "auto") return { approvalPolicy: "on-request", approvalsReviewer: "auto_review" };
+  return { approvalPolicy: mode };
+}
+
 /** Map a kebab-case sandbox mode to the app-server's sandboxPolicy wire shape. */
 export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
   switch (mode) {
@@ -824,7 +872,7 @@ export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
 /** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */
 export function turnOverrides(opts: Options) {
   if (!opts.resumeId) {
-    const o: Record<string, unknown> = { cwd: opts.dir, approvalPolicy: opts.approval };
+    const o: Record<string, unknown> = { cwd: opts.dir, ...resolveApproval(opts.approval) };
     if (opts.model) o.model = opts.model;
     if (opts.reasoning) o.effort = opts.reasoning;
     return o;
@@ -833,7 +881,7 @@ export function turnOverrides(opts: Options) {
   if (opts.explicit.has("dir")) o.cwd = opts.dir;
   if (opts.explicit.has("model")) o.model = opts.model;
   if (opts.explicit.has("reasoning")) o.effort = opts.reasoning;
-  if (opts.explicit.has("approval")) o.approvalPolicy = opts.approval;
+  if (opts.explicit.has("approval")) Object.assign(o, resolveApproval(opts.approval));
   // thread/resume's `sandbox` is ignored once the thread is loaded in a
   // long-lived (broker) app-server, so carry an explicit -s as a per-turn
   // sandboxPolicy override — the only path that re-applies the new mode.

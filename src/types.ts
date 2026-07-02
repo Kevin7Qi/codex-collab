@@ -55,6 +55,12 @@ export interface InitializeResponse {
 
 export type { ApprovalPolicy, SandboxMode, ReasoningEffort } from "./config";
 
+/** Where the app-server routes approval requests for review. "auto_review"
+ *  is the Guardian subagent (risk-based auto-permit/reject; escalates to the
+ *  client only when unsure). Accepted on thread/start, thread/fork,
+ *  thread/resume, and turn/start — no experimentalApi needed. */
+export type ApprovalsReviewer = "user" | "auto_review";
+
 export interface Thread {
   id: string;
   preview: string;
@@ -95,6 +101,7 @@ export interface ThreadForkParams {
   model?: string;
   cwd?: string;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
   sandbox?: string | null;
   config?: Record<string, unknown>;
   ephemeral?: boolean;
@@ -113,6 +120,7 @@ export interface TurnStartParams {
   input: UserInput[];
   cwd?: string;
   approvalPolicy?: ApprovalPolicy;
+  approvalsReviewer?: ApprovalsReviewer;
   sandboxPolicy?: unknown;
   model?: string;
   effort?: ReasoningEffort;
@@ -368,6 +376,17 @@ export interface FileChangeApprovalRequest {
 }
 
 export type ApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel";
+
+/** item/autoApprovalReview/started|completed notification payloads (Guardian
+ *  reviewing an approval request). Marked [UNSTABLE] in Codex 0.142 and
+ *  "expected to change soon" — every field is optional and consumers must
+ *  parse defensively, degrading to a generic progress line. */
+export interface AutoApprovalReviewParams {
+  threadId?: string;
+  turnId?: string;
+  itemId?: string;
+  [key: string]: unknown;
+}
 
 // --- Model list ---
 

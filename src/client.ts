@@ -522,7 +522,9 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   const initParams: InitializeParams = {
     clientInfo: { name: config.clientName, title: null, version: config.clientVersion },
     capabilities: {
-      experimentalApi: false,
+      // Required for thread/memoryMode/set (memory isolation of created
+      // threads). Guardian (approvalsReviewer) does NOT need it.
+      experimentalApi: true,
       optOutNotificationMethods: ["item/reasoning/textDelta"],
     },
   };

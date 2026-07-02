@@ -23,8 +23,9 @@ export async function handleConfig(args: string[]): Promise<void> {
     model:     { validate: v => v.length > 0 && !/[^a-zA-Z0-9._\-\/:]/.test(v), hint: "model name (e.g. gpt-5.4, gpt-5.3-codex)" },
     reasoning: { validate: v => (config.reasoningEfforts as readonly string[]).includes(v), hint: config.reasoningEfforts.join(", ") },
     sandbox:   { validate: v => (config.sandboxModes as readonly string[]).includes(v), hint: config.sandboxModes.join(", ") },
-    approval:  { validate: v => (config.approvalPolicies as readonly string[]).includes(v), hint: config.approvalPolicies.join(", ") },
+    approval:  { validate: v => (config.approvalModes as readonly string[]).includes(v), hint: config.approvalModes.join(", ") },
     timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds, 1-${MAX_TIMEOUT_SECONDS} (e.g. 1200)` },
+    memory:    { validate: v => v === "true" || v === "false", hint: "true, false (let Codex memory learn from created threads)" },
   };
 
   const cfg = loadUserConfig();
@@ -83,7 +84,8 @@ export async function handleConfig(args: string[]): Promise<void> {
     die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
   }
 
-  (cfg as Record<string, unknown>)[key] = key === "timeout" ? Number(value) : value;
+  (cfg as Record<string, unknown>)[key] =
+    key === "timeout" ? Number(value) : key === "memory" ? value === "true" : value;
   saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
 }

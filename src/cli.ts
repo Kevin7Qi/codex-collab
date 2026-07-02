@@ -118,7 +118,11 @@ Options:
   -d, --dir <path>        Working directory (default: cwd)
   --resume <id>           Resume existing thread
   --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout})
-  --approval <policy>     Approval: ${config.approvalPolicies.join(", ")} (default: ${config.defaultApprovalPolicy})
+  --approval <policy>     Approval: ${config.approvalModes.join(", ")} (default: ${config.defaultApprovalPolicy})
+                          "auto" routes requests to Codex's Guardian reviewer;
+                          only its escalations reach approve/decline
+  --memory                Let Codex's memory feature learn from threads this
+                          run creates (default: created threads are excluded)
   --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: auto-detected default branch)
@@ -180,6 +184,7 @@ const BOOLEAN_FLAGS = new Set([
   "--discover",
   "--full",
   "--unset",
+  "--memory",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {

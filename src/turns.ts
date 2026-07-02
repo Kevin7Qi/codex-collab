@@ -8,7 +8,7 @@ import {
   type UserInput, type TurnStartParams, type TurnStartResponse, type TurnCompletedParams,
   type ReviewTarget, type ReviewStartParams, type ReviewDelivery,
   type TurnResult, type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
-  type ErrorNotificationParams,
+  type ErrorNotificationParams, type AutoApprovalReviewParams,
   type CommandApprovalRequest, type FileChangeApprovalRequest,
   type ApprovalPolicy, type ReasoningEffort,
 } from "./types";
@@ -264,6 +264,10 @@ async function executeTurn(
       case "item/commandExecution/outputDelta":
         opts.dispatcher.handleDelta(method, params as DeltaParams);
         break;
+      case "item/autoApprovalReview/started":
+      case "item/autoApprovalReview/completed":
+        opts.dispatcher.handleAutoApprovalReview(method, params as AutoApprovalReviewParams);
+        break;
       case "error":
         opts.dispatcher.handleError(params as ErrorNotificationParams);
         break;
@@ -275,6 +279,8 @@ async function executeTurn(
     "item/completed",
     "item/agentMessage/delta",
     "item/commandExecution/outputDelta",
+    "item/autoApprovalReview/started",
+    "item/autoApprovalReview/completed",
     "error",
   ]) {
     unsubs.push(
