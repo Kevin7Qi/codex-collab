@@ -35,7 +35,9 @@ codex-collab run "investigate the auth module" -d /path/to/project --content-onl
 **IMPORTANT — Execution rules for ALL `codex-collab` Bash commands:**
 - Always use `dangerouslyDisableSandbox=true` — the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist.
 - For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: read the completed task's output (the notification includes it or use `Read` on the output file), then present the results to the user.
-- For all other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
+- `run --detach` returns in seconds — run it in the **foreground**.
+- `follow` on a live run blocks until that run completes, and `follow --watch` never exits: both are primarily the **user's** view for their own terminal pane — don't run `--watch` yourself. The one agent-facing use: `follow <id>` in background Bash is the completion signal for a detached run (see Detached Runs below). `follow` on an already-finished run is a quick foreground replay.
+- All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
 
 If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or:
 
@@ -135,20 +137,22 @@ codex-collab run "large refactor task" --detach --approval auto
 
 **For a multi-turn Claude ⇄ Codex conversation, suggest the user keep `codex-collab follow --watch` open in a separate terminal pane** — it doesn't exit between turns: each new run is picked up automatically (every run shown exactly once, in start order, even across concurrent threads; runs that finished while another was displayed appear as quick replays). It renders a purpose-built, color-coded view, costs zero model context, and stops with Ctrl-C. Scope it to one thread with `follow <id> --watch` when multiple threads run in parallel and the user wants a dedicated pane per thread.
 
+**Completion signal for detached runs (agent-facing):** the detach parent exits when the turn *starts*, not when it finishes — so backgrounding `run --detach` gives you no completion notification. When you need one, run `codex-collab follow <id>` in background Bash: it exits exactly when the run reaches a terminal state (exit 0 = completed), and that exit is your notification.
+
 ### Watching for approvals without polling (Monitor pattern)
+
+**Only arm this when the approval mode can actually block**: `on-request`, `on-failure`, `untrusted` — or `auto` if you want a net for the rare Guardian escalation. Under the default `never` there are no approval requests, and under `auto` Guardian handles nearly all of them; a watcher there is waste.
 
 When you run codex-collab in background Bash, you're notified when the *process exits* — but an approval request blocks mid-run without exiting. Watch on-disk state instead; both signals below appear regardless of which process owns the run:
 
-- an approval request file appears in `~/.codex-collab/workspaces/<slug>-<hash>/approvals/<id>.json` while a request is pending (and disappears when answered)
-- the run record (`runs/<runId>.json`) carries `"pendingApproval": {id, kind, summary, requestedAt}` while blocked, `null` otherwise
+- an approval request file appears at `~/.codex-collab/workspaces/*/approvals/<id>.json` while a request is pending (and disappears when answered); its JSON carries the command, reason, and `workspaceDir`
+- the run record (`workspaces/*/runs/<runId>.json`) carries `"pendingApproval": {id, kind, summary, requestedAt}` while blocked, `null` otherwise
 
-With the Monitor tool, arm a single-shot watcher alongside the background run and keep working — approval appears → notification → `codex-collab approve <id>` → the run continues (no kill/resume cycle, no polling in your context):
+Arm a single-shot watcher alongside the background run and keep working — approval appears → notification → `codex-collab approve <id>` → the run continues (no kill/resume cycle, no polling in your context). With the Monitor tool, this is the command; without it, run the same loop as a second background Bash command and its *exit* becomes your notification:
 
 ```bash
-until [ -n "$(ls <workspace-state>/approvals/*.json 2>/dev/null)" ]; do sleep 2; done; cat <workspace-state>/approvals/*.json
+until [ -n "$(ls ~/.codex-collab/workspaces/*/approvals/*.json 2>/dev/null)" ]; do sleep 2; done; cat ~/.codex-collab/workspaces/*/approvals/*.json
 ```
-
-Without Monitor, run that same `until`-loop as a second background Bash command — its *exit* becomes your notification. Prefer `--approval auto` (Guardian) so this machinery is only the escalation net, not the main path.
 
 ## Approvals
 
@@ -261,6 +265,7 @@ codex-collab health                     # Check prerequisites
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations reach `approve`/`decline` |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--detach` | (run) Return once the turn is running; watch with `follow <id>`, stop with `kill <id>`. Decouples turn lifetime from the invoking shell |
+| `-w, --watch` | (follow) Don't exit when the run finishes — keep following each new run, every run shown once in start order (Ctrl-C to stop). For the user's pane, not for agents |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
