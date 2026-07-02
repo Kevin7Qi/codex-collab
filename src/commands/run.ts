@@ -28,6 +28,7 @@ import {
   setActiveTurnId,
   setActiveWsPaths,
   setActiveRunId,
+  consumeInjectedRunId,
 } from "./shared";
 
 /** How long the detach parent waits for the child's turn to start.
@@ -147,6 +148,12 @@ async function detachRun(args: string[], options: ReturnType<typeof parseOptions
 }
 
 export async function handleRun(args: string[]): Promise<void> {
+  // Scrub the detach parent's injected runId out of the environment before
+  // anything can spawn (broker, app-server, Codex's shell commands all
+  // inherit it otherwise — and a nested codex-collab inside the turn would
+  // collide with this run's record). The value stays available internally.
+  consumeInjectedRunId();
+
   const { positional, options } = parseOptions(args);
   applyUserConfig(options);
 

@@ -45,6 +45,10 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
           status: "cancelled",
           completedAt: new Date().toISOString(),
           error: "Interrupted by signal",
+          // Ctrl-C while blocked on an approval exits before the approval
+          // poll's cleanup tick — terminal records must never claim a
+          // pending approval (same guarantee as recordTerminalRunState).
+          pendingApproval: null,
         });
       } catch (e) {
         console.error(`[codex] Warning: could not update run record during shutdown: ${e instanceof Error ? e.message : String(e)}`);

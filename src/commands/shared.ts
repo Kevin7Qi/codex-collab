@@ -702,10 +702,15 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
  *  Sticky for this process's lifetime so the broker-busy retry re-creates
  *  the SAME record the parent is watching, but removed from the environment
  *  immediately so grandchildren (e.g. Codex itself invoking codex-collab
- *  inside the turn) can't collide with it. */
+ *  inside the turn) can't collide with it.
+ *
+ *  Call this BEFORE establishing any client connection: the broker and
+ *  app-server spawned there inherit this process's environment, and every
+ *  shell command Codex runs inherits theirs — scrubbing only at thread-start
+ *  time would leak the runId to all of them. */
 let stickyInjectedRunId: string | null | undefined;
 
-function consumeInjectedRunId(): string | null {
+export function consumeInjectedRunId(): string | null {
   const fromEnv = process.env.CODEX_COLLAB_RUN_ID;
   if (fromEnv !== undefined) {
     delete process.env.CODEX_COLLAB_RUN_ID;
