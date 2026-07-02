@@ -5,14 +5,7 @@ description: Use when the user asks to invoke, delegate to, or collaborate with 
 
 # codex-collab
 
-codex-collab is a bridge between Claude and Codex. It communicates with Codex via the `codex app-server` JSON-RPC protocol, giving you structured, event-driven access to Codex's capabilities — prompting, code review, tool use, and file editing.
-
-## Collaboration Modes
-
-- **Run** — Single-command `run` for any prompted task (research, analysis, implementation). Starts a thread, sends prompt, waits for completion, returns output.
-- **Code review** — Single-command `review` for PR-style, uncommitted, or commit-level review.
-- **Parallel work** — You and Codex work on different parts simultaneously. Start multiple threads.
-- **Research** — Spin up a read-only Codex session to investigate something while you continue other work.
+codex-collab is a bridge between Claude and Codex. It communicates with Codex via the `codex app-server` JSON-RPC protocol, giving you structured, event-driven access to Codex's capabilities — prompting, code review, tool use, and file editing. Requires bun and the codex CLI on PATH (`codex-collab health` to verify).
 
 ## Run Command (Recommended for Prompted Tasks)
 
@@ -39,10 +32,13 @@ codex-collab run "investigate the auth module" -d /path/to/project --content-onl
 - `follow` on a live run blocks until that run completes, and `follow --watch` never exits: both are primarily the **user's** view for their own terminal pane — don't run `--watch` yourself. The one agent-facing use: `follow <id>` in background Bash is the completion signal for a detached run (see Detached Runs below). `follow` on an already-finished run is a quick foreground replay.
 - All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
 
-If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or:
+If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or `codex-collab progress <id>` for just the log tail. `<id>` is the codex-collab thread short ID (8-char hex), not the Claude Code task ID — it appears in the first progress line (`[codex] Thread a1b2c3d4 started`); `codex-collab threads` lists them. Progress lines stream in real time:
 
-```bash
-codex-collab progress <id>
+```
+[codex] Thread a1b2c3d4 started (gpt-5.4, workspace-write)
+[codex] Running: npm test
+[codex] Edited: src/auth.ts (update)
+[codex] Turn completed (2m 14s, 1 file changed)
 ```
 
 ## Code Review
@@ -103,25 +99,6 @@ The `--resume` flag accepts both ID formats:
 | Thread stuck / errored | `codex-collab kill <id>` then start new |
 
 If you've lost track of the thread ID, use `codex-collab threads` to find active threads.
-
-## Checking Progress
-
-If the user asks about a running task, use `TaskOutput(block=false)` (with the background task ID returned when launching the command) to read the output stream. The codex-collab thread short ID appears in the first progress line (e.g., `[codex] Thread a1b2c3d4 started`) — handy when you need it but don't have it. If you need just the tail of the log without the full stream:
-
-```bash
-codex-collab progress <thread-id>
-```
-
-Note: `<thread-id>` is the codex-collab thread short ID (8-char hex from the output), not the Claude Code background task ID. If you don't have it, run `codex-collab threads`.
-
-Progress lines stream in real-time during execution:
-```
-[codex] Thread a1b2c3d4 started (gpt-5.4, workspace-write)
-[codex] Turn started
-[codex] Running: npm test
-[codex] Edited: src/auth.ts (update)
-[codex] Turn completed (2m 14s, 1 file changed)
-```
 
 ## Detached Runs and Following
 
@@ -186,69 +163,22 @@ codex-collab decline <approval-id>
 
 ## CLI Reference
 
-### Run
-
-```bash
-codex-collab run "prompt" [options]               # New thread, send prompt, wait, print output
-codex-collab run --resume <id> "prompt" [options]  # Resume existing thread
-codex-collab run "prompt" -s read-only             # Read-only sandbox
-```
-
-### Review
-
-```bash
-codex-collab review [options]                      # PR-style (default)
-codex-collab review --mode uncommitted [options]   # Uncommitted changes
-codex-collab review --mode commit [options]        # Latest commit
-codex-collab review --mode commit --ref <hash>     # Specific commit
-codex-collab review "instructions" [options]       # Custom review
-codex-collab review --resume <id> [options]        # Resume existing thread
-```
-
-### Run (detached)
-
-```bash
-codex-collab run "prompt" --detach [options]  # Return once the turn is running
-codex-collab follow                           # Live view of the active run; exits on completion
-codex-collab follow <id>                      # Same, for a specific thread
-codex-collab follow --watch                   # Keep the pane open across runs (Ctrl-C to stop)
-```
-
-### Reading Output
+Usage examples for `run`, `review`, `--detach`, and `follow` live in their sections above; this is the remaining command surface:
 
 ```bash
 codex-collab output <id>                # Full log for thread
 codex-collab progress <id>              # Recent activity (tail of log)
-codex-collab follow <id>                # Live view of a running thread (or replay of the last run)
-```
-
-### Thread Management
-
-```bash
-codex-collab threads                    # List threads (current session)
-codex-collab threads --all              # List all threads (no display limit)
-codex-collab threads --discover         # Discover threads from Codex server (top 5 by default)
-codex-collab peek <id>                  # Show last exchange (default) from server
-codex-collab peek <id> --limit 10 --full  # Show 10 items including non-message types
+codex-collab threads [--all|--discover] # List threads (--discover: include server-side, top 5)
+codex-collab peek <id> [--limit N --full] # Recent conversation slice from server
 codex-collab kill <id>                  # Stop a running thread
-codex-collab delete <id>               # Archive thread, delete local files
+codex-collab delete <id>                # Archive thread, delete local files
 codex-collab clean                      # Delete old logs and stale mappings
+codex-collab approve <id> | decline <id> # Answer a pending approval
+codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, reasoning, sandbox, approval, timeout, memory)
+codex-collab models | templates | health | version
 ```
 
 Note: `jobs` still works as a deprecated alias for `threads`.
-
-### Utility
-
-```bash
-codex-collab config                     # Show persistent defaults
-codex-collab config model gpt-5.3-codex # Set default model
-codex-collab config model --unset       # Unset a key (return to auto)
-codex-collab config --unset             # Unset all keys (return to auto)
-codex-collab models                     # List available models
-codex-collab approve <id>              # Approve a pending request
-codex-collab decline <id>              # Decline a pending request
-codex-collab health                     # Check prerequisites
-```
 
 ### Options
 
@@ -260,10 +190,10 @@ codex-collab health                     # Check prerequisites
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
 | `--timeout <sec>` | Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes. Increase for large reviews or complex tasks. |
-| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto`: Codex's Guardian reviewer approves or denies each request autonomously — never blocks on a human; decisions and denial rationales stream as Guardian lines |
+| `--approval <policy>` | never, on-request, on-failure, untrusted, auto (default: never) — see Approvals |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
-| `--detach` | (run) Return once the turn is running; watch with `follow <id>`, stop with `kill <id>`. Decouples turn lifetime from the invoking shell |
-| `-w, --watch` | (follow) Don't exit when the run finishes — keep following each new run, every run shown once in start order (Ctrl-C to stop). For the user's pane, not for agents |
+| `--detach` | (run) Return once the turn is running — see Detached Runs |
+| `-w, --watch` | (follow) Keep following each new run instead of exiting — see Detached Runs |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for --mode commit |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
@@ -306,7 +236,3 @@ To hand off a thread to the Codex TUI, look up the full thread ID with `codex-co
 | Thread not found | Use `codex-collab threads` to list active threads |
 | Process crashed mid-task | Resume with `--resume <id>` — thread state is persisted |
 | Approval request hanging | Run `codex-collab approve <id>` or `codex-collab decline <id>` |
-
-## Prerequisites
-
-Requires bun and codex CLI on PATH. Run `codex-collab health` to verify.
