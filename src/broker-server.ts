@@ -788,12 +788,20 @@ async function main() {
     }
   }
 
+  // Unix sockets: create the file 0o700 atomically by masking group/other
+  // bits during bind. The socket is connectable the moment bind() creates it
+  // — before the listen callback runs — so the callback's chmod alone leaves
+  // a window with default (usually 0o755) permissions that is both a small
+  // security gap and an observable race (flaked the permissions test on a
+  // slow macOS CI runner).
+  const prevUmask = listenTarget.kind === "unix" ? process.umask(0o077) : null;
   server.listen(listenTarget.path, () => {
+    if (prevUmask !== null) process.umask(prevUmask);
     process.stderr.write(
       `[broker-server] Listening on ${endpoint} (idle timeout: ${idleTimeout}ms)\n`,
     );
     if (listenTarget.kind === "unix") {
-      chmodSync(listenTarget.path, 0o700);
+      chmodSync(listenTarget.path, 0o700); // belt-and-braces; the umask is the real guarantee
     }
   });
 
