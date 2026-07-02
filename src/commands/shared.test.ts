@@ -731,9 +731,12 @@ describe("resolveApproval", () => {
     });
   });
 
-  test("server policies pass through with no reviewer key", () => {
+  test("server policies pass through with the user reviewer (reversibility)", () => {
+    // approvalsReviewer persists per-thread, so an explicit non-auto mode
+    // must actively reset it — otherwise a thread once run with "auto" keeps
+    // Guardian even after the user asks for interactive control.
     for (const mode of ["never", "on-request", "on-failure", "untrusted"] as const) {
-      expect(resolveApproval(mode)).toEqual({ approvalPolicy: mode });
+      expect(resolveApproval(mode)).toEqual({ approvalPolicy: mode, approvalsReviewer: "user" });
     }
   });
 });
@@ -1253,6 +1256,7 @@ describe("startOrResumeThread", () => {
         model: "gpt-5",
         cwd: "/tmp/review-project",
         approvalPolicy: "on-request",
+        approvalsReviewer: "user",
         sandbox: "read-only",
       },
     });
@@ -1364,6 +1368,7 @@ describe("turnOverrides", () => {
     expect(overrides).toEqual({
       cwd: "/tmp/test",
       approvalPolicy: "on-request",
+      approvalsReviewer: "user",
       model: "gpt-5",
       effort: "high",
     });
@@ -1378,6 +1383,7 @@ describe("turnOverrides", () => {
     expect(overrides).toEqual({
       cwd: opts.dir,
       approvalPolicy: opts.approval,
+      approvalsReviewer: "user",
     });
     expect("model" in overrides).toBe(false);
     expect("effort" in overrides).toBe(false);
@@ -1430,6 +1436,9 @@ describe("turnOverrides", () => {
       effort: "low",
       cwd: "/tmp/proj",
       approvalPolicy: "on-failure",
+      // Explicit non-auto selection resets a possibly-persisted Guardian
+      // reviewer back to interactive routing (reversibility).
+      approvalsReviewer: "user",
       sandboxPolicy: { type: "dangerFullAccess" },
     });
   });

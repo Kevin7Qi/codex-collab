@@ -851,13 +851,18 @@ export async function startOrResumeThread(
  *  approval requests like "on-request" but routes them to Codex's Guardian
  *  subagent (approvalsReviewer "auto_review"), which permits/rejects
  *  autonomously and escalates to this client only when unsure — the
- *  file-based interactive flow stays as that escalation path. */
+ *  file-based interactive flow stays as that escalation path.
+ *
+ *  Non-auto modes explicitly send approvalsReviewer "user" so selecting them
+ *  is reversible: approvalsReviewer persists on the thread, and without the
+ *  reset a thread once run with "auto" would keep routing approvals through
+ *  Guardian even after the user explicitly asked for interactive control. */
 export function resolveApproval(mode: ApprovalMode): {
   approvalPolicy: ApprovalPolicy;
-  approvalsReviewer?: ApprovalsReviewer;
+  approvalsReviewer: ApprovalsReviewer;
 } {
   if (mode === "auto") return { approvalPolicy: "on-request", approvalsReviewer: "auto_review" };
-  return { approvalPolicy: mode };
+  return { approvalPolicy: mode, approvalsReviewer: "user" };
 }
 
 /** Map a kebab-case sandbox mode to the app-server's sandboxPolicy wire shape. */
