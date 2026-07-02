@@ -17,7 +17,7 @@ import {
 } from "./broker";
 import { connectToBroker } from "./broker-client";
 import net from "node:net";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, utimesSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import type { BrokerState } from "./types";
@@ -228,22 +228,44 @@ describe("getCurrentSessionId", () => {
 // ─── acquireSpawnLock ─────────────────────────────────────────────────────
 
 describe("acquireSpawnLock", () => {
-  test("acquires and releases lock", () => {
-    const release = acquireSpawnLock(tempDir);
+  test("acquires and releases lock", async () => {
+    const release = await acquireSpawnLock(tempDir);
     expect(release).not.toBeNull();
     expect(existsSync(join(tempDir, "broker.lock"))).toBe(true);
     release!();
     expect(existsSync(join(tempDir, "broker.lock"))).toBe(false);
   });
 
-  test("second acquire succeeds after first is released", () => {
-    const release1 = acquireSpawnLock(tempDir);
+  test("second acquire succeeds after first is released", async () => {
+    const release1 = await acquireSpawnLock(tempDir);
     expect(release1).not.toBeNull();
     release1!();
 
-    const release2 = acquireSpawnLock(tempDir);
+    const release2 = await acquireSpawnLock(tempDir);
     expect(release2).not.toBeNull();
     release2!();
+  });
+
+  test("release after a stale-break does not delete the new holder's lock", async () => {
+    // Simulate a crashed holder: acquire, then backdate the lock file so a
+    // second contender force-breaks it.
+    const release1 = await acquireSpawnLock(tempDir);
+    expect(release1).not.toBeNull();
+    const lockPath = join(tempDir, "broker.lock");
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lockPath, old, old);
+
+    // Contender breaks the stale lock and acquires its own.
+    const release2 = await acquireSpawnLock(tempDir);
+    expect(release2).not.toBeNull();
+    expect(existsSync(lockPath)).toBe(true);
+
+    // The original (broken) holder releasing must NOT remove the new lock.
+    release1!();
+    expect(existsSync(lockPath)).toBe(true);
+
+    release2!();
+    expect(existsSync(lockPath)).toBe(false);
   });
 });
 

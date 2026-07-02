@@ -428,26 +428,30 @@ describe("run ledger", () => {
     // first prune candidate — even though it's still emitting events and
     // its terminal recordRunFailure/recordTerminalRunState would later
     // look up a runId whose JSON had been deleted.
+    // Timestamps must be recent: "running" records older than the 24h stale
+    // horizon are treated as dead (leaked by a crashed process) and become
+    // evictable, so a *live* long-running run is represented by a fresh one.
+    const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
     const activeOldest = makeRun({
       runId: "run-active",
-      startedAt: "2026-01-01T00:00:00Z",
+      startedAt: hoursAgo(6),
       completedAt: null,
       status: "running",
     });
     const completedNewer1 = makeRun({
       runId: "run-completed-1",
-      startedAt: "2026-01-05T00:00:00Z",
-      completedAt: "2026-01-05T00:01:00Z",
+      startedAt: hoursAgo(3),
+      completedAt: hoursAgo(2.9),
     });
     const completedNewer2 = makeRun({
       runId: "run-completed-2",
-      startedAt: "2026-01-06T00:00:00Z",
-      completedAt: "2026-01-06T00:01:00Z",
+      startedAt: hoursAgo(2),
+      completedAt: hoursAgo(1.9),
     });
     const completedNewer3 = makeRun({
       runId: "run-completed-3",
-      startedAt: "2026-01-07T00:00:00Z",
-      completedAt: "2026-01-07T00:01:00Z",
+      startedAt: hoursAgo(1),
+      completedAt: hoursAgo(0.9),
     });
     createRun(testDir, activeOldest);
     createRun(testDir, completedNewer1);
@@ -469,13 +473,41 @@ describe("run ledger", () => {
     for (let i = 0; i < 5; i++) {
       createRun(testDir, makeRun({
         runId: `run-${i}`,
-        startedAt: new Date(Date.UTC(2026, 0, i + 1)).toISOString(),
+        startedAt: new Date(Date.now() - (i + 1) * 3_600_000).toISOString(),
         completedAt: null,
         status: "running",
       }));
     }
     pruneRuns(testDir, 2);
     expect(listRuns(testDir).length).toBe(5);
+  });
+
+  test("pruneRuns evicts 'running' records with no activity for over a day", () => {
+    // Regression: a run whose process died without writing a terminal state
+    // (SIGKILL, crash) stays status:"running" forever — nothing reconciles
+    // the ledger — and used to be permanently immune to pruning, leaking
+    // past the cap without bound.
+    for (let i = 0; i < 3; i++) {
+      createRun(testDir, makeRun({
+        runId: `stale-${i}`,
+        startedAt: new Date(Date.now() - (3 + i) * 24 * 3_600_000).toISOString(),
+        completedAt: null,
+        status: "running",
+      }));
+    }
+    createRun(testDir, makeRun({
+      runId: "live-running",
+      startedAt: new Date(Date.now() - 3_600_000).toISOString(),
+      completedAt: null,
+      status: "running",
+    }));
+    pruneRuns(testDir, 2);
+    const remaining = listRuns(testDir).map(r => r.runId);
+    expect(remaining).toContain("live-running");
+    expect(remaining).toHaveLength(2);
+    // The oldest stale records are the eviction victims
+    expect(remaining).not.toContain("stale-2");
+    expect(remaining).not.toContain("stale-1");
   });
 
   test("pruneRuns prefers completedAt over startedAt for sort", () => {

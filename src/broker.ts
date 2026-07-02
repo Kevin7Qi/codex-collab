@@ -12,6 +12,7 @@ import { randomBytes } from "node:crypto";
 import type { BrokerState, SessionState, ParsedEndpoint } from "./types";
 import { connectDirect, type AppServerClient } from "./client";
 import { config, resolveStateDir } from "./config";
+import { acquireLockAsync, LockTimeoutError } from "./lock";
 import { terminateProcessTree, isProcessAlive } from "./process";
 
 /** JSON-RPC error code returned when the broker is busy with another request. */
@@ -197,73 +198,24 @@ export async function isBrokerAlive(endpoint: string | null, timeoutMs = 150): P
 // ─── Spawn lock ───────────────────────────────────────────────────────────
 
 const LOCK_FILE = "broker.lock";
-const LOCK_MAX_ATTEMPTS = 600; // ~30s at 50ms avg sleep
-const LOCK_STALE_THRESHOLD_MS = 60_000;
 
 /**
- * Acquire an atomic lock file (`broker.lock`) for broker spawning.
- * Uses O_CREAT|O_EXCL, spins with 30-70ms jitter on contention, max ~30s.
- * Force-breaks locks older than 60s.
- * Returns a release function, or null if the lock cannot be acquired.
+ * Acquire the broker-spawn lock (`broker.lock`) — see src/lock.ts for the
+ * acquisition and stale-break semantics. Async so that signal handlers and
+ * timers keep running during contention (a sync spin would block the event
+ * loop for up to ~30s). Returns a release function, or null if the lock
+ * cannot be acquired.
  */
-export function acquireSpawnLock(stateDir: string): (() => void) | null {
+export async function acquireSpawnLock(stateDir: string): Promise<(() => void) | null> {
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(stateDir, LOCK_FILE);
-  let fd: number | undefined;
-
-  for (let i = 0; i < LOCK_MAX_ATTEMPTS; i++) {
-    try {
-      fd = fs.openSync(lockPath, "wx");
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
-        // Unexpected filesystem error
-        console.error(`[broker] Warning: spawn lock creation failed: ${(e as Error).message}`);
-        return null;
-      }
-      Bun.sleepSync(30 + Math.random() * 40);
-    }
+  try {
+    return await acquireLockAsync(lockPath);
+  } catch (e) {
+    if (e instanceof LockTimeoutError) return null; // held and not stale
+    console.error(`[broker] Warning: spawn lock creation failed: ${(e as Error).message}`);
+    return null;
   }
-
-  if (fd === undefined) {
-    // Check if lock is stale
-    try {
-      const stat = fs.statSync(lockPath);
-      const ageMs = Date.now() - stat.mtimeMs;
-      if (ageMs < LOCK_STALE_THRESHOLD_MS) {
-        return null; // Lock is held and not stale
-      }
-      // Lock is stale — force acquire after unlink
-      fs.unlinkSync(lockPath);
-    } catch (e) {
-      // statSync/unlinkSync failed (ENOENT race) — try once more
-      console.error(`[broker] Warning: stale lock recovery failed: ${(e as Error).message}`);
-    }
-    try {
-      fd = fs.openSync(lockPath, "wx");
-    } catch (e) {
-      console.error(`[broker] Warning: lock re-acquire after stale break failed: ${(e as Error).message}`);
-      return null;
-    }
-  }
-
-  const capturedFd = fd;
-  return () => {
-    try {
-      fs.closeSync(capturedFd);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`[broker] Warning: lock fd close failed: ${(e as Error).message}`);
-      }
-    }
-    try {
-      fs.unlinkSync(lockPath);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`[broker] Warning: lock cleanup failed: ${(e as Error).message}`);
-      }
-    }
-  };
 }
 
 // ─── Teardown ─────────────────────────────────────────────────────────────
@@ -477,55 +429,61 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
     sessionStartedAt = new Date().toISOString();
   }
 
-  // 1. Check if an existing broker is alive
-  const existingState = loadBrokerState(stateDir);
-  if (existingState?.endpoint) {
-    if (await isBrokerAlive(existingState.endpoint)) {
-      try {
-        const { connectToBroker } = await import("./broker-client");
-        const client = await connectToBroker({ endpoint: existingState.endpoint });
-
-        // If broker is busy and caller needs streaming, fall back to a
-        // standalone direct connection. The broker enforces single-stream
-        // ownership over its shared app-server, but parallel invocations in
-        // the same workspace are still expected to work — they get their
-        // own app-server. Non-streaming callers (kill, threads, etc.) keep
-        // the broker connection so they can inspect/interrupt the active turn.
-        if (client.brokerBusy && streaming) {
-          await client.close();
-          console.error("[broker] Broker is busy — using direct connection for this invocation.");
-          try {
-            saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
-          } catch (e) {
-            console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
-          }
-          return connectDirect({ cwd });
-        }
-
-        // Update session state (non-fatal if save fails — connection is valid)
-        try {
-          saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
-        } catch (e) {
-          console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
-        }
-
-        return client;
-      } catch (e) {
-        // Connection to existing broker failed — tear it down and spawn fresh
-        console.error(
-          `[broker] Warning: failed to connect to existing broker: ${(e as Error).message}. Spawning new one.`,
-        );
-        teardownBroker(stateDir, existingState);
-      }
-    } else {
-      // Broker is not alive — clean up stale state without killing.
-      // The saved PID may already refer to a recycled, unrelated process.
-      clearBrokerArtifacts(stateDir, existingState);
+  const saveSession = (): void => {
+    // Non-fatal if save fails — the connection being returned is valid
+    try {
+      saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
+    } catch (e) {
+      console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
     }
-  }
+  };
+
+  /**
+   * Probe and connect to the broker recorded in `state`. Returns a client on
+   * success, or null when the caller should proceed to spawn: no state, dead
+   * socket, or a failed connection attempt (the broker is torn down first).
+   *
+   * If the broker is busy and the caller needs streaming, falls back to a
+   * standalone direct connection. The broker enforces single-stream
+   * ownership over its shared app-server, but parallel invocations in the
+   * same workspace are still expected to work — they get their own
+   * app-server. Non-streaming callers (kill, threads, etc.) keep the broker
+   * connection so they can inspect/interrupt the active turn.
+   */
+  const connectToExisting = async (state: BrokerState | null): Promise<AppServerClient | null> => {
+    if (!state?.endpoint) return null;
+    if (!(await isBrokerAlive(state.endpoint))) return null;
+    try {
+      const { connectToBroker } = await import("./broker-client");
+      const client = await connectToBroker({ endpoint: state.endpoint });
+      if (client.brokerBusy && streaming) {
+        await client.close();
+        console.error("[broker] Broker is busy — using direct connection for this invocation.");
+        saveSession();
+        return connectDirect({ cwd });
+      }
+      saveSession();
+      return client;
+    } catch (e) {
+      // Connection to existing broker failed — tear it down and spawn fresh
+      console.error(
+        `[broker] Warning: failed to connect to existing broker: ${(e as Error).message}. Spawning new one.`,
+      );
+      teardownBroker(stateDir, state);
+      return null;
+    }
+  };
+
+  // 1. Check if an existing broker is alive. Dead-socket artifact cleanup is
+  // deliberately deferred until we hold the spawn lock: unlinking the fixed
+  // socket path here could race another process that just spawned a broker
+  // bound to it (probe-then-unlink TOCTOU).
+  const existingState = loadBrokerState(stateDir);
+  const existingClient = await connectToExisting(existingState);
+  if (existingClient) return existingClient;
 
   // 2. Acquire spawn lock
-  const release = acquireSpawnLock(stateDir);
+  const release = await acquireSpawnLock(stateDir);
   if (!release) {
     // Could not acquire lock — another process may be spawning.
     // Fall back to direct connection.
@@ -536,31 +494,14 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
   try {
     // Re-check after lock acquisition (another process may have spawned while we waited)
     const freshState = loadBrokerState(stateDir);
-    if (freshState?.endpoint && await isBrokerAlive(freshState.endpoint)) {
-      try {
-        const { connectToBroker } = await import("./broker-client");
-        const client = await connectToBroker({ endpoint: freshState.endpoint });
-        if (client.brokerBusy && streaming) {
-          await client.close();
-          console.error("[broker] Broker is busy — using direct connection for this invocation.");
-          try {
-            saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
-          } catch (e) {
-            console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
-          }
-          return connectDirect({ cwd });
-        }
-        try {
-          saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
-        } catch (e) {
-          console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
-        }
-        return client;
-      } catch (e) {
-        console.error(`[broker] Warning: failed to connect to existing broker after lock: ${(e as Error).message}. Spawning new one.`);
-        teardownBroker(stateDir, freshState);
-      }
-    }
+    const freshClient = await connectToExisting(freshState);
+    if (freshClient) return freshClient;
+
+    // Under the lock no other process can be spawning, so state naming a
+    // dead broker is safely removable now — clean up before binding a new
+    // socket at the same path. Does not touch the process: the saved PID
+    // may already refer to a recycled, unrelated one.
+    if (freshState) clearBrokerArtifacts(stateDir, freshState);
 
     // Reusable fallback: log, save session state best-effort, return a
     // direct connection. Deliberately does NOT persist broker state — a
