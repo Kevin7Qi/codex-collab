@@ -17,6 +17,7 @@ import {
   shuttingDown,
   setShuttingDown,
   removePidFile,
+  exitCodeForError,
   VALID_REVIEW_MODES,
 } from "./commands/shared";
 
@@ -96,16 +97,19 @@ Usage: codex-collab <command> [options]
 
 Commands:
   run "prompt" [opts]     Send prompt, wait for result, print output
+  run - [opts]            Read the prompt from stdin (no shell-quoting hazards)
   run --resume <id> "p"   Resume existing thread with new prompt
   review [opts]           Run code review (PR-style by default)
   review "instructions"   Custom review with specific focus
-  threads [--json] [--all] List threads (--limit <n>, --discover)
+  threads [--json] [--all] List threads (--limit <n>, --discover,
+                          --session: only threads this session has run)
   kill <id>               Stop a running thread
   follow [id] [--watch]   Live view of a running thread; exits on completion
                           (no id: attach to the workspace's active run,
                           or replay the most recent one; --watch: keep the
                           pane open and pick up each new run automatically)
-  output <id>             Read full log for thread
+  output <id> [--last]    Read full log for thread (--last: only the latest
+                          turn's output; implies --content-only)
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server
   config [key] [value]    Show or set persistent defaults
@@ -149,8 +153,16 @@ Options:
   --                      End of options; remaining args are prompt text
   -v, --version           Print version and exit (before the command only)
 
+Exit codes (run, review):
+  0  turn completed        3  turn timed out (--timeout; resume with --resume <id>)
+  1  turn/command failed   4  turn interrupted (kill)
+                           5  died blocked on an approval (request now void —
+                              resume with a longer --timeout or --approval auto)
+                           6  broker busy and fallback unavailable (transient; retry)
+
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
+  cat prompt.md | codex-collab run - --content-only
   codex-collab run --resume abc123 "now summarize the key files" --content-only
   codex-collab review -d /path/to/project --content-only
   codex-collab review --mode uncommitted -d /path/to/project --content-only
@@ -201,6 +213,8 @@ const BOOLEAN_FLAGS = new Set([
   "--detach",
   "-w", "--watch",
   "--purge",
+  "--last",
+  "--session",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {
@@ -333,5 +347,5 @@ main().catch((e) => {
   if (msg.includes("timed out")) {
     console.error("Tip: Resume with --resume <id> or increase --timeout");
   }
-  process.exit(1);
+  process.exit(exitCodeForError(e));
 });

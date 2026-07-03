@@ -175,53 +175,51 @@ describe("isBrokerAlive", () => {
 // ─── getCurrentSessionId ──────────────────────────────────────────────────
 
 describe("getCurrentSessionId", () => {
-  test("reads from env var first", () => {
-    const orig = process.env.CODEX_COLLAB_SESSION_ID;
-    try {
-      process.env.CODEX_COLLAB_SESSION_ID = "env-session-123";
-      const id = getCurrentSessionId(tempDir);
-      expect(id).toBe("env-session-123");
-    } finally {
-      if (orig !== undefined) {
-        process.env.CODEX_COLLAB_SESSION_ID = orig;
-      } else {
-        delete process.env.CODEX_COLLAB_SESSION_ID;
-      }
+  // Both env sources feed getCurrentSessionId, and the test runner itself
+  // may be launched from a Claude Code session — snapshot and scrub both.
+  const SESSION_VARS = ["CODEX_COLLAB_SESSION_ID", "CLAUDE_CODE_SESSION_ID"] as const;
+  let saved: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    saved = {};
+    for (const v of SESSION_VARS) {
+      saved[v] = process.env[v];
+      delete process.env[v];
     }
   });
 
-  test("reads from session.json when env var not set", () => {
-    const orig = process.env.CODEX_COLLAB_SESSION_ID;
-    try {
-      delete process.env.CODEX_COLLAB_SESSION_ID;
-      saveSessionState(tempDir, {
-        sessionId: "file-session-456",
-        startedAt: "2026-01-01T00:00:00Z",
-      });
-      const id = getCurrentSessionId(tempDir);
-      expect(id).toBe("file-session-456");
-    } finally {
-      if (orig !== undefined) {
-        process.env.CODEX_COLLAB_SESSION_ID = orig;
-      } else {
-        delete process.env.CODEX_COLLAB_SESSION_ID;
-      }
+  afterEach(() => {
+    for (const v of SESSION_VARS) {
+      if (saved[v] !== undefined) process.env[v] = saved[v];
+      else delete process.env[v];
     }
   });
 
-  test("returns null when neither env var nor session.json exists", () => {
-    const orig = process.env.CODEX_COLLAB_SESSION_ID;
-    try {
-      delete process.env.CODEX_COLLAB_SESSION_ID;
-      const id = getCurrentSessionId(tempDir);
-      expect(id).toBeNull();
-    } finally {
-      if (orig !== undefined) {
-        process.env.CODEX_COLLAB_SESSION_ID = orig;
-      } else {
-        delete process.env.CODEX_COLLAB_SESSION_ID;
-      }
-    }
+  test("explicit CODEX_COLLAB_SESSION_ID wins over everything", () => {
+    process.env.CODEX_COLLAB_SESSION_ID = "env-session-123";
+    process.env.CLAUDE_CODE_SESSION_ID = "claude-session-999";
+    expect(getCurrentSessionId(tempDir)).toBe("env-session-123");
+  });
+
+  test("CLAUDE_CODE_SESSION_ID identifies the calling conversation", () => {
+    process.env.CLAUDE_CODE_SESSION_ID = "claude-session-999";
+    saveSessionState(tempDir, {
+      sessionId: "file-session-456",
+      startedAt: "2026-01-01T00:00:00Z",
+    });
+    expect(getCurrentSessionId(tempDir)).toBe("claude-session-999");
+  });
+
+  test("falls back to session.json when no env var is set", () => {
+    saveSessionState(tempDir, {
+      sessionId: "file-session-456",
+      startedAt: "2026-01-01T00:00:00Z",
+    });
+    expect(getCurrentSessionId(tempDir)).toBe("file-session-456");
+  });
+
+  test("returns null when neither env vars nor session.json exist", () => {
+    expect(getCurrentSessionId(tempDir)).toBeNull();
   });
 });
 

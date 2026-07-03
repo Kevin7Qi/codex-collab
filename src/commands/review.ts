@@ -17,6 +17,9 @@ import {
   getWorkspacePaths,
   recordTerminalRunState,
   recordRunFailure,
+  hasPendingApproval,
+  tagExitCode,
+  EXIT_CODES,
   progress,
   writePidFile,
   removePidFile,
@@ -121,6 +124,11 @@ export async function handleReview(args: string[]): Promise<void> {
       return recordTerminalRunState(ws, threadId, runId, result, "Review", options.contentOnly);
     } catch (e) {
       e = wrapBrokerBusy(e);
+      // Same snapshot-before-clear as handleRun: a review that died with an
+      // approval still pending exits approval-pending, not generic failure.
+      if (hasPendingApproval(ws.stateDir, runId)) {
+        tagExitCode(e, EXIT_CODES.approvalPending);
+      }
       recordRunFailure(ws, threadId, runId, e);
       throw e;
     } finally {

@@ -5,6 +5,7 @@ import { join } from "path";
 import type { AppServerClient } from "./client";
 import {
   isKnownItem,
+  TurnTimeoutError,
   type UserInput, type TurnStartParams, type TurnStartResponse, type TurnCompletedParams,
   type ReviewTarget, type ReviewStartParams, type ReviewDelivery,
   type TurnResult, type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
@@ -669,7 +670,7 @@ function createTurnCompletionAwaiter(
           resolver = null;
           targetId = null;
           unsub();
-          reject(new Error(`Turn timed out after ${Math.round(timeoutMs / 1000)}s`));
+          reject(new TurnTimeoutError(`Turn timed out after ${Math.round(timeoutMs / 1000)}s`));
         }, timeoutMs);
         // Set resolver before targetId so the notification handler never
         // sees targetId set without a resolver to call.

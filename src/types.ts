@@ -153,6 +153,15 @@ export class RpcError extends Error {
   }
 }
 
+/** Thrown when a turn does not complete within --timeout. Typed so the CLI
+ *  exit path can map it to a distinct exit code (see EXIT_CODES). */
+export class TurnTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TurnTimeoutError";
+  }
+}
+
 export interface TurnError {
   message: string;
   codexErrorInfo?: CodexErrorInfo | null;

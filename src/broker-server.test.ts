@@ -1503,12 +1503,19 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
           const canWrite = rawSocket.write(chunk);
           written += chunkSize;
           if (!canWrite && !destroyed) {
-            // Wait for drain before writing more
+            // Wait for drain before writing more (close/timeout as safety).
+            // Remove whichever listeners didn't fire — a leftover close
+            // listener per drain cycle piles up into MaxListenersExceeded.
             await new Promise<void>((resolve) => {
-              rawSocket.once("drain", resolve);
-              // Safety: if socket destroyed, also resolve
-              rawSocket.once("close", resolve);
-              setTimeout(resolve, 1000);
+              const done = () => {
+                clearTimeout(timer);
+                rawSocket.off("drain", done);
+                rawSocket.off("close", done);
+                resolve();
+              };
+              const timer = setTimeout(done, 1000);
+              rawSocket.once("drain", done);
+              rawSocket.once("close", done);
             });
           }
         }

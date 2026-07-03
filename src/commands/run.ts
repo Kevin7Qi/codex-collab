@@ -20,6 +20,9 @@ import {
   turnOverrides,
   recordTerminalRunState,
   recordRunFailure,
+  hasPendingApproval,
+  tagExitCode,
+  EXIT_CODES,
   progress,
   writePidFile,
   removePidFile,
@@ -77,21 +80,34 @@ export function stripDetachFlag(args: string[]): string[] {
  * "starting" — the child bumps the phase when turn/start responds, so
  * success here means "turn is running", not merely "thread was created".
  */
-async function detachRun(args: string[], options: ReturnType<typeof parseOptions>["options"]): Promise<never> {
+async function detachRun(
+  args: string[],
+  options: ReturnType<typeof parseOptions>["options"],
+  stdinPrompt: string | null,
+): Promise<never> {
   const ws = getWorkspacePaths(options.dir);
   const runId = generateRunId();
   const childArgs = stripDetachFlag(args);
 
   const detachLog = join(ws.logsDir, `detached-${runId}.log`);
   const logFd = openSync(detachLog, "a");
+  // A stdin prompt (`run - --detach`) is re-read by the child, whose args
+  // still say "-": pipe the already-consumed text into it. Everything else
+  // gets no stdin — the runner must never block waiting for input.
   const proc = childSpawn(process.execPath, ["run", process.argv[1], "run", ...childArgs], {
-    stdio: ["ignore", logFd, logFd],
+    stdio: [stdinPrompt === null ? "ignore" : "pipe", logFd, logFd],
     cwd: process.cwd(),
     detached: true,
     windowsHide: true,
     env: { ...process.env, CODEX_COLLAB_RUN_ID: runId },
   });
   closeSync(logFd);
+  if (stdinPrompt !== null && proc.stdin) {
+    // EPIPE if the child dies before reading — the handshake below reports
+    // that failure; don't let the write crash the parent first.
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(stdinPrompt);
+  }
   proc.unref();
 
   let childExited = false;
@@ -176,11 +192,22 @@ export async function handleRun(args: string[]): Promise<void> {
     die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
   }
 
-  if (options.detach) {
-    await detachRun(args, options);
+  // `run -` reads the prompt from stdin — the safe channel for long,
+  // quote-riddled agent-generated prompts that shell quoting would mangle.
+  let prompt = positional.join(" ");
+  let promptFromStdin = false;
+  if (prompt === "-") {
+    if (process.stdin.isTTY) console.error("[codex] Reading prompt from stdin — end with Ctrl-D.");
+    // Preserve the text byte-for-byte (leading/trailing whitespace can be
+    // significant in heredocs and Markdown) — trim only to detect emptiness.
+    prompt = readFileSync(0, "utf-8");
+    if (!prompt.trim()) die('Empty prompt on stdin\nUsage: echo "prompt" | codex-collab run -');
+    promptFromStdin = true;
   }
 
-  let prompt = positional.join(" ");
+  if (options.detach) {
+    await detachRun(args, options, promptFromStdin ? prompt : null);
+  }
 
   if (options.template) {
     const { meta, body } = loadTemplateWithMeta(options.template);
@@ -265,6 +292,13 @@ export async function handleRun(args: string[]): Promise<void> {
       // again and is recorded; if the process dies in between, the record
       // parks in "starting" where the detach parent and pruneRuns handle it.
       if (!isBrokerBusyError(e)) {
+        // Snapshot before recordRunFailure clears it: a turn that died with
+        // an approval still pending (classically: --timeout while blocked on
+        // approval) exits with its own code so callers know to answer the
+        // approval rather than treat this as a turn failure.
+        if (hasPendingApproval(ws.stateDir, runId)) {
+          tagExitCode(e, EXIT_CODES.approvalPending);
+        }
         recordRunFailure(ws, threadId, runId, e);
       }
       throw e;

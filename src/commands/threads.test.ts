@@ -110,3 +110,90 @@ describe("resolveReadableLogPath", () => {
     }
   });
 });
+
+describe("extractAgentOutputBlocks", () => {
+  const { extractAgentOutputBlocks } = require("./threads") as typeof import("./threads");
+  const ts = "2026-07-03T10:00:00.000Z";
+
+  test("extracts each turn's block separately", () => {
+    const log = [
+      `${ts} [codex] Turn started`,
+      `${ts} agent output:`, "first answer", "<<END_AGENT_OUTPUT>>",
+      `${ts} [codex] Turn started`,
+      `${ts} agent output:`, "second answer", "line two", "<<END_AGENT_OUTPUT>>",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["first answer", "second answer\nline two"]);
+  });
+
+  test("timestamps inside model output do not end a block early", () => {
+    const log = [
+      `${ts} agent output:`, "before", "not-a-log 2026-07-03T10:00:00.000Z inline", "<<END_AGENT_OUTPUT>>",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["before\nnot-a-log 2026-07-03T10:00:00.000Z inline"]);
+  });
+
+  test("a crash-truncated block (no end marker) is still captured", () => {
+    const log = [
+      `${ts} agent output:`, "partial output",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["partial output"]);
+  });
+
+  test("a new timestamped entry closes an unterminated block", () => {
+    const log = [
+      `${ts} agent output:`, "truncated",
+      `${ts} [codex] next entry`,
+      `${ts} agent output:`, "complete", "<<END_AGENT_OUTPUT>>",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["truncated", "complete"]);
+  });
+
+  test("no blocks in a log without agent output", () => {
+    expect(extractAgentOutputBlocks(`${ts} [codex] Turn started\n${ts} command: ls (exit 0)`)).toEqual([]);
+  });
+});
+
+describe("pickLastOutput (output --last)", () => {
+  const { pickLastOutput } = require("./threads") as typeof import("./threads");
+  const ts = "2026-07-03T10:00:00.000Z";
+  const staleLog = `${ts} agent output:\nOLD ANSWER\n<<END_AGENT_OUTPUT>>`;
+
+  function rec(over: Partial<RunRecord>): RunRecord {
+    return {
+      runId: "r1", threadId: "t1", shortId: "aaaa1111", kind: "task",
+      phase: "finalizing", status: "completed", sessionId: null,
+      logFile: "logs/aaaa1111.log", logOffset: 0, prompt: "p", model: "m",
+      startedAt: ts, completedAt: ts, elapsed: "1s",
+      output: "NEW ANSWER", filesChanged: null, commandsRun: null, error: null,
+      ...over,
+    } as RunRecord;
+  }
+
+  test("completed run returns its own output, not the log's last block", () => {
+    const res = pickLastOutput(rec({}), staleLog);
+    expect(res).toEqual({ kind: "output", text: "NEW ANSWER", note: null });
+  });
+
+  test("a running latest run never falls back to an older turn's block", () => {
+    const res = pickLastOutput(rec({ status: "running", output: null, completedAt: null }), staleLog);
+    expect(res.kind).toBe("none");
+    expect((res as { running: boolean }).running).toBe(true);
+  });
+
+  test("an output-less failed run reports no-output instead of the stale block", () => {
+    const res = pickLastOutput(rec({ status: "failed", output: null, error: "boom" }), staleLog);
+    expect(res.kind).toBe("none");
+    expect((res as { reason: string }).reason).toContain("boom");
+  });
+
+  test("a failed run WITH partial output returns it, flagged", () => {
+    const res = pickLastOutput(rec({ status: "failed", output: "partial", error: "boom" }), staleLog);
+    expect(res).toMatchObject({ kind: "output", text: "partial" });
+    expect((res as { note: string }).note).toContain("failed");
+  });
+
+  test("no ledger record falls back to the newest log block", () => {
+    expect(pickLastOutput(null, staleLog)).toEqual({ kind: "output", text: "OLD ANSWER", note: null });
+    expect(pickLastOutput(null, "").kind).toBe("none");
+  });
+});

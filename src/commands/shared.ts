@@ -21,11 +21,12 @@ import {
   generateRunId,
   createRun,
   updateRun,
+  loadRun,
   pruneRuns,
   migrateGlobalState,
 } from "../threads";
 import type { PendingApproval } from "../types";
-import { RpcError } from "../types";
+import { RpcError, TurnTimeoutError } from "../types";
 import { EventDispatcher } from "../events";
 import {
   autoApproveHandler,
@@ -104,6 +105,10 @@ export interface Options {
   watch: boolean;
   /** delete: permanently delete the thread server-side instead of archiving. */
   purge: boolean;
+  /** output: print only the latest turn's agent output (implies contentOnly). */
+  last: boolean;
+  /** threads: only threads the current session has run. */
+  session: boolean;
   dir: string;
   contentOnly: boolean;
   json: boolean;
@@ -139,6 +144,50 @@ const UNSAFE_REF_CHARS = /[;|&`$()<>\\'"\s]/;
 export function die(msg: string): never {
   console.error(`Error: ${msg}`);
   process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// Exit codes
+// ---------------------------------------------------------------------------
+
+/** Exit-code taxonomy for run/review, so background callers can branch on
+ *  the outcome without text-sniffing stderr. 0/1 keep their universal
+ *  meanings (usage and unclassified errors stay 1); 130/143 remain the
+ *  signal-death codes set by the SIGINT/SIGTERM handlers. */
+export const EXIT_CODES = {
+  ok: 0,
+  failed: 1,
+  /** Turn did not complete within --timeout. Resume with --resume <id>. */
+  timeout: 3,
+  /** Turn interrupted (`codex-collab kill` or server-side interrupt). */
+  interrupted: 4,
+  /** Turn died while blocked on an approval request. The request itself is
+   *  void by the time this code is observed (the turn was interrupted and
+   *  the handler's cleanup removed the request file) — the remedy is to
+   *  resume with a longer --timeout, answer faster, or use --approval auto,
+   *  NOT to answer the now-dead request. */
+  approvalPending: 5,
+  /** Broker stream owned by another invocation and the direct-connection
+   *  fallback did not absorb it — transient, safe to retry. */
+  brokerBusy: 6,
+} as const;
+
+/** Errors can carry an explicit exit code (set where the context to classify
+ *  them exists, e.g. an approval was pending when the turn died). */
+export function tagExitCode(e: unknown, code: number): void {
+  if (e !== null && typeof e === "object") {
+    (e as { exitCode?: number }).exitCode = code;
+  }
+}
+
+/** Map an error escaping main() to its exit code. A tagged code wins;
+ *  otherwise classify by type. */
+export function exitCodeForError(e: unknown): number {
+  const tagged = e !== null && typeof e === "object" ? (e as { exitCode?: unknown }).exitCode : undefined;
+  if (typeof tagged === "number") return tagged;
+  if (isBrokerBusyError(e)) return EXIT_CODES.brokerBusy;
+  if (e instanceof TurnTimeoutError) return EXIT_CODES.timeout;
+  return EXIT_CODES.failed;
 }
 
 export function validateGitRef(value: string, label: string): string {
@@ -183,6 +232,8 @@ export function defaultOptions(): Options {
     watch: false,
     purge: false,
     dir: process.cwd(),
+    last: false,
+    session: false,
     contentOnly: false,
     json: false,
     timeout: config.defaultTimeout,
@@ -318,6 +369,11 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.watch = true;
     } else if (arg === "--purge") {
       options.purge = true;
+    } else if (arg === "--last") {
+      options.last = true;
+      options.contentOnly = true;
+    } else if (arg === "--session") {
+      options.session = true;
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
@@ -392,7 +448,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.template = argv[++i];
     } else if (arg === "--unset") {
       options.explicit.add("unset");
-    } else if (arg.startsWith("-")) {
+    } else if (arg !== "-" && arg.startsWith("-")) {
+      // Bare "-" is a positional by Unix convention (`run -` = prompt on stdin).
       console.error(`Error: Unknown option: ${arg}`);
       console.error("Run codex-collab --help for usage");
       process.exit(1);
@@ -975,6 +1032,27 @@ export function pluralize(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+/** Codex forwards upstream HTTP errors verbatim as (pretty-printed) JSON
+ *  blobs — e.g. the 400 for `-r minimal` on accounts whose built-in tools
+ *  (image_gen, web_search) require a higher effort. Extract the human
+ *  message; fall back to the raw string for anything unrecognized. */
+export function humanizeTurnError(raw: string): string {
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart === -1) return raw;
+  try {
+    const parsed = JSON.parse(raw.slice(jsonStart)) as {
+      error?: { message?: unknown };
+      message?: unknown;
+      status?: unknown;
+    };
+    const msg = parsed?.error?.message ?? parsed?.message;
+    if (typeof msg === "string" && msg.length > 0) {
+      return typeof parsed.status === "number" ? `${msg} (HTTP ${parsed.status})` : msg;
+    }
+  } catch { /* not JSON — print as-is */ }
+  return raw;
+}
+
 /** Print turn result and return the appropriate exit code. */
 export function printResult(
   result: TurnResult,
@@ -987,8 +1065,15 @@ export function printResult(
   }
 
   if (result.output) console.log(result.output);
-  if (result.error) console.error(`\nError: ${result.error}`);
-  return result.status === "completed" ? 0 : 1;
+  if (result.error) {
+    const msg = humanizeTurnError(result.error);
+    console.error(`\nError: ${msg}`);
+    if (/reasoning\.effort/i.test(msg)) {
+      console.error("Tip: this account's built-in tools need a higher reasoning effort — retry with -r low or higher.");
+    }
+  }
+  if (result.status === "completed") return EXIT_CODES.ok;
+  return result.status === "interrupted" ? EXIT_CODES.interrupted : EXIT_CODES.failed;
 }
 
 /**
@@ -1004,6 +1089,10 @@ export function recordTerminalRunState(
   label: "Turn" | "Review",
   contentOnly: boolean,
 ): number {
+  // Snapshot before the terminal write below clears it: a non-completed end
+  // with an approval still pending is the "healthy turn killed while blocked
+  // on approval" case, and gets its own exit code.
+  const hadPendingApproval = hasPendingApproval(ws.stateDir, runId);
   try {
     updateThreadStatus(ws.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
   } catch (e) {
@@ -1031,7 +1120,18 @@ export function recordTerminalRunState(
     stateSaveFailed = true;
   }
   const printed = printResult(result, label, contentOnly);
-  return stateSaveFailed ? 1 : printed;
+  if (stateSaveFailed) return EXIT_CODES.failed;
+  return printed !== EXIT_CODES.ok && hadPendingApproval ? EXIT_CODES.approvalPending : printed;
+}
+
+/** True iff the run record currently claims a pending approval. Read this
+ *  BEFORE writing a terminal state — terminal writes always clear it. */
+export function hasPendingApproval(stateDir: string, runId: string): boolean {
+  try {
+    return loadRun(stateDir, runId)?.pendingApproval != null;
+  } catch {
+    return false;
+  }
 }
 
 /**

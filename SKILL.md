@@ -23,11 +23,14 @@ codex-collab run --resume <id> "now check the error handling" --content-only
 
 # Specify working directory (omit -d if already in the project dir)
 codex-collab run "investigate the auth module" -d /path/to/project --content-only
+
+# Long or quote-riddled prompt: pass it on stdin with `run -` (no shell-quoting hazards)
+cat prompt.md | codex-collab run - --content-only
 ```
 
 **IMPORTANT — Execution rules for ALL `codex-collab` Bash commands:**
 - Always use `dangerouslyDisableSandbox=true` — the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist.
-- For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: read the completed task's output (the notification includes it or use `Read` on the output file), then present the results to the user.
+- For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: surface the result per Context Efficiency & Result Visibility below.
 - `run --detach` returns in seconds — run it in the **foreground**.
 - `follow` on a live run blocks until that run completes, and `follow --watch` never exits: both are primarily the **user's** view for their own terminal pane — don't run `--watch` yourself. The one agent-facing use: `follow <id>` in background Bash is the completion signal for a detached run (see Detached Runs below). `follow` on an already-finished run is a quick foreground replay.
 - All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
@@ -68,11 +71,12 @@ codex-collab review "Focus on security issues in auth" -d /path/to/project --con
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
-## Context Efficiency
+## Context Efficiency & Result Visibility
 
-- **Use `--content-only`** when reading output — prints only the result text, suppressing progress lines.
-- **`run` and `review` print results on completion** — no separate `output` call needed.
-- **Use `output <id>`** only to re-read the full log for a previously completed thread.
+- **Use `--content-only`** when reading output — result text only, no progress lines.
+- **`run` and `review` print results on completion**; a background task's result lands in its output file.
+- **Read results with Bash, not the Read tool**: `cat` the background output file, or `codex-collab output <id> --last` for a finished thread (`--last`: latest turn only). Bash output appears in the transcript where the user sees it; Read-tool content stays in your context and never reaches them.
+- **Then add only synthesis** — the result is already on screen, so repeat nothing: say what you verified, where you disagree, what you'd add.
 
 ## Resuming Threads
 
@@ -80,7 +84,7 @@ When consecutive tasks relate to the same project, resume the existing thread. C
 
 **If the user asks to continue or follow up on a prior task but you don't have the thread ID in context**, follow this discovery flow:
 
-1. `codex-collab threads --discover` — see top 5 recent threads (server + local).
+1. `codex-collab threads --discover` — see top 5 recent threads (server + local). If the thread was started earlier in this session, `codex-collab threads --session` narrows the list to exactly those.
 2. If unsure which thread is right, `codex-collab peek <id>` to see the last exchange of a candidate.
 3. For very long threads where peek alone isn't enough, spawn a subagent with `codex-collab peek <id> --limit 100 --full` and ask it to summarize. This keeps the firehose out of your own context.
 4. `codex-collab run --resume <id> "..."` to continue.
@@ -102,7 +106,7 @@ If you've lost track of the thread ID, use `codex-collab threads` to find active
 
 ## Detached Runs and Following
 
-**When to detach:** default to background `run` — it survives your turn ending and gives you a completion notification for free. Reach for `--detach` in exactly two situations: (1) the turn must outlive this Claude session — background tasks are killed when the session exits or restarts, which interrupts an in-flight turn, while a detached run keeps going and its result is retrievable later with `output <id>`; (2) the user is driving from their own terminal and wants the turn independent of that shell. Don't detach routine tasks: you lose the automatic completion notification (see below for how to get it back).
+**When to detach:** default to background `run` — it survives your turn ending and gives you a completion notification for free. Reach for `--detach` in exactly two situations: (1) the turn must outlive this Claude session — background tasks are killed when the session exits or restarts, which interrupts an in-flight turn, while a detached run keeps going and its result is retrievable later with `output <id> --last`; (2) the user is driving from their own terminal and wants the turn independent of that shell. Don't detach routine tasks: you lose the automatic completion notification (see below for how to get it back).
 
 `run --detach` hands the turn to a detached runner and returns as soon as the turn is actually running — the turn's lifetime is decoupled from the invoking shell, so nothing kills it if the shell or session goes away:
 
@@ -166,9 +170,10 @@ codex-collab decline <approval-id>
 Usage examples for `run`, `review`, `--detach`, and `follow` live in their sections above; this is the remaining command surface:
 
 ```bash
-codex-collab output <id>                # Full log for thread
+codex-collab output <id> [--last]       # Full log for thread (--last: only the latest turn's output)
 codex-collab progress <id>              # Recent activity (tail of log)
 codex-collab threads [--all|--discover] # List threads (--discover: include server-side, top 5)
+codex-collab threads --session          # Only threads the current session has run
 codex-collab peek <id> [--limit N --full] # Recent conversation slice from server
 codex-collab kill <id>                  # Stop a running thread
 codex-collab delete <id>                # Archive thread (recoverable via `codex unarchive`), delete local files
@@ -204,8 +209,15 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `--full` | Include all item types in peek output (default shows messages only) |
 | `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
 | `--content-only` | Print only result text (no progress lines) |
+| `--last` | (output) Only the latest turn's output, not the whole thread history (implies `--content-only`) |
+| `--session` | (threads) Only threads the current session has run |
 | `--limit <n>` | Limit items shown |
 | `--` | End of options; remaining arguments are treated as prompt text |
+| `-` | (run) Read the prompt from stdin — for long or quote-riddled prompts |
+
+### Exit codes (run, review)
+
+`0` completed · `1` failed · `3` timed out · `4` interrupted (kill) · `5` died blocked on an approval — the request is void, so don't try to answer it; resume with a longer `--timeout` or `--approval auto` · `6` broker busy and fallback unavailable — transient, retry. For backgrounded runs, branch on the exit code instead of text-sniffing the output.
 
 ## Templates
 
