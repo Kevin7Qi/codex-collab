@@ -82,17 +82,31 @@ export function pickDefaultRun(stateDir: string, pidsDir: string): RunRecord | n
   return live ?? runs[0] ?? null;
 }
 
+/** True iff run `a` comes after run `b` (startedAt, runId tiebreak). */
+function laterThan(a: RunRecord, b: RunRecord): boolean {
+  if (a.startedAt !== b.startedAt) return a.startedAt > b.startedAt;
+  return a.runId > b.runId;
+}
+
 /**
  * Where this run's section of the shared thread log ends: the smallest
  * logOffset of any LATER run on the same thread, or null (unbounded — this
  * run owns the log's tail). Runs on one thread append to one log file, so a
  * replay that read to EOF would swallow the next run's entries and the
- * watch loop would then render them a second time. Exported for tests.
+ * watch loop would then render them a second time.
+ *
+ * "Later" must include runs at the SAME offset: a run that dies before
+ * writing any log bytes leaves the next run starting at the identical
+ * offset, and the empty run's replay must be zero-length, not the tail.
+ * Exported for tests.
  */
 export function replayBound(stateDir: string, run: RunRecord): number | null {
   let bound: number | null = null;
   for (const r of listRunsForThread(stateDir, run.shortId)) {
-    if (r.runId !== run.runId && r.logOffset > run.logOffset && (bound === null || r.logOffset < bound)) {
+    if (r.runId === run.runId) continue;
+    const later = r.logOffset > run.logOffset
+      || (r.logOffset === run.logOffset && laterThan(r, run));
+    if (later && (bound === null || r.logOffset < bound)) {
       bound = r.logOffset;
     }
   }
@@ -132,7 +146,8 @@ async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptio
   // Same resolution as `output`: prefer the workspace log, fall back to the
   // run record's logFile for migrated runs whose log lives elsewhere.
   const logPath = resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId);
-  let bound = replayBound(ws.stateDir, run);
+  // Computed fresh before every read (loop top and finish) — see below.
+  let bound: number | null = null;
 
   const started = new Date(run.startedAt).getTime();
   const age = Number.isFinite(started) ? formatAge(Math.round(started / 1000)) : "unknown time";
@@ -179,15 +194,18 @@ async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptio
   }
 
   while (true) {
+    // Refresh the bound BEFORE reading, never after: a follow-up run
+    // registers its record (fixing its logOffset) before it writes its
+    // first log byte, so a read clamped to a just-computed bound can never
+    // consume the next run's section — a bound carried over from the
+    // previous iteration could be stale by one 300ms sleep.
+    bound = replayBound(ws.stateDir, run);
     const next = readNewBytes(logPath, offset, bound);
     offset = next.offset;
     show(next.bytes);
 
     const rec = loadRun(ws.stateDir, run.runId) ?? run;
     if (rec.status !== "running") return finish(rec);
-    // A follow-up run on this thread may register mid-follow; refresh the
-    // bound so the live tail never crosses into its section.
-    bound = replayBound(ws.stateDir, run);
 
     // Run says running but its runner process is gone: don't sit forever on
     // a log that will never terminate. (A missing PID file reads as alive —

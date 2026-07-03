@@ -125,3 +125,20 @@ describe("replayBound (shared thread log)", () => {
     expect(replayBound(stateDir, mine)).toBeNull();
   });
 });
+
+describe("replayBound: zero-byte runs (equal logOffset)", () => {
+  test("a run that wrote nothing is bounded at its own offset by the next run", () => {
+    const { stateDir } = freshDirs("replay-bound-empty");
+    // r-empty died before the dispatcher wrote any bytes; r-next starts at
+    // the identical offset. r-empty's replay must be zero-length — not the
+    // log tail, which would render r-next's content twice.
+    const rEmpty = { ...record("r-empty", "abcd7001", "failed", "2026-07-03T10:00:00.000Z"), logOffset: 500 };
+    const rNext = { ...record("r-next", "abcd7001", "completed", "2026-07-03T11:00:00.000Z"), logOffset: 500 };
+    createRun(stateDir, rEmpty);
+    createRun(stateDir, rNext);
+
+    const { replayBound } = require("./follow") as typeof import("./follow");
+    expect(replayBound(stateDir, rEmpty)).toBe(500);
+    expect(replayBound(stateDir, rNext)).toBeNull(); // the later run owns the tail
+  });
+});
