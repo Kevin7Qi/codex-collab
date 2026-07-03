@@ -187,3 +187,36 @@ describe("pickWatchStartRun (start order with multiple live runs)", () => {
     expect(pickWatchStartRun(stateDir, pidsDir)?.runId).toBe("r-2");
   });
 });
+
+describe("orphaned run records (deleted threads)", () => {
+  test("bare-follow pickers skip runs whose thread is gone from the index", () => {
+    const { stateDir, pidsDir } = freshDirs("orphan-runs");
+    const threadsFile = join(stateDir, "threads.json");
+    // Thread index knows only 'kept1111'; 'gone2222' was deleted but its
+    // stale running record survived (pre-fix delete) with no PID file —
+    // which reads as "alive" and would hang a bare follow forever.
+    writeFileSync(threadsFile, JSON.stringify({
+      kept1111: { threadId: "t-kept", createdAt: "2026-07-03T09:00:00.000Z" },
+    }));
+    createRun(stateDir, record("r-kept", "kept1111", "completed", "2026-07-03T09:00:00.000Z"));
+    createRun(stateDir, record("r-orphan", "gone2222", "running", "2026-07-03T10:00:00.000Z"));
+
+    const { pickDefaultRun, pickWatchStartRun, nextUnseenRun } = require("./follow") as typeof import("./follow");
+    expect(pickDefaultRun(stateDir, pidsDir, threadsFile)?.runId).toBe("r-kept");
+    expect(pickWatchStartRun(stateDir, pidsDir, threadsFile)?.runId).toBe("r-kept");
+    expect(nextUnseenRun(stateDir, new Set(), null, threadsFile)?.runId).toBe("r-kept");
+  });
+});
+
+describe("delete removes the thread's run records", () => {
+  test("removeRunsForThread clears only that thread's records", () => {
+    const { stateDir } = freshDirs("delete-runs");
+    createRun(stateDir, record("r-a1", "aaaa4001", "completed", "2026-07-03T09:00:00.000Z"));
+    createRun(stateDir, record("r-a2", "aaaa4001", "running", "2026-07-03T10:00:00.000Z"));
+    createRun(stateDir, record("r-b1", "bbbb4001", "completed", "2026-07-03T11:00:00.000Z"));
+
+    const { removeRunsForThread, listRuns } = require("../threads") as typeof import("../threads");
+    removeRunsForThread(stateDir, "aaaa4001");
+    expect(listRuns(stateDir).map(r => r.runId)).toEqual(["r-b1"]);
+  });
+});

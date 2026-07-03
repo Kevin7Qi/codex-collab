@@ -17,6 +17,7 @@ import {
   listRuns,
   listRunsForThread,
   loadRun,
+  loadThreadMapping,
 } from "../threads";
 import { resolveReadableLogPath } from "./threads";
 import { LogEntryParser, renderEntry, renderFinalStatus, type RenderOptions } from "../render";
@@ -71,13 +72,27 @@ function readNewBytes(logPath: string, offset: number, maxOffset: number | null 
 }
 
 /**
- * Pick the run a bare `follow` should attach to: the newest run that is both
- * marked running AND whose runner process is alive (a stale `running` record
- * from a crash shouldn't shadow real work), else the newest run overall
- * (replay). Exported for tests.
+ * Candidate runs for bare-follow selection, newest first. Run records whose
+ * thread is no longer in the index are excluded: `delete` now removes them,
+ * but records orphaned by older versions would otherwise attach follow to a
+ * thread with no mapping, no log, and no PID file — a stale `running` orphan
+ * reads as alive (missing PID file = alive) and would hang the tail forever.
  */
-export function pickDefaultRun(stateDir: string, pidsDir: string): RunRecord | null {
+function candidateRuns(stateDir: string, threadsFile: string | undefined): RunRecord[] {
   const runs = listRuns(stateDir); // newest first
+  if (!threadsFile) return runs;
+  const mapping = loadThreadMapping(threadsFile);
+  return runs.filter(r => Object.hasOwn(mapping, r.shortId));
+}
+
+/**
+ * Pick the run a one-shot bare `follow` attaches to: the newest run that is
+ * both marked running AND whose runner process is alive (a stale `running`
+ * record from a crash shouldn't shadow real work), else the newest run
+ * overall (replay). Exported for tests.
+ */
+export function pickDefaultRun(stateDir: string, pidsDir: string, threadsFile?: string): RunRecord | null {
+  const runs = candidateRuns(stateDir, threadsFile);
   const live = runs.find(r => r.status === "running" && isThreadProcessAlive(pidsDir, r.shortId));
   return live ?? runs[0] ?? null;
 }
@@ -89,8 +104,8 @@ export function pickDefaultRun(stateDir: string, pidsDir: string): RunRecord | n
  * newer one finished. Falls back to the newest run overall for a replay.
  * Exported for tests.
  */
-export function pickWatchStartRun(stateDir: string, pidsDir: string): RunRecord | null {
-  const runs = listRuns(stateDir); // newest first
+export function pickWatchStartRun(stateDir: string, pidsDir: string, threadsFile?: string): RunRecord | null {
+  const runs = candidateRuns(stateDir, threadsFile);
   for (let i = runs.length - 1; i >= 0; i--) {
     if (runs[i].status === "running" && isThreadProcessAlive(pidsDir, runs[i].shortId)) {
       return runs[i];
@@ -142,8 +157,11 @@ export function nextUnseenRun(
   stateDir: string,
   seen: ReadonlySet<string>,
   scopedShortId: string | null,
+  threadsFile?: string,
 ): RunRecord | null {
-  const runs = scopedShortId ? listRunsForThread(stateDir, scopedShortId) : listRuns(stateDir);
+  const runs = scopedShortId
+    ? listRunsForThread(stateDir, scopedShortId)
+    : candidateRuns(stateDir, threadsFile);
   for (let i = runs.length - 1; i >= 0; i--) {
     if (!seen.has(runs[i].runId)) return runs[i]; // newest-first list → walk backwards
   }
@@ -278,8 +296,8 @@ export async function handleFollow(args: string[]): Promise<void> {
     // Watch mode displays runs in start order, so it starts from the OLDEST
     // live run; a one-shot follow attaches to the newest (most relevant) one.
     run = options.watch
-      ? pickWatchStartRun(ws.stateDir, ws.pidsDir)
-      : pickDefaultRun(ws.stateDir, ws.pidsDir);
+      ? pickWatchStartRun(ws.stateDir, ws.pidsDir, ws.threadsFile)
+      : pickDefaultRun(ws.stateDir, ws.pidsDir, ws.threadsFile);
     if (!run && !options.watch) {
       die("No runs in this workspace yet.\nUsage: codex-collab follow [id] [--watch]");
     }
@@ -312,7 +330,7 @@ export async function handleFollow(args: string[]): Promise<void> {
       console.log("");
       hadRun = true;
     }
-    run = nextUnseenRun(ws.stateDir, seen, scopedShortId);
+    run = nextUnseenRun(ws.stateDir, seen, scopedShortId, ws.threadsFile);
     if (!run) {
       console.log(renderDim(
         hadRun ? "⏳ waiting for the next run… (Ctrl-C to stop)" : "⏳ waiting for the first run… (Ctrl-C to stop)",
@@ -320,7 +338,7 @@ export async function handleFollow(args: string[]): Promise<void> {
       ));
       do {
         await sleep(POLL_INTERVAL_MS);
-        run = nextUnseenRun(ws.stateDir, seen, scopedShortId);
+        run = nextUnseenRun(ws.stateDir, seen, scopedShortId, ws.threadsFile);
       } while (!run);
     }
   }

@@ -9,6 +9,7 @@ import {
   withThreadLock,
   removeLegacyGlobalThread,
   getLatestRun,
+  removeRunsForThread,
 } from "../threads";
 import { resolveWorkspaceDir } from "../config";
 import type { AppServerClient } from "../client";
@@ -373,6 +374,9 @@ export async function handleDelete(args: string[]): Promise<void> {
     const logPath = join(ws.logsDir, `${shortId}.log`);
     if (existsSync(logPath)) unlinkSync(logPath);
     removeThread(ws.threadsFile, shortId);
+    // Run records must go with the thread: a stale `running` record whose
+    // PID file is gone reads as alive and would make bare `follow` hang.
+    removeRunsForThread(ws.stateDir, shortId);
     try {
       removeLegacyGlobalThread(options.dir, threadId);
     } catch (e) {

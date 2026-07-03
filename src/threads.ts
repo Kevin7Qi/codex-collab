@@ -326,6 +326,22 @@ export function getLatestRun(stateDir: string, shortId: string): RunRecord | nul
   return runs.length > 0 ? runs[0] : null;
 }
 
+/** Remove all run records for a thread. Called by `delete` so the ledger
+ *  can't hold orphaned records for a thread whose mapping, log, and PID
+ *  file are gone — bare `follow` selects from run records and would
+ *  otherwise attach to (or hang on) a deleted thread's stale run. */
+export function removeRunsForThread(stateDir: string, shortId: string): void {
+  for (const r of listRunsForThread(stateDir, shortId)) {
+    try {
+      unlinkSync(runFilePath(stateDir, r.runId));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`[codex] Warning: could not remove run record ${r.runId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+}
+
 export function pruneRuns(stateDir: string, maxRuns?: number): void {
   const limit = maxRuns ?? config.maxRunsPerWorkspace;
   const dir = runsDir(stateDir);
