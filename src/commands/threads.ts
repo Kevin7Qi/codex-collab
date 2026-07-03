@@ -10,7 +10,9 @@ import {
   removeLegacyGlobalThread,
   getLatestRun,
   removeRunsForThread,
+  listRuns,
 } from "../threads";
+import { getCurrentSessionId } from "../broker";
 import { resolveWorkspaceDir } from "../config";
 import type { AppServerClient } from "../client";
 import type { Thread } from "../types";
@@ -160,6 +162,17 @@ export async function handleThreads(args: string[]): Promise<void> {
       e.lastStatus = "interrupted";
       removePidFile(ws.pidsDir, e.shortId);
     }
+  }
+
+  // --session: only threads this session has run. Membership comes from the
+  // run ledger — every invocation records its sessionId — so resumed threads
+  // count, not just ones this session created.
+  if (options.session) {
+    const sessionId = getCurrentSessionId(ws.stateDir);
+    const sessionThreads = sessionId
+      ? new Set(listRuns(ws.stateDir, { sessionId }).map((r) => r.threadId))
+      : new Set<string>();
+    entries = entries.filter((e) => sessionThreads.has(e.threadId));
   }
 
   const displayLimit = applyDiscoverLimit(options);

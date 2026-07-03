@@ -107,6 +107,8 @@ export interface Options {
   purge: boolean;
   /** output: print only the latest turn's agent output (implies contentOnly). */
   last: boolean;
+  /** threads: only threads the current session has run. */
+  session: boolean;
   dir: string;
   contentOnly: boolean;
   json: boolean;
@@ -228,6 +230,7 @@ export function defaultOptions(): Options {
     purge: false,
     dir: process.cwd(),
     last: false,
+    session: false,
     contentOnly: false,
     json: false,
     timeout: config.defaultTimeout,
@@ -366,6 +369,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
     } else if (arg === "--last") {
       options.last = true;
       options.contentOnly = true;
+    } else if (arg === "--session") {
+      options.session = true;
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {

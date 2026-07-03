@@ -101,7 +101,8 @@ Commands:
   run --resume <id> "p"   Resume existing thread with new prompt
   review [opts]           Run code review (PR-style by default)
   review "instructions"   Custom review with specific focus
-  threads [--json] [--all] List threads (--limit <n>, --discover)
+  threads [--json] [--all] List threads (--limit <n>, --discover,
+                          --session: only threads this session has run)
   kill <id>               Stop a running thread
   follow [id] [--watch]   Live view of a running thread; exits on completion
                           (no id: attach to the workspace's active run,
@@ -212,6 +213,7 @@ const BOOLEAN_FLAGS = new Set([
   "-w", "--watch",
   "--purge",
   "--last",
+  "--session",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {
