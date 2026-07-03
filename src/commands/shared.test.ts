@@ -1851,3 +1851,24 @@ describe("output --last", () => {
     expect(options.contentOnly).toBe(true);
   });
 });
+
+describe("humanizeTurnError", () => {
+  const { humanizeTurnError } = require("./shared") as typeof import("./shared");
+
+  test("extracts the message from a forwarded upstream JSON error", () => {
+    const raw = `{\n  "type": "error",\n  "error": {\n    "type": "invalid_request_error",\n    "message": "The following tools cannot be used with reasoning.effort 'minimal': image_gen, web_search.",\n    "param": "tools"\n  },\n  "status": 400\n}`;
+    expect(humanizeTurnError(raw)).toBe(
+      "The following tools cannot be used with reasoning.effort 'minimal': image_gen, web_search. (HTTP 400)",
+    );
+  });
+
+  test("handles a prefixed blob and flat message shape", () => {
+    expect(humanizeTurnError('bad request: {"message": "nope", "status": 429}')).toBe("nope (HTTP 429)");
+  });
+
+  test("passes plain strings and non-conforming JSON through unchanged", () => {
+    expect(humanizeTurnError("Turn timed out after 60s")).toBe("Turn timed out after 60s");
+    expect(humanizeTurnError('{"code": 1}')).toBe('{"code": 1}');
+    expect(humanizeTurnError("{not json")).toBe("{not json");
+  });
+});

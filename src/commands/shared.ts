@@ -1023,6 +1023,27 @@ export function pluralize(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+/** Codex forwards upstream HTTP errors verbatim as (pretty-printed) JSON
+ *  blobs — e.g. the 400 for `-r minimal` on accounts whose built-in tools
+ *  (image_gen, web_search) require a higher effort. Extract the human
+ *  message; fall back to the raw string for anything unrecognized. */
+export function humanizeTurnError(raw: string): string {
+  const jsonStart = raw.indexOf("{");
+  if (jsonStart === -1) return raw;
+  try {
+    const parsed = JSON.parse(raw.slice(jsonStart)) as {
+      error?: { message?: unknown };
+      message?: unknown;
+      status?: unknown;
+    };
+    const msg = parsed?.error?.message ?? parsed?.message;
+    if (typeof msg === "string" && msg.length > 0) {
+      return typeof parsed.status === "number" ? `${msg} (HTTP ${parsed.status})` : msg;
+    }
+  } catch { /* not JSON — print as-is */ }
+  return raw;
+}
+
 /** Print turn result and return the appropriate exit code. */
 export function printResult(
   result: TurnResult,
@@ -1035,7 +1056,13 @@ export function printResult(
   }
 
   if (result.output) console.log(result.output);
-  if (result.error) console.error(`\nError: ${result.error}`);
+  if (result.error) {
+    const msg = humanizeTurnError(result.error);
+    console.error(`\nError: ${msg}`);
+    if (/reasoning\.effort/i.test(msg)) {
+      console.error("Tip: this account's built-in tools need a higher reasoning effort — retry with -r low or higher.");
+    }
+  }
   if (result.status === "completed") return EXIT_CODES.ok;
   return result.status === "interrupted" ? EXIT_CODES.interrupted : EXIT_CODES.failed;
 }
