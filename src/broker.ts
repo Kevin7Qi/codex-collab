@@ -277,11 +277,18 @@ export function teardownBroker(stateDir: string, state: BrokerState): void {
 // ─── Session ID helper ────────────────────────────────────────────────────
 
 /**
- * Get the current session ID.
- * Checks `CODEX_COLLAB_SESSION_ID` env var first, then reads from `session.json`.
+ * Get the current session ID. Precedence:
+ * 1. `CODEX_COLLAB_SESSION_ID` — explicit override.
+ * 2. `CLAUDE_CODE_SESSION_ID` — the calling agent conversation. Stable for
+ *    the conversation's whole life and distinct across concurrent
+ *    conversations, so run records and `threads --session` agree on what
+ *    "this session" means.
+ * 3. `session.json` — the broker session, reused only within the idle-timeout
+ *    window measured from session START (a long working session rotates
+ *    through several). Approximates "recent work" for bare terminal use.
  */
 export function getCurrentSessionId(stateDir: string): string | null {
-  const envId = process.env.CODEX_COLLAB_SESSION_ID;
+  const envId = process.env.CODEX_COLLAB_SESSION_ID ?? process.env.CLAUDE_CODE_SESSION_ID;
   if (envId) return envId;
 
   const session = loadSessionState(stateDir);
