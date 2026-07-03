@@ -217,7 +217,7 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 
 ### Exit codes (run, review)
 
-`0` completed · `1` failed · `3` timed out · `4` interrupted (kill) · `5` ended with an approval still pending — answer it, then resume · `6` broker busy and fallback unavailable — transient, retry. For backgrounded runs, branch on the exit code instead of text-sniffing the output.
+`0` completed · `1` failed · `3` timed out · `4` interrupted (kill) · `5` died blocked on an approval — the request is void, so don't try to answer it; resume with a longer `--timeout` or `--approval auto` · `6` broker busy and fallback unavailable — transient, retry. For backgrounded runs, branch on the exit code instead of text-sniffing the output.
 
 ## Templates
 

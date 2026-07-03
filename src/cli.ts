@@ -156,7 +156,8 @@ Options:
 Exit codes (run, review):
   0  turn completed        3  turn timed out (--timeout; resume with --resume <id>)
   1  turn/command failed   4  turn interrupted (kill)
-                           5  ended with an approval still pending (answer it, then resume)
+                           5  died blocked on an approval (request now void —
+                              resume with a longer --timeout or --approval auto)
                            6  broker busy and fallback unavailable (transient; retry)
 
 Examples:

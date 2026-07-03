@@ -15,7 +15,7 @@ import {
 import { getCurrentSessionId } from "../broker";
 import { resolveWorkspaceDir } from "../config";
 import type { AppServerClient } from "../client";
-import type { Thread } from "../types";
+import type { Thread, RunRecord } from "../types";
 import {
   existsSync,
   readFileSync,
@@ -252,15 +252,19 @@ export function resolveReadableLogPath(
   return wsLog; // let the caller's existing not-found handling fire
 }
 
-/** Resolve a positional ID arg to a log file path, or die with an error. */
-function resolveLogPath(positional: string[], usage: string, ws: ReturnType<typeof getWorkspacePaths>): string {
+/** Resolve a positional ID arg to a log file path (and shortId), or die. */
+function resolveLogPath(
+  positional: string[],
+  usage: string,
+  ws: ReturnType<typeof getWorkspacePaths>,
+): { logPath: string; shortId: string } {
   const id = positional[0];
   if (!id) die(usage);
   validateIdOrDie(id);
   const threadId = resolveThreadIdOrDie(ws.threadsFile, id);
   const shortId = findShortId(ws.threadsFile, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
-  return resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId);
+  return { logPath: resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId), shortId };
 }
 
 /** Extract agent output blocks from a thread log, one string per turn.
@@ -290,18 +294,62 @@ export function extractAgentOutputBlocks(content: string): string[] {
   return blocks;
 }
 
+/** What `output --last` should print for a thread. Anchored to the latest
+ *  RunRecord — the newest *log block* would silently replay an older turn's
+ *  answer whenever the latest run hasn't produced output (still running,
+ *  failed before any agent message, …). The log-block fallback is only for
+ *  threads with no ledger records (pre-ledger history). Exported for tests. */
+export type LastOutput =
+  | { kind: "output"; text: string; note: string | null }
+  | { kind: "none"; reason: string; running: boolean };
+
+export function pickLastOutput(rec: RunRecord | null, logContent: string): LastOutput {
+  if (rec) {
+    if (rec.status === "running") {
+      return { kind: "none", reason: "Run still in progress — no final output yet", running: true };
+    }
+    if (rec.output) {
+      const note = rec.status === "completed"
+        ? null
+        : `latest run ${rec.status}${rec.error ? ` (${rec.error})` : ""} — output may be partial`;
+      return { kind: "output", text: rec.output, note };
+    }
+    return {
+      kind: "none",
+      reason: `The latest run produced no output (status: ${rec.status}${rec.error ? `: ${rec.error}` : ""})`,
+      running: false,
+    };
+  }
+  const blocks = extractAgentOutputBlocks(logContent);
+  if (blocks.length === 0) {
+    return { kind: "none", reason: "No agent output in the thread log", running: false };
+  }
+  return { kind: "output", text: blocks[blocks.length - 1], note: null };
+}
+
 export async function handleOutput(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
   const ws = getWorkspacePaths(options.dir);
-  const logPath = resolveLogPath(positional, "Usage: codex-collab output <id>", ws);
-  if (!existsSync(logPath)) die(`No log file for thread`);
-  const content = readFileSync(logPath, "utf-8");
+  const { logPath, shortId } = resolveLogPath(positional, "Usage: codex-collab output <id>", ws);
+  // The log may not exist yet for a just-started run — for --last the run
+  // record is authoritative, so only the log-reading modes require the file.
+  const content = existsSync(logPath) ? readFileSync(logPath, "utf-8") : null;
+  if (options.last) {
+    const res = pickLastOutput(getLatestRun(ws.stateDir, shortId), content ?? "");
+    if (res.kind === "none") {
+      const hint = res.running
+        ? `Watch it: codex-collab follow ${shortId}`
+        : `Full history: codex-collab output ${shortId}`;
+      die(`${res.reason}\n${hint}`);
+    }
+    if (res.note) console.error(`[codex] Note: ${res.note}`);
+    console.log(res.text);
+    return;
+  }
+  if (content === null) die(`No log file for thread`);
   if (options.contentOnly) {
-    // A thread log accumulates every turn; --last trims to the newest block
-    // so the current result can be surfaced without replaying the history.
     const blocks = extractAgentOutputBlocks(content);
-    const selected = options.last ? blocks.slice(-1) : blocks;
-    for (const block of selected) console.log(block);
+    for (const block of blocks) console.log(block);
   } else {
     console.log(content);
   }
@@ -314,7 +362,7 @@ export async function handleOutput(args: string[]): Promise<void> {
 export async function handleProgress(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
   const ws = getWorkspacePaths(options.dir);
-  const logPath = resolveLogPath(positional, "Usage: codex-collab progress <id>", ws);
+  const { logPath } = resolveLogPath(positional, "Usage: codex-collab progress <id>", ws);
   if (!existsSync(logPath)) {
     console.log("No activity yet.");
     return;

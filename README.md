@@ -162,7 +162,7 @@ codex-collab follow --watch
 | `--` | End of options; remaining arguments are treated as prompt text |
 | `-` | (run) Read the prompt from stdin |
 
-`run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` ended with an approval still pending, `6` broker busy (transient — retry).
+`run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` died blocked on an approval (the request is void — resume with a longer `--timeout` or `--approval auto`), `6` broker busy (transient — retry).
 
 </details>
 

@@ -161,8 +161,11 @@ export const EXIT_CODES = {
   timeout: 3,
   /** Turn interrupted (`codex-collab kill` or server-side interrupt). */
   interrupted: 4,
-  /** Turn ended while an approval request was still pending — answer it
-   *  (approve/decline) and resume, or rerun with a longer --timeout. */
+  /** Turn died while blocked on an approval request. The request itself is
+   *  void by the time this code is observed (the turn was interrupted and
+   *  the handler's cleanup removed the request file) — the remedy is to
+   *  resume with a longer --timeout, answer faster, or use --approval auto,
+   *  NOT to answer the now-dead request. */
   approvalPending: 5,
   /** Broker stream owned by another invocation and the direct-connection
    *  fallback did not absorb it — transient, safe to retry. */
