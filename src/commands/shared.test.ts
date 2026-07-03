@@ -1716,3 +1716,24 @@ describe("delete --purge", () => {
     expect(await tryServerDelete(clientFor(async () => { throw new Error("connection lost"); }), "t1")).toBe("failed");
   });
 });
+
+describe("killDetachedRunner", () => {
+  test("terminates a detached process group", async () => {
+    if (process.platform === "win32") return; // group-kill semantics differ; taskkill path exercised in CI on Windows runs
+    const { spawn } = await import("node:child_process");
+    const child = spawn("sleep", ["60"], { detached: true, stdio: "ignore" });
+    child.unref();
+    const pid = child.pid!;
+
+    const { killDetachedRunner } = require("./run") as typeof import("./run");
+    killDetachedRunner(pid);
+
+    // SIGTERM delivery is async — poll briefly for the process to vanish
+    let alive = true;
+    for (let i = 0; i < 50 && alive; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      try { process.kill(pid, 0); } catch { alive = false; }
+    }
+    expect(alive).toBe(false);
+  });
+});

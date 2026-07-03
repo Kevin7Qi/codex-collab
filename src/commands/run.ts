@@ -1,6 +1,6 @@
 // src/commands/run.ts — run command handler
 
-import { spawn as childSpawn } from "node:child_process";
+import { spawn as childSpawn, spawnSync } from "node:child_process";
 import { openSync, closeSync, readFileSync } from "fs";
 import { join } from "path";
 import { updateThreadStatus, generateRunId, loadRun, updateRun } from "../threads";
@@ -39,6 +39,21 @@ const DETACH_HANDSHAKE_TIMEOUT_MS = 60_000;
  *  The broker-busy fallback records a transient failure, reconnects
  *  directly, and re-creates the same record — don't report the transient. */
 const DETACH_FAILED_GRACE_MS = 10_000;
+
+/** Terminate a detached runner and everything it spawned. `detached: true`
+ *  gave the child its own process group (pgid = pid), so a group signal
+ *  reaches its direct-connection app-server too; the shared broker lives in
+ *  a separate group and is untouched. The child's SIGTERM handler interrupts
+ *  an in-flight turn and records the run cancelled. Exported for tests. */
+export function killDetachedRunner(pid: number): void {
+  try {
+    if (process.platform === "win32") {
+      spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", timeout: 5000, windowsHide: true });
+    } else {
+      process.kill(-pid, "SIGTERM");
+    }
+  } catch { /* already gone */ }
+}
 
 /** Remove the --detach flag (both `--detach` and `--detach=x` spellings —
  *  the latter would make the child re-enter detachRun forever) from the args
@@ -144,7 +159,12 @@ async function detachRun(args: string[], options: ReturnType<typeof parseOptions
     await new Promise((r) => setTimeout(r, 200));
   }
 
-  dieWithRunnerOutput(`Detached runner did not start a turn within ${DETACH_HANDSHAKE_TIMEOUT_MS / 1000}s.`);
+  // Reporting failure while leaving the runner alive would let the turn
+  // execute (and modify the workspace) after the user was told it failed.
+  // A slow-but-healthy runner is indistinguishable from a stuck one here,
+  // so terminate it — its SIGTERM handler records the run as cancelled.
+  if (!childExited && proc.pid) killDetachedRunner(proc.pid);
+  dieWithRunnerOutput(`Detached runner did not start a turn within ${DETACH_HANDSHAKE_TIMEOUT_MS / 1000}s — terminated it.`);
 }
 
 export async function handleRun(args: string[]): Promise<void> {
