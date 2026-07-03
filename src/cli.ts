@@ -17,6 +17,7 @@ import {
   shuttingDown,
   setShuttingDown,
   removePidFile,
+  exitCodeForError,
   VALID_REVIEW_MODES,
 } from "./commands/shared";
 
@@ -105,7 +106,8 @@ Commands:
                           (no id: attach to the workspace's active run,
                           or replay the most recent one; --watch: keep the
                           pane open and pick up each new run automatically)
-  output <id>             Read full log for thread
+  output <id> [--last]    Read full log for thread (--last: only the latest
+                          turn's output; implies --content-only)
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server
   config [key] [value]    Show or set persistent defaults
@@ -148,6 +150,12 @@ Options:
   --discover              Merge server-side threads into the local list (threads)
   --                      End of options; remaining args are prompt text
   -v, --version           Print version and exit (before the command only)
+
+Exit codes (run, review):
+  0  turn completed        3  turn timed out (--timeout; resume with --resume <id>)
+  1  turn/command failed   4  turn interrupted (kill)
+                           5  ended with an approval still pending (answer it, then resume)
+                           6  broker busy and fallback unavailable (transient; retry)
 
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
@@ -201,6 +209,7 @@ const BOOLEAN_FLAGS = new Set([
   "--detach",
   "-w", "--watch",
   "--purge",
+  "--last",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {
@@ -333,5 +342,5 @@ main().catch((e) => {
   if (msg.includes("timed out")) {
     console.error("Tip: Resume with --resume <id> or increase --timeout");
   }
-  process.exit(1);
+  process.exit(exitCodeForError(e));
 });

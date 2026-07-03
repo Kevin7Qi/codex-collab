@@ -20,6 +20,9 @@ import {
   turnOverrides,
   recordTerminalRunState,
   recordRunFailure,
+  hasPendingApproval,
+  tagExitCode,
+  EXIT_CODES,
   progress,
   writePidFile,
   removePidFile,
@@ -265,6 +268,13 @@ export async function handleRun(args: string[]): Promise<void> {
       // again and is recorded; if the process dies in between, the record
       // parks in "starting" where the detach parent and pruneRuns handle it.
       if (!isBrokerBusyError(e)) {
+        // Snapshot before recordRunFailure clears it: a turn that died with
+        // an approval still pending (classically: --timeout while blocked on
+        // approval) exits with its own code so callers know to answer the
+        // approval rather than treat this as a turn failure.
+        if (hasPendingApproval(ws.stateDir, runId)) {
+          tagExitCode(e, EXIT_CODES.approvalPending);
+        }
         recordRunFailure(ws, threadId, runId, e);
       }
       throw e;

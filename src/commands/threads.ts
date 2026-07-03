@@ -250,6 +250,33 @@ function resolveLogPath(positional: string[], usage: string, ws: ReturnType<type
   return resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId);
 }
 
+/** Extract agent output blocks from a thread log, one string per turn.
+ *  Log format: "<ISO-timestamp> agent output:\n<content>\n<<END_AGENT_OUTPUT>>"
+ *  Using an explicit end marker avoids false positives when model output
+ *  contains timestamps. Exported for tests. */
+export function extractAgentOutputBlocks(content: string): string[] {
+  const tsPrefix = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
+  const blocks: string[] = [];
+  let current: string[] | null = null;
+  for (const line of content.split("\n")) {
+    if (line === "<<END_AGENT_OUTPUT>>") {
+      if (current) blocks.push(current.join("\n"));
+      current = null;
+      continue;
+    }
+    if (tsPrefix.test(line)) {
+      // A new timestamped entry ends any open block (crash-truncated logs
+      // can lack the end marker) — keep what was captured.
+      if (current) blocks.push(current.join("\n"));
+      current = line.includes(" agent output:") ? [] : null;
+      continue;
+    }
+    if (current) current.push(line);
+  }
+  if (current) blocks.push(current.join("\n"));
+  return blocks;
+}
+
 export async function handleOutput(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
   const ws = getWorkspacePaths(options.dir);
@@ -257,25 +284,11 @@ export async function handleOutput(args: string[]): Promise<void> {
   if (!existsSync(logPath)) die(`No log file for thread`);
   const content = readFileSync(logPath, "utf-8");
   if (options.contentOnly) {
-    // Extract agent output blocks from the log.
-    // Log format: "<ISO-timestamp> agent output:\n<content>\n<<END_AGENT_OUTPUT>>"
-    // Using an explicit end marker avoids false positives when model output contains timestamps.
-    const tsPrefix = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
-    const lines = content.split("\n");
-    let inAgentOutput = false;
-    for (const line of lines) {
-      if (line === "<<END_AGENT_OUTPUT>>") {
-        inAgentOutput = false;
-        continue;
-      }
-      if (tsPrefix.test(line)) {
-        inAgentOutput = line.includes(" agent output:");
-        continue;
-      }
-      if (inAgentOutput) {
-        console.log(line);
-      }
-    }
+    // A thread log accumulates every turn; --last trims to the newest block
+    // so the current result can be surfaced without replaying the history.
+    const blocks = extractAgentOutputBlocks(content);
+    const selected = options.last ? blocks.slice(-1) : blocks;
+    for (const block of selected) console.log(block);
   } else {
     console.log(content);
   }

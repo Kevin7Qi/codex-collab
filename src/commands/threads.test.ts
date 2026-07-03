@@ -110,3 +110,45 @@ describe("resolveReadableLogPath", () => {
     }
   });
 });
+
+describe("extractAgentOutputBlocks", () => {
+  const { extractAgentOutputBlocks } = require("./threads") as typeof import("./threads");
+  const ts = "2026-07-03T10:00:00.000Z";
+
+  test("extracts each turn's block separately", () => {
+    const log = [
+      `${ts} [codex] Turn started`,
+      `${ts} agent output:`, "first answer", "<<END_AGENT_OUTPUT>>",
+      `${ts} [codex] Turn started`,
+      `${ts} agent output:`, "second answer", "line two", "<<END_AGENT_OUTPUT>>",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["first answer", "second answer\nline two"]);
+  });
+
+  test("timestamps inside model output do not end a block early", () => {
+    const log = [
+      `${ts} agent output:`, "before", "not-a-log 2026-07-03T10:00:00.000Z inline", "<<END_AGENT_OUTPUT>>",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["before\nnot-a-log 2026-07-03T10:00:00.000Z inline"]);
+  });
+
+  test("a crash-truncated block (no end marker) is still captured", () => {
+    const log = [
+      `${ts} agent output:`, "partial output",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["partial output"]);
+  });
+
+  test("a new timestamped entry closes an unterminated block", () => {
+    const log = [
+      `${ts} agent output:`, "truncated",
+      `${ts} [codex] next entry`,
+      `${ts} agent output:`, "complete", "<<END_AGENT_OUTPUT>>",
+    ].join("\n");
+    expect(extractAgentOutputBlocks(log)).toEqual(["truncated", "complete"]);
+  });
+
+  test("no blocks in a log without agent output", () => {
+    expect(extractAgentOutputBlocks(`${ts} [codex] Turn started\n${ts} command: ls (exit 0)`)).toEqual([]);
+  });
+});

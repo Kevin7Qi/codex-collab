@@ -1761,3 +1761,93 @@ describe("tryServerDelete: unsupported thread/delete must not read as success", 
     expect(await tryServerDelete(clientThrowing(new Error("thread not found")), "t1")).toBe("already_done");
   });
 });
+
+describe("exit-code taxonomy", () => {
+  const { EXIT_CODES, exitCodeForError, tagExitCode, hasPendingApproval } =
+    require("./shared") as typeof import("./shared");
+  const { TurnTimeoutError, RpcError } = require("../types") as typeof import("../types");
+
+  test("timeout errors map to the timeout code", () => {
+    expect(exitCodeForError(new TurnTimeoutError("Turn timed out after 60s"))).toBe(EXIT_CODES.timeout);
+  });
+
+  test("broker-busy errors map to the broker-busy code", () => {
+    expect(exitCodeForError(new RpcError("busy", -32001))).toBe(EXIT_CODES.brokerBusy);
+  });
+
+  test("unclassified errors stay at 1", () => {
+    expect(exitCodeForError(new Error("boom"))).toBe(EXIT_CODES.failed);
+    expect(exitCodeForError("string error")).toBe(EXIT_CODES.failed);
+    expect(exitCodeForError(null)).toBe(EXIT_CODES.failed);
+  });
+
+  test("a tagged code wins over type classification", () => {
+    const e = new TurnTimeoutError("Turn timed out after 60s");
+    tagExitCode(e, EXIT_CODES.approvalPending);
+    expect(exitCodeForError(e)).toBe(EXIT_CODES.approvalPending);
+  });
+
+  test("tagExitCode is a no-op on non-objects", () => {
+    expect(() => tagExitCode("s", 5)).not.toThrow();
+    expect(() => tagExitCode(null, 5)).not.toThrow();
+  });
+
+  function record(ws: WorkspacePaths, runId: string, pending: boolean): void {
+    createRun(ws.stateDir, {
+      runId, threadId: "t-1", shortId: "aaaa1111", kind: "task",
+      phase: "running", status: "running", sessionId: null,
+      logFile: "logs/aaaa1111.log", logOffset: 0, prompt: "p", model: "m",
+      startedAt: new Date().toISOString(), completedAt: null, elapsed: null,
+      output: null, filesChanged: null, commandsRun: null, error: null,
+      pendingApproval: pending
+        ? { id: "call_x", kind: "commandExecution", summary: "touch x", requestedAt: new Date().toISOString() }
+        : null,
+    });
+  }
+
+  test("hasPendingApproval reflects the run record; missing record is false", () => {
+    const ws = freshWorkspace("exit-pending-check");
+    record(ws, "run-p1", true);
+    record(ws, "run-p2", false);
+    expect(hasPendingApproval(ws.stateDir, "run-p1")).toBe(true);
+    expect(hasPendingApproval(ws.stateDir, "run-p2")).toBe(false);
+    expect(hasPendingApproval(ws.stateDir, "run-missing")).toBe(false);
+  });
+
+  test("interrupted turn exits with the interrupted code", () => {
+    const ws = freshWorkspace("exit-interrupted");
+    record(ws, "run-i1", false);
+    const code = recordTerminalRunState(ws, "t-1", "run-i1", {
+      status: "interrupted", output: "", filesChanged: [], commandsRun: [], durationMs: 1000,
+    }, "Turn", true);
+    expect(code).toBe(EXIT_CODES.interrupted);
+  });
+
+  test("interrupted turn with a pending approval exits approval-pending", () => {
+    const ws = freshWorkspace("exit-interrupted-pending");
+    record(ws, "run-i2", true);
+    const code = recordTerminalRunState(ws, "t-1", "run-i2", {
+      status: "interrupted", output: "", filesChanged: [], commandsRun: [], durationMs: 1000,
+    }, "Turn", true);
+    expect(code).toBe(EXIT_CODES.approvalPending);
+    // The terminal record still never claims a pending approval
+    expect(loadRun(ws.stateDir, "run-i2")?.pendingApproval).toBeNull();
+  });
+
+  test("completed turn exits 0 even if an approval flag was stale", () => {
+    const ws = freshWorkspace("exit-completed-stale-pending");
+    record(ws, "run-c1", true);
+    const code = recordTerminalRunState(ws, "t-1", "run-c1", {
+      status: "completed", output: "done", filesChanged: [], commandsRun: [], durationMs: 1000,
+    }, "Turn", true);
+    expect(code).toBe(EXIT_CODES.ok);
+  });
+});
+
+describe("output --last", () => {
+  test("parseOptions: --last implies --content-only", () => {
+    const { options } = parseOptions(["abc123", "--last"]);
+    expect(options.last).toBe(true);
+    expect(options.contentOnly).toBe(true);
+  });
+});
