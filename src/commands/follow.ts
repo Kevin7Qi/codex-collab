@@ -133,6 +133,24 @@ export function nextUnseenRun(
   return null;
 }
 
+/**
+ * Seed the --watch seen-set: everything already in the ledger EXCEPT runs
+ * that are currently live (running with an alive runner) and the run being
+ * attached first. Marking history as seen keeps a new watch from replaying
+ * the whole workspace; leaving live runs unseen keeps concurrent active
+ * work from being silently skipped once the first run finishes.
+ * Exported for tests.
+ */
+export function seedSeenRuns(stateDir: string, pidsDir: string, exceptRunId?: string): Set<string> {
+  const seen = new Set<string>();
+  for (const r of listRuns(stateDir)) {
+    if (r.runId === exceptRunId) continue;
+    const live = r.status === "running" && isThreadProcessAlive(pidsDir, r.shortId);
+    if (!live) seen.add(r.runId);
+  }
+  return seen;
+}
+
 interface FollowOutcome {
   record: RunRecord;
   /** The record still said running but the runner process was confirmed dead. */
@@ -255,13 +273,7 @@ export async function handleFollow(args: string[]): Promise<void> {
   // concurrent threads are serialized in start order (one pane, one stream —
   // open a second `follow <id> --watch` pane to track two threads live).
   // Runs until Ctrl-C.
-  //
-  // Seed the seen-set with everything that already exists except the run we
-  // first attach to, so starting a watch doesn't replay workspace history.
-  const seen = new Set<string>();
-  for (const r of listRuns(ws.stateDir)) {
-    if (r.runId !== run?.runId) seen.add(r.runId);
-  }
+  const seen = seedSeenRuns(ws.stateDir, ws.pidsDir, run?.runId);
 
   let hadRun = false;
   while (true) {

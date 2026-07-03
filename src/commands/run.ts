@@ -35,10 +35,6 @@ import {
  *  Covers a cold broker spawn + app-server handshake + model/list fetch. */
 const DETACH_HANDSHAKE_TIMEOUT_MS = 60_000;
 
-/** How long a `failed` record may persist before the parent gives up on it.
- *  The broker-busy fallback records a transient failure, reconnects
- *  directly, and re-creates the same record — don't report the transient. */
-const DETACH_FAILED_GRACE_MS = 10_000;
 
 /** Terminate a detached runner and everything it spawned. `detached: true`
  *  gave the child its own process group (pgid = pid), so a group signal
@@ -114,7 +110,6 @@ async function detachRun(args: string[], options: ReturnType<typeof parseOptions
   };
 
   const deadline = Date.now() + DETACH_HANDSHAKE_TIMEOUT_MS;
-  let failedSince: number | null = null;
   while (Date.now() < deadline) {
     const rec = loadRun(ws.stateDir, runId);
     if (rec) {
@@ -136,15 +131,14 @@ async function detachRun(args: string[], options: ReturnType<typeof parseOptions
       if (rec.status === "cancelled") {
         dieWithRunnerOutput(`Detached run was interrupted before the turn started (thread ${rec.shortId}).`);
       }
-      if (rec.status === "failed") {
-        // Grace period: the broker-busy fallback records a transient failure
-        // and then re-creates this same record via the retained runId.
-        failedSince ??= Date.now();
-        if (Date.now() - failedSince > DETACH_FAILED_GRACE_MS) {
-          dieWithRunnerOutput(`Detached run failed to start${rec.error ? `: ${rec.error}` : "."}`);
-        }
-      } else {
-        failedSince = null;
+      // A `failed` record is only definitive once the child has exited: the
+      // broker-busy fallback records a transient failure, reconnects
+      // directly, and re-creates this same record — while the child lives,
+      // keep waiting (the 60s deadline + kill below is the backstop).
+      // Reporting failure early would either orphan a runner that later
+      // executes the turn, or require killing a legitimately-retrying one.
+      if (childExited && rec.status === "failed") {
+        dieWithRunnerOutput(`Detached run failed to start${rec.error ? `: ${rec.error}` : "."}`);
       }
       if (childExited && rec.status === "running" && rec.phase === "starting") {
         // Child died between creating the record and turn/start — the record

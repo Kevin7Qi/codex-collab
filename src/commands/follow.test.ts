@@ -142,3 +142,25 @@ describe("replayBound: zero-byte runs (equal logOffset)", () => {
     expect(replayBound(stateDir, rNext)).toBeNull(); // the later run owns the tail
   });
 });
+
+describe("seedSeenRuns (watch startup)", () => {
+  test("history is seeded; live concurrent runs stay unseen", () => {
+    const { stateDir, pidsDir } = freshDirs("seed-seen");
+    createRun(stateDir, record("r-old", "1111aaaa", "completed", "2026-07-03T09:00:00.000Z"));
+    createRun(stateDir, record("r-picked", "2222aaaa", "running", "2026-07-03T10:00:00.000Z"));
+    createRun(stateDir, record("r-live2", "3333aaaa", "running", "2026-07-03T10:00:01.000Z"));
+    createRun(stateDir, record("r-stale", "4444aaaa", "running", "2026-07-03T10:00:02.000Z"));
+    // r-picked and r-live2 have live runners; r-stale's is dead
+    writeFileSync(join(pidsDir, "2222aaaa"), String(process.pid));
+    writeFileSync(join(pidsDir, "3333aaaa"), String(process.pid));
+    writeFileSync(join(pidsDir, "4444aaaa"), "99999999");
+
+    const { seedSeenRuns } = require("./follow") as typeof import("./follow");
+    const seen = seedSeenRuns(stateDir, pidsDir, "r-picked");
+
+    expect(seen.has("r-old")).toBe(true);    // history: don't replay
+    expect(seen.has("r-stale")).toBe(true);  // dead runner: not active work
+    expect(seen.has("r-live2")).toBe(false); // concurrent live run MUST display later
+    expect(seen.has("r-picked")).toBe(false); // the run being attached first
+  });
+});

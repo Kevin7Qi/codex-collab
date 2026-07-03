@@ -67,6 +67,11 @@ export class LogEntryParser {
   drain(): LogEntry[] {
     const out: LogEntry[] = [];
     if (this.block) {
+      // A partial last line without its newline still belongs to the block —
+      // emitting it separately would render the tail of the final answer as
+      // an orphan log line.
+      if (this.buf.trim() !== "") this.block.lines.push(this.buf);
+      this.buf = "";
       out.push(this.block);
       this.block = null;
     }

@@ -108,3 +108,13 @@ describe("renderFinalStatus", () => {
     expect(renderFinalStatus("running", {}, false)).toBe("● running");
   });
 });
+
+describe("drain keeps partial lines inside agent-output blocks", () => {
+  test("a crash mid-line stays part of the result block, not an orphan line", () => {
+    const p = new LogEntryParser();
+    p.feed("2026-07-03T10:00:00.000Z agent output:\nfirst line\npartial tail");
+    const drained = p.drain();
+    expect(drained).toHaveLength(1);
+    expect(drained[0].lines).toEqual(["agent output:", "first line", "partial tail"]);
+  });
+});
