@@ -440,7 +440,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.template = argv[++i];
     } else if (arg === "--unset") {
       options.explicit.add("unset");
-    } else if (arg.startsWith("-")) {
+    } else if (arg !== "-" && arg.startsWith("-")) {
+      // Bare "-" is a positional by Unix convention (`run -` = prompt on stdin).
       console.error(`Error: Unknown option: ${arg}`);
       console.error("Run codex-collab --help for usage");
       process.exit(1);

@@ -80,21 +80,34 @@ export function stripDetachFlag(args: string[]): string[] {
  * "starting" — the child bumps the phase when turn/start responds, so
  * success here means "turn is running", not merely "thread was created".
  */
-async function detachRun(args: string[], options: ReturnType<typeof parseOptions>["options"]): Promise<never> {
+async function detachRun(
+  args: string[],
+  options: ReturnType<typeof parseOptions>["options"],
+  stdinPrompt: string | null,
+): Promise<never> {
   const ws = getWorkspacePaths(options.dir);
   const runId = generateRunId();
   const childArgs = stripDetachFlag(args);
 
   const detachLog = join(ws.logsDir, `detached-${runId}.log`);
   const logFd = openSync(detachLog, "a");
+  // A stdin prompt (`run - --detach`) is re-read by the child, whose args
+  // still say "-": pipe the already-consumed text into it. Everything else
+  // gets no stdin — the runner must never block waiting for input.
   const proc = childSpawn(process.execPath, ["run", process.argv[1], "run", ...childArgs], {
-    stdio: ["ignore", logFd, logFd],
+    stdio: [stdinPrompt === null ? "ignore" : "pipe", logFd, logFd],
     cwd: process.cwd(),
     detached: true,
     windowsHide: true,
     env: { ...process.env, CODEX_COLLAB_RUN_ID: runId },
   });
   closeSync(logFd);
+  if (stdinPrompt !== null && proc.stdin) {
+    // EPIPE if the child dies before reading — the handshake below reports
+    // that failure; don't let the write crash the parent first.
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(stdinPrompt);
+  }
   proc.unref();
 
   let childExited = false;
@@ -179,11 +192,20 @@ export async function handleRun(args: string[]): Promise<void> {
     die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
   }
 
-  if (options.detach) {
-    await detachRun(args, options);
+  // `run -` reads the prompt from stdin — the safe channel for long,
+  // quote-riddled agent-generated prompts that shell quoting would mangle.
+  let prompt = positional.join(" ");
+  let promptFromStdin = false;
+  if (prompt === "-") {
+    if (process.stdin.isTTY) console.error("[codex] Reading prompt from stdin — end with Ctrl-D.");
+    prompt = readFileSync(0, "utf-8").trim();
+    if (!prompt) die('Empty prompt on stdin\nUsage: echo "prompt" | codex-collab run -');
+    promptFromStdin = true;
   }
 
-  let prompt = positional.join(" ");
+  if (options.detach) {
+    await detachRun(args, options, promptFromStdin ? prompt : null);
+  }
 
   if (options.template) {
     const { meta, body } = loadTemplateWithMeta(options.template);

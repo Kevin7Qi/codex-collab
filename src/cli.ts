@@ -97,6 +97,7 @@ Usage: codex-collab <command> [options]
 
 Commands:
   run "prompt" [opts]     Send prompt, wait for result, print output
+  run - [opts]            Read the prompt from stdin (no shell-quoting hazards)
   run --resume <id> "p"   Resume existing thread with new prompt
   review [opts]           Run code review (PR-style by default)
   review "instructions"   Custom review with specific focus
@@ -159,6 +160,7 @@ Exit codes (run, review):
 
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
+  cat prompt.md | codex-collab run - --content-only
   codex-collab run --resume abc123 "now summarize the key files" --content-only
   codex-collab review -d /path/to/project --content-only
   codex-collab review --mode uncommitted -d /path/to/project --content-only

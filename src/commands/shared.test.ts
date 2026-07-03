@@ -1872,3 +1872,10 @@ describe("humanizeTurnError", () => {
     expect(humanizeTurnError("{not json")).toBe("{not json");
   });
 });
+
+describe("stdin prompt marker", () => {
+  test("bare '-' is a positional, not an unknown option", () => {
+    const { positional } = parseOptions(["-", "--content-only"]);
+    expect(positional).toEqual(["-"]);
+  });
+});
