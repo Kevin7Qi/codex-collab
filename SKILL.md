@@ -106,7 +106,7 @@ If you've lost track of the thread ID, use `codex-collab threads` to find active
 
 ## Detached Runs and Following
 
-**When to detach:** default to background `run` — it survives your turn ending and gives you a completion notification for free. Reach for `--detach` in exactly two situations: (1) the turn must outlive this Claude session — background tasks are killed when the session exits or restarts, which interrupts an in-flight turn, while a detached run keeps going and its result is retrievable later with `output <id>`; (2) the user is driving from their own terminal and wants the turn independent of that shell. Don't detach routine tasks: you lose the automatic completion notification (see below for how to get it back).
+**When to detach:** default to background `run` — it survives your turn ending and gives you a completion notification for free. Reach for `--detach` in exactly two situations: (1) the turn must outlive this Claude session — background tasks are killed when the session exits or restarts, which interrupts an in-flight turn, while a detached run keeps going and its result is retrievable later with `output <id> --last`; (2) the user is driving from their own terminal and wants the turn independent of that shell. Don't detach routine tasks: you lose the automatic completion notification (see below for how to get it back).
 
 `run --detach` hands the turn to a detached runner and returns as soon as the turn is actually running — the turn's lifetime is decoupled from the invoking shell, so nothing kills it if the shell or session goes away:
 
