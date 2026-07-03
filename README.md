@@ -106,12 +106,12 @@ codex-collab follow --watch
 
 | Command | Description |
 |---------|-------------|
-| `run "prompt" [opts]` | Start thread, send prompt, wait, print output |
+| `run "prompt" [opts]` | Start thread, send prompt, wait, print output (`run -` reads the prompt from stdin — no shell-quoting hazards) |
 | `review [opts]` | Code review (PR, uncommitted, commit) |
-| `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server) |
+| `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server, `--session` for only threads the current session has run) |
 | `kill <id>` | Interrupt running thread |
 | `follow [id]` | Live view of a running thread; exits with its status (replays the last run when already finished). Without an ID, attaches to the workspace's active run — or replays the most recent one. With `--watch`, stays open and follows each new run (every run shown once, in start order) |
-| `output <id>` | Full log for thread |
+| `output <id> [--last]` | Full log for thread (`--last`: only the latest turn's output) |
 | `progress <id>` | Recent activity (tail of log) |
 | `peek <id>` | Show recent conversation slice from server |
 | `config [key] [value]` | Show or set persistent defaults |
@@ -155,9 +155,14 @@ codex-collab follow --watch
 | `--limit <n>` | Limit items shown by `threads` or `peek` |
 | `--full` | Include all item types in `peek` output (default shows messages only) |
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
+| `--last` | (output) Only the latest turn's output instead of the whole thread history (implies `--content-only`) |
+| `--session` | (threads) Only threads the current session has run |
 | `--timeout <sec>` | Turn timeout (default: 1200, max 2147483) |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 | `--` | End of options; remaining arguments are treated as prompt text |
+| `-` | (run) Read the prompt from stdin |
+
+`run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` ended with an approval still pending, `6` broker busy (transient — retry).
 
 </details>
 
