@@ -1737,3 +1737,27 @@ describe("killDetachedRunner", () => {
     expect(alive).toBe(false);
   });
 });
+
+describe("tryServerDelete: unsupported thread/delete must not read as success", () => {
+  const clientThrowing = (err: Error): AppServerClient => ({
+    request: (async () => { throw err; }) as AppServerClient["request"],
+    notify: () => {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
+    respond: () => {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
+  });
+
+  test("JSON-RPC -32601 (method not found) is a failure, not already_done", async () => {
+    const { tryServerDelete } = require("./shared") as typeof import("./shared");
+    const { RpcError } = require("../types") as typeof import("../types");
+    expect(await tryServerDelete(clientThrowing(new RpcError("Method not found: thread/delete", -32601)), "t1")).toBe("failed");
+  });
+
+  test("'Method not found' by message alone is also a failure", async () => {
+    const { tryServerDelete } = require("./shared") as typeof import("./shared");
+    expect(await tryServerDelete(clientThrowing(new Error("Method not found: thread/delete")), "t1")).toBe("failed");
+  });
+
+  test("a genuinely missing thread is still already_done", async () => {
+    const { tryServerDelete } = require("./shared") as typeof import("./shared");
+    expect(await tryServerDelete(clientThrowing(new Error("thread not found")), "t1")).toBe("already_done");
+  });
+});

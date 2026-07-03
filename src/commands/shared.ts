@@ -25,6 +25,7 @@ import {
   migrateGlobalState,
 } from "../threads";
 import type { PendingApproval } from "../types";
+import { RpcError } from "../types";
 import { EventDispatcher } from "../events";
 import {
   autoApproveHandler,
@@ -1158,7 +1159,17 @@ export async function tryServerDelete(client: AppServerClient, threadId: string)
     await client.request("thread/delete", { threadId });
     return "deleted";
   } catch (e) {
-    if (e instanceof Error && e.message.includes("not found")) {
+    // "Method not found" (JSON-RPC -32601: a Codex without thread/delete)
+    // must NOT read as "thread already gone" — that would report a permanent
+    // deletion that never happened.
+    const methodUnsupported =
+      (e instanceof RpcError && e.rpcCode === -32601) ||
+      (e instanceof Error && /method not found/i.test(e.message));
+    if (methodUnsupported) {
+      console.error(`[codex] This Codex version does not support thread/delete — use plain \`delete\` (archive) instead.`);
+      return "failed";
+    }
+    if (e instanceof Error && /not found/i.test(e.message)) {
       return "already_done";
     }
     console.error(`[codex] Warning: could not delete thread on server: ${e instanceof Error ? e.message : String(e)}`);

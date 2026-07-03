@@ -164,3 +164,26 @@ describe("seedSeenRuns (watch startup)", () => {
     expect(seen.has("r-picked")).toBe(false); // the run being attached first
   });
 });
+
+describe("pickWatchStartRun (start order with multiple live runs)", () => {
+  test("picks the OLDEST live run so a blocked older run isn't hidden", () => {
+    const { stateDir, pidsDir } = freshDirs("watch-start-order");
+    createRun(stateDir, record("r-done", "5555bbbb", "completed", "2026-07-03T08:00:00.000Z"));
+    createRun(stateDir, record("r-live-old", "6666bbbb", "running", "2026-07-03T09:00:00.000Z"));
+    createRun(stateDir, record("r-live-new", "7777bbbb", "running", "2026-07-03T10:00:00.000Z"));
+    writeFileSync(join(pidsDir, "6666bbbb"), String(process.pid));
+    writeFileSync(join(pidsDir, "7777bbbb"), String(process.pid));
+
+    const { pickWatchStartRun } = require("./follow") as typeof import("./follow");
+    expect(pickWatchStartRun(stateDir, pidsDir)?.runId).toBe("r-live-old");
+  });
+
+  test("falls back to newest run overall when nothing is live", () => {
+    const { stateDir, pidsDir } = freshDirs("watch-start-replay");
+    createRun(stateDir, record("r-1", "8888bbbb", "completed", "2026-07-03T08:00:00.000Z"));
+    createRun(stateDir, record("r-2", "9999bbbb", "failed", "2026-07-03T09:00:00.000Z"));
+
+    const { pickWatchStartRun } = require("./follow") as typeof import("./follow");
+    expect(pickWatchStartRun(stateDir, pidsDir)?.runId).toBe("r-2");
+  });
+});

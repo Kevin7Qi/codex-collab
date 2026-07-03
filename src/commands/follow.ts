@@ -82,6 +82,23 @@ export function pickDefaultRun(stateDir: string, pidsDir: string): RunRecord | n
   return live ?? runs[0] ?? null;
 }
 
+/**
+ * Watch-mode start run: the OLDEST live run, not the newest — the watch
+ * displays runs in start order, and starting from the newest would leave an
+ * older still-running (possibly approval-blocked) run invisible until the
+ * newer one finished. Falls back to the newest run overall for a replay.
+ * Exported for tests.
+ */
+export function pickWatchStartRun(stateDir: string, pidsDir: string): RunRecord | null {
+  const runs = listRuns(stateDir); // newest first
+  for (let i = runs.length - 1; i >= 0; i--) {
+    if (runs[i].status === "running" && isThreadProcessAlive(pidsDir, runs[i].shortId)) {
+      return runs[i];
+    }
+  }
+  return runs[0] ?? null;
+}
+
 /** True iff run `a` comes after run `b` (startedAt, runId tiebreak). */
 function laterThan(a: RunRecord, b: RunRecord): boolean {
   if (a.startedAt !== b.startedAt) return a.startedAt > b.startedAt;
@@ -258,7 +275,11 @@ export async function handleFollow(args: string[]): Promise<void> {
   let scopedShortId: string | null = null;
   let run: RunRecord | null;
   if (positional.length === 0) {
-    run = pickDefaultRun(ws.stateDir, ws.pidsDir);
+    // Watch mode displays runs in start order, so it starts from the OLDEST
+    // live run; a one-shot follow attaches to the newest (most relevant) one.
+    run = options.watch
+      ? pickWatchStartRun(ws.stateDir, ws.pidsDir)
+      : pickDefaultRun(ws.stateDir, ws.pidsDir);
     if (!run && !options.watch) {
       die("No runs in this workspace yet.\nUsage: codex-collab follow [id] [--watch]");
     }
