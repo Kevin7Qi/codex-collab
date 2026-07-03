@@ -292,3 +292,25 @@ describe("Guardian auto-approval review events", () => {
     expect(log).toContain("rm -rf node_modules");
   });
 });
+
+describe("guardianWarning", () => {
+  test("renders the warning message as a Guardian progress line", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("gw1", TEST_LOG_DIR, (line) => lines.push(line));
+
+    dispatcher.handleGuardianWarning({
+      message: "Automatic approval review approved (risk: medium, authorization: high): persistent modification to /etc/hosts.",
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe("Guardian warning: Automatic approval review approved (risk: medium, authorization: high): persistent modification to /etc/hosts.");
+  });
+
+  test("degrades gracefully when the UNSTABLE payload has no message", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("gw2", TEST_LOG_DIR, (line) => lines.push(line));
+    dispatcher.handleGuardianWarning({});
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("Guardian issued a warning");
+  });
+});

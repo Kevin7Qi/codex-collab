@@ -267,7 +267,8 @@ export function loadRun(stateDir: string, runId: string): RunRecord | null {
 
 type RunPatch = Partial<Pick<RunRecord,
   "status" | "phase" | "sessionId" | "completedAt" | "elapsed" |
-  "output" | "filesChanged" | "commandsRun" | "error" | "logOffset"
+  "output" | "filesChanged" | "commandsRun" | "error" | "logOffset" |
+  "pendingApproval"
 >>;
 
 /**
@@ -323,6 +324,30 @@ export function listRunsForThread(stateDir: string, shortId: string): RunRecord[
 export function getLatestRun(stateDir: string, shortId: string): RunRecord | null {
   const runs = listRunsForThread(stateDir, shortId);
   return runs.length > 0 ? runs[0] : null;
+}
+
+/** Remove all run records for a thread, along with each run's captured
+ *  detached-runner output (`logs/detached-<runId>.log` — it can contain
+ *  prompts and results, so a local delete must reach it). Called by
+ *  `delete` so the ledger can't hold orphaned records for a thread whose
+ *  mapping, log, and PID file are gone — bare `follow` selects from run
+ *  records and would otherwise attach to (or hang on) a deleted thread's
+ *  stale run. */
+export function removeRunsForThread(stateDir: string, shortId: string): void {
+  for (const r of listRunsForThread(stateDir, shortId)) {
+    for (const path of [
+      runFilePath(stateDir, r.runId),
+      join(stateDir, "logs", `detached-${r.runId}.log`),
+    ]) {
+      try {
+        unlinkSync(path);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+          console.error(`[codex] Warning: could not remove ${path}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
 }
 
 export function pruneRuns(stateDir: string, maxRuns?: number): void {

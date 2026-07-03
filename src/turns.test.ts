@@ -1472,3 +1472,32 @@ describe("per-turn approvalsReviewer forwarding", () => {
     expect(captured?.approvalPolicy).toBe("on-request");
   });
 });
+
+describe("guardianWarning routing", () => {
+  test("thread-scoped warning (no turnId) reaches the dispatcher; other threads' warnings are filtered", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("guardianWarning", { threadId: "thr-1", message: "risk accepted for thr-1" });
+          emit("guardianWarning", { threadId: "thr-other", message: "leak from another thread" });
+        }, 20);
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 50);
+        return inProgressTurn("turn-1");
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher("gw-routing", TEST_LOG_DIR, (line) => lines.push(line));
+
+    await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
+      dispatcher,
+      approvalHandler: autoApproveHandler,
+      timeoutMs: 5000,
+      killSignalsDir: TEST_KILL_DIR,
+    });
+
+    expect(lines.some(l => l.includes("risk accepted for thr-1"))).toBe(true);
+    expect(lines.some(l => l.includes("leak from another thread"))).toBe(false);
+  });
+});

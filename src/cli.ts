@@ -45,6 +45,10 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
           status: "cancelled",
           completedAt: new Date().toISOString(),
           error: "Interrupted by signal",
+          // Ctrl-C while blocked on an approval exits before the approval
+          // poll's cleanup tick — terminal records must never claim a
+          // pending approval (same guarantee as recordTerminalRunState).
+          pendingApproval: null,
         });
       } catch (e) {
         console.error(`[codex] Warning: could not update run record during shutdown: ${e instanceof Error ? e.message : String(e)}`);
@@ -97,6 +101,10 @@ Commands:
   review "instructions"   Custom review with specific focus
   threads [--json] [--all] List threads (--limit <n>, --discover)
   kill <id>               Stop a running thread
+  follow [id] [--watch]   Live view of a running thread; exits on completion
+                          (no id: attach to the workspace's active run,
+                          or replay the most recent one; --watch: keep the
+                          pane open and pick up each new run automatically)
   output <id>             Read full log for thread
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server
@@ -106,7 +114,8 @@ Commands:
   approve <id>            Approve a pending request
   decline <id>            Decline a pending request
   clean                   Delete old logs and stale mappings
-  delete <id>             Archive thread, delete local files
+  delete <id> [--purge]   Archive thread (recoverable) and delete local files;
+                          --purge permanently deletes it server-side instead
   health                  Check prerequisites
   version                 Print version
 
@@ -119,10 +128,14 @@ Options:
   --resume <id>           Resume existing thread
   --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout})
   --approval <policy>     Approval: ${config.approvalModes.join(", ")} (default: ${config.defaultApprovalPolicy})
-                          "auto" routes requests to Codex's Guardian reviewer;
-                          only its escalations reach approve/decline
+                          "auto": Codex's Guardian reviewer approves or denies
+                          each request autonomously (never blocks on a human)
   --memory                Let Codex's memory feature learn from threads this
                           run creates (default: created threads are excluded)
+  --detach                (run) Return once the turn is running; watch it with
+                          'follow <id>', stop it with 'kill <id>'
+  -w, --watch             (follow) Don't exit when the run finishes — keep
+                          following each new run (Ctrl-C to stop)
   --mode <mode>           Review mode: ${VALID_REVIEW_MODES.join(", ")}
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: auto-detected default branch)
@@ -185,6 +198,9 @@ const BOOLEAN_FLAGS = new Set([
   "--full",
   "--unset",
   "--memory",
+  "--detach",
+  "-w", "--watch",
+  "--purge",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {
@@ -252,7 +268,7 @@ async function main() {
 
   // Validate command
   const knownCommands = new Set([
-    "run", "review", "threads", "jobs", "kill", "output", "progress",
+    "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version",
   ]);
@@ -282,6 +298,8 @@ async function main() {
       return (await import("./commands/threads")).handleThreads(rest);
     case "kill":
       return (await import("./commands/kill")).handleKill(rest);
+    case "follow":
+      return (await import("./commands/follow")).handleFollow(rest);
     case "output":
       return (await import("./commands/threads")).handleOutput(rest);
     case "progress":

@@ -106,7 +106,12 @@ export async function handleReview(args: string[]): Promise<void> {
     try {
       const result = await runReview(client, threadId, target, {
         dispatcher,
-        approvalHandler: getApprovalHandler(effective.approvalPolicy, ws.approvalsDir, options.dir),
+        approvalHandler: getApprovalHandler(effective.approvalPolicy, ws.approvalsDir, {
+          workspaceDir: options.dir,
+          dispatcher,
+          stateDir: ws.stateDir,
+          runId,
+        }),
         timeoutMs: options.timeout * 1000,
         killSignalsDir: ws.killSignalsDir,
         onTurnId: (id) => setActiveTurnId(id),

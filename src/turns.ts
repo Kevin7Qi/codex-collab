@@ -236,13 +236,16 @@ async function executeTurn(
   // aren't silently dropped.
   function routeNotification(method: string, params: unknown): void {
     const routing = params as { threadId?: unknown; turnId?: unknown };
-    if (
-      turnId !== null &&
-      typeof routing?.threadId === "string" &&
-      typeof routing?.turnId === "string" &&
-      !belongsToActiveTurn({ threadId: routing.threadId, turnId: routing.turnId }, turnId)
-    ) {
-      return;
+    if (turnId !== null && typeof routing?.threadId === "string") {
+      if (typeof routing?.turnId === "string") {
+        if (!belongsToActiveTurn({ threadId: routing.threadId, turnId: routing.turnId }, turnId)) {
+          return;
+        }
+      } else if (routing.threadId !== threadId && routing.threadId !== reviewSubthreadId) {
+        // Thread-scoped notifications without a turnId (e.g. guardianWarning)
+        // still must not leak across threads on a shared broker.
+        return;
+      }
     }
     switch (method) {
       case "item/started": {
@@ -273,6 +276,9 @@ async function executeTurn(
       case "item/autoApprovalReview/completed":
         opts.dispatcher.handleAutoApprovalReview(method, params as AutoApprovalReviewParams);
         break;
+      case "guardianWarning":
+        opts.dispatcher.handleGuardianWarning(params as { message?: unknown });
+        break;
       case "error":
         opts.dispatcher.handleError(params as ErrorNotificationParams);
         break;
@@ -286,6 +292,7 @@ async function executeTurn(
     "item/commandExecution/outputDelta",
     "item/autoApprovalReview/started",
     "item/autoApprovalReview/completed",
+    "guardianWarning",
     "error",
   ]) {
     unsubs.push(

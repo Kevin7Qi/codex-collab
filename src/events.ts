@@ -111,6 +111,16 @@ export class EventDispatcher {
     }
   }
 
+  /** Log-only sink for out-of-band lines that already reached the console by
+   *  another path (e.g. approval prompts, which must stay visible even under
+   *  --content-only). Writes the `[codex]`-tagged entry to the thread log so
+   *  observers that don't own this process's stdout — `follow`, Monitor
+   *  scripts, `output` — see the same event stream. */
+  logLine(text: string): void {
+    this.log(`[codex] ${text}`);
+    this.flush();
+  }
+
   handleDelta(method: string, params: DeltaParams): void {
     if (method === "item/agentMessage/delta") {
       this.accumulatedOutput += params.delta;
@@ -162,6 +172,17 @@ export class EventDispatcher {
       this.progress(`Guardian reviewing approval request${clipped ? `: ${clipped}` : ""}`);
       this.log(`guardian review started: ${safeStringify(params)}`);
     }
+  }
+
+  /** guardianWarning: a human-facing message about a Guardian decision. Fires
+   *  on denials AND on risky approvals ("Automatic approval review approved
+   *  (risk: medium, authorization: high): <rationale>"). Thread-scoped, no
+   *  turnId. This is the primary audit line for Guardian's judgment calls. */
+  handleGuardianWarning(params: { message?: unknown }): void {
+    const msg = typeof params?.message === "string" && params.message.length > 0
+      ? params.message
+      : "Guardian issued a warning (no message in payload)";
+    this.progress(`Guardian warning: ${msg}`);
   }
 
   handleError(params: ErrorNotificationParams): void {

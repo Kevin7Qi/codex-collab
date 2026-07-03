@@ -56,9 +56,11 @@ export interface InitializeResponse {
 export type { ApprovalPolicy, SandboxMode, ReasoningEffort } from "./config";
 
 /** Where the app-server routes approval requests for review. "auto_review"
- *  is the Guardian subagent (risk-based auto-permit/reject; escalates to the
- *  client only when unsure). Accepted on thread/start, thread/fork,
- *  thread/resume, and turn/start — no experimentalApi needed. */
+ *  is the Guardian subagent: it approves or DENIES autonomously — it does
+ *  not escalate to the client. Denials surface via the `guardianWarning`
+ *  notification and can be overridden with thread/approveGuardianDeniedAction.
+ *  Accepted on thread/start, thread/fork, thread/resume, and turn/start —
+ *  no experimentalApi needed. */
 export type ApprovalsReviewer = "user" | "auto_review";
 
 export interface Thread {
@@ -456,6 +458,17 @@ export type RunPhase =
 
 export type RunStatus = "running" | "completed" | "failed" | "cancelled";
 
+/** A pending interactive approval attached to a run — the on-disk signal
+ *  observers (follow, Monitor scripts) use to see a blocked run without
+ *  owning its stdout. */
+export interface PendingApproval {
+  id: string;
+  kind: "commandExecution" | "fileChange";
+  /** Command text or file-change reason — whatever best describes the ask. */
+  summary: string | null;
+  requestedAt: string;
+}
+
 export interface RunRecord {
   runId: string;
   threadId: string;
@@ -463,6 +476,11 @@ export interface RunRecord {
   kind: RunKind;
   phase: RunPhase | null;
   status: RunStatus;
+  /** PID of the runner process that owns this run. Liveness checks must be
+   *  run-specific: the thread's PID file tracks only the LATEST runner, so a
+   *  stale older record would read as alive through its successor's file.
+   *  Absent on records written by older versions. */
+  pid?: number | null;
   sessionId: string | null;
   logFile: string;
   logOffset: number;
@@ -475,6 +493,8 @@ export interface RunRecord {
   filesChanged: FileChange[] | null;
   commandsRun: CommandExec[] | null;
   error: string | null;
+  /** Set while an interactive approval is blocking the run; null/absent otherwise. */
+  pendingApproval?: PendingApproval | null;
 }
 
 // --- Broker state (per-workspace) ---

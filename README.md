@@ -20,7 +20,8 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
 - **Thread reuse** — Resume existing threads to send follow-up prompts, build on previous responses, or steer the work in a new direction.
 - **Approval control** — Configurable approval policies for tool calls: auto-approve, interactive, deny, or Codex's Guardian auto-reviewer (`--approval auto`).
-- **Memory isolation** — Threads created by codex-collab are excluded from Codex's memory feature by default (`thread/memoryMode/set mode=disabled`), so agent-driven sessions don't shape Codex's learned picture of how *you* work. Opt back in per-run with `--memory` or persistently with `config memory true`. Resumed threads are never touched — the flag is persistent per-thread, and a thread you created yourself should keep feeding your memory. Scope note: this governs Codex's *local* memory consolidation (`~/.codex/memories`); the `personality` feature is explicit user config (not learned) and unaffected, and anything learned server-side from API traffic is outside any client's control.
+- **Live observability** — `run --detach` hands a long task to a detached runner; `follow --watch` is a purpose-built live view that tracks every run in a terminal pane.
+- **Memory isolation** — Threads created by codex-collab are excluded from Codex's memory feature by default, so agent-driven sessions don't shape Codex's learned picture of how *you* work. Opt back in with `--memory` (see Options for details).
 
 ## Installation
 
@@ -95,6 +96,10 @@ codex-collab review --content-only
 
 # Resume a thread
 codex-collab run --resume <id> "now check error handling" --content-only
+
+# Long task: detach it, watch it live in another pane
+codex-collab run "large refactor" --detach --approval auto
+codex-collab follow --watch
 ```
 
 ## CLI Commands
@@ -105,6 +110,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `review [opts]` | Code review (PR, uncommitted, commit) |
 | `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server) |
 | `kill <id>` | Interrupt running thread |
+| `follow [id]` | Live view of a running thread; exits with its status (replays the last run when already finished). Without an ID, attaches to the workspace's active run — or replays the most recent one. With `--watch`, stays open and follows each new run (every run shown once, in start order) |
 | `output <id>` | Full log for thread |
 | `progress <id>` | Recent activity (tail of log) |
 | `peek <id>` | Show recent conversation slice from server |
@@ -119,7 +125,7 @@ codex-collab run --resume <id> "now check error handling" --content-only
 
 | Command | Description |
 |---------|-------------|
-| `delete <id>` | Archive thread, delete local files |
+| `delete <id> [--purge]` | Archive thread (recoverable via `codex unarchive`) and delete local files; `--purge` permanently deletes it server-side instead |
 | `clean` | Delete old logs and stale mappings |
 | `approve <id>` | Approve a pending request |
 | `decline <id>` | Decline a pending request |
@@ -138,8 +144,10 @@ codex-collab run --resume <id> "now check error handling" --content-only
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
-| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto` routes requests to Codex's Guardian reviewer; only escalations need `approve`/`decline` |
-| `--memory` | Let Codex's memory feature learn from threads this run creates (default: excluded) |
+| `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto`: Codex's Guardian reviewer approves or denies each request autonomously — never blocks on a human; decisions stream as Guardian lines |
+| `--memory` | Let Codex's memory feature learn from threads this run creates. Default: created threads get `thread/memoryMode/set mode=disabled`; resumed threads are never touched (the flag is persistent per-thread, and a thread you created yourself should keep feeding your memory). Governs Codex's *local* memory consolidation (`~/.codex/memories`) only — the `personality` feature is explicit user config (not learned) and unaffected. Persistent form: `config memory true` |
+| `--detach` | (run) Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
+| `-w, --watch` | (follow) Don't exit when the run finishes — keep following each new run (Ctrl-C to stop) |
 | `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
 | `--json` | JSON output for supported commands (`threads`, `peek`) |
 | `--all` | List all threads with no display limit |

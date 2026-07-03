@@ -24,6 +24,8 @@ import {
   pruneRuns,
   migrateGlobalState,
 } from "../threads";
+import type { PendingApproval } from "../types";
+import { RpcError } from "../types";
 import { EventDispatcher } from "../events";
 import {
   autoApproveHandler,
@@ -96,6 +98,12 @@ export interface Options {
   /** Opt-in: let Codex's memory feature learn from threads this run creates.
    *  Default off — created threads get thread/memoryMode/set mode=disabled. */
   memory: boolean;
+  /** run: hand the turn to a detached runner process and return immediately. */
+  detach: boolean;
+  /** follow: don't exit when the run finishes — keep watching for the next one. */
+  watch: boolean;
+  /** delete: permanently delete the thread server-side instead of archiving. */
+  purge: boolean;
   dir: string;
   contentOnly: boolean;
   json: boolean;
@@ -171,6 +179,9 @@ export function defaultOptions(): Options {
     sandbox: config.defaultSandbox,
     approval: config.defaultApprovalPolicy,
     memory: false,
+    detach: false,
+    watch: false,
+    purge: false,
     dir: process.cwd(),
     contentOnly: false,
     json: false,
@@ -301,6 +312,12 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
     } else if (arg === "--memory") {
       options.memory = true;
       options.explicit.add("memory");
+    } else if (arg === "--detach") {
+      options.detach = true;
+    } else if (arg === "-w" || arg === "--watch") {
+      options.watch = true;
+    } else if (arg === "--purge") {
+      options.purge = true;
     } else if (arg === "--content-only") {
       options.contentOnly = true;
     } else if (arg === "--json") {
@@ -510,9 +527,30 @@ export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeW
 export function setActiveRunId(id: string | undefined): void { activeRunId = id; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
 
-export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string, workspaceDir?: string): ApprovalHandler {
+export interface ApprovalHandlerContext {
+  workspaceDir?: string;
+  /** Mirrors approval prompts into the thread log so observers that don't
+   *  own this process's stdout (follow, Monitor, output) see them. */
+  dispatcher?: EventDispatcher;
+  /** With runId, mirrors the pending approval into the run record. */
+  stateDir?: string;
+  runId?: string;
+}
+
+export function getApprovalHandler(policy: ApprovalPolicy, approvalsDir: string, ctx?: ApprovalHandlerContext): ApprovalHandler {
   if (policy === "never") return autoApproveHandler;
-  return new InteractiveApprovalHandler(approvalsDir, progress, { workspaceDir });
+  // Approval prompts must stay on the console even under --content-only
+  // (they're actionable, not progress noise), so this bypasses the
+  // dispatcher's console gate and logs separately.
+  const onProgress = (line: string) => {
+    progress(line);
+    ctx?.dispatcher?.logLine(line);
+  };
+  const { stateDir, runId } = ctx ?? {};
+  const onPending = stateDir && runId
+    ? (pending: PendingApproval | null) => updateRun(stateDir, runId, { pendingApproval: pending })
+    : undefined;
+  return new InteractiveApprovalHandler(approvalsDir, onProgress, { workspaceDir: ctx?.workspaceDir, onPending });
 }
 
 /** Best-effort close that swallows + logs errors. Cleanup runs on every
@@ -666,6 +704,27 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
 // Thread start/resume
 // ---------------------------------------------------------------------------
 
+/** RunId injected by a `run --detach` parent (its ledger-handshake key).
+ *  Sticky for this process's lifetime so the broker-busy retry re-creates
+ *  the SAME record the parent is watching, but removed from the environment
+ *  immediately so grandchildren (e.g. Codex itself invoking codex-collab
+ *  inside the turn) can't collide with it.
+ *
+ *  Call this BEFORE establishing any client connection: the broker and
+ *  app-server spawned there inherit this process's environment, and every
+ *  shell command Codex runs inherits theirs — scrubbing only at thread-start
+ *  time would leak the runId to all of them. */
+let stickyInjectedRunId: string | null | undefined;
+
+export function consumeInjectedRunId(): string | null {
+  const fromEnv = process.env.CODEX_COLLAB_RUN_ID;
+  if (fromEnv !== undefined) {
+    delete process.env.CODEX_COLLAB_RUN_ID;
+    stickyInjectedRunId = /^[a-zA-Z0-9_-]+$/.test(fromEnv) ? fromEnv : null;
+  }
+  return stickyInjectedRunId ?? null;
+}
+
 /** Start or resume a thread, returning threadId, shortId, runId, and effective config. */
 export async function startOrResumeThread(
   client: AppServerClient,
@@ -813,7 +872,7 @@ export async function startOrResumeThread(
 
   // Create run record (Gap 1 + Gap 5 + Gap 6)
   const prompt = preview ?? null;
-  const runId = generateRunId();
+  const runId = consumeInjectedRunId() ?? generateRunId();
   const sessionId = getCurrentSessionId(ws.stateDir);
   const logPath = join(ws.logsDir, `${shortId}.log`);
   const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
@@ -825,6 +884,7 @@ export async function startOrResumeThread(
     kind: isReview ? "review" : "task",
     phase: "starting",
     status: "running",
+    pid: process.pid,
     sessionId,
     logFile: `logs/${shortId}.log`,
     logOffset,
@@ -849,9 +909,10 @@ export async function startOrResumeThread(
 
 /** Map a CLI approval mode to the app-server's wire params. "auto" generates
  *  approval requests like "on-request" but routes them to Codex's Guardian
- *  subagent (approvalsReviewer "auto_review"), which permits/rejects
- *  autonomously and escalates to this client only when unsure — the
- *  file-based interactive flow stays as that escalation path.
+ *  subagent (approvalsReviewer "auto_review"), which approves or denies
+ *  autonomously — it never escalates to this client, so auto runs never
+ *  block on a human. Decisions and denial rationales surface via the
+ *  autoApprovalReview events and guardianWarning notifications.
  *
  *  Non-auto modes explicitly send approvalsReviewer "user" so selecting them
  *  is reversible: approvalsReviewer persists on the thread, and without the
@@ -959,6 +1020,10 @@ export function recordTerminalRunState(
       filesChanged: result.filesChanged,
       commandsRun: result.commandsRun,
       error: result.error ?? null,
+      // A kill/timeout can end the run while the approval poll is asleep and
+      // the process exits before its cleanup tick — never leave a terminal
+      // record claiming an approval is still pending.
+      pendingApproval: null,
     });
   } catch (e) {
     console.error(`[codex] CRITICAL: could not save run state for ${runId}: ${e instanceof Error ? e.message : String(e)}`);
@@ -990,6 +1055,9 @@ export function recordRunFailure(
       status: "failed",
       completedAt: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
+      // Same guarantee as recordTerminalRunState: terminal records never
+      // claim a pending approval.
+      pendingApproval: null,
     });
   } catch (e) {
     console.error(`[codex] Warning: could not record run failure for ${runId}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1081,6 +1149,31 @@ export async function tryArchive(client: AppServerClient, threadId: string): Pro
       return "already_done";
     }
     console.error(`[codex] Warning: could not archive thread: ${e instanceof Error ? e.message : String(e)}`);
+    return "failed";
+  }
+}
+
+/** Try to permanently delete a thread on the server (thread/delete). Unlike
+ *  archiving, this is NOT recoverable with `codex unarchive`. */
+export async function tryServerDelete(client: AppServerClient, threadId: string): Promise<"deleted" | "already_done" | "failed"> {
+  try {
+    await client.request("thread/delete", { threadId });
+    return "deleted";
+  } catch (e) {
+    // "Method not found" (JSON-RPC -32601: a Codex without thread/delete)
+    // must NOT read as "thread already gone" — that would report a permanent
+    // deletion that never happened.
+    const methodUnsupported =
+      (e instanceof RpcError && e.rpcCode === -32601) ||
+      (e instanceof Error && /method not found/i.test(e.message));
+    if (methodUnsupported) {
+      console.error(`[codex] This Codex version does not support thread/delete — use plain \`delete\` (archive) instead.`);
+      return "failed";
+    }
+    if (e instanceof Error && /not found/i.test(e.message)) {
+      return "already_done";
+    }
+    console.error(`[codex] Warning: could not delete thread on server: ${e instanceof Error ? e.message : String(e)}`);
     return "failed";
   }
 }
