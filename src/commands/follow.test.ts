@@ -1,7 +1,7 @@
 // src/commands/follow.test.ts — bare-follow run selection
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { pickDefaultRun, nextUnseenRun } from "./follow";
 import { createRun } from "../threads";
@@ -209,14 +209,43 @@ describe("orphaned run records (deleted threads)", () => {
 });
 
 describe("delete removes the thread's run records", () => {
-  test("removeRunsForThread clears only that thread's records", () => {
+  test("removeRunsForThread clears the records and their detached-runner logs", () => {
     const { stateDir } = freshDirs("delete-runs");
     createRun(stateDir, record("r-a1", "aaaa4001", "completed", "2026-07-03T09:00:00.000Z"));
     createRun(stateDir, record("r-a2", "aaaa4001", "running", "2026-07-03T10:00:00.000Z"));
     createRun(stateDir, record("r-b1", "bbbb4001", "completed", "2026-07-03T11:00:00.000Z"));
+    // Captured detached-runner output can hold prompts/results — a local
+    // delete must reach it too.
+    mkdirSync(join(stateDir, "logs"), { recursive: true });
+    writeFileSync(join(stateDir, "logs", "detached-r-a1.log"), "captured runner output");
 
     const { removeRunsForThread, listRuns } = require("../threads") as typeof import("../threads");
     removeRunsForThread(stateDir, "aaaa4001");
     expect(listRuns(stateDir).map(r => r.runId)).toEqual(["r-b1"]);
+    expect(existsSync(join(stateDir, "logs", "detached-r-a1.log"))).toBe(false);
+  });
+});
+
+describe("runIsLive (run-specific liveness)", () => {
+  test("a stale run with a dead recorded PID is not alive, even when the thread PID file points at a live successor", () => {
+    const { pidsDir } = freshDirs("run-liveness");
+    // Successor runner is alive and owns the thread's PID file
+    writeFileSync(join(pidsDir, "cccc5001"), String(process.pid));
+
+    const { runIsLive } = require("./follow") as typeof import("./follow");
+    const stale = { ...record("r-stale", "cccc5001", "running", "2026-07-03T09:00:00.000Z"), pid: 99999999 };
+    const successor = { ...record("r-live", "cccc5001", "running", "2026-07-03T10:00:00.000Z"), pid: process.pid };
+
+    expect(runIsLive(stale, pidsDir)).toBe(false);   // pre-fix: true via the successor's PID file
+    expect(runIsLive(successor, pidsDir)).toBe(true);
+  });
+
+  test("records without a pid field fall back to the thread-level check", () => {
+    const { pidsDir } = freshDirs("run-liveness-legacy");
+    writeFileSync(join(pidsDir, "dddd5001"), String(process.pid));
+
+    const { runIsLive } = require("./follow") as typeof import("./follow");
+    const legacy = record("r-legacy", "dddd5001", "running", "2026-07-03T09:00:00.000Z");
+    expect(runIsLive(legacy, pidsDir)).toBe(true);
   });
 });

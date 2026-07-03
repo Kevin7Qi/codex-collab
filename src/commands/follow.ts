@@ -71,6 +71,23 @@ function readNewBytes(logPath: string, offset: number, maxOffset: number | null 
   }
 }
 
+/** Run-specific liveness. Prefer the record's own runner PID: the thread's
+ *  PID file tracks only the LATEST runner, so a stale older `running` record
+ *  would read as alive through its successor's file and stall a watch
+ *  forever. Records from older versions (no pid field) fall back to the
+ *  thread-level check. Exported for tests. */
+export function runIsLive(run: RunRecord, pidsDir: string): boolean {
+  if (typeof run.pid === "number" && run.pid > 0) {
+    try {
+      process.kill(run.pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+  return isThreadProcessAlive(pidsDir, run.shortId);
+}
+
 /**
  * Candidate runs for bare-follow selection, newest first. Run records whose
  * thread is no longer in the index are excluded: `delete` now removes them,
@@ -93,7 +110,7 @@ function candidateRuns(stateDir: string, threadsFile: string | undefined): RunRe
  */
 export function pickDefaultRun(stateDir: string, pidsDir: string, threadsFile?: string): RunRecord | null {
   const runs = candidateRuns(stateDir, threadsFile);
-  const live = runs.find(r => r.status === "running" && isThreadProcessAlive(pidsDir, r.shortId));
+  const live = runs.find(r => r.status === "running" && runIsLive(r, pidsDir));
   return live ?? runs[0] ?? null;
 }
 
@@ -107,7 +124,7 @@ export function pickDefaultRun(stateDir: string, pidsDir: string, threadsFile?: 
 export function pickWatchStartRun(stateDir: string, pidsDir: string, threadsFile?: string): RunRecord | null {
   const runs = candidateRuns(stateDir, threadsFile);
   for (let i = runs.length - 1; i >= 0; i--) {
-    if (runs[i].status === "running" && isThreadProcessAlive(pidsDir, runs[i].shortId)) {
+    if (runs[i].status === "running" && runIsLive(runs[i], pidsDir)) {
       return runs[i];
     }
   }
@@ -180,7 +197,7 @@ export function seedSeenRuns(stateDir: string, pidsDir: string, exceptRunId?: st
   const seen = new Set<string>();
   for (const r of listRuns(stateDir)) {
     if (r.runId === exceptRunId) continue;
-    const live = r.status === "running" && isThreadProcessAlive(pidsDir, r.shortId);
+    const live = r.status === "running" && runIsLive(r, pidsDir);
     if (!live) seen.add(r.runId);
   }
   return seen;
@@ -268,9 +285,9 @@ async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptio
     if (rec.status !== "running") return finish(rec);
 
     // Run says running but its runner process is gone: don't sit forever on
-    // a log that will never terminate. (A missing PID file reads as alive —
-    // see isThreadProcessAlive — so this only trips on a confirmed-dead PID.)
-    if (!isThreadProcessAlive(ws.pidsDir, shortId)) {
+    // a log that will never terminate. Run-specific check — the thread's PID
+    // file may already belong to a successor run's live process.
+    if (!runIsLive(rec, ws.pidsDir)) {
       drainRemaining(); // the runner's last flushed bytes, incl. a partial answer
       console.error(`[codex] Runner process for ${shortId} is gone but the run is still marked running — it may have crashed. Check: codex-collab threads`);
       return { record: rec, runnerDied: true };

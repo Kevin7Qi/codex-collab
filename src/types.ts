@@ -476,6 +476,11 @@ export interface RunRecord {
   kind: RunKind;
   phase: RunPhase | null;
   status: RunStatus;
+  /** PID of the runner process that owns this run. Liveness checks must be
+   *  run-specific: the thread's PID file tracks only the LATEST runner, so a
+   *  stale older record would read as alive through its successor's file.
+   *  Absent on records written by older versions. */
+  pid?: number | null;
   sessionId: string | null;
   logFile: string;
   logOffset: number;

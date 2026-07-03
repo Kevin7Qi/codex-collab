@@ -884,6 +884,7 @@ export async function startOrResumeThread(
     kind: isReview ? "review" : "task",
     phase: "starting",
     status: "running",
+    pid: process.pid,
     sessionId,
     logFile: `logs/${shortId}.log`,
     logOffset,
