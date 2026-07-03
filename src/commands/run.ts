@@ -6,7 +6,7 @@ import { join } from "path";
 import { updateThreadStatus, generateRunId, loadRun, updateRun } from "../threads";
 import { runTurn } from "../turns";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
-import { wrapBrokerBusy } from "../broker";
+import { wrapBrokerBusy, isBrokerBusyError } from "../broker";
 import {
   die,
   parseOptions,
@@ -131,12 +131,13 @@ async function detachRun(args: string[], options: ReturnType<typeof parseOptions
       if (rec.status === "cancelled") {
         dieWithRunnerOutput(`Detached run was interrupted before the turn started (thread ${rec.shortId}).`);
       }
-      // A `failed` record is only definitive once the child has exited: the
-      // broker-busy fallback records a transient failure, reconnects
-      // directly, and re-creates this same record — while the child lives,
-      // keep waiting (the 60s deadline + kill below is the backstop).
-      // Reporting failure early would either orphan a runner that later
-      // executes the turn, or require killing a legitimately-retrying one.
+      // A `failed` record is only definitive once the child has exited:
+      // while the child lives it may still be mid-retry (the broker-busy
+      // fallback no longer records its transient failure, but older runners
+      // and unforeseen paths might) — keep waiting; the 60s deadline + kill
+      // below is the backstop. Reporting failure early would either orphan
+      // a runner that later executes the turn, or require killing a
+      // legitimately-retrying one.
       if (childExited && rec.status === "failed") {
         dieWithRunnerOutput(`Detached run failed to start${rec.error ? `: ${rec.error}` : "."}`);
       }
@@ -255,7 +256,17 @@ export async function handleRun(args: string[]): Promise<void> {
       return recordTerminalRunState(ws, threadId, runId, result, "Turn", options.contentOnly);
     } catch (e) {
       e = wrapBrokerBusy(e);
-      recordRunFailure(ws, threadId, runId, e);
+      // A broker-busy error here is about to be retried by withClient over a
+      // direct connection, re-creating this SAME record (sticky runId).
+      // Persisting the transient failure would flash `running → failed →
+      // running` at observers: a `follow --watch` attached in that window
+      // renders the failure, marks the runId seen, and never shows the real
+      // execution. If the retry also fails, its (non-busy) error lands here
+      // again and is recorded; if the process dies in between, the record
+      // parks in "starting" where the detach parent and pruneRuns handle it.
+      if (!isBrokerBusyError(e)) {
+        recordRunFailure(ws, threadId, runId, e);
+      }
       throw e;
     } finally {
       setActiveThreadId(undefined);
