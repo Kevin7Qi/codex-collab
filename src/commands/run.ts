@@ -198,8 +198,10 @@ export async function handleRun(args: string[]): Promise<void> {
   let promptFromStdin = false;
   if (prompt === "-") {
     if (process.stdin.isTTY) console.error("[codex] Reading prompt from stdin — end with Ctrl-D.");
-    prompt = readFileSync(0, "utf-8").trim();
-    if (!prompt) die('Empty prompt on stdin\nUsage: echo "prompt" | codex-collab run -');
+    // Preserve the text byte-for-byte (leading/trailing whitespace can be
+    // significant in heredocs and Markdown) — trim only to detect emptiness.
+    prompt = readFileSync(0, "utf-8");
+    if (!prompt.trim()) die('Empty prompt on stdin\nUsage: echo "prompt" | codex-collab run -');
     promptFromStdin = true;
   }
 
