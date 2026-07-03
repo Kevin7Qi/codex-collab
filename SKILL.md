@@ -30,7 +30,7 @@ cat prompt.md | codex-collab run - --content-only
 
 **IMPORTANT — Execution rules for ALL `codex-collab` Bash commands:**
 - Always use `dangerouslyDisableSandbox=true` — the tool writes to `~/.codex-collab/` which is outside the sandbox allowlist.
-- For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: read the completed task's output (the notification includes it or use `Read` on the output file), then present the results to the user.
+- For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: surface the result per Context Efficiency & Result Visibility below.
 - `run --detach` returns in seconds — run it in the **foreground**.
 - `follow` on a live run blocks until that run completes, and `follow --watch` never exits: both are primarily the **user's** view for their own terminal pane — don't run `--watch` yourself. The one agent-facing use: `follow <id>` in background Bash is the completion signal for a detached run (see Detached Runs below). `follow` on an already-finished run is a quick foreground replay.
 - All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
@@ -71,14 +71,12 @@ codex-collab review "Focus on security issues in auth" -d /path/to/project --con
 
 Review modes: `pr` (default), `uncommitted`, `commit`, `custom`
 
-## Surfacing Results (no parroting)
+## Context Efficiency & Result Visibility
 
-Codex's output must reach the user through a channel they can see, exactly once:
-
-- **`run` and `review` print results on completion** — reading the finished background task's output puts it in the transcript; no separate `output` call needed.
-- **To re-read a finished thread's result, run `codex-collab output <id> --last` through the Bash tool** (`--last` = only the latest turn; drop it for the whole thread history). Bash output is visible to the user — reading the log file with the Read tool is not, and would force you to restate the content yourself.
-- **Never restate Codex's output verbatim in your reply** — it is already on screen and in the thread log. Write only your synthesis: what you verified, where you disagree, and what you would add.
 - **Use `--content-only`** when reading output — result text only, no progress lines.
+- **`run` and `review` print results on completion**; a background task's result lands in its output file.
+- **Read results with Bash, not the Read tool**: `cat` the background output file, or `codex-collab output <id> --last` for a finished thread (`--last`: latest turn only). Bash output appears in the transcript where the user sees it; Read-tool content stays in your context and never reaches them.
+- **Then add only synthesis** — the result is already on screen, so repeat nothing: say what you verified, where you disagree, what you'd add.
 
 ## Resuming Threads
 
