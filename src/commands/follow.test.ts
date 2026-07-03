@@ -249,3 +249,33 @@ describe("runIsLive (run-specific liveness)", () => {
     expect(runIsLive(legacy, pidsDir)).toBe(true);
   });
 });
+
+describe("pickThreadRun (scoped follow, live-first)", () => {
+  test("an older live run beats a newer terminal record", () => {
+    const { stateDir, pidsDir } = freshDirs("scoped-live-first");
+    const liveOld = { ...record("r-live-old", "eeee7001", "running", "2026-07-03T09:00:00.000Z"), pid: process.pid };
+    const doneNew = record("r-done-new", "eeee7001", "completed", "2026-07-03T10:00:00.000Z");
+    createRun(stateDir, liveOld);
+    createRun(stateDir, doneNew);
+
+    const { pickThreadRun } = require("./follow") as typeof import("./follow");
+    expect(pickThreadRun(stateDir, pidsDir, "eeee7001")?.runId).toBe("r-live-old");
+  });
+
+  test("watch mode takes the oldest live run; no live falls back to latest", () => {
+    const { stateDir, pidsDir } = freshDirs("scoped-watch-oldest");
+    const live1 = { ...record("r-live-1", "ffff7001", "running", "2026-07-03T09:00:00.000Z"), pid: process.pid };
+    const live2 = { ...record("r-live-2", "ffff7001", "running", "2026-07-03T10:00:00.000Z"), pid: process.pid };
+    createRun(stateDir, live1);
+    createRun(stateDir, live2);
+
+    const { pickThreadRun } = require("./follow") as typeof import("./follow");
+    expect(pickThreadRun(stateDir, pidsDir, "ffff7001", true)?.runId).toBe("r-live-1");
+    expect(pickThreadRun(stateDir, pidsDir, "ffff7001", false)?.runId).toBe("r-live-2");
+
+    const { stateDir: s2, pidsDir: p2 } = freshDirs("scoped-no-live");
+    createRun(s2, record("r-t1", "aaaa7002", "completed", "2026-07-03T09:00:00.000Z"));
+    createRun(s2, record("r-t2", "aaaa7002", "failed", "2026-07-03T10:00:00.000Z"));
+    expect(pickThreadRun(s2, p2, "aaaa7002")?.runId).toBe("r-t2");
+  });
+});

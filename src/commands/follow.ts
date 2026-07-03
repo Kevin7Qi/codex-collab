@@ -13,7 +13,6 @@
 import { openSync, readSync, closeSync, fstatSync } from "fs";
 import {
   legacyFindShortId as findShortId,
-  getLatestRun,
   listRuns,
   listRunsForThread,
   loadRun,
@@ -128,6 +127,26 @@ export function pickWatchStartRun(stateDir: string, pidsDir: string, threadsFile
       return runs[i];
     }
   }
+  return runs[0] ?? null;
+}
+
+/**
+ * Scoped-follow selection within one thread: prefer a LIVE running run —
+ * an older run can still be active (or approval-blocked) while a newer
+ * terminal record exists, and replaying the newer one would exit without
+ * ever showing the active work. Watch mode asks for the oldest live run
+ * (start-order display); one-shot follow takes the newest. Falls back to
+ * the latest record for a replay. Exported for tests.
+ */
+export function pickThreadRun(
+  stateDir: string,
+  pidsDir: string,
+  shortId: string,
+  oldestLive = false,
+): RunRecord | null {
+  const runs = listRunsForThread(stateDir, shortId); // newest first
+  const live = runs.filter(r => r.status === "running" && runIsLive(r, pidsDir));
+  if (live.length > 0) return oldestLive ? live[live.length - 1] : live[0];
   return runs[0] ?? null;
 }
 
@@ -321,7 +340,9 @@ export async function handleFollow(args: string[]): Promise<void> {
   } else {
     const threadId = resolveThreadIdOrDie(ws.threadsFile, positional[0]);
     scopedShortId = findShortId(ws.threadsFile, threadId) ?? positional[0];
-    run = getLatestRun(ws.stateDir, scopedShortId);
+    // Live-first, like the bare path: a newer terminal record must not
+    // shadow an older run that is still active on this thread.
+    run = pickThreadRun(ws.stateDir, ws.pidsDir, scopedShortId, options.watch);
     if (!run && !options.watch) {
       die(`No run history for thread ${scopedShortId}. For the raw log, use: codex-collab output ${scopedShortId}`);
     }

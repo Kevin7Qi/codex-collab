@@ -369,6 +369,15 @@ export async function handleDelete(args: string[]): Promise<void> {
     }
   }
 
+  // A failed PURGE keeps local state: the permanent deletion definitively
+  // did not happen, and wiping the short-id mapping here would break the
+  // retry we just suggested (`delete <id>` needs it). Archive failures are
+  // lower stakes — the thread stays discoverable server-side — so plain
+  // delete still cleans up locally as before.
+  if (options.purge && serverResult === "failed") {
+    die(`Server delete failed — local state kept so you can retry.\nArchive instead with: codex-collab delete ${id}`);
+  }
+
   if (shortId) {
     removePidFile(ws.pidsDir, shortId);
     const logPath = join(ws.logsDir, `${shortId}.log`);
@@ -385,7 +394,7 @@ export async function handleDelete(args: string[]): Promise<void> {
   }
 
   if (serverResult === "failed") {
-    progress(`Deleted local data for thread ${id} (server ${options.purge ? "delete" : "archive"} failed — the thread may still exist server-side)`);
+    progress(`Deleted local data for thread ${id} (server archive failed — the thread may still exist server-side)`);
   } else if (options.purge) {
     progress(`Permanently deleted thread ${id} (server + local)`);
   } else {
