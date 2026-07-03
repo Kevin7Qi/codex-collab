@@ -188,16 +188,23 @@ async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptio
     }
   };
 
-  const finish = (rec: RunRecord): FollowOutcome => {
-    // Drain whatever the writer flushed after the terminal-state update —
-    // bounded to this run's log section (a later run on the same thread may
-    // already have appended past it).
+  // Render everything the writer flushed that we haven't shown yet —
+  // bounded to this run's log section (a later run on the same thread may
+  // already have appended past it) — then flush any unterminated
+  // agent-output block. Used on every exit path: normal completion AND a
+  // dead runner, whose last flushed bytes must not be dropped.
+  const drainRemaining = () => {
     bound = replayBound(ws.stateDir, run);
     const tail = readNewBytes(logPath, offset, bound);
+    offset = tail.offset;
     show(tail.bytes);
     for (const entry of parser.drain()) {
       for (const line of renderEntry(entry, render)) console.log(line);
     }
+  };
+
+  const finish = (rec: RunRecord): FollowOutcome => {
+    drainRemaining();
     console.log(renderFinalStatus(rec.status, {
       elapsed: rec.elapsed,
       filesChanged: rec.filesChanged?.length,
@@ -229,6 +236,7 @@ async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptio
     // a log that will never terminate. (A missing PID file reads as alive —
     // see isThreadProcessAlive — so this only trips on a confirmed-dead PID.)
     if (!isThreadProcessAlive(ws.pidsDir, shortId)) {
+      drainRemaining(); // the runner's last flushed bytes, incl. a partial answer
       console.error(`[codex] Runner process for ${shortId} is gone but the run is still marked running — it may have crashed. Check: codex-collab threads`);
       return { record: rec, runnerDied: true };
     }
