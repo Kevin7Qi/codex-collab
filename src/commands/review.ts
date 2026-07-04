@@ -100,6 +100,10 @@ export async function handleReview(args: string[]): Promise<void> {
     setActiveRunId(runId);
     writePidFile(ws.pidsDir, shortId);
 
+    // No guardianDir: review threads are ephemeral (never persisted
+    // server-side), so a Guardian denial here could not be overridden later —
+    // thread/resume on the dead thread would fail. Denials still show in the
+    // progress stream and log.
     const dispatcher = createDispatcher(shortId, ws.logsDir, options);
 
     // Note: model/cwd/approval/sandbox already reached the server via the

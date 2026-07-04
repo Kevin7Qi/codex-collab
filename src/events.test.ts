@@ -256,6 +256,42 @@ describe("Guardian auto-approval review events", () => {
     expect(lines[1]).toBe("Guardian approved (low risk): /bin/zsh -lc 'touch canary.txt'");
   });
 
+  test("denied review is persisted for override when guardianDir is set", () => {
+    const lines: string[] = [];
+    const guardianDir = join(TEST_LOG_DIR, "guardian");
+    const dispatcher = new EventDispatcher("guardian-deny", TEST_LOG_DIR, (line) => lines.push(line), guardianDir);
+
+    dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
+      threadId: "t1", turnId: "turn1", reviewId: "rev-denied-1", decisionSource: "agent",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: "out of scope" },
+      action: { type: "command", source: "shell", command: "rm -rf /tmp/y", cwd: "/tmp" },
+    });
+
+    const persisted = JSON.parse(readFileSync(join(guardianDir, "rev-denied-1.json"), "utf8"));
+    expect(persisted.reviewId).toBe("rev-denied-1");
+    expect(persisted.threadId).toBe("t1");
+    expect(lines.some((l) => l.includes("approve --guardian rev-deni"))).toBe(true);
+  });
+
+  test("approvals and denials without guardianDir are not persisted", () => {
+    const guardianDir = join(TEST_LOG_DIR, "guardian");
+    const withDir = new EventDispatcher("guardian-ok", TEST_LOG_DIR, () => {}, guardianDir);
+    withDir.handleAutoApprovalReview("item/autoApprovalReview/completed", {
+      threadId: "t1", turnId: "turn1", reviewId: "rev-approved-1",
+      review: { status: "approved", riskLevel: "low", userAuthorization: "high", rationale: null },
+      action: { type: "command", source: "shell", command: "ls", cwd: "/tmp" },
+    });
+    expect(existsSync(join(guardianDir, "rev-approved-1.json"))).toBe(false);
+
+    const withoutDir = new EventDispatcher("guardian-nodir", TEST_LOG_DIR, () => {});
+    withoutDir.handleAutoApprovalReview("item/autoApprovalReview/completed", {
+      threadId: "t1", turnId: "turn1", reviewId: "rev-denied-2",
+      review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: null },
+      action: { type: "command", source: "shell", command: "ls", cwd: "/tmp" },
+    });
+    expect(existsSync(join(guardianDir, "rev-denied-2.json"))).toBe(false);
+  });
+
   test("enum-shaped decision objects use their type discriminant", () => {
     const lines: string[] = [];
     const dispatcher = new EventDispatcher("guardian3", TEST_LOG_DIR, (line) => lines.push(line));

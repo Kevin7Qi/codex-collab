@@ -62,6 +62,7 @@ export interface WorkspacePaths {
   killSignalsDir: string;
   pidsDir: string;
   runsDir: string;
+  guardianDir: string;
 }
 
 export function getWorkspacePaths(cwd: string): WorkspacePaths {
@@ -73,9 +74,10 @@ export function getWorkspacePaths(cwd: string): WorkspacePaths {
     killSignalsDir: join(stateDir, "kill-signals"),
     pidsDir: join(stateDir, "pids"),
     runsDir: join(stateDir, "runs"),
+    guardianDir: join(stateDir, "guardian"),
   };
   // Lazily ensure workspace directories exist on first access.
-  for (const dir of [paths.logsDir, paths.approvalsDir, paths.killSignalsDir, paths.pidsDir, paths.runsDir]) {
+  for (const dir of [paths.logsDir, paths.approvalsDir, paths.killSignalsDir, paths.pidsDir, paths.runsDir, paths.guardianDir]) {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   // Ensure global data dir exists for config.json
@@ -105,6 +107,9 @@ export interface Options {
   purge: boolean;
   /** output: print only the latest turn's agent output (implies contentOnly). */
   last: boolean;
+  /** approve: override a Guardian denial instead of answering a pending
+   *  interactive approval request. */
+  guardian: boolean;
   /** threads: only threads the current session has run. */
   session: boolean;
   dir: string;
@@ -250,6 +255,7 @@ export function defaultOptions(): Options {
     detach: false,
     watch: false,
     purge: false,
+    guardian: false,
     dir: process.cwd(),
     last: false,
     session: false,
@@ -391,6 +397,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
     } else if (arg === "--last") {
       options.last = true;
       options.contentOnly = true;
+    } else if (arg === "--guardian") {
+      options.guardian = true;
     } else if (arg === "--session") {
       options.session = true;
     } else if (arg === "--content-only") {
@@ -675,11 +683,17 @@ export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>,
   }
 }
 
-export function createDispatcher(shortId: string, logsDir: string, opts: Options): EventDispatcher {
+export function createDispatcher(
+  shortId: string,
+  logsDir: string,
+  opts: Options,
+  guardianDir?: string,
+): EventDispatcher {
   return new EventDispatcher(
     shortId,
     logsDir,
     opts.contentOnly ? () => {} : progress,
+    guardianDir,
   );
 }
 
