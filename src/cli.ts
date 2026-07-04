@@ -116,6 +116,8 @@ Commands:
   models                  List available models
   templates               List available prompt templates
   approve <id>            Approve a pending request
+  approve --guardian [id] Override a Guardian denial (no id: list pending
+                          denials); takes effect on the thread's next run
   decline <id>            Decline a pending request
   clean                   Delete old logs and stale mappings
   delete <id> [--purge]   Archive thread (recoverable) and delete local files;

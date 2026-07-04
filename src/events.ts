@@ -8,6 +8,7 @@ import {
   type ErrorNotificationParams, type AutoApprovalReviewParams,
   type FileChange, type CommandExec,
 } from "./types";
+import { saveGuardianDenial } from "./guardian";
 
 type ProgressCallback = (line: string) => void;
 
@@ -23,15 +24,20 @@ export class EventDispatcher {
   private logBuffer: string[] = [];
   private logPath: string;
   private onProgress: ProgressCallback;
+  /** When set, denied Guardian reviews are persisted here so the user can
+   *  override them later with `approve --guardian`. */
+  private guardianDir: string | null;
 
   constructor(
     shortId: string,
     logsDir: string,
     onProgress?: ProgressCallback,
+    guardianDir?: string,
   ) {
     if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true, mode: 0o700 });
     this.logPath = join(logsDir, `${shortId}.log`);
     this.onProgress = onProgress ?? ((line) => process.stderr.write(line + "\n"));
+    this.guardianDir = guardianDir ?? null;
   }
 
   handleItemStarted(params: ItemStartedParams): void {
@@ -168,6 +174,18 @@ export class EventDispatcher {
       // decision trail (rationale, decisionSource) matters for auditing an
       // autonomous approval.
       this.log(`guardian review completed: ${safeStringify(params)}`);
+      if (decision === "denied" && this.guardianDir) {
+        try {
+          if (saveGuardianDenial(this.guardianDir, params)) {
+            this.progress(
+              `Override available: codex-collab approve --guardian ${String(params.reviewId).slice(0, 8)}`,
+            );
+          }
+        } catch (e) {
+          // Persistence is best-effort; the denial is still in the log above.
+          this.log(`failed to persist guardian denial: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     } else {
       this.progress(`Guardian reviewing approval request${clipped ? `: ${clipped}` : ""}`);
       this.log(`guardian review started: ${safeStringify(params)}`);

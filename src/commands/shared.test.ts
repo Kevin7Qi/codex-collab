@@ -44,8 +44,9 @@ function freshWorkspace(name: string): WorkspacePaths {
     killSignalsDir: join(stateDir, "kill-signals"),
     pidsDir: join(stateDir, "pids"),
     runsDir: join(stateDir, "runs"),
+    guardianDir: join(stateDir, "guardian"),
   };
-  for (const dir of [ws.logsDir, ws.approvalsDir, ws.killSignalsDir, ws.pidsDir, ws.runsDir]) {
+  for (const dir of [ws.logsDir, ws.approvalsDir, ws.killSignalsDir, ws.pidsDir, ws.runsDir, ws.guardianDir]) {
     mkdirSync(dir, { recursive: true });
   }
   return ws;

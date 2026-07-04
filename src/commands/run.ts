@@ -248,7 +248,7 @@ export async function handleRun(args: string[]): Promise<void> {
     setActiveRunId(runId);
     writePidFile(ws.pidsDir, shortId);
 
-    const dispatcher = createDispatcher(shortId, ws.logsDir, options);
+    const dispatcher = createDispatcher(shortId, ws.logsDir, options, ws.guardianDir);
 
     try {
       const result = await runTurn(

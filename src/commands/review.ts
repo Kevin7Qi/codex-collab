@@ -100,7 +100,7 @@ export async function handleReview(args: string[]): Promise<void> {
     setActiveRunId(runId);
     writePidFile(ws.pidsDir, shortId);
 
-    const dispatcher = createDispatcher(shortId, ws.logsDir, options);
+    const dispatcher = createDispatcher(shortId, ws.logsDir, options, ws.guardianDir);
 
     // Note: model/cwd/approval/sandbox already reached the server via the
     // thread start/fork params in startOrResumeThread; review/start itself

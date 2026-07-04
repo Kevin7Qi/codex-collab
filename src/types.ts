@@ -396,7 +396,32 @@ export interface AutoApprovalReviewParams {
   threadId?: string;
   turnId?: string;
   itemId?: string;
+  /** Stable identifier for the review lifecycle — the handle
+   *  thread/approveGuardianDeniedAction overrides are keyed by. */
+  reviewId?: string;
+  targetItemId?: string | null;
+  startedAtMs?: number;
+  completedAtMs?: number;
+  decisionSource?: string;
+  /** Verdict: { status, riskLevel, userAuthorization, rationale }. */
+  review?: unknown;
+  /** Reviewed action, tagged by `type` (command, execve, applyPatch,
+   *  networkAccess, mcpToolCall, requestPermissions). */
+  action?: unknown;
   [key: string]: unknown;
+}
+
+/** A Guardian denial captured from item/autoApprovalReview/completed and
+ *  persisted under the workspace's guardian/ dir so the user can override
+ *  it later with `approve --guardian <review-id>`. */
+export interface GuardianDenialRecord {
+  reviewId: string;
+  threadId: string;
+  receivedAt: string;
+  /** Set once the override RPC has been sent; hides it from the pending list. */
+  overriddenAt?: string;
+  /** Raw notification payload (camelCase v2 wire shape). */
+  notification: AutoApprovalReviewParams;
 }
 
 // --- Model list ---

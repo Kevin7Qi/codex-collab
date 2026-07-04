@@ -151,6 +151,15 @@ codex-collab run "refactor the auth module" --approval auto --content-only
 
 With `--approval auto`, Guardian approves or **denies** each request on its own — it does not escalate to the interactive flow, so auto runs never block. Its decisions appear in the progress stream (`Guardian approved (low risk): …`) with full payloads in the thread log; judgment calls and denials additionally surface as `Guardian warning: …` lines carrying the risk level, the user-authorization assessment, and the rationale. Note Guardian weighs whether the *user* asked for the action — explicitly user-requested commands get high authorization and are usually approved; it exists to catch the model acting beyond its mandate.
 
+When Guardian denies an action the run keeps going (the agent works around it), and the denial is saved locally with a progress hint (`Override available: codex-collab approve --guardian <review-id>`). If the user decides the action was actually fine:
+
+```bash
+codex-collab approve --guardian               # list pending denials
+codex-collab approve --guardian <review-id>   # override one (prefix ok)
+```
+
+The override records a user approval for that exact action inside the thread — nothing executes immediately; the agent retries it on the thread's next run (`codex-collab run --resume <short-id> "continue"`). It authorizes only that specific action, not similar ones.
+
 Under the interactive policies (`on-request`, `on-failure`, `untrusted`), an approval request shows:
 ```
 [codex] APPROVAL NEEDED
