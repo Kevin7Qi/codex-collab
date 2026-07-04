@@ -25,7 +25,6 @@ describe("config object", () => {
   });
 
   test("deprecated paths still work", () => {
-    expect(config.threadsFile).toContain("threads.json");
     expect(config.logsDir).toContain("logs");
     expect(config.approvalsDir).toContain("approvals");
     expect(config.killSignalsDir).toContain("kill-signals");

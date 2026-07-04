@@ -1,109 +1,36 @@
-// src/client.ts — JSON-RPC client for Codex app server
+// src/client.ts — direct stdio transport to the Codex app server
+//
+// The JSON-RPC plumbing (dispatch, pending tracking, line buffering) lives in
+// rpc.ts and is shared with broker-client.ts; this file owns what is specific
+// to the spawned child process: spawn, stdin/stdout wiring, stderr draining,
+// exit monitoring, platform-specific shutdown, and the initialize handshake.
 
-import { spawn } from "bun";
-import { spawnSync } from "child_process";
-import type {
-  JsonRpcMessage,
-  JsonRpcRequest,
-  JsonRpcResponse,
-  JsonRpcError,
-  JsonRpcNotification,
-  RequestId,
-  InitializeParams,
-  InitializeResponse,
-} from "./types";
-import { RpcError } from "./types";
+import { spawn as childSpawn, spawnSync } from "child_process";
+import type { InitializeParams, InitializeResponse, RequestId } from "./types";
 import { config } from "./config";
-
-const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
+import {
+  createRpcEndpoint,
+  type NotificationHandler,
+  type AnyNotificationHandler,
+  type ServerRequestHandler,
+} from "./rpc";
 
 export type { RequestId } from "./types";
-
-/** Format a JSON-RPC-style notification (no id, no response). Returns newline-terminated JSON.
- *  Note: Codex app server protocol omits the standard `jsonrpc: "2.0"` field. */
-export function formatNotification(method: string, params?: unknown): string {
-  const msg: Record<string, unknown> = { method };
-  if (params !== undefined) msg.params = params;
-  return JSON.stringify(msg) + "\n";
-}
-
-/** Format a JSON-RPC response to a server request. Returns newline-terminated JSON. */
-export function formatResponse(id: RequestId, result: unknown): string {
-  return JSON.stringify({ id, result }) + "\n";
-}
-
-/** Parse a JSON-RPC message from a line. Returns null if unparseable or not a valid protocol message. */
-export function parseMessage(line: string): JsonRpcMessage | null {
-  try {
-    const raw = JSON.parse(line);
-    if (typeof raw !== "object" || raw === null) return null;
-
-    const hasMethod = "method" in raw && typeof raw.method === "string";
-    const hasId = "id" in raw && (typeof raw.id === "string" || typeof raw.id === "number");
-    const hasResult = "result" in raw;
-    const hasError = "error" in raw;
-
-    if (!hasMethod && !hasId) {
-      console.error(`[codex] Warning: ignoring non-protocol message: ${line.slice(0, 200)}`);
-      return null;
-    }
-
-    if (hasId && !hasMethod) {
-      if (hasResult === hasError) {
-        console.error(`[codex] Warning: ignoring malformed response: ${line.slice(0, 200)}`);
-        return null;
-      }
-      if (hasError) {
-        const error = (raw as { error?: unknown }).error;
-        if (
-          typeof error !== "object" ||
-          error === null ||
-          typeof (error as { code?: unknown }).code !== "number" ||
-          typeof (error as { message?: unknown }).message !== "string"
-        ) {
-          console.error(`[codex] Warning: ignoring malformed error response: ${line.slice(0, 200)}`);
-          return null;
-        }
-      }
-      return raw as JsonRpcMessage;
-    }
-
-    if (hasMethod && hasId && (hasResult || hasError)) {
-      console.error(`[codex] Warning: ignoring malformed request/response hybrid: ${line.slice(0, 200)}`);
-      return null;
-    }
-
-    if (hasMethod && !hasId && (hasResult || hasError)) {
-      console.error(`[codex] Warning: ignoring malformed notification/response hybrid: ${line.slice(0, 200)}`);
-      return null;
-    }
-
-    return raw as JsonRpcMessage;
-  } catch {
-    console.error(`[codex] Warning: unparseable message from app server: ${line.slice(0, 200)}`);
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// AppServerClient — spawn, handshake, request/response routing, shutdown
-// ---------------------------------------------------------------------------
-
-/** Pending request tracker. */
-export interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
-/** Handler for server-sent notifications. */
-export type NotificationHandler = (params: unknown) => void;
-
-/** Handler for any server-sent notification, including the method name. */
-export type AnyNotificationHandler = (method: string, params: unknown) => void;
-
-/** Handler for server-sent requests (e.g. approval requests). Returns the result to send back. */
-export type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
+// Protocol helpers historically lived here; broker-server.ts and tests import
+// them from this module.
+export {
+  formatNotification,
+  formatResponse,
+  parseMessage,
+  isResponse,
+  isError,
+  isRequest,
+  isNotification,
+  type PendingRequest,
+  type NotificationHandler,
+  type AnyNotificationHandler,
+  type ServerRequestHandler,
+} from "./rpc";
 
 /** Options for connectDirect(). */
 export interface ConnectOptions {
@@ -139,7 +66,8 @@ export interface AppServerClient {
    *  (e.g. the app-server process exits). Not called on intentional close(). */
   onClose(handler: () => void): () => void;
   /** Close the connection and terminate the server process.
-   *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL.
+   *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL,
+   *  signalling the app-server's process group so grandchildren die too.
    *  On Windows: close stdin, then immediately terminate the process tree
    *  (no timed grace period, unlike Unix). */
   close(): Promise<void>;
@@ -150,26 +78,6 @@ export interface AppServerClient {
   brokerBusy: boolean;
 }
 
-/** Type guard: message is a response (has id + result). */
-export function isResponse(msg: JsonRpcMessage): msg is JsonRpcResponse {
-  return "id" in msg && "result" in msg && !("method" in msg);
-}
-
-/** Type guard: message is an error response (has id + error). */
-export function isError(msg: JsonRpcMessage): msg is JsonRpcError {
-  return "id" in msg && "error" in msg && !("method" in msg);
-}
-
-/** Type guard: message is a request (has id + method). */
-export function isRequest(msg: JsonRpcMessage): msg is JsonRpcRequest {
-  return "id" in msg && "method" in msg && !("result" in msg) && !("error" in msg);
-}
-
-/** Type guard: message is a notification (has method, no id). */
-export function isNotification(msg: JsonRpcMessage): msg is JsonRpcNotification {
-  return "method" in msg && !("id" in msg);
-}
-
 /**
  * Spawn the Codex app-server process, perform the initialize handshake,
  * and return an AppServerClient for request/response communication.
@@ -178,277 +86,113 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   const command = opts?.command ?? ["codex", "app-server"];
   const requestTimeout = opts?.requestTimeout ?? config.requestTimeout;
 
-  // Spawn the child process
-  const proc = (() => {
-    try {
-      return spawn(command, {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-        cwd: opts?.cwd,
-        env: opts?.env ? { ...process.env, ...opts.env } : undefined,
-        // On Windows, `codex` resolves to `codex.cmd` and Bun.spawn wraps it
-        // with `cmd.exe /c`, which would otherwise show a console window for
-        // the lifetime of the broker's app-server.
-        windowsHide: true,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(
-        `Failed to start app server (${command.join(" ")}): ${msg}\n` +
+  // Spawn the child process. Node's child_process (not Bun.spawn, which has
+  // no `detached`) so the app-server gets its own process group on Unix —
+  // close() can then signal the whole tree (-pid) instead of only the direct
+  // child, which orphaned grandchildren (wrapper scripts, mid-turn shell
+  // commands). The CLI's own pgroup is untouched. Not used on Windows, where
+  // detached also detaches the console; tree termination there is taskkill /T.
+  const detached = process.platform !== "win32";
+  // On Windows, npm installs `codex` as a `codex.cmd` shim, which
+  // child_process.spawn refuses to launch without a shell (EINVAL since the
+  // CVE-2024-27980 hardening). Wrap with `cmd.exe /c` — the same thing
+  // Bun.spawn did implicitly; windowsHide keeps the console window away.
+  const argv = process.platform === "win32" ? ["cmd.exe", "/c", ...command] : command;
+  const proc = childSpawn(argv[0], argv.slice(1), {
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: opts?.cwd,
+    env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+    detached,
+    windowsHide: true,
+  });
+
+  let exited = false;
+
+  /** Signal the app-server's process group (Unix, detached) with a fallback
+   *  to the direct child; plain child kill elsewhere. */
+  function killTree(signal?: NodeJS.Signals): void {
+    if (detached && proc.pid) {
+      try {
+        process.kill(-proc.pid, signal ?? "SIGTERM");
+        return;
+      } catch {} // ESRCH (group gone) / EPERM — fall through to the child
+    }
+    try { proc.kill(signal); } catch (e) {
+      if (!exited) {
+        console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  /** After the direct child is gone, its detached process group can still
+   *  hold descendants (the group id stays reserved while any member lives).
+   *  SIGTERM the group and, if members ignore it, escalate to SIGKILL —
+   *  bounded at ~500ms and zero-cost when the group is already empty, so
+   *  close() resolving really means the tree is gone. */
+  async function sweepGroup(): Promise<void> {
+    if (!detached || !proc.pid) return;
+    const pgid = proc.pid;
+    const groupAlive = () => {
+      try { process.kill(-pgid, 0); return true; } catch { return false; }
+    };
+    if (!groupAlive()) return;
+    try { process.kill(-pgid, "SIGTERM"); } catch { return; }
+    for (let i = 0; i < 10 && groupAlive(); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (groupAlive()) {
+      try { process.kill(-pgid, "SIGKILL"); } catch {}
+    }
+  }
+
+  const endpoint = createRpcEndpoint({
+    label: "codex",
+    requestTimeout,
+    send: (data) => {
+      if (!proc.stdin.writable) throw new Error("stdin is not writable");
+      proc.stdin.write(data);
+    },
+    downReason: () => (exited ? "App server process exited unexpectedly" : null),
+    overflowReason: "App server response buffer exceeded maximum size",
+    onOverflow: () => killTree(),
+    writeFailedPrefix: "App server stdin write failed: ",
+  });
+
+  // Feed stdout into the endpoint line parser
+  proc.stdout.setEncoding("utf8");
+  proc.stdout.on("data", (chunk: string) => endpoint.feed(chunk));
+
+  // Async stdin errors (e.g. EPIPE racing process death) surface via the
+  // exit handler below; an unhandled 'error' event would crash the CLI.
+  proc.stdin.on("error", () => {});
+
+  // Monitor process exit: reject all pending requests and notify close
+  // handlers. A spawn failure (ENOENT — codex not installed) emits 'error'
+  // and may never emit 'exit', so both settle the same state.
+  const procGone = new Promise<void>((resolveGone) => {
+    proc.once("exit", () => {
+      exited = true;
+      endpoint.fail("App server process exited unexpectedly");
+      resolveGone();
+    });
+    proc.once("error", (err) => {
+      exited = true;
+      endpoint.fail(
+        `Failed to start app server (${command.join(" ")}): ${err.message}\n` +
         `Ensure codex CLI is installed: npm install -g @openai/codex`,
       );
-    }
-  })();
-
-  // Internal state
-  const pending = new Map<RequestId, PendingRequest>();
-  const notificationHandlers = new Map<string, Set<NotificationHandler>>();
-  const anyNotificationHandlers = new Set<AnyNotificationHandler>();
-  const requestHandlers = new Map<string, ServerRequestHandler>();
-  let closed = false;
-  let exited = false;
-  let connectionNextId = 1;
-
-  // Write a string to the child's stdin
-  function write(data: string): void {
-    if (closed) return;
-    try {
-      proc.stdin.write(data);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!exited) {
-        console.error(`[codex] Failed to write to app server: ${msg}`);
-      }
-      rejectAll("App server stdin write failed: " + msg);
-    }
-  }
-
-  // Reject all pending requests (used on process exit or close)
-  function rejectAll(reason: string): void {
-    for (const entry of pending.values()) {
-      clearTimeout(entry.timer);
-      entry.reject(new Error(reason));
-    }
-    pending.clear();
-  }
-
-  // Dispatch a parsed message
-  function dispatch(msg: JsonRpcMessage): void {
-    if (isResponse(msg)) {
-      const entry = pending.get(msg.id);
-      if (entry) {
-        clearTimeout(entry.timer);
-        pending.delete(msg.id);
-        entry.resolve(msg.result);
-      }
-      return;
-    }
-
-    if (isError(msg)) {
-      const entry = pending.get(msg.id);
-      if (entry) {
-        clearTimeout(entry.timer);
-        pending.delete(msg.id);
-        const e = msg.error;
-        entry.reject(new RpcError(
-          `JSON-RPC error ${e.code}: ${e.message}${e.data ? ` (${JSON.stringify(e.data)})` : ""}`,
-          e.code,
-        ));
-      }
-      return;
-    }
-
-    if (isRequest(msg)) {
-      const handler = requestHandlers.get(msg.method);
-      if (handler) {
-        Promise.resolve()
-          .then(() => handler(msg.params))
-          .then(
-            (res) => write(formatResponse(msg.id, res)),
-            (err) => {
-              const errMsg = err instanceof Error ? err.message : String(err);
-              // Preserve a structured code/data the handler attached to the
-              // Error (e.g. a forwarded client rejection); fall back to the
-              // generic internal-error code otherwise.
-              const errAny = err as { code?: unknown; data?: unknown };
-              const code = typeof errAny?.code === "number" ? errAny.code : -32603;
-              const message = code === -32603 ? `Handler error: ${errMsg}` : errMsg;
-              console.error(`[codex] Error in request handler for "${msg.method}": ${errMsg}`);
-              const errBody: Record<string, unknown> = { code, message };
-              if (errAny?.data !== undefined) errBody.data = errAny.data;
-              write(JSON.stringify({ id: msg.id, error: errBody }) + "\n");
-            },
-          );
-      } else {
-        write(JSON.stringify({ id: msg.id, error: { code: -32601, message: `Method not found: ${msg.method}` } }) + "\n");
-      }
-      return;
-    }
-
-    if (isNotification(msg)) {
-      // Wildcard handlers fire first, regardless of method, so the broker
-      // forwards every notification — including new ones the protocol adds.
-      for (const h of anyNotificationHandlers) {
-        try {
-          h(msg.method, msg.params);
-        } catch (e) {
-          console.error(`[codex] Error in wildcard notification handler for "${msg.method}": ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-      const handlers = notificationHandlers.get(msg.method);
-      if (handlers) {
-        for (const h of handlers) {
-          try {
-            h(msg.params);
-          } catch (e) {
-            console.error(`[codex] Error in notification handler for "${msg.method}": ${e instanceof Error ? e.message : String(e)}`);
-          }
-        }
-      }
-    }
-  }
-
-  // Start the read loop — reads stdout line-by-line
-  const readLoop = (async () => {
-    const reader = proc.stdout.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        if (buffer.length > MAX_BUFFER_SIZE) {
-          console.error("[codex] App server response buffer exceeded maximum size");
-          rejectAll("App server response buffer exceeded maximum size");
-          try { proc.kill(); } catch {}
-          break;
-        }
-
-        let newlineIdx: number;
-        while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-          const line = buffer.slice(0, newlineIdx).trim();
-          buffer = buffer.slice(newlineIdx + 1);
-          if (!line) continue;
-
-          const msg = parseMessage(line);
-          if (msg) {
-            dispatch(msg);
-          }
-        }
-      }
-    } catch (e) {
-      if (!closed && !exited) {
-        console.error(`[codex] Read loop error: ${e instanceof Error ? e.message : String(e)}`);
-        rejectAll("Read loop failed unexpectedly");
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  })();
-
-  // Monitor process exit: reject all pending requests and notify close handlers
-  const closeHandlers = new Set<() => void>();
-  proc.exited.then(() => {
-    exited = true;
-    if (!closed) {
-      rejectAll("App server process exited unexpectedly");
-      for (const handler of closeHandlers) {
-        try { handler(); } catch (e) {
-          console.error(`[codex] Warning: close handler error: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      }
-    }
+      resolveGone();
+    });
   });
 
   // Drain stderr and log non-empty output
-  (async () => {
-    const reader = proc.stderr.getReader();
-    const decoder = new TextDecoder();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const text = decoder.decode(value, { stream: true }).trim();
-        if (text) {
-          console.error(`[codex] app-server stderr: ${text}`);
-        }
-      }
-    } catch (e) {
-      if (!closed && !exited) {
-        console.error(`[codex] Warning: stderr reader failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    } finally {
-      reader.releaseLock();
+  proc.stderr.setEncoding("utf8");
+  proc.stderr.on("data", (chunk: string) => {
+    const text = chunk.trim();
+    if (text) {
+      console.error(`[codex] app-server stderr: ${text}`);
     }
-  })();
-
-  // --- Build the client object ---
-
-  function request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      if (closed) { reject(new Error("Client is closed")); return; }
-      if (exited) { reject(new Error("App server process exited unexpectedly")); return; }
-
-      const id = connectionNextId++;
-      const msg: Record<string, unknown> = { id, method };
-      if (params !== undefined) msg.params = params;
-      const line = JSON.stringify(msg) + "\n";
-
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error(`Request ${method} (id=${id}) timed out after ${requestTimeout}ms`));
-      }, requestTimeout);
-
-      pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
-      write(line);
-    });
-  }
-
-  function notify(method: string, params?: unknown): void {
-    write(formatNotification(method, params));
-  }
-
-  function on(method: string, handler: NotificationHandler): () => void {
-    if (!notificationHandlers.has(method)) {
-      notificationHandlers.set(method, new Set());
-    }
-    notificationHandlers.get(method)!.add(handler);
-    return () => {
-      notificationHandlers.get(method)?.delete(handler);
-    };
-  }
-
-  function onAny(handler: AnyNotificationHandler): () => void {
-    anyNotificationHandlers.add(handler);
-    return () => { anyNotificationHandlers.delete(handler); };
-  }
-
-  /** Register a handler for server-sent requests. Only one handler per method;
-   *  a new registration replaces the previous one (with a warning). */
-  function onRequest(method: string, handler: ServerRequestHandler): () => void {
-    if (requestHandlers.has(method)) {
-      console.error(`[codex] Warning: replacing existing request handler for "${method}"`);
-    }
-    requestHandlers.set(method, handler);
-    return () => {
-      // Only delete if this is still our handler
-      if (requestHandlers.get(method) === handler) {
-        requestHandlers.delete(method);
-      }
-    };
-  }
-
-  function respond(id: RequestId, result: unknown): void {
-    write(formatResponse(id, result));
-  }
-
-  function onClose(handler: () => void): () => void {
-    closeHandlers.add(handler);
-    return () => { closeHandlers.delete(handler); };
-  }
+  });
 
   /** Wait for the process to exit within the given timeout. The timer is
    *  cleared when the process wins the race — a leftover armed timer keeps
@@ -457,7 +201,7 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   function waitForExit(timeoutMs: number): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
-      proc.exited.then(() => {
+      procGone.then(() => {
         clearTimeout(timer);
         resolve(true);
       });
@@ -465,9 +209,8 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   }
 
   async function close(): Promise<void> {
-    if (closed) return;
-    closed = true;
-    rejectAll("Client closed");
+    if (endpoint.isClosed()) return;
+    endpoint.markClosed();
 
     // Close stdin to signal the server to exit
     try {
@@ -501,20 +244,25 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
           console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
-      // Wait for the process to fully exit so dangling readLoop / proc.exited
-      // promises don't keep the event loop alive (which blocks background tasks
+      // Wait for the process to fully exit so a dangling exit listener
+      // doesn't keep the event loop alive (which blocks background tasks
       // from reporting completion).
-      if (await waitForExit(3000)) { await readLoop; }
+      await waitForExit(3000);
       return;
     }
 
-    // Unix: wait for graceful exit, then escalate
-    if (await waitForExit(5000)) { await readLoop; return; }
-    proc.kill("SIGTERM");
-    if (await waitForExit(3000)) { await readLoop; return; }
-    proc.kill("SIGKILL");
-    await proc.exited;
-    await readLoop;
+    // Unix: wait for graceful exit, then escalate — group signals, so
+    // grandchildren (wrapper scripts, mid-turn shell commands) die with
+    // the app-server instead of being orphaned. Every exit path ends with
+    // a group sweep: the leader dying says nothing about descendants (a
+    // server exiting on stdin EOF can leave a spawned command running,
+    // and a straggler can ignore the group SIGTERM).
+    if (await waitForExit(5000)) { await sweepGroup(); return; }
+    killTree("SIGTERM");
+    if (await waitForExit(3000)) { await sweepGroup(); return; }
+    killTree("SIGKILL");
+    await procGone;
+    await sweepGroup();
   }
 
   // --- Perform initialize handshake ---
@@ -531,21 +279,21 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
 
   let initResult: InitializeResponse;
   try {
-    initResult = await request<InitializeResponse>("initialize", initParams);
-    notify("initialized");
+    initResult = await endpoint.request<InitializeResponse>("initialize", initParams);
+    endpoint.notify("initialized");
   } catch (e) {
     await close();
     throw e;
   }
 
   return {
-    request,
-    notify,
-    on,
-    onAny,
-    onRequest,
-    respond,
-    onClose,
+    request: endpoint.request,
+    notify: endpoint.notify,
+    on: endpoint.on,
+    onAny: endpoint.onAny,
+    onRequest: endpoint.onRequest,
+    respond: endpoint.respond,
+    onClose: endpoint.onClose,
     close,
     userAgent: initResult.userAgent,
     brokerBusy: false,

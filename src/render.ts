@@ -196,7 +196,7 @@ export function renderFinalStatus(
   switch (status) {
     case "completed":
       return style(`✔ completed${suffix}`, [ANSI.bold, ANSI.green], color);
-    case "cancelled":
+    case "interrupted":
       return style(`■ interrupted${suffix}`, [ANSI.bold, ANSI.yellow], color);
     case "failed":
       return style(`✖ failed${suffix}${detail.error ? ` — ${detail.error}` : ""}`, [ANSI.bold, ANSI.red], color);

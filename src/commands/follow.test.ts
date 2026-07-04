@@ -4,7 +4,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import { pickDefaultRun, nextUnseenRun } from "./follow";
-import { createRun } from "../threads";
+import { createRun, mutateThreadIndex } from "../threads";
 import type { RunRecord, RunStatus } from "../types";
 
 const tmpRoot = join(process.env.TMPDIR ?? "/tmp", "follow-test-" + process.pid);
@@ -14,6 +14,15 @@ function freshDirs(name: string): { stateDir: string; pidsDir: string } {
   const pidsDir = join(stateDir, "pids");
   mkdirSync(pidsDir, { recursive: true });
   return { stateDir, pidsDir };
+}
+
+/** createRun + a matching thread-index entry — the bare-follow pickers skip
+ *  runs whose thread is missing from the index (orphan protection). */
+function createIndexedRun(stateDir: string, rec: RunRecord): void {
+  createRun(stateDir, rec);
+  mutateThreadIndex(stateDir, (index) => {
+    index[rec.shortId] = { threadId: rec.threadId, createdAt: rec.startedAt };
+  });
 }
 
 function record(runId: string, shortId: string, status: RunStatus, startedAt: string): RunRecord {
@@ -29,8 +38,8 @@ function record(runId: string, shortId: string, status: RunStatus, startedAt: st
 describe("pickDefaultRun", () => {
   test("prefers the newest running run with a live process", () => {
     const { stateDir, pidsDir } = freshDirs("live-run");
-    createRun(stateDir, record("r-old", "aaaa0001", "completed", "2026-07-02T10:00:00.000Z"));
-    createRun(stateDir, record("r-live", "aaaa0002", "running", "2026-07-02T09:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-old", "aaaa0001", "completed", "2026-07-02T10:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-live", "aaaa0002", "running", "2026-07-02T09:00:00.000Z"));
     // Live PID for the running one (this test process)
     writeFileSync(join(pidsDir, "aaaa0002"), String(process.pid));
 
@@ -40,8 +49,8 @@ describe("pickDefaultRun", () => {
 
   test("skips a stale running record whose process is dead", () => {
     const { stateDir, pidsDir } = freshDirs("stale-run");
-    createRun(stateDir, record("r-stale", "bbbb0001", "running", "2026-07-02T11:00:00.000Z"));
-    createRun(stateDir, record("r-done", "bbbb0002", "completed", "2026-07-02T10:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-stale", "bbbb0001", "running", "2026-07-02T11:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-done", "bbbb0002", "completed", "2026-07-02T10:00:00.000Z"));
     // Dead PID for the "running" record (bun test never has PID ~2^22-ish reserved)
     writeFileSync(join(pidsDir, "bbbb0001"), "99999999");
 
@@ -52,8 +61,8 @@ describe("pickDefaultRun", () => {
 
   test("falls back to the newest run when nothing is running", () => {
     const { stateDir, pidsDir } = freshDirs("replay");
-    createRun(stateDir, record("r-1", "cccc0001", "completed", "2026-07-02T10:00:00.000Z"));
-    createRun(stateDir, record("r-2", "cccc0002", "failed", "2026-07-02T11:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-1", "cccc0001", "completed", "2026-07-02T10:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-2", "cccc0002", "failed", "2026-07-02T11:00:00.000Z"));
 
     expect(pickDefaultRun(stateDir, pidsDir)?.runId).toBe("r-2");
   });
@@ -67,9 +76,9 @@ describe("pickDefaultRun", () => {
 describe("nextUnseenRun (watch mode)", () => {
   test("returns unseen runs oldest-first so none are skipped under concurrency", () => {
     const { stateDir } = freshDirs("watch-order");
-    createRun(stateDir, record("r-1", "dddd0001", "completed", "2026-07-02T10:00:00.000Z"));
-    createRun(stateDir, record("r-2", "dddd0002", "completed", "2026-07-02T11:00:00.000Z"));
-    createRun(stateDir, record("r-3", "dddd0003", "running", "2026-07-02T12:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-1", "dddd0001", "completed", "2026-07-02T10:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-2", "dddd0002", "completed", "2026-07-02T11:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-3", "dddd0003", "running", "2026-07-02T12:00:00.000Z"));
 
     const seen = new Set<string>();
     // Two runs finished while we were attached elsewhere: both must surface,
@@ -85,8 +94,8 @@ describe("nextUnseenRun (watch mode)", () => {
 
   test("scoped watch only surfaces runs of that thread", () => {
     const { stateDir } = freshDirs("watch-scoped");
-    createRun(stateDir, record("r-mine", "eeee0001", "completed", "2026-07-02T10:00:00.000Z"));
-    createRun(stateDir, record("r-other", "eeee0002", "running", "2026-07-02T11:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-mine", "eeee0001", "completed", "2026-07-02T10:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-other", "eeee0002", "running", "2026-07-02T11:00:00.000Z"));
 
     const seen = new Set<string>();
     expect(nextUnseenRun(stateDir, seen, "eeee0001")?.runId).toBe("r-mine");
@@ -146,10 +155,10 @@ describe("replayBound: zero-byte runs (equal logOffset)", () => {
 describe("seedSeenRuns (watch startup)", () => {
   test("history is seeded; live concurrent runs stay unseen", () => {
     const { stateDir, pidsDir } = freshDirs("seed-seen");
-    createRun(stateDir, record("r-old", "1111aaaa", "completed", "2026-07-03T09:00:00.000Z"));
-    createRun(stateDir, record("r-picked", "2222aaaa", "running", "2026-07-03T10:00:00.000Z"));
-    createRun(stateDir, record("r-live2", "3333aaaa", "running", "2026-07-03T10:00:01.000Z"));
-    createRun(stateDir, record("r-stale", "4444aaaa", "running", "2026-07-03T10:00:02.000Z"));
+    createIndexedRun(stateDir, record("r-old", "1111aaaa", "completed", "2026-07-03T09:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-picked", "2222aaaa", "running", "2026-07-03T10:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-live2", "3333aaaa", "running", "2026-07-03T10:00:01.000Z"));
+    createIndexedRun(stateDir, record("r-stale", "4444aaaa", "running", "2026-07-03T10:00:02.000Z"));
     // r-picked and r-live2 have live runners; r-stale's is dead
     writeFileSync(join(pidsDir, "2222aaaa"), String(process.pid));
     writeFileSync(join(pidsDir, "3333aaaa"), String(process.pid));
@@ -168,9 +177,9 @@ describe("seedSeenRuns (watch startup)", () => {
 describe("pickWatchStartRun (start order with multiple live runs)", () => {
   test("picks the OLDEST live run so a blocked older run isn't hidden", () => {
     const { stateDir, pidsDir } = freshDirs("watch-start-order");
-    createRun(stateDir, record("r-done", "5555bbbb", "completed", "2026-07-03T08:00:00.000Z"));
-    createRun(stateDir, record("r-live-old", "6666bbbb", "running", "2026-07-03T09:00:00.000Z"));
-    createRun(stateDir, record("r-live-new", "7777bbbb", "running", "2026-07-03T10:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-done", "5555bbbb", "completed", "2026-07-03T08:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-live-old", "6666bbbb", "running", "2026-07-03T09:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-live-new", "7777bbbb", "running", "2026-07-03T10:00:00.000Z"));
     writeFileSync(join(pidsDir, "6666bbbb"), String(process.pid));
     writeFileSync(join(pidsDir, "7777bbbb"), String(process.pid));
 
@@ -180,8 +189,8 @@ describe("pickWatchStartRun (start order with multiple live runs)", () => {
 
   test("falls back to newest run overall when nothing is live", () => {
     const { stateDir, pidsDir } = freshDirs("watch-start-replay");
-    createRun(stateDir, record("r-1", "8888bbbb", "completed", "2026-07-03T08:00:00.000Z"));
-    createRun(stateDir, record("r-2", "9999bbbb", "failed", "2026-07-03T09:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-1", "8888bbbb", "completed", "2026-07-03T08:00:00.000Z"));
+    createIndexedRun(stateDir, record("r-2", "9999bbbb", "failed", "2026-07-03T09:00:00.000Z"));
 
     const { pickWatchStartRun } = require("./follow") as typeof import("./follow");
     expect(pickWatchStartRun(stateDir, pidsDir)?.runId).toBe("r-2");
@@ -202,9 +211,9 @@ describe("orphaned run records (deleted threads)", () => {
     createRun(stateDir, record("r-orphan", "gone2222", "running", "2026-07-03T10:00:00.000Z"));
 
     const { pickDefaultRun, pickWatchStartRun, nextUnseenRun } = require("./follow") as typeof import("./follow");
-    expect(pickDefaultRun(stateDir, pidsDir, threadsFile)?.runId).toBe("r-kept");
-    expect(pickWatchStartRun(stateDir, pidsDir, threadsFile)?.runId).toBe("r-kept");
-    expect(nextUnseenRun(stateDir, new Set(), null, threadsFile)?.runId).toBe("r-kept");
+    expect(pickDefaultRun(stateDir, pidsDir)?.runId).toBe("r-kept");
+    expect(pickWatchStartRun(stateDir, pidsDir)?.runId).toBe("r-kept");
+    expect(nextUnseenRun(stateDir, new Set(), null)?.runId).toBe("r-kept");
   });
 });
 

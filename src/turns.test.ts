@@ -13,8 +13,8 @@ import { join } from "path";
 import { tmpdir } from "os";
 import {
   updateThreadStatus,
-  loadThreadMapping,
-  saveThreadMapping,
+  loadThreadIndex,
+  saveThreadIndex,
 } from "./threads";
 
 const TEST_LOG_DIR = join(tmpdir(), "codex-collab-test-turns");
@@ -906,7 +906,7 @@ describe("error propagation", () => {
 // updateThreadStatus
 // ---------------------------------------------------------------------------
 
-const TEST_THREADS_FILE = join(tmpdir(), "codex-collab-test-threads", "threads.json");
+const TEST_STATE_DIR = join(tmpdir(), "codex-collab-test-threads");
 
 describe("updateThreadStatus", () => {
   beforeEach(() => {
@@ -916,7 +916,7 @@ describe("updateThreadStatus", () => {
   });
 
   test("updates status and timestamp", () => {
-    saveThreadMapping(TEST_THREADS_FILE, {
+    saveThreadIndex(TEST_STATE_DIR, {
       abc12345: {
         threadId: "thr-1",
         createdAt: "2026-01-01T00:00:00Z",
@@ -924,18 +924,18 @@ describe("updateThreadStatus", () => {
       },
     });
 
-    updateThreadStatus(TEST_THREADS_FILE, "thr-1", "completed");
-    const loaded = loadThreadMapping(TEST_THREADS_FILE);
+    updateThreadStatus(TEST_STATE_DIR, "thr-1", "completed");
+    const loaded = loadThreadIndex(TEST_STATE_DIR);
     expect(loaded.abc12345.lastStatus).toBe("completed");
     expect(loaded.abc12345.updatedAt).toBeDefined();
   });
 
   test("warns on unknown thread", () => {
-    saveThreadMapping(TEST_THREADS_FILE, {});
+    saveThreadIndex(TEST_STATE_DIR, {});
     const warnings: string[] = [];
     const origError = console.error;
     console.error = (msg: string) => warnings.push(msg);
-    updateThreadStatus(TEST_THREADS_FILE, "thr-unknown", "running");
+    updateThreadStatus(TEST_STATE_DIR, "thr-unknown", "running");
     console.error = origError;
     expect(warnings.some((w) => w.includes("unknown thread"))).toBe(true);
   });

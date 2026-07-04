@@ -144,7 +144,7 @@ async function detachRun(
         progress(`  Output:   codex-collab output ${rec.shortId}`);
         process.exit(0);
       }
-      if (rec.status === "cancelled") {
+      if (rec.status === "interrupted") {
         dieWithRunnerOutput(`Detached run was interrupted before the turn started (thread ${rec.shortId}).`);
       }
       // A `failed` record is only definitive once the child has exited:
@@ -241,7 +241,7 @@ export async function handleRun(args: string[]): Promise<void> {
       progress("Turn started");
     }
 
-    updateThreadStatus(ws.threadsFile, threadId, "running");
+    updateThreadStatus(ws.stateDir, threadId, "running");
     setActiveThreadId(threadId);
     setActiveShortId(shortId);
     setActiveWsPaths(ws);

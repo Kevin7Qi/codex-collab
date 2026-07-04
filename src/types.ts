@@ -442,14 +442,14 @@ export interface TurnResult {
 
 export interface ThreadIndexEntry {
   threadId: string;
-  name: string | null;
-  model: string | null;
-  cwd: string;
   createdAt: string;
-  updatedAt: string;
-  /** Legacy display field preserved while commands finish moving to run ledger. */
+  updatedAt?: string;
+  model?: string;
+  cwd?: string;
+  /** First-prompt excerpt shown in `threads` listings. */
   preview?: string;
-  /** Legacy display field preserved while commands finish moving to run ledger. */
+  /** Denormalized latest-turn status for display; the run ledger is the
+   *  authoritative per-invocation record. */
   lastStatus?: "running" | "completed" | "failed" | "interrupted";
 }
 
@@ -465,7 +465,7 @@ export type RunPhase =
   | "starting" | "reviewing" | "editing" | "verifying"
   | "running" | "investigating" | "finalizing";
 
-export type RunStatus = "running" | "completed" | "failed" | "cancelled";
+export type RunStatus = "running" | "completed" | "failed" | "interrupted";
 
 /** A pending interactive approval attached to a run — the on-disk signal
  *  observers (follow, Monitor scripts) use to see a blocked run without
@@ -525,20 +525,4 @@ export type BrokerEndpointKind = "unix" | "pipe";
 export interface ParsedEndpoint {
   kind: BrokerEndpointKind;
   path: string;
-}
-
-// --- Short ID mapping (legacy, pending migration) ---
-
-export interface ThreadMappingEntry {
-  threadId: string;
-  createdAt: string;
-  model?: string;
-  cwd?: string;
-  preview?: string;
-  lastStatus?: "running" | "completed" | "failed" | "interrupted";
-  updatedAt?: string;
-}
-
-export interface ThreadMapping {
-  [shortId: string]: ThreadMappingEntry;
 }

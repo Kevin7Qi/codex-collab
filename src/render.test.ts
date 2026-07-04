@@ -103,7 +103,7 @@ describe("renderFinalStatus", () => {
   test("covers the run-record status vocabulary", () => {
     expect(renderFinalStatus("completed", { elapsed: "14s", filesChanged: 2 }, false))
       .toBe("✔ completed (14s, 2 files changed)");
-    expect(renderFinalStatus("cancelled", { elapsed: "5s" }, false)).toBe("■ interrupted (5s)");
+    expect(renderFinalStatus("interrupted", { elapsed: "5s" }, false)).toBe("■ interrupted (5s)");
     expect(renderFinalStatus("failed", { error: "boom" }, false)).toBe("✖ failed — boom");
     expect(renderFinalStatus("running", {}, false)).toBe("● running");
   });
