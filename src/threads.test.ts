@@ -309,6 +309,22 @@ describe("run ledger", () => {
     expect(loaded!.threadId).toBe("thr_test"); // unchanged
   });
 
+  test("legacy 'cancelled' records normalize to 'interrupted' on every read path", () => {
+    const run = makeRun();
+    createRun(testDir, run);
+    // Simulate a record written before the status unification.
+    const filePath = join(testDir, "runs", `${run.runId}.json`);
+    writeFileSync(filePath, readFileSync(filePath, "utf-8").replace('"completed"', '"cancelled"'));
+
+    expect(loadRun(testDir, run.runId)!.status).toBe("interrupted");
+    expect(listRuns(testDir).find(r => r.runId === run.runId)!.status).toBe("interrupted");
+
+    // updateRun persists the normalized value even when the patch doesn't touch status.
+    updateRun(testDir, run.runId, { error: "x" });
+    expect(readFileSync(filePath, "utf-8")).not.toContain("cancelled");
+    expect(loadRun(testDir, run.runId)!.status).toBe("interrupted");
+  });
+
   test("updateRun throws on unknown run instead of silently no-op", () => {
     expect(() => updateRun(testDir, "run-does-not-exist", { status: "completed" }))
       .toThrow(/unknown run/i);
@@ -1044,7 +1060,7 @@ describe("migrateGlobalState", () => {
     const byShortId = Object.fromEntries(runs.map(r => [r.shortId, r]));
     expect(byShortId.aaa11111.status).toBe("completed");
     expect(byShortId.bbb22222.status).toBe("failed");      // stale running -> failed
-    expect(byShortId.ccc33333.status).toBe("cancelled");    // interrupted -> cancelled
+    expect(byShortId.ccc33333.status).toBe("interrupted");
     expect(byShortId.ddd44444.status).toBe("failed");
 
     const index = loadThreadIndex(wsStateDir);

@@ -465,7 +465,7 @@ export type RunPhase =
   | "starting" | "reviewing" | "editing" | "verifying"
   | "running" | "investigating" | "finalizing";
 
-export type RunStatus = "running" | "completed" | "failed" | "cancelled";
+export type RunStatus = "running" | "completed" | "failed" | "interrupted";
 
 /** A pending interactive approval attached to a run — the on-disk signal
  *  observers (follow, Monitor scripts) use to see a blocked run without

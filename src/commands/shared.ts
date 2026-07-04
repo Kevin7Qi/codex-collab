@@ -1090,7 +1090,7 @@ export function recordTerminalRunState(
   let stateSaveFailed = false;
   try {
     updateRun(ws.stateDir, runId, {
-      status: result.status === "completed" ? "completed" : result.status === "interrupted" ? "cancelled" : "failed",
+      status: result.status,
       phase: "finalizing",
       completedAt: new Date().toISOString(),
       elapsed: formatDuration(result.durationMs),

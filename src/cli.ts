@@ -43,7 +43,7 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
     if (activeRunId) {
       try {
         updateRun(activeWsPaths.stateDir, activeRunId, {
-          status: "cancelled",
+          status: "interrupted",
           completedAt: new Date().toISOString(),
           error: "Interrupted by signal",
           // Ctrl-C while blocked on an approval exits before the approval

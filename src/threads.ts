@@ -276,6 +276,14 @@ export function createRun(stateDir: string, record: RunRecord): void {
   renameSync(tmpPath, filePath);
 }
 
+/** Records written before the status unification say "cancelled" where the
+ *  thread index (and every display surface) says "interrupted". Normalize on
+ *  read — a lazy migration; the next updateRun persists the new value. */
+function normalizeRunRecord(record: RunRecord): RunRecord {
+  if ((record.status as string) === "cancelled") record.status = "interrupted";
+  return record;
+}
+
 export function loadRun(stateDir: string, runId: string): RunRecord | null {
   const filePath = runFilePath(stateDir, runId);
   if (!existsSync(filePath)) return null;
@@ -299,7 +307,7 @@ export function loadRun(stateDir: string, runId: string): RunRecord | null {
       console.error(`[codex] Warning: run file ${runId} has invalid structure`);
       return null;
     }
-    return parsed;
+    return normalizeRunRecord(parsed);
   } catch (e) {
     console.error(`[codex] Warning: failed to parse run file ${runId}: ${e instanceof Error ? e.message : e}`);
     return null;
@@ -325,7 +333,7 @@ export function updateRun(stateDir: string, runId: string, patch: RunPatch): voi
   }
   let record: RunRecord;
   try {
-    record = JSON.parse(readFileSync(filePath, "utf-8"));
+    record = normalizeRunRecord(JSON.parse(readFileSync(filePath, "utf-8")));
   } catch (e) {
     throw new Error(`Failed to read run ${runId}: ${e instanceof Error ? e.message : e}`);
   }
@@ -346,7 +354,7 @@ export function listRuns(stateDir: string, opts?: { sessionId?: string }): RunRe
   const records: RunRecord[] = [];
   for (const file of files) {
     try {
-      const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
+      const record: RunRecord = normalizeRunRecord(JSON.parse(readFileSync(join(dir, file), "utf-8")));
       if (opts?.sessionId && record.sessionId !== opts.sessionId) continue;
       records.push(record);
     } catch (e) {
@@ -503,7 +511,7 @@ function mapLegacyStatus(lastStatus?: string): RunStatus {
   switch (lastStatus) {
     case "completed": return "completed";
     case "failed": return "failed";
-    case "interrupted": return "cancelled";
+    case "interrupted": return "interrupted";
     case "running": return "failed"; // stale — process is gone
     default: return "failed";
   }
@@ -780,7 +788,7 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
 
     // Determine terminal status
     const status = mapLegacyStatus(entry.lastStatus);
-    const isTerminal = status === "completed" || status === "failed" || status === "cancelled";
+    const isTerminal = status === "completed" || status === "failed" || status === "interrupted";
 
     // Create synthetic RunRecord
     const record: RunRecord = {
