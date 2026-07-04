@@ -35,7 +35,10 @@ function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 const exitEarly = process.env.MOCK_EXIT_EARLY === "1";
 const errorResponse = process.env.MOCK_ERROR_RESPONSE === "1";
 if (process.env.MOCK_SPAWN_GRANDCHILD) {
-  const child = Bun.spawn(["sleep", "300"]);
+  const argv = process.env.MOCK_GRANDCHILD_STUBBORN === "1"
+    ? ["bun", "-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"]
+    : ["sleep", "300"];
+  const child = Bun.spawn(argv);
   require("fs").writeFileSync(process.env.MOCK_SPAWN_GRANDCHILD, String(child.pid));
 }
 let buffer = "";
@@ -554,15 +557,21 @@ describe("close() kills grandchildren", () => {
     }
   }, 20000);
 
-  test("a grandchild left behind by a GRACEFUL exit is swept too", async () => {
+  // Parameterized: a well-behaved grandchild dies from the sweep's SIGTERM;
+  // a SIGTERM-ignoring one must be caught by the sweep's SIGKILL escalation.
+  for (const stubborn of [false, true]) {
+    test(`a grandchild left behind by a GRACEFUL exit is swept (${stubborn ? "ignores SIGTERM" : "well-behaved"})`, async () => {
     if (process.platform === "win32") return;
-    const pidFile = join(TEST_DIR, `grandchild-graceful-${process.pid}-${Date.now()}.pid`);
-    // Default mock behavior: exits on stdin EOF — but the sleep(300) it
+    const pidFile = join(TEST_DIR, `grandchild-graceful-${stubborn}-${process.pid}-${Date.now()}.pid`);
+    // Default mock behavior: exits on stdin EOF — but the grandchild it
     // spawned survives that clean exit. close() must sweep the group.
     const c = await connect({
       command: ["bun", "run", MOCK_SERVER],
       requestTimeout: 10000,
-      env: { MOCK_SPAWN_GRANDCHILD: pidFile },
+      env: {
+        MOCK_SPAWN_GRANDCHILD: pidFile,
+        ...(stubborn ? { MOCK_GRANDCHILD_STUBBORN: "1" } : {}),
+      },
     });
 
     const { existsSync, readFileSync, rmSync } = await import("fs");
@@ -585,5 +594,6 @@ describe("close() kills grandchildren", () => {
       try { process.kill(grandchildPid, "SIGKILL"); } catch {}
       rmSync(pidFile, { force: true });
     }
-  }, 20000);
+    }, 20000);
+  }
 });

@@ -124,6 +124,27 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     }
   }
 
+  /** After the direct child is gone, its detached process group can still
+   *  hold descendants (the group id stays reserved while any member lives).
+   *  SIGTERM the group and, if members ignore it, escalate to SIGKILL —
+   *  bounded at ~500ms and zero-cost when the group is already empty, so
+   *  close() resolving really means the tree is gone. */
+  async function sweepGroup(): Promise<void> {
+    if (!detached || !proc.pid) return;
+    const pgid = proc.pid;
+    const groupAlive = () => {
+      try { process.kill(-pgid, 0); return true; } catch { return false; }
+    };
+    if (!groupAlive()) return;
+    try { process.kill(-pgid, "SIGTERM"); } catch { return; }
+    for (let i = 0; i < 10 && groupAlive(); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (groupAlive()) {
+      try { process.kill(-pgid, "SIGKILL"); } catch {}
+    }
+  }
+
   const endpoint = createRpcEndpoint({
     label: "codex",
     requestTimeout,
@@ -232,16 +253,16 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
 
     // Unix: wait for graceful exit, then escalate — group signals, so
     // grandchildren (wrapper scripts, mid-turn shell commands) die with
-    // the app-server instead of being orphaned. Even after a graceful
-    // exit, sweep the process group: a server that exits on stdin EOF can
-    // still leave a spawned command running, and the group id stays
-    // reserved while any member is alive (ESRCH on an empty group is
-    // swallowed by killTree).
-    if (await waitForExit(5000)) { killTree("SIGTERM"); return; }
+    // the app-server instead of being orphaned. Every exit path ends with
+    // a group sweep: the leader dying says nothing about descendants (a
+    // server exiting on stdin EOF can leave a spawned command running,
+    // and a straggler can ignore the group SIGTERM).
+    if (await waitForExit(5000)) { await sweepGroup(); return; }
     killTree("SIGTERM");
-    if (await waitForExit(3000)) return;
+    if (await waitForExit(3000)) { await sweepGroup(); return; }
     killTree("SIGKILL");
     await procGone;
+    await sweepGroup();
   }
 
   // --- Perform initialize handshake ---
