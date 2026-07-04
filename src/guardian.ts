@@ -133,7 +133,17 @@ export function mapGuardianAction(action: Record<string, unknown>): Record<strin
 export function buildGuardianOverrideEvent(record: GuardianDenialRecord): Record<string, unknown> {
   const n = record.notification;
   const review = (n.review ?? {}) as Record<string, unknown>;
-  const status = typeof review.status === "string" ? review.status : null;
+  // The dispatcher tolerates enum-shaped values like { type: "denied" }
+  // (UNSTABLE protocol); accept the same shapes here so any denial it
+  // persisted can actually be overridden.
+  const rawStatus = review.status;
+  const status =
+    typeof rawStatus === "string"
+      ? rawStatus
+      : rawStatus !== null && typeof rawStatus === "object" &&
+          typeof (rawStatus as { type?: unknown }).type === "string"
+        ? (rawStatus as { type: string }).type
+        : null;
   if (status !== "denied") {
     throw new Error(`Review ${record.reviewId} is not a denial (status: ${status ?? "unknown"})`);
   }

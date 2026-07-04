@@ -160,6 +160,13 @@ describe("buildGuardianOverrideEvent", () => {
     });
   });
 
+  test("accepts the enum-shaped status the dispatcher tolerates", () => {
+    const event = buildGuardianOverrideEvent(record({
+      review: { status: { type: "denied" }, riskLevel: null, userAuthorization: null, rationale: null },
+    }));
+    expect(event.status).toBe("denied");
+  });
+
   test("rejects non-denials and missing actions", () => {
     expect(() => buildGuardianOverrideEvent(record({
       review: { status: "approved", riskLevel: "low", userAuthorization: "high", rationale: null },
