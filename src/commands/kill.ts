@@ -1,17 +1,13 @@
 // src/commands/kill.ts — kill command handler
 
-import {
-  findShortId,
-  loadThreadIndex,
-  updateThreadStatus,
-} from "../threads";
+import { loadThreadIndex, updateThreadStatus } from "../threads";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import {
   die,
   parseOptions,
   validateIdOrDie,
-  resolveThreadIdOrDie,
+  resolveThreadIdAllowRaw,
   progress,
   withClient,
   readPidFile,
@@ -26,8 +22,7 @@ export async function handleKill(args: string[]): Promise<void> {
   if (!id) die("Usage: codex-collab kill <id>");
   validateIdOrDie(id);
 
-  const threadId = resolveThreadIdOrDie(ws.stateDir, id);
-  const shortId = findShortId(ws.stateDir, threadId);
+  const { threadId, shortId } = resolveThreadIdAllowRaw(ws.stateDir, id);
 
   // Skip kill for threads that have already reached a terminal status
   if (shortId) {
@@ -97,8 +92,10 @@ export async function handleKill(args: string[]): Promise<void> {
   }
 
   if (killSignalWritten || serverInterrupted) {
-    updateThreadStatus(ws.stateDir, threadId, "interrupted");
-    if (shortId) removePidFile(ws.pidsDir, shortId);
+    if (shortId) {
+      updateThreadStatus(ws.stateDir, threadId, "interrupted");
+      removePidFile(ws.pidsDir, shortId);
+    }
     progress(`Stopped thread ${id}`);
   } else {
     progress(`Could not signal thread ${id} — try again.`);

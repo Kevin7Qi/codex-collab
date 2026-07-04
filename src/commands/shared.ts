@@ -217,6 +217,25 @@ export function resolveThreadIdOrDie(stateDir: string, id: string): string {
   }
 }
 
+/** Like resolveThreadIdOrDie, but an ID missing from the local index is
+ *  treated as a raw server thread ID (shortId: null) instead of an error —
+ *  peek, run --resume, kill, and delete all accept threads created by the
+ *  Codex TUI or another workspace that were never discovered locally.
+ *  Ambiguous prefixes and index corruption still die. Callers must
+ *  validateIdOrDie(id) first. */
+export function resolveThreadIdAllowRaw(
+  stateDir: string,
+  id: string,
+): { threadId: string; shortId: string | null } {
+  try {
+    const resolved = resolveThreadId(stateDir, id);
+    if (resolved) return resolved;
+  } catch (e) {
+    die(e instanceof Error ? e.message : String(e));
+  }
+  return { threadId: id, shortId: null };
+}
+
 export function progress(text: string): void {
   console.log(`[codex] ${text}`);
 }

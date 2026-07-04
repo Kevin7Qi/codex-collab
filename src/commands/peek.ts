@@ -1,11 +1,12 @@
 // src/commands/peek.ts — peek command and pure formatting helpers.
 
 import type { Turn, ThreadItem, Thread, UserMessageItem, AgentMessageItem } from "../types";
-import { resolveThreadId } from "../threads";
+
 import {
   die,
   parseOptions,
   validateIdOrDie,
+  resolveThreadIdAllowRaw,
   withClient,
   getWorkspacePaths,
 } from "./shared";
@@ -156,15 +157,7 @@ export async function handlePeek(args: string[]): Promise<void> {
   // Try local index first; if not found, treat the input as a raw thread ID
   // and let the server validate it. Surface ambiguous-prefix errors immediately
   // — only "Thread not found" should fall through to the server.
-  let threadId: string;
-  let shortId: string | null;
-  try {
-    const resolved = resolveThreadId(ws.stateDir, id);
-    threadId = resolved?.threadId ?? id;
-    shortId = resolved?.shortId ?? null;
-  } catch (e) {
-    die(e instanceof Error ? e.message : String(e));
-  }
+  const { threadId, shortId } = resolveThreadIdAllowRaw(ws.stateDir, id);
 
   const limit = options.explicit.has("limit") ? options.limit : DEFAULT_PEEK_LIMIT;
 

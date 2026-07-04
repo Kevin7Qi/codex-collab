@@ -29,6 +29,7 @@ import {
   parseOptions,
   validateIdOrDie,
   resolveThreadIdOrDie,
+  resolveThreadIdAllowRaw,
   progress,
   formatAge,
   isThreadProcessAlive,
@@ -381,8 +382,7 @@ export async function handleDelete(args: string[]): Promise<void> {
   if (!id) die("Usage: codex-collab delete <id>");
   validateIdOrDie(id);
 
-  const threadId = resolveThreadIdOrDie(ws.stateDir, id);
-  const shortId = findShortId(ws.stateDir, threadId);
+  const { threadId, shortId } = resolveThreadIdAllowRaw(ws.stateDir, id);
 
   // If the thread is currently running, stop it first before archiving
   const localStatus = shortId ? loadThreadIndex(ws.stateDir)[shortId]?.lastStatus : undefined;
