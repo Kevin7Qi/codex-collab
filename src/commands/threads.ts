@@ -1,12 +1,11 @@
 // src/commands/threads.ts — threads, output, progress, delete, clean commands
 
 import {
-  legacyRegisterThread as registerThread,
-  legacyFindShortId as findShortId,
-  legacyRemoveThread as removeThread,
-  loadThreadMapping,
-  saveThreadMapping,
-  withThreadLock,
+  registerThread,
+  findShortId,
+  removeThread,
+  loadThreadIndex,
+  mutateThreadIndex,
   removeLegacyGlobalThread,
   getLatestRun,
   removeRunsForThread,
@@ -81,7 +80,7 @@ async function discoverThreads(client: AppServerClient, ws: WorkspacePaths, cwd:
   });
   if (serverThreads.length === 0) return 0;
 
-  const mapping = loadThreadMapping(ws.threadsFile);
+  const mapping = loadThreadIndex(ws.stateDir);
   const knownThreadIds = new Set(Object.values(mapping).map(e => e.threadId));
   let discovered = 0;
 
@@ -93,7 +92,7 @@ async function discoverThreads(client: AppServerClient, ws: WorkspacePaths, cwd:
     // thread/list exposes only the provider ("openai"), not a model name —
     // storing it as `model` made discovered threads display a provider where
     // local threads show a model. Leave model unset instead.
-    registerThread(ws.threadsFile, thread.id, {
+    registerThread(ws.stateDir, thread.id, {
       cwd: thread.cwd ?? cwd,
       preview: thread.preview ?? thread.name ?? undefined,
       createdAt,
@@ -128,7 +127,7 @@ export async function handleThreads(args: string[]): Promise<void> {
     }
   }
 
-  const mapping = loadThreadMapping(ws.threadsFile);
+  const mapping = loadThreadIndex(ws.stateDir);
 
   // Build entries sorted by updatedAt (most recent first), falling back to createdAt
   let entries = Object.entries(mapping)
@@ -146,8 +145,7 @@ export async function handleThreads(args: string[]): Promise<void> {
     (e) => e.lastStatus === "running" && !isThreadProcessAlive(ws.pidsDir, e.shortId),
   );
   if (stale.length > 0) {
-    withThreadLock(ws.threadsFile, () => {
-      const fresh = loadThreadMapping(ws.threadsFile);
+    mutateThreadIndex(ws.stateDir, (fresh) => {
       const now = new Date().toISOString();
       for (const e of stale) {
         const entry = fresh[e.shortId];
@@ -156,7 +154,6 @@ export async function handleThreads(args: string[]): Promise<void> {
           entry.updatedAt = now;
         }
       }
-      saveThreadMapping(ws.threadsFile, fresh);
     });
     for (const e of stale) {
       e.lastStatus = "interrupted";
@@ -261,8 +258,8 @@ function resolveLogPath(
   const id = positional[0];
   if (!id) die(usage);
   validateIdOrDie(id);
-  const threadId = resolveThreadIdOrDie(ws.threadsFile, id);
-  const shortId = findShortId(ws.threadsFile, threadId);
+  const threadId = resolveThreadIdOrDie(ws.stateDir, id);
+  const shortId = findShortId(ws.stateDir, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
   return { logPath: resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId), shortId };
 }
@@ -384,11 +381,11 @@ export async function handleDelete(args: string[]): Promise<void> {
   if (!id) die("Usage: codex-collab delete <id>");
   validateIdOrDie(id);
 
-  const threadId = resolveThreadIdOrDie(ws.threadsFile, id);
-  const shortId = findShortId(ws.threadsFile, threadId);
+  const threadId = resolveThreadIdOrDie(ws.stateDir, id);
+  const shortId = findShortId(ws.stateDir, threadId);
 
   // If the thread is currently running, stop it first before archiving
-  const localStatus = shortId ? loadThreadMapping(ws.threadsFile)[shortId]?.lastStatus : undefined;
+  const localStatus = shortId ? loadThreadIndex(ws.stateDir)[shortId]?.lastStatus : undefined;
   if (localStatus === "running") {
     const signalPath = join(ws.killSignalsDir, threadId);
     try {
@@ -456,7 +453,7 @@ export async function handleDelete(args: string[]): Promise<void> {
     removePidFile(ws.pidsDir, shortId);
     const logPath = join(ws.logsDir, `${shortId}.log`);
     if (existsSync(logPath)) unlinkSync(logPath);
-    removeThread(ws.threadsFile, shortId);
+    removeThread(ws.stateDir, shortId);
     // Run records must go with the thread: a stale `running` record whose
     // PID file is gone reads as alive and would make bare `follow` hang.
     removeRunsForThread(ws.stateDir, shortId);
@@ -516,8 +513,7 @@ export async function handleClean(args: string[]): Promise<void> {
   // activity so recently-used threads aren't pruned just because they
   // were created more than 7 days ago.
   let mappingsRemoved = 0;
-  withThreadLock(ws.threadsFile, () => {
-    const mapping = loadThreadMapping(ws.threadsFile);
+  mutateThreadIndex(ws.stateDir, (mapping) => {
     const now = Date.now();
     for (const [shortId, entry] of Object.entries(mapping)) {
       try {
@@ -535,9 +531,7 @@ export async function handleClean(args: string[]): Promise<void> {
         console.error(`[codex] Warning: skipping mapping ${shortId}: ${e instanceof Error ? e.message : e}`);
       }
     }
-    if (mappingsRemoved > 0) {
-      saveThreadMapping(ws.threadsFile, mapping);
-    }
+    return mappingsRemoved > 0;
   });
 
   const parts: string[] = [];

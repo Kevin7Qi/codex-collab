@@ -13,7 +13,7 @@ import { randomBytes, createHash } from "crypto";
 import { basename, dirname, join, resolve } from "path";
 import { config, validateId, resolveWorkspaceDir, isPathInside, STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
 import { acquireLockSync, LockTimeoutError } from "./lock";
-import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus, ThreadMapping, ThreadMappingEntry } from "./types";
+import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus } from "./types";
 
 // ─── Advisory file lock ────────────────────────────────────────────────────
 
@@ -99,8 +99,9 @@ function bailOnCorruptThreads(filePath: string, reason: string): Error {
   return new Error(`Threads file corrupted (${reason}).\n${where}`);
 }
 
-export function saveThreadIndex(stateDir: string, index: ThreadIndex): void {
-  const filePath = threadsFilePath(stateDir);
+/** Atomic write of a threads file at an explicit path. Used by saveThreadIndex
+ *  and by legacy-global-file maintenance in the migration code below. */
+function writeThreadsFileAt(filePath: string, index: ThreadIndex): void {
   const dir = dirname(filePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmpPath = filePath + ".tmp";
@@ -108,10 +109,28 @@ export function saveThreadIndex(stateDir: string, index: ThreadIndex): void {
   renameSync(tmpPath, filePath);
 }
 
+export function saveThreadIndex(stateDir: string, index: ThreadIndex): void {
+  writeThreadsFileAt(threadsFilePath(stateDir), index);
+}
+
+/**
+ * Load the index, apply `mutate`, and save — all under the thread lock.
+ * Return false from `mutate` to skip the save (no changes).
+ */
+export function mutateThreadIndex(
+  stateDir: string,
+  mutate: (index: ThreadIndex) => boolean | void,
+): void {
+  withThreadLock(threadsFilePath(stateDir), () => {
+    const index = loadThreadIndex(stateDir);
+    if (mutate(index) !== false) saveThreadIndex(stateDir, index);
+  });
+}
+
 export function registerThread(
   stateDir: string,
   threadId: string,
-  meta?: Partial<ThreadIndexEntry>,
+  meta?: Partial<Pick<ThreadIndexEntry, "model" | "cwd" | "preview" | "createdAt" | "updatedAt">>,
 ): string {
   validateId(threadId);
   const filePath = threadsFilePath(stateDir);
@@ -122,11 +141,11 @@ export function registerThread(
     const now = new Date().toISOString();
     index[shortId] = {
       threadId,
-      name: meta?.name ?? null,
-      model: meta?.model ?? null,
-      cwd: meta?.cwd ?? process.cwd(),
       createdAt: meta?.createdAt ?? now,
       updatedAt: meta?.updatedAt ?? now,
+      model: meta?.model,
+      cwd: meta?.cwd,
+      preview: meta?.preview,
     };
     saveThreadIndex(stateDir, index);
     return shortId;
@@ -180,26 +199,48 @@ export function findShortId(stateDir: string, threadId: string): string | null {
   return null;
 }
 
-type ThreadMetaPatch = Partial<Pick<ThreadIndexEntry, "name" | "model" | "cwd">>;
+type ThreadMetaPatch = Partial<Pick<ThreadIndexEntry, "model" | "cwd" | "preview">>;
 
+/** Update display metadata for a thread, keyed by full thread ID (callers
+ *  coming off a server response hold the thread ID, not the short ID). */
 export function updateThreadMeta(
   stateDir: string,
-  shortId: string,
+  threadId: string,
   patch: ThreadMetaPatch,
 ): void {
-  const filePath = threadsFilePath(stateDir);
-  withThreadLock(filePath, () => {
-    const index = loadThreadIndex(stateDir);
-    if (!index[shortId]) {
-      console.error(`[codex] Warning: cannot update metadata for unknown short ID ${shortId}`);
-      return;
+  mutateThreadIndex(stateDir, (index) => {
+    for (const entry of Object.values(index)) {
+      if (entry.threadId === threadId) {
+        if (patch.model !== undefined) entry.model = patch.model;
+        if (patch.cwd !== undefined) entry.cwd = patch.cwd;
+        if (patch.preview !== undefined) entry.preview = patch.preview;
+        entry.updatedAt = new Date().toISOString();
+        return;
+      }
     }
-    const entry = index[shortId];
-    if (patch.name !== undefined) entry.name = patch.name;
-    if (patch.model !== undefined) entry.model = patch.model;
-    if (patch.cwd !== undefined) entry.cwd = patch.cwd;
-    entry.updatedAt = new Date().toISOString();
-    saveThreadIndex(stateDir, index);
+    console.error(`[codex] Warning: cannot update metadata for unknown thread ${threadId.slice(0, 12)}...`);
+    return false;
+  });
+}
+
+/** Update the denormalized display status for a thread, keyed by full thread
+ *  ID. The run ledger is the authoritative per-invocation record; this keeps
+ *  `threads` listings current without a ledger scan. */
+export function updateThreadStatus(
+  stateDir: string,
+  threadId: string,
+  status: NonNullable<ThreadIndexEntry["lastStatus"]>,
+): void {
+  mutateThreadIndex(stateDir, (index) => {
+    for (const entry of Object.values(index)) {
+      if (entry.threadId === threadId) {
+        entry.lastStatus = status;
+        entry.updatedAt = new Date().toISOString();
+        return;
+      }
+    }
+    console.error(`[codex] Warning: cannot update status for unknown thread ${threadId.slice(0, 12)}...`);
+    return false;
   });
 }
 
@@ -622,7 +663,7 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
   // migrated yet, and (b) cascade through every CLI invocation since
   // migration runs from getWorkspacePaths. On corruption we skip migration
   // and leave the file in place so the user can inspect/repair it.
-  let globalMapping: ThreadMapping;
+  let globalMapping: ThreadIndex;
   let content: string;
   try {
     content = readFileSync(globalThreadsFile, "utf-8");
@@ -662,7 +703,7 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
   // values that may be symlinked forms of the same directory (e.g. macOS
   // /var vs /private/var).
   const wsRoot = resolveWorkspaceDir(cwd);
-  const matchingEntries: [string, ThreadMappingEntry][] = [];
+  const matchingEntries: [string, ThreadIndexEntry][] = [];
   for (const [shortId, entry] of Object.entries(globalMapping)) {
     if (entry.cwd && isPathInside(canonicalizePath(entry.cwd), wsRoot)) {
       matchingEntries.push([shortId, entry]);
@@ -693,8 +734,7 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
     const previous = index[targetShortId];
     const nextEntry = {
       threadId: entry.threadId,
-      name: previous?.name ?? null,
-      model: previous?.model ?? entry.model ?? null,
+      model: previous?.model ?? entry.model,
       cwd: previous?.cwd ?? entry.cwd ?? cwd,
       createdAt: previous?.createdAt ?? entry.createdAt,
       updatedAt: previous?.updatedAt ?? entry.updatedAt ?? entry.createdAt,
@@ -709,7 +749,6 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
     };
     const changed = !previous ||
       previous.threadId !== nextEntry.threadId ||
-      previous.name !== nextEntry.name ||
       previous.model !== nextEntry.model ||
       previous.cwd !== nextEntry.cwd ||
       previous.createdAt !== nextEntry.createdAt ||
@@ -797,7 +836,7 @@ export function removeLegacyGlobalThread(
 
   const wsRoot = resolveWorkspaceDir(cwd);
   return withThreadLock(globalThreadsFile, () => {
-    let globalMapping: ThreadMapping;
+    let globalMapping: ThreadIndex;
     try {
       const parsed = JSON.parse(readFileSync(globalThreadsFile, "utf-8"));
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -818,174 +857,8 @@ export function removeLegacyGlobalThread(
       }
     }
 
-    if (changed) saveThreadMapping(globalThreadsFile, globalMapping);
+    if (changed) writeThreadsFileAt(globalThreadsFile, globalMapping);
     return changed;
   });
 }
 
-// ─── Legacy API (backward-compatible) ──────────────────────────────────────
-// These functions preserve the old signatures used by cli.ts, turns.ts, etc.
-// They delegate to the new thread index functions using the parent directory
-// of the threadsFile as the stateDir.
-
-/** @deprecated Use loadThreadIndex instead. */
-export function loadThreadMapping(threadsFile: string): ThreadMapping {
-  // The old API expected threadsFile = {dir}/threads.json
-  // We read the file directly to maintain exact backward compat
-  if (!existsSync(threadsFile)) return {};
-  let content: string;
-  try {
-    content = readFileSync(threadsFile, "utf-8");
-  } catch (e) {
-    throw new Error(`Cannot read threads file ${threadsFile}: ${e instanceof Error ? e.message : e}`);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch (e) {
-    throw bailOnCorruptThreads(threadsFile, `unparseable JSON (${e instanceof Error ? e.message : e})`);
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw bailOnCorruptThreads(threadsFile, "invalid structure (not a JSON object)");
-  }
-  return parsed as ThreadMapping;
-}
-
-/** @deprecated Use saveThreadIndex instead. */
-export function saveThreadMapping(threadsFile: string, mapping: ThreadMapping): void {
-  const dir = dirname(threadsFile);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmpPath = threadsFile + ".tmp";
-  writeFileSync(tmpPath, JSON.stringify(mapping, null, 2), { mode: 0o600 });
-  renameSync(tmpPath, threadsFile);
-}
-
-/**
- * @deprecated Use updateThreadMeta (new signature) instead.
- * Old signature: updateThreadMeta(threadsFile, threadId, meta) where threadId is the full ID.
- */
-export function legacyUpdateThreadMeta(
-  threadsFile: string,
-  threadId: string,
-  meta: Partial<Pick<ThreadMappingEntry, "model" | "cwd" | "preview">>,
-): void {
-  withThreadLock(threadsFile, () => {
-    const mapping = loadThreadMapping(threadsFile);
-    for (const entry of Object.values(mapping)) {
-      if (entry.threadId === threadId) {
-        if (meta.model !== undefined) entry.model = meta.model;
-        if (meta.cwd !== undefined) entry.cwd = meta.cwd;
-        if (meta.preview !== undefined) entry.preview = meta.preview;
-        entry.updatedAt = new Date().toISOString();
-        saveThreadMapping(threadsFile, mapping);
-        return;
-      }
-    }
-    console.error(`[codex] Warning: cannot update metadata for unknown thread ${threadId.slice(0, 12)}...`);
-  });
-}
-
-/** @deprecated Use run ledger status tracking instead. */
-export function updateThreadStatus(
-  threadsFile: string,
-  threadId: string,
-  status: "running" | "completed" | "failed" | "interrupted",
-): void {
-  withThreadLock(threadsFile, () => {
-    const mapping = loadThreadMapping(threadsFile);
-    let found = false;
-    for (const entry of Object.values(mapping)) {
-      if (entry.threadId === threadId) {
-        found = true;
-        entry.lastStatus = status;
-        entry.updatedAt = new Date().toISOString();
-        break;
-      }
-    }
-    if (!found) {
-      console.error(`[codex] Warning: cannot update status for unknown thread ${threadId.slice(0, 12)}...`);
-      return;
-    }
-    saveThreadMapping(threadsFile, mapping);
-  });
-}
-
-/**
- * @deprecated Legacy registerThread that returns the full mapping.
- * New code should use the new registerThread (returns shortId string).
- */
-export function legacyRegisterThread(
-  threadsFile: string,
-  threadId: string,
-  meta?: { model?: string; cwd?: string; preview?: string; createdAt?: string; updatedAt?: string },
-): ThreadMapping {
-  validateId(threadId);
-  return withThreadLock(threadsFile, () => {
-    const mapping = loadThreadMapping(threadsFile);
-    let shortId = generateShortId();
-    while (shortId in mapping) shortId = generateShortId();
-    const now = new Date().toISOString();
-    mapping[shortId] = {
-      threadId,
-      createdAt: meta?.createdAt ?? now,
-      updatedAt: meta?.updatedAt ?? now,
-      model: meta?.model,
-      cwd: meta?.cwd,
-      preview: meta?.preview,
-    };
-    saveThreadMapping(threadsFile, mapping);
-    return mapping;
-  });
-}
-
-/**
- * @deprecated Legacy resolveThreadId that returns threadId string or throws.
- * New code should use the new resolveThreadId (returns object or null).
- */
-export function legacyResolveThreadId(threadsFile: string, idOrPrefix: string): string {
-  const mapping = loadThreadMapping(threadsFile);
-
-  // Exact short ID match (hasOwn: `mapping[idOrPrefix]` alone would hit
-  // Object.prototype members for IDs like "constructor", returning
-  // undefined as the threadId instead of falling through to "not found")
-  if (Object.hasOwn(mapping, idOrPrefix)) return mapping[idOrPrefix].threadId;
-
-  // Short ID prefix match
-  const matches = Object.entries(mapping).filter(([k]) => k.startsWith(idOrPrefix));
-  if (matches.length === 1) return matches[0][1].threadId;
-  if (matches.length > 1) {
-    throw new Error(
-      `Ambiguous ID prefix "${idOrPrefix}" — matches: ${matches.map(([k]) => k).join(", ")}`,
-    );
-  }
-
-  // Full thread ID match (e.g., UUID from Codex TUI handoff)
-  const byThreadId = Object.values(mapping).find(e => e.threadId === idOrPrefix);
-  if (byThreadId) return byThreadId.threadId;
-
-  throw new Error(`Thread not found: "${idOrPrefix}"`);
-}
-
-/**
- * @deprecated Legacy findShortId that takes threadsFile.
- * New code should use the new findShortId (takes stateDir).
- */
-export function legacyFindShortId(threadsFile: string, threadId: string): string | null {
-  const mapping = loadThreadMapping(threadsFile);
-  for (const [shortId, entry] of Object.entries(mapping)) {
-    if (entry.threadId === threadId) return shortId;
-  }
-  return null;
-}
-
-/**
- * @deprecated Legacy removeThread that takes threadsFile.
- * New code should use the new removeThread (takes stateDir).
- */
-export function legacyRemoveThread(threadsFile: string, shortId: string): void {
-  withThreadLock(threadsFile, () => {
-    const mapping = loadThreadMapping(threadsFile);
-    delete mapping[shortId];
-    saveThreadMapping(threadsFile, mapping);
-  });
-}

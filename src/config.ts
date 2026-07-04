@@ -87,7 +87,6 @@ export const config = {
   get dataDir() { return join(getHome(), ".codex-collab"); },
 
   /** @deprecated Will be removed when threads module is refactored to use per-workspace state. */
-  get threadsFile() { return join(this.dataDir, "threads.json"); },
   /** @deprecated Will be removed when events module is refactored to use per-workspace state. */
   get logsDir() { return join(this.dataDir, "logs"); },
   /** @deprecated Will be removed when approvals module is refactored to use per-workspace state. */

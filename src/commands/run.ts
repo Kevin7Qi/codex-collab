@@ -241,7 +241,7 @@ export async function handleRun(args: string[]): Promise<void> {
       progress("Turn started");
     }
 
-    updateThreadStatus(ws.threadsFile, threadId, "running");
+    updateThreadStatus(ws.stateDir, threadId, "running");
     setActiveThreadId(threadId);
     setActiveShortId(shortId);
     setActiveWsPaths(ws);

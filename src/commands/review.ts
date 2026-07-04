@@ -93,7 +93,7 @@ export async function handleReview(args: string[]): Promise<void> {
       }
     }
 
-    updateThreadStatus(ws.threadsFile, threadId, "running");
+    updateThreadStatus(ws.stateDir, threadId, "running");
     setActiveThreadId(threadId);
     setActiveShortId(shortId);
     setActiveWsPaths(ws);

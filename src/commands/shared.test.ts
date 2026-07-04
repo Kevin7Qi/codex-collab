@@ -1671,10 +1671,10 @@ let callNo = 0;
 
 function ws(name: string) {
   const stateDir = join(${JSON.stringify(stateRoot)}, name);
-  const w = { stateDir, threadsFile: join(stateDir, "threads.json"), logsDir: join(stateDir, "logs"),
+  const w = { stateDir, logsDir: join(stateDir, "logs"),
     approvalsDir: join(stateDir, "approvals"), killSignalsDir: join(stateDir, "kill-signals"),
     pidsDir: join(stateDir, "pids"), runsDir: join(stateDir, "runs") };
-  for (const d of Object.values(w)) if (d !== w.threadsFile) mkdirSync(d, { recursive: true });
+  for (const d of Object.values(w)) mkdirSync(d, { recursive: true });
   return w;
 }
 

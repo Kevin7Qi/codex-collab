@@ -13,10 +13,10 @@ import {
 import { type AppServerClient, connectDirect } from "../client";
 import { ensureConnection, getCurrentSessionId, isBrokerBusyError } from "../broker";
 import {
-  legacyRegisterThread as registerThread,
-  legacyResolveThreadId as resolveThreadId,
-  legacyFindShortId as findShortId,
-  legacyUpdateThreadMeta as updateThreadMeta,
+  registerThread,
+  resolveThreadId,
+  findShortId,
+  updateThreadMeta,
   updateThreadStatus,
   generateRunId,
   createRun,
@@ -57,7 +57,6 @@ import type {
 
 export interface WorkspacePaths {
   stateDir: string;
-  threadsFile: string;
   logsDir: string;
   approvalsDir: string;
   killSignalsDir: string;
@@ -69,7 +68,6 @@ export function getWorkspacePaths(cwd: string): WorkspacePaths {
   const stateDir = resolveStateDir(cwd);
   const paths = {
     stateDir,
-    threadsFile: join(stateDir, "threads.json"),
     logsDir: join(stateDir, "logs"),
     approvalsDir: join(stateDir, "approvals"),
     killSignalsDir: join(stateDir, "kill-signals"),
@@ -209,9 +207,11 @@ export function validateIdOrDie(id: string): string {
 /** Resolve a user-supplied thread ID or exit with a friendly error.
  *  "Thread not found" and "Ambiguous prefix" are user mistakes and should
  *  print as `Error: …`, not escape to main()'s `Fatal: …` handler. */
-export function resolveThreadIdOrDie(threadsFile: string, id: string): string {
+export function resolveThreadIdOrDie(stateDir: string, id: string): string {
   try {
-    return resolveThreadId(threadsFile, id);
+    const resolved = resolveThreadId(stateDir, id);
+    if (!resolved) die(`Thread not found: "${id}"`);
+    return resolved.threadId;
   } catch (e) {
     die(e instanceof Error ? e.message : String(e));
   }
@@ -798,19 +798,15 @@ export async function startOrResumeThread(
 
   if (opts.resumeId) {
     // Try local resolution first; if not found, treat the ID as a full thread ID
-    // and pass it directly to the server (handles TUI-created threads not yet discovered)
-    try {
-      threadId = resolveThreadId(ws.threadsFile, opts.resumeId);
-    } catch (e) {
-      // Only "not found" falls through to the raw-ID path. Everything else
-      // must surface: ambiguity so the user can disambiguate, and index
-      // corruption because bailOnCorruptThreads has just renamed the index
-      // aside and its message explains how to recover — swallowing it here
-      // used to replace that with a baffling server-side "thread not found".
-      if (!(e instanceof Error && e.message.startsWith("Thread not found"))) {
-        throw e;
-      }
-      // Thread not found locally — treat as raw server thread ID
+    // and pass it directly to the server (handles TUI-created threads not yet
+    // discovered). Ambiguity and index corruption still throw and must surface:
+    // ambiguity so the user can disambiguate, corruption because
+    // bailOnCorruptThreads has just renamed the index aside and its message
+    // explains how to recover.
+    const resolved = resolveThreadId(ws.stateDir, opts.resumeId);
+    if (resolved) {
+      threadId = resolved.threadId;
+    } else {
       validateId(opts.resumeId);
       threadId = opts.resumeId;
     }
@@ -830,17 +826,14 @@ export async function startOrResumeThread(
       Object.assign(forkParams, extraStartParams ?? {});
       effective = await client.request<ThreadStartResponse>("thread/fork", forkParams);
       threadId = effective.thread.id;
-      registerThread(ws.threadsFile, threadId, {
+      shortId = registerThread(ws.stateDir, threadId, {
         model: effective.model,
         cwd: effective.cwd ?? opts.dir,
         preview,
       });
-      const resolvedShortId = findShortId(ws.threadsFile, threadId);
-      if (!resolvedShortId) die(`Internal error: forked review thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
-      shortId = resolvedShortId;
       isNewThread = true;
     } else {
-      shortId = findShortId(ws.threadsFile, threadId) ?? opts.resumeId;
+      shortId = findShortId(ws.stateDir, threadId) ?? opts.resumeId;
       const resumeParams: Record<string, unknown> = {
         threadId,
         persistExtendedHistory: false,
@@ -854,16 +847,15 @@ export async function startOrResumeThread(
       if (extraStartParams) Object.assign(resumeParams, extraStartParams);
       effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
       // Ensure the thread is in our local index (may not be if it was created externally)
-      if (!findShortId(ws.threadsFile, threadId)) {
-        registerThread(ws.threadsFile, threadId, {
+      if (!findShortId(ws.stateDir, threadId)) {
+        shortId = registerThread(ws.stateDir, threadId, {
           model: effective.model,
           cwd: opts.dir,
           preview,
         });
-        shortId = findShortId(ws.threadsFile, threadId) ?? shortId;
       } else {
         // Refresh stored metadata so `threads` stays accurate after resume
-        updateThreadMeta(ws.threadsFile, threadId, {
+        updateThreadMeta(ws.stateDir, threadId, {
           model: effective.model,
           ...(opts.explicit.has("dir") ? { cwd: opts.dir } : {}),
           ...(preview ? { preview } : {}),
@@ -887,14 +879,11 @@ export async function startOrResumeThread(
       startParams,
     );
     threadId = effective.thread.id;
-    registerThread(ws.threadsFile, threadId, {
+    shortId = registerThread(ws.stateDir, threadId, {
       model: effective.model,
       cwd: opts.dir,
       preview,
     });
-    const resolvedShortId = findShortId(ws.threadsFile, threadId);
-    if (!resolvedShortId) die(`Internal error: thread ${threadId.slice(0, 12)}... registered but not found in mapping`);
-    shortId = resolvedShortId;
     isNewThread = true;
   }
 
@@ -1094,7 +1083,7 @@ export function recordTerminalRunState(
   // on approval" case, and gets its own exit code.
   const hadPendingApproval = hasPendingApproval(ws.stateDir, runId);
   try {
-    updateThreadStatus(ws.threadsFile, threadId, result.status as "completed" | "failed" | "interrupted");
+    updateThreadStatus(ws.stateDir, threadId, result.status as "completed" | "failed" | "interrupted");
   } catch (e) {
     console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -1146,7 +1135,7 @@ export function recordRunFailure(
   error: unknown,
 ): void {
   try {
-    updateThreadStatus(ws.threadsFile, threadId, "failed");
+    updateThreadStatus(ws.stateDir, threadId, "failed");
   } catch (e) {
     console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
   }

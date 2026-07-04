@@ -19,7 +19,7 @@ import {
   migrateGlobalState,
   removeLegacyGlobalThread,
 } from "./threads";
-import type { RunRecord, ThreadMapping } from "./types";
+import type { RunRecord, ThreadIndex } from "./types";
 import { STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
 import { rmSync, existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
@@ -62,7 +62,6 @@ describe("thread index", () => {
     const index = {
       abc12345: {
         threadId: "thr_long_id",
-        name: null,
         model: "gpt-5",
         cwd: "/proj",
         createdAt: "2026-01-01T00:00:00Z",
@@ -96,7 +95,6 @@ describe("thread index", () => {
     expect(index[shortId].threadId).toBe("thr_new_id");
     expect(index[shortId].model).toBe("gpt-5");
     expect(index[shortId].cwd).toBe("/proj");
-    expect(index[shortId].name).toBeNull();
   });
 
   test("registerThread regenerates on collision", () => {
@@ -104,8 +102,6 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       deadbeef: {
         threadId: "thr_existing",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -122,8 +118,6 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "thr_long_id",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -137,8 +131,6 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "thr_long_id",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -152,16 +144,12 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "thr_1",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
       },
       abc12399: {
         threadId: "thr_2",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -174,8 +162,6 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "thr_full_thread_id_here",
-        name: "my thread",
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -189,8 +175,6 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "019d680c-7b23-7f22-ab99-6584214a2bed",
-        name: "uuid thread",
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -210,8 +194,6 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "thr_long_id",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -229,16 +211,15 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "thr_1",
-        name: null,
         model: "old-model",
         cwd: "/old",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
       },
     });
-    updateThreadMeta(testDir, "abc12345", { name: "my thread", model: "new-model" });
+    updateThreadMeta(testDir, "thr_1", { preview: "my thread", model: "new-model" });
     const index = loadThreadIndex(testDir);
-    expect(index.abc12345.name).toBe("my thread");
+    expect(index.abc12345.preview).toBe("my thread");
     expect(index.abc12345.model).toBe("new-model");
     expect(index.abc12345.cwd).toBe("/old"); // unchanged
     expect(index.abc12345.updatedAt).not.toBe("2026-01-01T00:00:00Z");
@@ -248,16 +229,12 @@ describe("thread index", () => {
     saveThreadIndex(testDir, {
       abc12345: {
         threadId: "thr_1",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
       },
       def67890: {
         threadId: "thr_2",
-        name: null,
-        model: null,
         cwd: "/",
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -674,7 +651,7 @@ function computeWsStateDir(globalDataDir: string, cwd: string): string {
   return join(globalDataDir, "workspaces", `${slug}-${hash}`);
 }
 
-function writeGlobalThreads(globalDataDir: string, mapping: ThreadMapping): void {
+function writeGlobalThreads(globalDataDir: string, mapping: ThreadIndex): void {
   const file = join(globalDataDir, "threads.json");
   mkdirSync(globalDataDir, { recursive: true });
   writeFileSync(file, JSON.stringify(mapping, null, 2));
@@ -731,7 +708,6 @@ describe("migrateGlobalState", () => {
     expect(Object.keys(index)).toHaveLength(2);
     expect(index.aaa11111.threadId).toBe("thr_alpha");
     expect(index.aaa11111.model).toBe("gpt-5");
-    expect(index.aaa11111.name).toBeNull();
     expect(index.aaa11111.preview).toBe("Do the thing");
     expect(index.aaa11111.lastStatus).toBe("completed");
     expect(index.bbb22222.threadId).toBe("thr_beta");
@@ -764,8 +740,6 @@ describe("migrateGlobalState", () => {
     saveThreadIndex(wsStateDir, {
       abc12345: {
         threadId: "thr_existing",
-        name: null,
-        model: null,
         cwd: wsRoot,
         createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
@@ -953,7 +927,6 @@ describe("migrateGlobalState", () => {
     saveThreadIndex(wsStateDir, {
       existing1: {
         threadId: "thr_existing",
-        name: "Existing Thread",
         model: "gpt-5",
         cwd: wsRoot,
         createdAt: "2025-01-01T00:00:00Z",
@@ -967,7 +940,7 @@ describe("migrateGlobalState", () => {
     const index = loadThreadIndex(wsStateDir);
     expect(Object.keys(index)).toHaveLength(2);
     expect(index.existing1.threadId).toBe("thr_existing");
-    expect(index.existing1.name).toBe("Existing Thread");
+    expect(index.existing1.model).toBe("gpt-5"); // pre-existing workspace state preserved
     expect(index.aaa11111.threadId).toBe("thr_alpha");
     expect(index.aaa11111.lastStatus).toBe("completed");
 

@@ -1,10 +1,7 @@
 // src/commands/peek.ts — peek command and pure formatting helpers.
 
 import type { Turn, ThreadItem, Thread, UserMessageItem, AgentMessageItem } from "../types";
-import {
-  legacyResolveThreadId as resolveThreadId,
-  legacyFindShortId as findShortId,
-} from "../threads";
+import { resolveThreadId } from "../threads";
 import {
   die,
   parseOptions,
@@ -162,13 +159,11 @@ export async function handlePeek(args: string[]): Promise<void> {
   let threadId: string;
   let shortId: string | null;
   try {
-    threadId = resolveThreadId(ws.threadsFile, id);
-    shortId = findShortId(ws.threadsFile, threadId);
+    const resolved = resolveThreadId(ws.stateDir, id);
+    threadId = resolved?.threadId ?? id;
+    shortId = resolved?.shortId ?? null;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (!msg.startsWith("Thread not found")) die(msg);
-    threadId = id;
-    shortId = null;
+    die(e instanceof Error ? e.message : String(e));
   }
 
   const limit = options.explicit.has("limit") ? options.limit : DEFAULT_PEEK_LIMIT;

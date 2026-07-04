@@ -36,7 +36,7 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
   // cleanup — ensures the mapping is written even if client.close() hangs.
   if (activeThreadId && activeWsPaths) {
     try {
-      updateThreadStatus(activeWsPaths.threadsFile, activeThreadId, "interrupted");
+      updateThreadStatus(activeWsPaths.stateDir, activeThreadId, "interrupted");
     } catch (e) {
       console.error(`[codex] Warning: could not update thread status during shutdown: ${e instanceof Error ? e.message : String(e)}`);
     }
