@@ -521,6 +521,17 @@ describe("AppServerClient", () => {
 // close() must kill grandchildren (Unix process group)
 // ---------------------------------------------------------------------------
 
+/** kill(pid, 0) succeeds for zombies: an orphaned grandchild stays STAT=Z
+ *  until PID 1 reaps it, which never happens promptly in containers with a
+ *  non-reaping init. Read the process state so "killed but unreaped" counts
+ *  as dead. */
+function grandchildAlive(pid: number): boolean {
+  try { process.kill(pid, 0); } catch { return false; }
+  const stat = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)])
+    .stdout.toString().trim();
+  return stat !== "" && !stat.startsWith("Z");
+}
+
 describe("close() kills grandchildren", () => {
   test("a grandchild of a hung server dies with the process group", async () => {
     if (process.platform === "win32") return; // Windows tree kill is taskkill /T
@@ -547,7 +558,7 @@ describe("close() kills grandchildren", () => {
 
       let alive = true;
       for (let i = 0; i < 20 && alive; i++) {
-        try { process.kill(grandchildPid, 0); } catch { alive = false; }
+        alive = grandchildAlive(grandchildPid);
         if (alive) await new Promise((r) => setTimeout(r, 100));
       }
       expect(alive).toBe(false);
@@ -586,7 +597,7 @@ describe("close() kills grandchildren", () => {
       await c.close();
       let alive = true;
       for (let i = 0; i < 20 && alive; i++) {
-        try { process.kill(grandchildPid, 0); } catch { alive = false; }
+        alive = grandchildAlive(grandchildPid);
         if (alive) await new Promise((r) => setTimeout(r, 100));
       }
       expect(alive).toBe(false);
