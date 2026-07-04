@@ -553,4 +553,37 @@ describe("close() kills grandchildren", () => {
       rmSync(pidFile, { force: true });
     }
   }, 20000);
+
+  test("a grandchild left behind by a GRACEFUL exit is swept too", async () => {
+    if (process.platform === "win32") return;
+    const pidFile = join(TEST_DIR, `grandchild-graceful-${process.pid}-${Date.now()}.pid`);
+    // Default mock behavior: exits on stdin EOF — but the sleep(300) it
+    // spawned survives that clean exit. close() must sweep the group.
+    const c = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 10000,
+      env: { MOCK_SPAWN_GRANDCHILD: pidFile },
+    });
+
+    const { existsSync, readFileSync, rmSync } = await import("fs");
+    let grandchildPid = 0;
+    for (let i = 0; i < 100 && !grandchildPid; i++) {
+      if (existsSync(pidFile)) grandchildPid = Number(readFileSync(pidFile, "utf-8").trim());
+      if (!grandchildPid) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(grandchildPid).toBeGreaterThan(0);
+
+    try {
+      await c.close();
+      let alive = true;
+      for (let i = 0; i < 20 && alive; i++) {
+        try { process.kill(grandchildPid, 0); } catch { alive = false; }
+        if (alive) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(alive).toBe(false);
+    } finally {
+      try { process.kill(grandchildPid, "SIGKILL"); } catch {}
+      rmSync(pidFile, { force: true });
+    }
+  }, 20000);
 });

@@ -93,13 +93,16 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   // commands). The CLI's own pgroup is untouched. Not used on Windows, where
   // detached also detaches the console; tree termination there is taskkill /T.
   const detached = process.platform !== "win32";
-  const proc = childSpawn(command[0], command.slice(1), {
+  // On Windows, npm installs `codex` as a `codex.cmd` shim, which
+  // child_process.spawn refuses to launch without a shell (EINVAL since the
+  // CVE-2024-27980 hardening). Wrap with `cmd.exe /c` — the same thing
+  // Bun.spawn did implicitly; windowsHide keeps the console window away.
+  const argv = process.platform === "win32" ? ["cmd.exe", "/c", ...command] : command;
+  const proc = childSpawn(argv[0], argv.slice(1), {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: opts?.cwd,
     env: opts?.env ? { ...process.env, ...opts.env } : undefined,
     detached,
-    // On Windows, `codex` resolves to `codex.cmd`, which would otherwise
-    // show a console window for the lifetime of the broker's app-server.
     windowsHide: true,
   });
 
@@ -229,8 +232,12 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
 
     // Unix: wait for graceful exit, then escalate — group signals, so
     // grandchildren (wrapper scripts, mid-turn shell commands) die with
-    // the app-server instead of being orphaned.
-    if (await waitForExit(5000)) return;
+    // the app-server instead of being orphaned. Even after a graceful
+    // exit, sweep the process group: a server that exits on stdin EOF can
+    // still leave a spawned command running, and the group id stays
+    // reserved while any member is alive (ESRCH on an empty group is
+    // swallowed by killTree).
+    if (await waitForExit(5000)) { killTree("SIGTERM"); return; }
     killTree("SIGTERM");
     if (await waitForExit(3000)) return;
     killTree("SIGKILL");
