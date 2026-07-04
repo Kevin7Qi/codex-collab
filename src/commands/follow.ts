@@ -11,6 +11,7 @@
 // detached — and survives broker handoffs.
 
 import { openSync, readSync, closeSync, fstatSync } from "fs";
+import { resolve } from "path";
 import {
   findShortId,
   listRuns,
@@ -169,10 +170,17 @@ function laterThan(a: RunRecord, b: RunRecord): boolean {
  * Exported for tests.
  */
 export function replayBound(stateDir: string, run: RunRecord): number | null {
+  // Canonicalize before comparing: migration-created records store logFile
+  // as an absolute path while normal legacy records store the same physical
+  // file as a stateDir-relative "logs/{shortId}.log" — a raw string compare
+  // would fail to group them and leave the older run's replay unbounded.
+  const logFileOf = (r: RunRecord): string | null =>
+    r.logFile ? resolve(stateDir, r.logFile) : null;
+  const runLogFile = logFileOf(run);
   let bound: number | null = null;
   for (const r of listRunsForThread(stateDir, run.shortId)) {
     if (r.runId === run.runId) continue;
-    if ((r.logFile || null) !== (run.logFile || null)) continue;
+    if (logFileOf(r) !== runLogFile) continue;
     const later = r.logOffset > run.logOffset
       || (r.logOffset === run.logOffset && laterThan(r, run));
     if (later && (bound === null || r.logOffset < bound)) {

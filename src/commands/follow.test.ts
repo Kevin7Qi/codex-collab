@@ -167,6 +167,29 @@ describe("replayBound: per-run log files", () => {
   });
 });
 
+describe("replayBound: absolute vs relative logFile (migration records)", () => {
+  test("an absolute-path record bounds a relative-path record for the same file", () => {
+    const { stateDir } = freshDirs("replay-bound-abs-rel");
+    // Migration-created synthetic records store the shared log as an
+    // ABSOLUTE path; later pre-per-run records store the same physical file
+    // as stateDir-relative "logs/{shortId}.log". They must group as one
+    // file, or the older run's replay is unbounded and swallows the newer
+    // run's entries.
+    const relative = { ...record("r-rel", "ffff9001", "completed", "2026-07-03T10:00:00.000Z"), logOffset: 0 };
+    const absolute = {
+      ...record("r-abs", "ffff9001", "completed", "2026-07-03T11:00:00.000Z"),
+      logFile: join(stateDir, "logs", "ffff9001.log"),
+      logOffset: 400,
+    };
+    createRun(stateDir, relative);
+    createRun(stateDir, absolute);
+
+    const { replayBound } = require("./follow") as typeof import("./follow");
+    expect(replayBound(stateDir, relative)).toBe(400);
+    expect(replayBound(stateDir, absolute)).toBeNull();
+  });
+});
+
 describe("replayBound: zero-byte runs (equal logOffset)", () => {
   test("a run that wrote nothing is bounded at its own offset by the next run", () => {
     const { stateDir } = freshDirs("replay-bound-empty");
