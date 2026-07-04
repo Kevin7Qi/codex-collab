@@ -39,7 +39,6 @@ function freshWorkspace(name: string): WorkspacePaths {
   const stateDir = freshTmpDir(name);
   const ws = {
     stateDir,
-    threadsFile: join(stateDir, "threads.json"),
     logsDir: join(stateDir, "logs"),
     approvalsDir: join(stateDir, "approvals"),
     killSignalsDir: join(stateDir, "kill-signals"),

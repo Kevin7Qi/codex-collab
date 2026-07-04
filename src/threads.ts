@@ -158,7 +158,7 @@ export function registerThread(
  * Resolution order:
  * 1. Exact short ID match
  * 2. Prefix match on short IDs (error if ambiguous)
- * 3. If starts with "thr_", search index values for matching threadId
+ * 3. Full thread ID lookup (any format — thr_, UUID, etc.)
  * 4. Otherwise, return null
  */
 export function resolveThreadId(
@@ -666,7 +666,8 @@ function runMigration(cwd: string, dataDir: string, globalThreadsFile: string, s
   const index: ThreadIndex = loadThreadIndex(stateDir);
 
   // 3. Load the global thread mapping directly. We deliberately do NOT use
-  // loadThreadMapping here — it renames the file aside on corruption, which
+  // loadThreadIndex-style corruption handling here — it renames the file
+  // aside on corruption, which
   // would (a) destroy the legacy state for OTHER workspaces that haven't
   // migrated yet, and (b) cascade through every CLI invocation since
   // migration runs from getWorkspacePaths. On corruption we skip migration
