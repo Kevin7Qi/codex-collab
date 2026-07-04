@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { applyDiscoverLimit, resolveReadableLogPath } from "./threads";
+import { applyDiscoverLimit, resolveReadableLogPath, resolveRunLogPath, collectThreadLogPaths, readThreadLog } from "./threads";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -108,6 +108,78 @@ describe("resolveReadableLogPath", () => {
     } finally {
       rmSync(evilDir, { recursive: true });
     }
+  });
+});
+
+describe("per-run log reading (resolveRunLogPath / collectThreadLogPaths / readThreadLog)", () => {
+  let stateDir: string;
+  let logsDir: string;
+
+  beforeEach(() => {
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    stateDir = join(tmpdir(), `codex-per-run-log-${suffix}`);
+    logsDir = join(stateDir, "logs");
+    mkdirSync(logsDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (existsSync(stateDir)) rmSync(stateDir, { recursive: true });
+  });
+
+  function record(shortId: string, runId: string, logFile: string): RunRecord {
+    return {
+      runId, threadId: `t-${shortId}`, shortId,
+      kind: "task", phase: null, status: "completed", sessionId: null,
+      logFile, logOffset: 0, prompt: null, model: null,
+      startedAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:00:01Z",
+      elapsed: null, output: null, filesChanged: null, commandsRun: null, error: null,
+    };
+  }
+
+  test("resolveRunLogPath resolves the record's own confined logFile", () => {
+    const rec = record("aaaa1111", "run-1", "logs/aaaa1111/run-1.log");
+    expect(resolveRunLogPath(stateDir, logsDir, rec)).toBe(join(logsDir, "aaaa1111", "run-1.log"));
+  });
+
+  test("resolveRunLogPath refuses an escaping logFile and falls back to the thread log", () => {
+    const rec = record("aaaa2222", "run-1", "../../../etc/passwd");
+    expect(resolveRunLogPath(stateDir, logsDir, rec)).toBe(join(logsDir, "aaaa2222.log"));
+  });
+
+  test("collectThreadLogPaths orders legacy shared log before per-run files, per-run sorted by name", () => {
+    const shortId = "bbbb1111";
+    writeFileSync(join(logsDir, `${shortId}.log`), "legacy\n");
+    mkdirSync(join(logsDir, shortId), { recursive: true });
+    // base36-timestamp runIds sort chronologically by name
+    writeFileSync(join(logsDir, shortId, "run-b-second.log"), "second\n");
+    writeFileSync(join(logsDir, shortId, "run-a-first.log"), "first\n");
+
+    expect(collectThreadLogPaths(stateDir, logsDir, shortId)).toEqual([
+      join(logsDir, `${shortId}.log`),
+      join(logsDir, shortId, "run-a-first.log"),
+      join(logsDir, shortId, "run-b-second.log"),
+    ]);
+    expect(readThreadLog(stateDir, logsDir, shortId)).toBe("legacy\nfirst\nsecond\n");
+  });
+
+  test("readThreadLog returns null for a thread with no logs", () => {
+    expect(readThreadLog(stateDir, logsDir, "cccc1111")).toBeNull();
+  });
+
+  test("collectThreadLogPaths falls back to the migration-edge global log via the run record", () => {
+    // No workspace logs at all; the latest run record points at a legacy
+    // global-path log (the resolveReadableLogPath edge case).
+    const globalDir = join(stateDir, "global-logs");
+    mkdirSync(globalDir, { recursive: true });
+    const globalLog = join(globalDir, "dddd1111.log");
+    writeFileSync(globalLog, "global content\n");
+    createRun(stateDir, record("dddd1111", "run-1", globalLog));
+
+    const paths = collectThreadLogPaths(stateDir, logsDir, "dddd1111");
+    // resolveReadableLogPath confines to logsDir + config.logsDir; a path
+    // under stateDir/global-logs is OUTSIDE both, so the fallback must
+    // refuse it — an empty list, not an escape.
+    expect(paths).toEqual([]);
   });
 });
 

@@ -151,7 +151,7 @@ describe("runTurn", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-turn", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-turn.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -178,7 +178,7 @@ describe("runTurn", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-turn-delta", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-turn-delta.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -198,7 +198,7 @@ describe("runTurn", () => {
       completionParams: completedTurn("turn-1", "failed", { message: "Context window exceeded" }),
     });
 
-    const dispatcher = new EventDispatcher("test-turn-err", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-turn-err.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -224,7 +224,7 @@ describe("runTurn", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-instant", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-instant.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -239,7 +239,7 @@ describe("runTurn", () => {
   test("times out when turn/completed never fires", async () => {
     const { client } = buildMockClient(() => inProgressTurn("turn-1"));
 
-    const dispatcher = new EventDispatcher("test-turn-timeout", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-turn-timeout.log"), () => {});
 
     const start = Date.now();
     try {
@@ -286,7 +286,7 @@ describe("runTurn", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-turn-collect", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-turn-collect.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "run tests" }], {
       dispatcher,
@@ -316,7 +316,7 @@ describe("runTurn", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-turn-params", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-turn-params.log"), () => {});
 
     await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -353,7 +353,7 @@ describe("runTurn", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-turnid-filter", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-turnid-filter.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -387,7 +387,7 @@ describe("runReview", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-review", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review.log"), () => {});
 
     const result = await runReview(
       client,
@@ -428,7 +428,7 @@ describe("runReview", () => {
     });
     void emit;
 
-    const dispatcher = new EventDispatcher("test-review-kill", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review-kill.log"), () => {});
 
     // Drop a kill signal file after a brief delay so the awaiter picks it up.
     setTimeout(() => {
@@ -475,7 +475,7 @@ describe("runReview", () => {
     });
     void emit; // keep mock alive
 
-    const dispatcher = new EventDispatcher("test-review-interrupt", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review-interrupt.log"), () => {});
 
     await expect(
       runReview(
@@ -524,7 +524,7 @@ describe("runReview", () => {
     });
     void emit;
 
-    const dispatcher = new EventDispatcher("test-review-subthread-inference", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review-subthread-inference.log"), () => {});
 
     const t0 = Date.now();
     const result = await runReview(
@@ -556,7 +556,7 @@ describe("runReview", () => {
       completionParams: completedTurn("review-turn-2", "failed", { message: "No changes to review" }),
     });
 
-    const dispatcher = new EventDispatcher("test-review-err", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review-err.log"), () => {});
 
     const result = await runReview(
       client,
@@ -600,7 +600,7 @@ describe("review output via exitedReviewMode", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-review-override", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review-override.log"), () => {});
 
     const result = await runReview(
       client,
@@ -641,7 +641,7 @@ describe("kill signal", () => {
       writeFileSync(join(TEST_KILL_DIR, "thr-1"), "", { mode: 0o600 });
     }, 100);
 
-    const dispatcher = new EventDispatcher("test-kill-request", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-kill-request.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -668,7 +668,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-kill", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-kill.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -699,7 +699,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-stale-kill", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-stale-kill.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -724,7 +724,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-fresh-kill", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-fresh-kill.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -750,7 +750,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-pid-mismatch", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-pid-mismatch.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -772,7 +772,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-pid-match", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-pid-match.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -794,7 +794,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-wildcard", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-wildcard.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -820,7 +820,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-stale-wildcard", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-stale-wildcard.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -841,7 +841,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-no-kill", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-no-kill.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -862,7 +862,7 @@ describe("kill signal", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-cleanup", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-cleanup.log"), () => {});
 
     await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -889,7 +889,7 @@ describe("error propagation", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-propagate", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-propagate.log"), () => {});
 
     await expect(
       runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
@@ -981,7 +981,7 @@ describe("approval wiring", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-approval-wiring", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-approval-wiring.log"), () => {});
 
     await runTurn(client, "thr-1", [{ type: "text", text: "do stuff" }], {
       dispatcher,
@@ -1059,7 +1059,7 @@ describe("notification buffering and turn filtering", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-buffer-replay", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-buffer-replay.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -1090,7 +1090,7 @@ describe("notification buffering and turn filtering", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-buffer-other-thread", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-buffer-other-thread.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -1137,7 +1137,7 @@ describe("notification buffering and turn filtering", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-foreign-filter", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-foreign-filter.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -1165,7 +1165,7 @@ describe("connection loss", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-conn-loss", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-conn-loss.log"), () => {});
 
     const started = Date.now();
     await expect(
@@ -1203,7 +1203,7 @@ describe("completion inference", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-infer-completion", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-infer-completion.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -1237,7 +1237,7 @@ describe("completion inference", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-normal-beats-inference", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-normal-beats-inference.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -1287,7 +1287,7 @@ describe("completion inference", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-inference-reset", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-inference-reset.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -1340,7 +1340,7 @@ describe("structured capture from item/completed", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-structured-capture", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-structured-capture.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "build" }], {
       dispatcher,
@@ -1389,7 +1389,7 @@ describe("structured capture from item/completed", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("test-dedup-capture", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-dedup-capture.log"), () => {});
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "run tests" }], {
       dispatcher,
@@ -1427,7 +1427,7 @@ describe("Guardian event routing", () => {
     });
 
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("guardian-routing", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian-routing.log"), (line) => lines.push(line));
 
     const result = await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
@@ -1455,7 +1455,7 @@ describe("per-turn approvalsReviewer forwarding", () => {
       throw new Error(`Unexpected method: ${method}`);
     });
 
-    const dispatcher = new EventDispatcher("reviewer-fwd", TEST_LOG_DIR, () => {});
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "reviewer-fwd.log"), () => {});
     await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,
       approvalHandler: autoApproveHandler,
@@ -1488,7 +1488,7 @@ describe("guardianWarning routing", () => {
     });
 
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("gw-routing", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "gw-routing.log"), (line) => lines.push(line));
 
     await runTurn(client, "thr-1", [{ type: "text", text: "hello" }], {
       dispatcher,

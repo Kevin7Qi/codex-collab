@@ -19,6 +19,7 @@ import {
   updateThreadMeta,
   updateThreadStatus,
   generateRunId,
+  runLogRelPath,
   createRun,
   updateRun,
   loadRun,
@@ -684,14 +685,12 @@ export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>,
 }
 
 export function createDispatcher(
-  shortId: string,
-  logsDir: string,
+  logPath: string,
   opts: Options,
   guardianDir?: string,
 ): EventDispatcher {
   return new EventDispatcher(
-    shortId,
-    logsDir,
+    logPath,
     opts.contentOnly ? () => {} : progress,
     guardianDir,
   );
@@ -953,8 +952,6 @@ export async function startOrResumeThread(
   const prompt = preview ?? null;
   const runId = consumeInjectedRunId() ?? generateRunId();
   const sessionId = getCurrentSessionId(ws.stateDir);
-  const logPath = join(ws.logsDir, `${shortId}.log`);
-  const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
 
   createRun(ws.stateDir, {
     runId,
@@ -965,8 +962,11 @@ export async function startOrResumeThread(
     status: "running",
     pid: process.pid,
     sessionId,
-    logFile: `logs/${shortId}.log`,
-    logOffset,
+    // Per-run log file: this run owns it exclusively, so followers get
+    // perfect attribution even when runs on one thread overlap. logOffset
+    // stays for legacy records that share logs/{shortId}.log.
+    logFile: runLogRelPath(shortId, runId),
+    logOffset: 0,
     prompt,
     model: effective.model,
     startedAt: new Date().toISOString(),

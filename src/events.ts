@@ -1,7 +1,7 @@
 // src/events.ts — Event dispatcher for app server notifications
 
 import { appendFileSync, mkdirSync, existsSync } from "fs";
-import { join } from "path";
+import { dirname } from "path";
 import {
   isKnownItem,
   type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
@@ -29,13 +29,13 @@ export class EventDispatcher {
   private guardianDir: string | null;
 
   constructor(
-    shortId: string,
-    logsDir: string,
+    logPath: string,
     onProgress?: ProgressCallback,
     guardianDir?: string,
   ) {
-    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true, mode: 0o700 });
-    this.logPath = join(logsDir, `${shortId}.log`);
+    const dir = dirname(logPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+    this.logPath = logPath;
     this.onProgress = onProgress ?? ((line) => process.stderr.write(line + "\n"));
     this.guardianDir = guardianDir ?? null;
   }

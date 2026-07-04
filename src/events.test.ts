@@ -13,7 +13,7 @@ beforeEach(() => {
 
 describe("EventDispatcher", () => {
   test("accumulates agent message deltas", () => {
-    const dispatcher = new EventDispatcher("test1", TEST_LOG_DIR);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test1.log"));
     dispatcher.handleDelta("item/agentMessage/delta", {
       threadId: "t1", turnId: "turn1", itemId: "item1", delta: "Hello ",
     });
@@ -25,7 +25,7 @@ describe("EventDispatcher", () => {
 
   test("formats progress line for command execution", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("test2", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test2.log"), (line) => lines.push(line));
 
     dispatcher.handleItemStarted({
       item: { type: "commandExecution", id: "i1", command: "npm test", cwd: "/proj", status: "inProgress", processId: null, commandActions: [] },
@@ -39,7 +39,7 @@ describe("EventDispatcher", () => {
 
   test("formats progress line for file change", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("test3", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test3.log"), (line) => lines.push(line));
 
     dispatcher.handleItemCompleted({
       item: {
@@ -57,7 +57,7 @@ describe("EventDispatcher", () => {
   });
 
   test("writes events to log file", () => {
-    const dispatcher = new EventDispatcher("test4", TEST_LOG_DIR);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test4.log"));
     dispatcher.handleItemCompleted({
       item: {
         type: "commandExecution", id: "i1", command: "echo hello", cwd: "/tmp",
@@ -75,7 +75,7 @@ describe("EventDispatcher", () => {
   });
 
   test("captures review output from exitedReviewMode item/completed", () => {
-    const dispatcher = new EventDispatcher("test-review", TEST_LOG_DIR);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review.log"));
 
     dispatcher.handleItemCompleted({
       item: { type: "exitedReviewMode", id: "review-1", review: "Code looks great" },
@@ -93,7 +93,7 @@ describe("EventDispatcher", () => {
     // final_answer over the full review — the entire review body was dropped
     // from TurnResult.output (and thus from the run-ledger output field and
     // the CLI's stdout under --content-only). The full review must win.
-    const dispatcher = new EventDispatcher("test-review-finalanswer", TEST_LOG_DIR);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-review-finalanswer.log"));
     const fullReview = Array.from({ length: 40 }, (_, i) =>
       `Finding ${i + 1}: detailed substantive review content.`).join("\n");
 
@@ -115,7 +115,7 @@ describe("EventDispatcher", () => {
 
   test("handles mid-turn error notifications", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("test-error", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-error.log"), (line) => lines.push(line));
 
     dispatcher.handleError({
       error: { message: "Rate limit exceeded" },
@@ -131,7 +131,7 @@ describe("EventDispatcher", () => {
 
   test("does not count declined command in commandsRun", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("test-declined-cmd", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-declined-cmd.log"), (line) => lines.push(line));
 
     dispatcher.handleItemCompleted({
       item: {
@@ -148,7 +148,7 @@ describe("EventDispatcher", () => {
 
   test("does not count failed file change in filesChanged", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("test-failed-fc", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-failed-fc.log"), (line) => lines.push(line));
 
     dispatcher.handleItemCompleted({
       item: {
@@ -166,7 +166,7 @@ describe("EventDispatcher", () => {
   });
 
   test("progress events auto-flush to log file", () => {
-    const dispatcher = new EventDispatcher("test-autoflush", TEST_LOG_DIR);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-autoflush.log"));
     const logPath = join(TEST_LOG_DIR, "test-autoflush.log");
 
     // Trigger a progress event (command started) — should auto-flush without explicit flush() call
@@ -183,7 +183,7 @@ describe("EventDispatcher", () => {
   });
 
   test("collects file changes and commands", () => {
-    const dispatcher = new EventDispatcher("test5", TEST_LOG_DIR);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test5.log"));
 
     dispatcher.handleItemCompleted({
       item: {
@@ -212,7 +212,7 @@ describe("EventDispatcher", () => {
 describe("Guardian auto-approval review events", () => {
   test("started event renders a progress line with the command", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("guardian1", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian1.log"), (line) => lines.push(line));
 
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/started", {
       threadId: "t1", turnId: "turn1", itemId: "i1", command: "touch /tmp/file",
@@ -225,7 +225,7 @@ describe("Guardian auto-approval review events", () => {
 
   test("completed event renders the decision", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("guardian2", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian2.log"), (line) => lines.push(line));
 
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
       threadId: "t1", turnId: "turn1", itemId: "i1", decision: "approved", command: "touch /tmp/file",
@@ -238,7 +238,7 @@ describe("Guardian auto-approval review events", () => {
 
   test("observed 0.142 shape: action.command + review.status/riskLevel", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("guardian-live", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian-live.log"), (line) => lines.push(line));
 
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/started", {
       threadId: "t1", turnId: "turn1", reviewId: "r1", targetItemId: "call_1",
@@ -259,7 +259,7 @@ describe("Guardian auto-approval review events", () => {
   test("denied review is persisted for override when guardianDir is set", () => {
     const lines: string[] = [];
     const guardianDir = join(TEST_LOG_DIR, "guardian");
-    const dispatcher = new EventDispatcher("guardian-deny", TEST_LOG_DIR, (line) => lines.push(line), guardianDir);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian-deny.log"), (line) => lines.push(line), guardianDir);
 
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
       threadId: "t1", turnId: "turn1", reviewId: "rev-denied-1", decisionSource: "agent",
@@ -275,7 +275,7 @@ describe("Guardian auto-approval review events", () => {
 
   test("approvals and denials without guardianDir are not persisted", () => {
     const guardianDir = join(TEST_LOG_DIR, "guardian");
-    const withDir = new EventDispatcher("guardian-ok", TEST_LOG_DIR, () => {}, guardianDir);
+    const withDir = new EventDispatcher(join(TEST_LOG_DIR, "guardian-ok.log"), () => {}, guardianDir);
     withDir.handleAutoApprovalReview("item/autoApprovalReview/completed", {
       threadId: "t1", turnId: "turn1", reviewId: "rev-approved-1",
       review: { status: "approved", riskLevel: "low", userAuthorization: "high", rationale: null },
@@ -283,7 +283,7 @@ describe("Guardian auto-approval review events", () => {
     });
     expect(existsSync(join(guardianDir, "rev-approved-1.json"))).toBe(false);
 
-    const withoutDir = new EventDispatcher("guardian-nodir", TEST_LOG_DIR, () => {});
+    const withoutDir = new EventDispatcher(join(TEST_LOG_DIR, "guardian-nodir.log"), () => {});
     withoutDir.handleAutoApprovalReview("item/autoApprovalReview/completed", {
       threadId: "t1", turnId: "turn1", reviewId: "rev-denied-2",
       review: { status: "denied", riskLevel: "high", userAuthorization: "low", rationale: null },
@@ -294,7 +294,7 @@ describe("Guardian auto-approval review events", () => {
 
   test("enum-shaped decision objects use their type discriminant", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("guardian3", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian3.log"), (line) => lines.push(line));
 
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
       decision: { type: "rejected" },
@@ -306,7 +306,7 @@ describe("Guardian auto-approval review events", () => {
 
   test("degrades to a generic line on an unrecognized payload (UNSTABLE protocol)", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("guardian4", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian4.log"), (line) => lines.push(line));
 
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/started", {});
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {});
@@ -317,7 +317,7 @@ describe("Guardian auto-approval review events", () => {
   });
 
   test("full payload is written to the log for auditability", () => {
-    const dispatcher = new EventDispatcher("guardian5", TEST_LOG_DIR);
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "guardian5.log"));
     dispatcher.handleAutoApprovalReview("item/autoApprovalReview/completed", {
       decision: "approved", command: "rm -rf node_modules",
     });
@@ -332,7 +332,7 @@ describe("Guardian auto-approval review events", () => {
 describe("guardianWarning", () => {
   test("renders the warning message as a Guardian progress line", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("gw1", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "gw1.log"), (line) => lines.push(line));
 
     dispatcher.handleGuardianWarning({
       message: "Automatic approval review approved (risk: medium, authorization: high): persistent modification to /etc/hosts.",
@@ -344,7 +344,7 @@ describe("guardianWarning", () => {
 
   test("degrades gracefully when the UNSTABLE payload has no message", () => {
     const lines: string[] = [];
-    const dispatcher = new EventDispatcher("gw2", TEST_LOG_DIR, (line) => lines.push(line));
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "gw2.log"), (line) => lines.push(line));
     dispatcher.handleGuardianWarning({});
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("Guardian issued a warning");

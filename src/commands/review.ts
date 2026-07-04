@@ -1,7 +1,8 @@
 // src/commands/review.ts — review command handler
 
+import { join } from "path";
 import { runReview } from "../turns";
-import { updateThreadStatus } from "../threads";
+import { updateThreadStatus, runLogRelPath } from "../threads";
 import { getDefaultBranch } from "../git";
 import type { ReviewTarget } from "../types";
 import { wrapBrokerBusy } from "../broker";
@@ -104,7 +105,7 @@ export async function handleReview(args: string[]): Promise<void> {
     // server-side), so a Guardian denial here could not be overridden later —
     // thread/resume on the dead thread would fail. Denials still show in the
     // progress stream and log.
-    const dispatcher = createDispatcher(shortId, ws.logsDir, options);
+    const dispatcher = createDispatcher(join(ws.stateDir, runLogRelPath(shortId, runId)), options);
 
     // Note: model/cwd/approval/sandbox already reached the server via the
     // thread start/fork params in startOrResumeThread; review/start itself

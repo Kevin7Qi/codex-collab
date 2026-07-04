@@ -267,6 +267,14 @@ export function generateRunId(): string {
   return `run-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 }
 
+/** Stable stateDir-relative path of a run's own log file. Each run writes
+ *  its own log (per-run attribution for concurrent same-thread runs);
+ *  legacy records point at the shared `logs/{shortId}.log` instead. The
+ *  base36-timestamp runId prefix keeps a directory listing chronological. */
+export function runLogRelPath(shortId: string, runId: string): string {
+  return `logs/${shortId}/${runId}.log`;
+}
+
 export function createRun(stateDir: string, record: RunRecord): void {
   const dir = runsDir(stateDir);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -413,9 +421,17 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   const resolveLogFile = (logFile: string | null): string | null => {
     if (!logFile) return null;
     const abs = resolve(stateDir, logFile);
-    if (isPathInside(abs, logsRoot)) return abs;
-    console.error(`[codex] Warning: refusing to prune log outside workspace state: ${logFile}`);
-    return null;
+    if (!isPathInside(abs, logsRoot)) {
+      console.error(`[codex] Warning: refusing to prune log outside workspace state: ${logFile}`);
+      return null;
+    }
+    // Per-run logs (in a logs/{shortId}/ subdir) are NOT pruned with their
+    // record: they are the thread's readable history for `output`, retained
+    // like the legacy shared log until `clean`'s age policy or `delete`
+    // removes them. Only legacy shared logs directly under logs/ are prune
+    // candidates (for threads that already left the index).
+    if (dirname(abs) !== logsRoot) return null;
+    return abs;
   };
 
   type Entry = { file: string; activityAt: string; logFile: string | null; logPath: string | null; running: boolean };
