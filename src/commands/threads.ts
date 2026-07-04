@@ -10,6 +10,7 @@ import {
   getLatestRun,
   removeRunsForThread,
   listRuns,
+  listRunsForThread,
 } from "../threads";
 import { getCurrentSessionId } from "../broker";
 import { resolveWorkspaceDir } from "../config";
@@ -273,29 +274,37 @@ export function resolveRunLogPath(
   return join(logsDir, `${run.shortId}.log`);
 }
 
-/** All log files for a thread in chronological order: the legacy shared
- *  `logs/{shortId}.log` (pre-per-run history) first, then the per-run files
- *  under `logs/{shortId}/` — their base36-timestamp runId names make the
- *  sorted directory listing chronological. Empty when the thread has no
- *  logs; the resolveReadableLogPath fallback covers the migration edge
- *  where the only copy lives in the legacy global logs dir. */
+/** All log files for a thread in chronological order: legacy shared logs
+ *  (pre-per-run history) first, then the per-run files under
+ *  `logs/{shortId}/` — their base36-timestamp runId names make the sorted
+ *  directory listing chronological. Legacy history is the workspace
+ *  `logs/{shortId}.log` plus any confined log a run record points at
+ *  outside the per-run dir — the migration edge where the only copy lives
+ *  in the legacy global logs dir. That record-based scan must run even when
+ *  per-run files exist: resuming a migrated thread creates per-run logs
+ *  without ever copying the global one into the workspace. */
 export function collectThreadLogPaths(
   stateDir: string,
   logsDir: string,
   shortId: string,
+  globalLogsDir: string = config.logsDir,
 ): string[] {
   const paths: string[] = [];
   const legacy = join(logsDir, `${shortId}.log`);
   if (existsSync(legacy)) paths.push(legacy);
   const runDir = join(logsDir, shortId);
+  for (const run of [...listRunsForThread(stateDir, shortId)].reverse()) { // oldest first
+    if (!run.logFile) continue;
+    const candidate = resolve(stateDir, run.logFile);
+    const confined = isPathInside(candidate, resolve(logsDir))
+      || isPathInside(candidate, resolve(globalLogsDir));
+    if (!confined || isPathInside(candidate, runDir)) continue; // per-run files come from the dir listing below
+    if (!paths.includes(candidate) && existsSync(candidate)) paths.push(candidate);
+  }
   if (existsSync(runDir)) {
     for (const name of readdirSync(runDir).sort()) {
       if (name.endsWith(".log")) paths.push(join(runDir, name));
     }
-  }
-  if (paths.length === 0) {
-    const fallback = resolveReadableLogPath(stateDir, logsDir, shortId);
-    if (existsSync(fallback)) paths.push(fallback);
   }
   return paths;
 }

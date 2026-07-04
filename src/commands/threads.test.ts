@@ -166,6 +166,27 @@ describe("per-run log reading (resolveRunLogPath / collectThreadLogPaths / readT
     expect(readThreadLog(stateDir, logsDir, "cccc1111")).toBeNull();
   });
 
+  test("migration-edge global log survives alongside newer per-run files", () => {
+    // The copy-failed migration case: the only pre-resume history lives in
+    // the legacy GLOBAL logs dir (via the synthetic run record's logFile).
+    // Resuming the thread creates per-run logs — the global history must
+    // still be included, not dropped once per-run files exist.
+    const shortId = "eeee1111";
+    const globalLogsDir = join(stateDir, "fake-global-logs");
+    mkdirSync(globalLogsDir, { recursive: true });
+    const globalLog = join(globalLogsDir, `${shortId}.log`);
+    writeFileSync(globalLog, "pre-resume history\n");
+    createRun(stateDir, record(shortId, "run-0-migrated", globalLog));
+    mkdirSync(join(logsDir, shortId), { recursive: true });
+    writeFileSync(join(logsDir, shortId, "run-1-resumed.log"), "post-resume\n");
+    createRun(stateDir, record(shortId, "run-1-resumed", `logs/${shortId}/run-1-resumed.log`));
+
+    expect(collectThreadLogPaths(stateDir, logsDir, shortId, globalLogsDir)).toEqual([
+      globalLog,
+      join(logsDir, shortId, "run-1-resumed.log"),
+    ]);
+  });
+
   test("collectThreadLogPaths falls back to the migration-edge global log via the run record", () => {
     // No workspace logs at all; the latest run record points at a legacy
     // global-path log (the resolveReadableLogPath edge case).
@@ -176,9 +197,9 @@ describe("per-run log reading (resolveRunLogPath / collectThreadLogPaths / readT
     createRun(stateDir, record("dddd1111", "run-1", globalLog));
 
     const paths = collectThreadLogPaths(stateDir, logsDir, "dddd1111");
-    // resolveReadableLogPath confines to logsDir + config.logsDir; a path
-    // under stateDir/global-logs is OUTSIDE both, so the fallback must
-    // refuse it — an empty list, not an escape.
+    // The record scan confines to logsDir + the global logs dir; a path
+    // under stateDir/global-logs is OUTSIDE both (config.logsDir default),
+    // so it must be refused — an empty list, not an escape.
     expect(paths).toEqual([]);
   });
 });
