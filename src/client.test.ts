@@ -34,6 +34,10 @@ const MOCK_SERVER_SOURCE = `#!/usr/bin/env bun
 function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 const exitEarly = process.env.MOCK_EXIT_EARLY === "1";
 const errorResponse = process.env.MOCK_ERROR_RESPONSE === "1";
+if (process.env.MOCK_SPAWN_GRANDCHILD) {
+  const child = Bun.spawn(["sleep", "300"]);
+  require("fs").writeFileSync(process.env.MOCK_SPAWN_GRANDCHILD, String(child.pid));
+}
 let buffer = "";
 process.stdin.setEncoding("utf-8");
 process.stdin.on("data", (chunk) => {
@@ -71,7 +75,7 @@ process.stdin.on("data", (chunk) => {
     }
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => { if (process.env.MOCK_IGNORE_STDIN_END !== "1") process.exit(0); });
 process.stdin.on("error", () => process.exit(1));
 `;
 
@@ -508,4 +512,45 @@ describe("AppServerClient", () => {
       await c.close();
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// close() must kill grandchildren (Unix process group)
+// ---------------------------------------------------------------------------
+
+describe("close() kills grandchildren", () => {
+  test("a grandchild of a hung server dies with the process group", async () => {
+    if (process.platform === "win32") return; // Windows tree kill is taskkill /T
+    const pidFile = join(TEST_DIR, `grandchild-${process.pid}-${Date.now()}.pid`);
+    const c = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 10000,
+      env: { MOCK_SPAWN_GRANDCHILD: pidFile, MOCK_IGNORE_STDIN_END: "1" },
+    });
+
+    const { existsSync, readFileSync, rmSync } = await import("fs");
+    let grandchildPid = 0;
+    for (let i = 0; i < 100 && !grandchildPid; i++) {
+      if (existsSync(pidFile)) grandchildPid = Number(readFileSync(pidFile, "utf-8").trim());
+      if (!grandchildPid) await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(grandchildPid).toBeGreaterThan(0);
+
+    try {
+      // The server ignores stdin EOF (hung server), so close() escalates to
+      // a group SIGTERM — which must take the grandchild down too. Before
+      // group signalling, only the direct child died and sleep(300) leaked.
+      await c.close();
+
+      let alive = true;
+      for (let i = 0; i < 20 && alive; i++) {
+        try { process.kill(grandchildPid, 0); } catch { alive = false; }
+        if (alive) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(alive).toBe(false);
+    } finally {
+      try { process.kill(grandchildPid, "SIGKILL"); } catch {}
+      rmSync(pidFile, { force: true });
+    }
+  }, 20000);
 });

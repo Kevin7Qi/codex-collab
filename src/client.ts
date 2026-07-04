@@ -5,8 +5,7 @@
 // to the spawned child process: spawn, stdin/stdout wiring, stderr draining,
 // exit monitoring, platform-specific shutdown, and the initialize handshake.
 
-import { spawn } from "bun";
-import { spawnSync } from "child_process";
+import { spawn as childSpawn, spawnSync } from "child_process";
 import type { InitializeParams, InitializeResponse, RequestId } from "./types";
 import { config } from "./config";
 import {
@@ -67,7 +66,8 @@ export interface AppServerClient {
    *  (e.g. the app-server process exits). Not called on intentional close(). */
   onClose(handler: () => void): () => void;
   /** Close the connection and terminate the server process.
-   *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL.
+   *  On Unix: close stdin -> wait 5s -> SIGTERM -> wait 3s -> SIGKILL,
+   *  signalling the app-server's process group so grandchildren die too.
    *  On Windows: close stdin, then immediately terminate the process tree
    *  (no timed grace period, unlike Unix). */
   close(): Promise<void>;
@@ -86,89 +86,89 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   const command = opts?.command ?? ["codex", "app-server"];
   const requestTimeout = opts?.requestTimeout ?? config.requestTimeout;
 
-  // Spawn the child process
-  const proc = (() => {
-    try {
-      return spawn(command, {
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-        cwd: opts?.cwd,
-        env: opts?.env ? { ...process.env, ...opts.env } : undefined,
-        // On Windows, `codex` resolves to `codex.cmd` and Bun.spawn wraps it
-        // with `cmd.exe /c`, which would otherwise show a console window for
-        // the lifetime of the broker's app-server.
-        windowsHide: true,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new Error(
-        `Failed to start app server (${command.join(" ")}): ${msg}\n` +
-        `Ensure codex CLI is installed: npm install -g @openai/codex`,
-      );
-    }
-  })();
+  // Spawn the child process. Node's child_process (not Bun.spawn, which has
+  // no `detached`) so the app-server gets its own process group on Unix —
+  // close() can then signal the whole tree (-pid) instead of only the direct
+  // child, which orphaned grandchildren (wrapper scripts, mid-turn shell
+  // commands). The CLI's own pgroup is untouched. Not used on Windows, where
+  // detached also detaches the console; tree termination there is taskkill /T.
+  const detached = process.platform !== "win32";
+  const proc = childSpawn(command[0], command.slice(1), {
+    stdio: ["pipe", "pipe", "pipe"],
+    cwd: opts?.cwd,
+    env: opts?.env ? { ...process.env, ...opts.env } : undefined,
+    detached,
+    // On Windows, `codex` resolves to `codex.cmd`, which would otherwise
+    // show a console window for the lifetime of the broker's app-server.
+    windowsHide: true,
+  });
 
   let exited = false;
+
+  /** Signal the app-server's process group (Unix, detached) with a fallback
+   *  to the direct child; plain child kill elsewhere. */
+  function killTree(signal?: NodeJS.Signals): void {
+    if (detached && proc.pid) {
+      try {
+        process.kill(-proc.pid, signal ?? "SIGTERM");
+        return;
+      } catch {} // ESRCH (group gone) / EPERM — fall through to the child
+    }
+    try { proc.kill(signal); } catch (e) {
+      if (!exited) {
+        console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
 
   const endpoint = createRpcEndpoint({
     label: "codex",
     requestTimeout,
-    send: (data) => proc.stdin.write(data),
+    send: (data) => {
+      if (!proc.stdin.writable) throw new Error("stdin is not writable");
+      proc.stdin.write(data);
+    },
     downReason: () => (exited ? "App server process exited unexpectedly" : null),
     overflowReason: "App server response buffer exceeded maximum size",
-    onOverflow: () => { try { proc.kill(); } catch {} },
+    onOverflow: () => killTree(),
     writeFailedPrefix: "App server stdin write failed: ",
   });
 
-  // Start the read loop — reads stdout line-by-line
-  const readLoop = (async () => {
-    const reader = proc.stdout.getReader();
-    const decoder = new TextDecoder();
+  // Feed stdout into the endpoint line parser
+  proc.stdout.setEncoding("utf8");
+  proc.stdout.on("data", (chunk: string) => endpoint.feed(chunk));
 
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        endpoint.feed(decoder.decode(value, { stream: true }));
-      }
-    } catch (e) {
-      if (!endpoint.isClosed() && !exited) {
-        console.error(`[codex] Read loop error: ${e instanceof Error ? e.message : String(e)}`);
-        endpoint.rejectAllPending("Read loop failed unexpectedly");
-      }
-    } finally {
-      reader.releaseLock();
-    }
-  })();
+  // Async stdin errors (e.g. EPIPE racing process death) surface via the
+  // exit handler below; an unhandled 'error' event would crash the CLI.
+  proc.stdin.on("error", () => {});
 
-  // Monitor process exit: reject all pending requests and notify close handlers
-  proc.exited.then(() => {
-    exited = true;
-    endpoint.fail("App server process exited unexpectedly");
+  // Monitor process exit: reject all pending requests and notify close
+  // handlers. A spawn failure (ENOENT — codex not installed) emits 'error'
+  // and may never emit 'exit', so both settle the same state.
+  const procGone = new Promise<void>((resolveGone) => {
+    proc.once("exit", () => {
+      exited = true;
+      endpoint.fail("App server process exited unexpectedly");
+      resolveGone();
+    });
+    proc.once("error", (err) => {
+      exited = true;
+      endpoint.fail(
+        `Failed to start app server (${command.join(" ")}): ${err.message}\n` +
+        `Ensure codex CLI is installed: npm install -g @openai/codex`,
+      );
+      resolveGone();
+    });
   });
 
   // Drain stderr and log non-empty output
-  (async () => {
-    const reader = proc.stderr.getReader();
-    const decoder = new TextDecoder();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const text = decoder.decode(value, { stream: true }).trim();
-        if (text) {
-          console.error(`[codex] app-server stderr: ${text}`);
-        }
-      }
-    } catch (e) {
-      if (!endpoint.isClosed() && !exited) {
-        console.error(`[codex] Warning: stderr reader failed: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    } finally {
-      reader.releaseLock();
+  proc.stderr.setEncoding("utf8");
+  proc.stderr.on("data", (chunk: string) => {
+    const text = chunk.trim();
+    if (text) {
+      console.error(`[codex] app-server stderr: ${text}`);
     }
-  })();
+  });
 
   /** Wait for the process to exit within the given timeout. The timer is
    *  cleared when the process wins the race — a leftover armed timer keeps
@@ -177,7 +177,7 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
   function waitForExit(timeoutMs: number): Promise<boolean> {
     return new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
-      proc.exited.then(() => {
+      procGone.then(() => {
         clearTimeout(timer);
         resolve(true);
       });
@@ -220,20 +220,21 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
           console.error(`[codex] Warning: proc.kill() failed: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
-      // Wait for the process to fully exit so dangling readLoop / proc.exited
-      // promises don't keep the event loop alive (which blocks background tasks
+      // Wait for the process to fully exit so a dangling exit listener
+      // doesn't keep the event loop alive (which blocks background tasks
       // from reporting completion).
-      if (await waitForExit(3000)) { await readLoop; }
+      await waitForExit(3000);
       return;
     }
 
-    // Unix: wait for graceful exit, then escalate
-    if (await waitForExit(5000)) { await readLoop; return; }
-    proc.kill("SIGTERM");
-    if (await waitForExit(3000)) { await readLoop; return; }
-    proc.kill("SIGKILL");
-    await proc.exited;
-    await readLoop;
+    // Unix: wait for graceful exit, then escalate — group signals, so
+    // grandchildren (wrapper scripts, mid-turn shell commands) die with
+    // the app-server instead of being orphaned.
+    if (await waitForExit(5000)) return;
+    killTree("SIGTERM");
+    if (await waitForExit(3000)) return;
+    killTree("SIGKILL");
+    await procGone;
   }
 
   // --- Perform initialize handshake ---
