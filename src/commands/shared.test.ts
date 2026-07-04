@@ -20,7 +20,7 @@ import {
   type WorkspacePaths,
   type Options,
 } from "./shared";
-import { createRun, loadRun } from "../threads";
+import { createRun, loadRun, registerThread } from "../threads";
 import { config } from "../config";
 import type { AppServerClient } from "../client";
 import type { Model, ThreadStartResponse } from "../types";
@@ -1261,8 +1261,50 @@ describe("startOrResumeThread", () => {
         approvalPolicy: "on-request",
         approvalsReviewer: "user",
         sandbox: "read-only",
+        // review_model pin: Codex would otherwise prefer its own config.toml
+        // review_model over the model we requested for this review.
+        config: { review_model: "gpt-5" },
       },
     });
+  });
+
+  test("review --resume without --model pins review_model to the thread's last known model", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const sourceThreadId = "01900000000070008000000000000003";
+    const forkedThreadId = "01900000000070008000000000000004";
+    const client = recordingClient(calls, {
+      "thread/fork": () => threadStartResponse(forkedThreadId, "/tmp/proj"),
+    });
+    const ws = freshWorkspace("review-resume-fork-index-model");
+    const shortId = registerThread(ws.stateDir, sourceThreadId, { model: "gpt-5.3-codex" });
+
+    const opts = defaultOptions();
+    opts.resumeId = shortId;
+    opts.dir = "/tmp/proj";
+
+    await startOrResumeThread(client, opts, ws, { sandbox: "read-only" }, "Review PR", true);
+
+    const fork = calls.find(c => c.method === "thread/fork");
+    expect(fork?.params).toMatchObject({ config: { review_model: "gpt-5.3-codex" } });
+  });
+
+  test("review --resume of an unknown external thread sends no review_model pin", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const externalThreadId = "01900000000070008000000000000005";
+    const forkedThreadId = "01900000000070008000000000000006";
+    const client = recordingClient(calls, {
+      "thread/fork": () => threadStartResponse(forkedThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.resumeId = externalThreadId;
+    opts.dir = "/tmp/proj";
+
+    await startOrResumeThread(
+      client, opts, freshWorkspace("review-resume-external"), { sandbox: "read-only" }, "Review PR", true,
+    );
+
+    const fork = calls.find(c => c.method === "thread/fork");
+    expect((fork?.params as Record<string, unknown>).config).toBeUndefined();
   });
 
   /** Mock client that records calls and answers from a method→response map.
@@ -1310,6 +1352,33 @@ describe("startOrResumeThread", () => {
     });
     const memory = calls.find(c => c.method === "thread/memoryMode/set");
     expect(memory?.params).toEqual({ threadId: newThreadId, mode: "disabled" });
+  });
+
+  test("fresh review thread pins review_model to the resolved model; plain runs don't", async () => {
+    const reviewCalls: Array<{ method: string; params: unknown }> = [];
+    const reviewClient = recordingClient(reviewCalls, {
+      "thread/start": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+    opts.model = "gpt-5.3-codex";
+
+    await startOrResumeThread(
+      reviewClient, opts, freshWorkspace("review-start-model-pin"), { sandbox: "read-only" }, "Review PR", true,
+    );
+    const reviewStart = reviewCalls.find(c => c.method === "thread/start");
+    expect(reviewStart?.params).toMatchObject({
+      model: "gpt-5.3-codex",
+      config: { review_model: "gpt-5.3-codex" },
+    });
+
+    const runCalls: Array<{ method: string; params: unknown }> = [];
+    const runClient = recordingClient(runCalls, {
+      "thread/start": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    await startOrResumeThread(runClient, opts, freshWorkspace("run-start-no-pin"), undefined, "task", false);
+    const runStart = runCalls.find(c => c.method === "thread/start");
+    expect((runStart?.params as Record<string, unknown>).config).toBeUndefined();
   });
 
   test("new thread with --memory: no memoryMode call", async () => {

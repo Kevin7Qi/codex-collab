@@ -16,6 +16,7 @@ import {
   registerThread,
   resolveThreadId,
   findShortId,
+  loadThreadIndex,
   updateThreadMeta,
   updateThreadStatus,
   generateRunId,
@@ -854,6 +855,18 @@ export async function startOrResumeThread(
       if (opts.explicit.has("model")) forkParams.model = opts.model;
       if (opts.explicit.has("dir")) forkParams.cwd = opts.dir;
       if (opts.explicit.has("approval")) Object.assign(forkParams, resolveApproval(opts.approval));
+      // Codex resolves the review sub-agent's model from its own
+      // `review_model` config key before falling back to the thread's model,
+      // so a review_model in ~/.codex/config.toml would silently override the
+      // model requested here. Pin review_model to the model this review runs
+      // as: the explicit flag, else the thread's last known model. External
+      // threads with no local record get no pin.
+      const reviewModel = opts.explicit.has("model")
+        ? opts.model
+        : resolved
+          ? loadThreadIndex(ws.stateDir)[resolved.shortId]?.model
+          : undefined;
+      if (reviewModel) forkParams.config = { review_model: reviewModel };
       // Reviews must run in read-only mode. `thread/resume.sandbox` is not
       // reliable for already-loaded broker threads, and `review/start` has no
       // per-turn sandbox override, so fork the resumed context into a fresh
@@ -909,6 +922,10 @@ export async function startOrResumeThread(
       ...extraStartParams,
     };
     if (opts.model) startParams.model = opts.model;
+    // Same review_model pin as the fork path above: without it, a
+    // review_model in ~/.codex/config.toml would win over the model shown in
+    // our own "started for review" progress line.
+    if (isReview && opts.model) startParams.config = { review_model: opts.model };
     effective = await client.request<ThreadStartResponse>(
       "thread/start",
       startParams,
