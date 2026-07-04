@@ -3,7 +3,7 @@
 import { spawn as childSpawn, spawnSync } from "node:child_process";
 import { openSync, closeSync, readFileSync } from "fs";
 import { join } from "path";
-import { updateThreadStatus, generateRunId, loadRun, updateRun } from "../threads";
+import { updateThreadStatus, generateRunId, loadRun, updateRun, runLogRelPath } from "../threads";
 import { runTurn } from "../turns";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
 import { wrapBrokerBusy, isBrokerBusyError } from "../broker";
@@ -248,7 +248,7 @@ export async function handleRun(args: string[]): Promise<void> {
     setActiveRunId(runId);
     writePidFile(ws.pidsDir, shortId);
 
-    const dispatcher = createDispatcher(shortId, ws.logsDir, options, ws.guardianDir);
+    const dispatcher = createDispatcher(join(ws.stateDir, runLogRelPath(shortId, runId)), options, ws.guardianDir);
 
     try {
       const result = await runTurn(

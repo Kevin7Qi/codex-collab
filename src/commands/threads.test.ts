@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { applyDiscoverLimit, resolveReadableLogPath } from "./threads";
+import { applyDiscoverLimit, resolveRunLogPath, collectThreadLogPaths, readThreadLog } from "./threads";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -28,37 +28,24 @@ describe("applyDiscoverLimit", () => {
   });
 });
 
-// resolveReadableLogPath addresses the migration-edge-case Codex flagged:
-// if migration's copyFileSync from {dataDir}/logs to {stateDir}/logs ever fails,
-// the run record stores the legacy global path as `logFile` and no workspace-
-// local log file exists. With the migration marker stamped, migration never
-// retries the copy. `output`/`progress` previously read only the workspace-
-// local path → empty/missing. The fallback resolves to the run record's
-// logFile when the workspace file is absent so the user can still read the log.
-describe("resolveReadableLogPath", () => {
+describe("per-run log reading (resolveRunLogPath / collectThreadLogPaths / readThreadLog)", () => {
   let stateDir: string;
   let logsDir: string;
-  let legacyLogsDir: string;
-  let legacyLog: string;
 
   beforeEach(() => {
     const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    stateDir = join(tmpdir(), `codex-resolvable-log-${suffix}`);
+    stateDir = join(tmpdir(), `codex-per-run-log-${suffix}`);
     logsDir = join(stateDir, "logs");
-    legacyLogsDir = join(tmpdir(), `codex-resolvable-legacy-${suffix}`);
-    legacyLog = join(legacyLogsDir, "abcd1234.log");
     mkdirSync(logsDir, { recursive: true });
-    mkdirSync(legacyLogsDir, { recursive: true });
   });
 
   afterEach(() => {
     if (existsSync(stateDir)) rmSync(stateDir, { recursive: true });
-    if (existsSync(legacyLogsDir)) rmSync(legacyLogsDir, { recursive: true });
   });
 
-  function record(shortId: string, logFile: string): RunRecord {
+  function record(shortId: string, runId: string, logFile: string): RunRecord {
     return {
-      runId: `r-${shortId}`, threadId: `t-${shortId}`, shortId,
+      runId, threadId: `t-${shortId}`, shortId,
       kind: "task", phase: null, status: "completed", sessionId: null,
       logFile, logOffset: 0, prompt: null, model: null,
       startedAt: "2026-01-01T00:00:00Z", completedAt: "2026-01-01T00:00:01Z",
@@ -66,48 +53,71 @@ describe("resolveReadableLogPath", () => {
     };
   }
 
-  test("prefers the workspace-local log when it exists", () => {
-    const ws = join(logsDir, "abcd1234.log");
-    writeFileSync(ws, "ws content");
-    writeFileSync(legacyLog, "legacy content");
-    createRun(stateDir, record("abcd1234", legacyLog));
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(ws);
+  test("resolveRunLogPath resolves the record's own confined logFile", () => {
+    const rec = record("aaaa1111", "run-1", "logs/aaaa1111/run-1.log");
+    expect(resolveRunLogPath(stateDir, logsDir, rec)).toBe(join(logsDir, "aaaa1111", "run-1.log"));
   });
 
-  test("falls back to the run record's logFile when the workspace log is absent", () => {
-    // The migration-copy-failure scenario: no {logsDir}/<shortId>.log on disk;
-    // the run record points at the legacy global location, which still exists.
-    writeFileSync(legacyLog, "legacy content");
-    createRun(stateDir, record("abcd1234", legacyLog));
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(legacyLog);
+  test("resolveRunLogPath refuses an escaping logFile and falls back to the thread log", () => {
+    const rec = record("aaaa2222", "run-1", "../../../etc/passwd");
+    expect(resolveRunLogPath(stateDir, logsDir, rec)).toBe(join(logsDir, "aaaa2222.log"));
   });
 
-  test("returns the workspace path (for downstream not-found handling) when neither file exists", () => {
-    createRun(stateDir, record("abcd1234", legacyLog)); // logFile points nowhere
-    const expected = join(logsDir, "abcd1234.log");
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(expected);
+  test("collectThreadLogPaths orders legacy shared log before per-run files, per-run sorted by name", () => {
+    const shortId = "bbbb1111";
+    writeFileSync(join(logsDir, `${shortId}.log`), "legacy\n");
+    mkdirSync(join(logsDir, shortId), { recursive: true });
+    // base36-timestamp runIds sort chronologically by name
+    writeFileSync(join(logsDir, shortId, "run-b-second.log"), "second\n");
+    writeFileSync(join(logsDir, shortId, "run-a-first.log"), "first\n");
+
+    expect(collectThreadLogPaths(stateDir, logsDir, shortId)).toEqual([
+      join(logsDir, `${shortId}.log`),
+      join(logsDir, shortId, "run-a-first.log"),
+      join(logsDir, shortId, "run-b-second.log"),
+    ]);
+    expect(readThreadLog(stateDir, logsDir, shortId)).toBe("legacy\nfirst\nsecond\n");
   });
 
-  test("returns the workspace path when no run record exists", () => {
-    const expected = join(logsDir, "abcd1234.log");
-    expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(expected);
+  test("readThreadLog returns null for a thread with no logs", () => {
+    expect(readThreadLog(stateDir, logsDir, "cccc1111")).toBeNull();
   });
 
-  test("refuses fallback paths outside both workspace and legacy logs roots", () => {
-    // Confinement: a run record carrying an arbitrary absolute path (corrupted
-    // state, adversarial input, file moved aside) must not let `output` or
-    // `progress` happily print contents from anywhere on the filesystem.
-    const evilDir = join(tmpdir(), `codex-resolvable-evil-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-    mkdirSync(evilDir, { recursive: true });
-    const evilLog = join(evilDir, "outside.log");
-    writeFileSync(evilLog, "should not be readable");
-    try {
-      createRun(stateDir, record("abcd1234", evilLog));
-      const expected = join(logsDir, "abcd1234.log");
-      expect(resolveReadableLogPath(stateDir, logsDir, "abcd1234", legacyLogsDir)).toBe(expected);
-    } finally {
-      rmSync(evilDir, { recursive: true });
-    }
+  test("migration-edge global log survives alongside newer per-run files", () => {
+    // The copy-failed migration case: the only pre-resume history lives in
+    // the legacy GLOBAL logs dir (via the synthetic run record's logFile).
+    // Resuming the thread creates per-run logs — the global history must
+    // still be included, not dropped once per-run files exist.
+    const shortId = "eeee1111";
+    const globalLogsDir = join(stateDir, "fake-global-logs");
+    mkdirSync(globalLogsDir, { recursive: true });
+    const globalLog = join(globalLogsDir, `${shortId}.log`);
+    writeFileSync(globalLog, "pre-resume history\n");
+    createRun(stateDir, record(shortId, "run-0-migrated", globalLog));
+    mkdirSync(join(logsDir, shortId), { recursive: true });
+    writeFileSync(join(logsDir, shortId, "run-1-resumed.log"), "post-resume\n");
+    createRun(stateDir, record(shortId, "run-1-resumed", `logs/${shortId}/run-1-resumed.log`));
+
+    expect(collectThreadLogPaths(stateDir, logsDir, shortId, globalLogsDir)).toEqual([
+      globalLog,
+      join(logsDir, shortId, "run-1-resumed.log"),
+    ]);
+  });
+
+  test("collectThreadLogPaths falls back to the migration-edge global log via the run record", () => {
+    // No workspace logs at all; the latest run record points at a legacy
+    // global-path log (the resolveReadableLogPath edge case).
+    const globalDir = join(stateDir, "global-logs");
+    mkdirSync(globalDir, { recursive: true });
+    const globalLog = join(globalDir, "dddd1111.log");
+    writeFileSync(globalLog, "global content\n");
+    createRun(stateDir, record("dddd1111", "run-1", globalLog));
+
+    const paths = collectThreadLogPaths(stateDir, logsDir, "dddd1111");
+    // The record scan confines to logsDir + the global logs dir; a path
+    // under stateDir/global-logs is OUTSIDE both (config.logsDir default),
+    // so it must be refused — an empty list, not an escape.
+    expect(paths).toEqual([]);
   });
 });
 

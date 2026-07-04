@@ -10,6 +10,7 @@ import {
   getLatestRun,
   removeRunsForThread,
   listRuns,
+  listRunsForThread,
 } from "../threads";
 import { getCurrentSessionId } from "../broker";
 import { resolveWorkspaceDir } from "../config";
@@ -19,6 +20,9 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  rmdirSync,
+  rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "fs";
@@ -210,59 +214,82 @@ export async function handleThreads(args: string[]): Promise<void> {
 // output
 // ---------------------------------------------------------------------------
 
-/**
- * Resolve a thread's log path for reading, preferring the workspace-local
- * file but falling back to the run record's `logFile` if the workspace file
- * is absent.
- *
- * This handles the migration edge case: if `migrateGlobalState`'s
- * `copyFileSync` from the legacy `{dataDir}/logs` to `{stateDir}/logs` ever
- * fails (rare — transient I/O or restrictive source perms), the run record's
- * `logFile` falls back to the legacy global path while no workspace-local
- * file is created. With the migration marker stamped, migration won't retry
- * the copy — so without this fallback, `output` and `progress` would return
- * an empty/missing-file diagnostic even though the log content still exists
- * at the legacy path. (Run records created by normal turns store `logFile`
- * as a workspace-relative `logs/<shortId>.log` — see commands/shared.ts's
- * createRun call; legacy/migration synthetic records may instead carry an
- * absolute global path. `resolve(stateDir, …)` handles both cases.)
- *
- * The fallback is confined to the workspace `logsDir` or the legacy
- * `globalLogsDir` (defaults to `~/.codex-collab/logs`) so a corrupted or
- * adversarial run record cannot point us at arbitrary filesystem paths
- * (mirrors the confinement in pruneRuns' resolveLogFile).
- */
-export function resolveReadableLogPath(
+/** Resolve one run's own log file: the record's `logFile` (confined to the
+ *  workspace or legacy-global logs dirs so a corrupted or adversarial run
+ *  record cannot point us at arbitrary filesystem paths), with the shared
+ *  thread log as the legacy fallback. Per-run records always
+ *  point inside `logs/{shortId}/`; legacy records point at the shared file
+ *  or (migration edge) an absolute global path. */
+export function resolveRunLogPath(
+  stateDir: string,
+  logsDir: string,
+  run: RunRecord,
+  globalLogsDir: string = config.logsDir,
+): string {
+  if (run.logFile) {
+    const candidate = resolve(stateDir, run.logFile);
+    const confined = isPathInside(candidate, resolve(logsDir))
+      || isPathInside(candidate, resolve(globalLogsDir));
+    if (confined) return candidate;
+  }
+  return join(logsDir, `${run.shortId}.log`);
+}
+
+/** All log files for a thread in chronological order: legacy shared logs
+ *  (pre-per-run history) first, then the per-run files under
+ *  `logs/{shortId}/` — their base36-timestamp runId names make the sorted
+ *  directory listing chronological. Legacy history is the workspace
+ *  `logs/{shortId}.log` plus any confined log a run record points at
+ *  outside the per-run dir — the migration edge where the only copy lives
+ *  in the legacy global logs dir. That record-based scan must run even when
+ *  per-run files exist: resuming a migrated thread creates per-run logs
+ *  without ever copying the global one into the workspace. */
+export function collectThreadLogPaths(
   stateDir: string,
   logsDir: string,
   shortId: string,
   globalLogsDir: string = config.logsDir,
-): string {
-  const wsLog = join(logsDir, `${shortId}.log`);
-  if (existsSync(wsLog)) return wsLog;
-  const latest = getLatestRun(stateDir, shortId);
-  if (latest && latest.logFile) {
-    const fallback = resolve(stateDir, latest.logFile);
-    const confined = isPathInside(fallback, resolve(logsDir))
-      || isPathInside(fallback, resolve(globalLogsDir));
-    if (confined && existsSync(fallback)) return fallback;
+): string[] {
+  const paths: string[] = [];
+  const legacy = join(logsDir, `${shortId}.log`);
+  if (existsSync(legacy)) paths.push(legacy);
+  const runDir = join(logsDir, shortId);
+  for (const run of [...listRunsForThread(stateDir, shortId)].reverse()) { // oldest first
+    if (!run.logFile) continue;
+    const candidate = resolve(stateDir, run.logFile);
+    const confined = isPathInside(candidate, resolve(logsDir))
+      || isPathInside(candidate, resolve(globalLogsDir));
+    if (!confined || isPathInside(candidate, runDir)) continue; // per-run files come from the dir listing below
+    if (!paths.includes(candidate) && existsSync(candidate)) paths.push(candidate);
   }
-  return wsLog; // let the caller's existing not-found handling fire
+  if (existsSync(runDir)) {
+    for (const name of readdirSync(runDir).sort()) {
+      if (name.endsWith(".log")) paths.push(join(runDir, name));
+    }
+  }
+  return paths;
 }
 
-/** Resolve a positional ID arg to a log file path (and shortId), or die. */
-function resolveLogPath(
+/** Concatenated log content for a thread, or null when it has none. */
+export function readThreadLog(stateDir: string, logsDir: string, shortId: string): string | null {
+  const paths = collectThreadLogPaths(stateDir, logsDir, shortId);
+  if (paths.length === 0) return null;
+  return paths.map((p) => readFileSync(p, "utf-8")).join("");
+}
+
+/** Resolve a positional ID arg to its shortId, or die. */
+function resolveLogTarget(
   positional: string[],
   usage: string,
   ws: ReturnType<typeof getWorkspacePaths>,
-): { logPath: string; shortId: string } {
+): { shortId: string } {
   const id = positional[0];
   if (!id) die(usage);
   validateIdOrDie(id);
   const threadId = resolveThreadIdOrDie(ws.stateDir, id);
   const shortId = findShortId(ws.stateDir, threadId);
   if (!shortId) die(`Thread not found: ${id}`);
-  return { logPath: resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId), shortId };
+  return { shortId };
 }
 
 /** Extract agent output blocks from a thread log, one string per turn.
@@ -328,10 +355,10 @@ export function pickLastOutput(rec: RunRecord | null, logContent: string): LastO
 export async function handleOutput(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
   const ws = getWorkspacePaths(options.dir);
-  const { logPath, shortId } = resolveLogPath(positional, "Usage: codex-collab output <id>", ws);
+  const { shortId } = resolveLogTarget(positional, "Usage: codex-collab output <id>", ws);
   // The log may not exist yet for a just-started run — for --last the run
   // record is authoritative, so only the log-reading modes require the file.
-  const content = existsSync(logPath) ? readFileSync(logPath, "utf-8") : null;
+  const content = readThreadLog(ws.stateDir, ws.logsDir, shortId);
   if (options.last) {
     const res = pickLastOutput(getLatestRun(ws.stateDir, shortId), content ?? "");
     if (res.kind === "none") {
@@ -360,14 +387,15 @@ export async function handleOutput(args: string[]): Promise<void> {
 export async function handleProgress(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
   const ws = getWorkspacePaths(options.dir);
-  const { logPath } = resolveLogPath(positional, "Usage: codex-collab progress <id>", ws);
-  if (!existsSync(logPath)) {
+  const { shortId } = resolveLogTarget(positional, "Usage: codex-collab progress <id>", ws);
+  const content = readThreadLog(ws.stateDir, ws.logsDir, shortId);
+  if (content === null) {
     console.log("No activity yet.");
     return;
   }
 
   // Show last 20 lines
-  const lines = readFileSync(logPath, "utf-8").trim().split("\n");
+  const lines = content.trim().split("\n");
   console.log(lines.slice(-20).join("\n"));
 }
 
@@ -453,6 +481,8 @@ export async function handleDelete(args: string[]): Promise<void> {
     removePidFile(ws.pidsDir, shortId);
     const logPath = join(ws.logsDir, `${shortId}.log`);
     if (existsSync(logPath)) unlinkSync(logPath);
+    // Per-run log files live under logs/{shortId}/ and die with the thread.
+    rmSync(join(ws.logsDir, shortId), { recursive: true, force: true });
     removeThread(ws.stateDir, shortId);
     // Run records must go with the thread: a stale `running` record whose
     // PID file is gone reads as alive and would make bare `follow` hang.
@@ -477,14 +507,25 @@ export async function handleDelete(args: string[]): Promise<void> {
 // clean
 // ---------------------------------------------------------------------------
 
-/** Delete files older than maxAgeMs in the given directory. Returns count deleted. */
-function deleteOldFiles(dir: string, maxAgeMs: number): number {
+/** Delete files older than maxAgeMs in the given directory. With `recurse`,
+ *  descend one level into subdirectories (per-run log dirs under logs/) and
+ *  remove any left empty. Returns count deleted. */
+function deleteOldFiles(dir: string, maxAgeMs: number, recurse = false): number {
   if (!existsSync(dir)) return 0;
   const now = Date.now();
   let deleted = 0;
   for (const file of readdirSync(dir)) {
     const path = join(dir, file);
     try {
+      if (statSync(path).isDirectory()) {
+        if (recurse) {
+          deleted += deleteOldFiles(path, maxAgeMs);
+          try {
+            rmdirSync(path); // only succeeds when empty
+          } catch { /* still has fresh logs */ }
+        }
+        continue;
+      }
       if (now - Bun.file(path).lastModified > maxAgeMs) {
         unlinkSync(path);
         deleted++;
@@ -504,7 +545,7 @@ export async function handleClean(args: string[]): Promise<void> {
   const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
   const oneDayMs = 24 * 60 * 60 * 1000;
 
-  const logsDeleted = deleteOldFiles(ws.logsDir, sevenDaysMs);
+  const logsDeleted = deleteOldFiles(ws.logsDir, sevenDaysMs, true);
   const approvalsDeleted = deleteOldFiles(ws.approvalsDir, oneDayMs);
   const killSignalsDeleted = deleteOldFiles(ws.killSignalsDir, oneDayMs);
   const pidsDeleted = deleteOldFiles(ws.pidsDir, oneDayMs);
@@ -519,8 +560,8 @@ export async function handleClean(args: string[]): Promise<void> {
       try {
         let lastActivity = new Date(entry.createdAt).getTime();
         if (Number.isNaN(lastActivity)) lastActivity = 0;
-        const logPath = join(ws.logsDir, `${shortId}.log`);
-        if (existsSync(logPath)) {
+        // Legacy shared log AND per-run log files both count as activity.
+        for (const logPath of collectThreadLogPaths(ws.stateDir, ws.logsDir, shortId)) {
           lastActivity = Math.max(lastActivity, Bun.file(logPath).lastModified);
         }
         if (now - lastActivity > sevenDaysMs) {

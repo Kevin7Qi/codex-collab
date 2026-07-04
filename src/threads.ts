@@ -267,6 +267,14 @@ export function generateRunId(): string {
   return `run-${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
 }
 
+/** Stable stateDir-relative path of a run's own log file. Each run writes
+ *  its own log (per-run attribution for concurrent same-thread runs);
+ *  legacy records point at the shared `logs/{shortId}.log` instead. The
+ *  base36-timestamp runId prefix keeps a directory listing chronological. */
+export function runLogRelPath(shortId: string, runId: string): string {
+  return `logs/${shortId}/${runId}.log`;
+}
+
 export function createRun(stateDir: string, record: RunRecord): void {
   const dir = runsDir(stateDir);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -276,12 +284,54 @@ export function createRun(stateDir: string, record: RunRecord): void {
   renameSync(tmpPath, filePath);
 }
 
-/** Records written before the status unification say "cancelled" where the
- *  thread index (and every display surface) says "interrupted". Normalize on
- *  read — a lazy migration; the next updateRun persists the new value. */
-function normalizeRunRecord(record: RunRecord): RunRecord {
-  if ((record.status as string) === "cancelled") record.status = "interrupted";
-  return record;
+/** Current run-ledger schema version. v2: statuses unified on
+ *  "interrupted" (records written before the unification said "cancelled"),
+ *  swept once by ensureLedgerVersion so read paths need no normalization. */
+const LEDGER_VERSION = "2";
+const LEDGER_VERSION_FILE = ".ledger-version";
+
+/**
+ * One-time ledger migration, called on every workspace access (cheap fast
+ * path: a one-byte file compare). If the version marker is stale or missing,
+ * rewrite any legacy "cancelled" statuses to "interrupted" under the ledger
+ * lock, then stamp the marker. Idempotent: a crash mid-sweep leaves the
+ * marker unstamped and the next invocation re-sweeps. If the lock is
+ * contended (another process is sweeping right now), skip — the worst case
+ * is one cosmetic "cancelled" render during the first post-upgrade command.
+ */
+export function ensureLedgerVersion(stateDir: string): void {
+  const dir = runsDir(stateDir);
+  const versionPath = join(dir, LEDGER_VERSION_FILE);
+  try {
+    if (readFileSync(versionPath, "utf-8") === LEDGER_VERSION) return;
+  } catch { /* missing or unreadable → sweep */ }
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(versionPath, LEDGER_VERSION, { mode: 0o600 });
+    return;
+  }
+  try {
+    withThreadLock(versionPath, () => {
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith(".json")) continue;
+        const filePath = join(dir, file);
+        try {
+          const record = JSON.parse(readFileSync(filePath, "utf-8"));
+          if (record?.status === "cancelled") {
+            record.status = "interrupted";
+            const tmpPath = filePath + ".tmp";
+            writeFileSync(tmpPath, JSON.stringify(record, null, 2), { mode: 0o600 });
+            renameSync(tmpPath, filePath);
+          }
+        } catch (e) {
+          console.error(`[codex] Warning: could not sweep run file ${file}: ${e instanceof Error ? e.message : e}`);
+        }
+      }
+      writeFileSync(versionPath, LEDGER_VERSION, { mode: 0o600 });
+    });
+  } catch (e) {
+    console.error(`[codex] Warning: ledger sweep skipped: ${e instanceof Error ? e.message : e}`);
+  }
 }
 
 export function loadRun(stateDir: string, runId: string): RunRecord | null {
@@ -307,7 +357,7 @@ export function loadRun(stateDir: string, runId: string): RunRecord | null {
       console.error(`[codex] Warning: run file ${runId} has invalid structure`);
       return null;
     }
-    return normalizeRunRecord(parsed);
+    return parsed;
   } catch (e) {
     console.error(`[codex] Warning: failed to parse run file ${runId}: ${e instanceof Error ? e.message : e}`);
     return null;
@@ -333,7 +383,7 @@ export function updateRun(stateDir: string, runId: string, patch: RunPatch): voi
   }
   let record: RunRecord;
   try {
-    record = normalizeRunRecord(JSON.parse(readFileSync(filePath, "utf-8")));
+    record = JSON.parse(readFileSync(filePath, "utf-8"));
   } catch (e) {
     throw new Error(`Failed to read run ${runId}: ${e instanceof Error ? e.message : e}`);
   }
@@ -354,7 +404,7 @@ export function listRuns(stateDir: string, opts?: { sessionId?: string }): RunRe
   const records: RunRecord[] = [];
   for (const file of files) {
     try {
-      const record: RunRecord = normalizeRunRecord(JSON.parse(readFileSync(join(dir, file), "utf-8")));
+      const record: RunRecord = JSON.parse(readFileSync(join(dir, file), "utf-8"));
       if (opts?.sessionId && record.sessionId !== opts.sessionId) continue;
       records.push(record);
     } catch (e) {
@@ -413,9 +463,17 @@ export function pruneRuns(stateDir: string, maxRuns?: number): void {
   const resolveLogFile = (logFile: string | null): string | null => {
     if (!logFile) return null;
     const abs = resolve(stateDir, logFile);
-    if (isPathInside(abs, logsRoot)) return abs;
-    console.error(`[codex] Warning: refusing to prune log outside workspace state: ${logFile}`);
-    return null;
+    if (!isPathInside(abs, logsRoot)) {
+      console.error(`[codex] Warning: refusing to prune log outside workspace state: ${logFile}`);
+      return null;
+    }
+    // Per-run logs (in a logs/{shortId}/ subdir) are NOT pruned with their
+    // record: they are the thread's readable history for `output`, retained
+    // like the legacy shared log until `clean`'s age policy or `delete`
+    // removes them. Only legacy shared logs directly under logs/ are prune
+    // candidates (for threads that already left the index).
+    if (dirname(abs) !== logsRoot) return null;
+    return abs;
   };
 
   type Entry = { file: string; activityAt: string; logFile: string | null; logPath: string | null; running: boolean };

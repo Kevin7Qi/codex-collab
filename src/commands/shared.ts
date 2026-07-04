@@ -16,9 +16,12 @@ import {
   registerThread,
   resolveThreadId,
   findShortId,
+  loadThreadIndex,
   updateThreadMeta,
   updateThreadStatus,
   generateRunId,
+  runLogRelPath,
+  ensureLedgerVersion,
   createRun,
   updateRun,
   loadRun,
@@ -39,7 +42,6 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
-  statSync,
 } from "fs";
 import { resolve, join, dirname } from "path";
 import type {
@@ -84,6 +86,9 @@ export function getWorkspacePaths(cwd: string): WorkspacePaths {
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   // Migrate legacy global state to per-workspace layout (idempotent)
   migrateGlobalState(cwd);
+  // One-time run-ledger sweep (legacy "cancelled" → "interrupted"); cheap
+  // version-marker check on every subsequent access.
+  ensureLedgerVersion(stateDir);
   return paths;
 }
 
@@ -684,14 +689,12 @@ export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>,
 }
 
 export function createDispatcher(
-  shortId: string,
-  logsDir: string,
+  logPath: string,
   opts: Options,
   guardianDir?: string,
 ): EventDispatcher {
   return new EventDispatcher(
-    shortId,
-    logsDir,
+    logPath,
     opts.contentOnly ? () => {} : progress,
     guardianDir,
   );
@@ -852,6 +855,18 @@ export async function startOrResumeThread(
       if (opts.explicit.has("model")) forkParams.model = opts.model;
       if (opts.explicit.has("dir")) forkParams.cwd = opts.dir;
       if (opts.explicit.has("approval")) Object.assign(forkParams, resolveApproval(opts.approval));
+      // Codex resolves the review sub-agent's model from its own
+      // `review_model` config key before falling back to the thread's model,
+      // so a review_model in ~/.codex/config.toml would silently override the
+      // model requested here. Pin review_model to the model this review runs
+      // as: the explicit flag, else the thread's last known model. External
+      // threads with no local record get no pin.
+      const reviewModel = opts.explicit.has("model")
+        ? opts.model
+        : resolved
+          ? loadThreadIndex(ws.stateDir)[resolved.shortId]?.model
+          : undefined;
+      if (reviewModel) forkParams.config = { review_model: reviewModel };
       // Reviews must run in read-only mode. `thread/resume.sandbox` is not
       // reliable for already-loaded broker threads, and `review/start` has no
       // per-turn sandbox override, so fork the resumed context into a fresh
@@ -907,6 +922,10 @@ export async function startOrResumeThread(
       ...extraStartParams,
     };
     if (opts.model) startParams.model = opts.model;
+    // Same review_model pin as the fork path above: without it, a
+    // review_model in ~/.codex/config.toml would win over the model shown in
+    // our own "started for review" progress line.
+    if (isReview && opts.model) startParams.config = { review_model: opts.model };
     effective = await client.request<ThreadStartResponse>(
       "thread/start",
       startParams,
@@ -953,8 +972,6 @@ export async function startOrResumeThread(
   const prompt = preview ?? null;
   const runId = consumeInjectedRunId() ?? generateRunId();
   const sessionId = getCurrentSessionId(ws.stateDir);
-  const logPath = join(ws.logsDir, `${shortId}.log`);
-  const logOffset = existsSync(logPath) ? statSync(logPath).size : 0;
 
   createRun(ws.stateDir, {
     runId,
@@ -965,8 +982,11 @@ export async function startOrResumeThread(
     status: "running",
     pid: process.pid,
     sessionId,
-    logFile: `logs/${shortId}.log`,
-    logOffset,
+    // Per-run log file: this run owns it exclusively, so followers get
+    // perfect attribution even when runs on one thread overlap. logOffset
+    // stays for legacy records that share logs/{shortId}.log.
+    logFile: runLogRelPath(shortId, runId),
+    logOffset: 0,
     prompt,
     model: effective.model,
     startedAt: new Date().toISOString(),

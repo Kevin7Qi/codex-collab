@@ -11,6 +11,7 @@
 // detached — and survives broker handoffs.
 
 import { openSync, readSync, closeSync, fstatSync } from "fs";
+import { resolve } from "path";
 import {
   findShortId,
   listRuns,
@@ -18,7 +19,7 @@ import {
   loadRun,
   loadThreadIndex,
 } from "../threads";
-import { resolveReadableLogPath } from "./threads";
+import { resolveRunLogPath } from "./threads";
 import { LogEntryParser, renderEntry, renderFinalStatus, type RenderOptions } from "../render";
 import type { RunRecord } from "../types";
 import {
@@ -156,10 +157,11 @@ function laterThan(a: RunRecord, b: RunRecord): boolean {
 }
 
 /**
- * Where this run's section of the shared thread log ends: the smallest
- * logOffset of any LATER run on the same thread, or null (unbounded — this
- * run owns the log's tail). Runs on one thread append to one log file, so a
- * replay that read to EOF would swallow the next run's entries and the
+ * Where this run's section of its log file ends: the smallest logOffset of
+ * any LATER run writing to the SAME file, or null (unbounded — this run owns
+ * the file's tail). Per-run records own their file exclusively, so the bound
+ * is always null for them; legacy records share `logs/{shortId}.log`, where
+ * a replay that read to EOF would swallow the next run's entries and the
  * watch loop would then render them a second time.
  *
  * "Later" must include runs at the SAME offset: a run that dies before
@@ -168,9 +170,17 @@ function laterThan(a: RunRecord, b: RunRecord): boolean {
  * Exported for tests.
  */
 export function replayBound(stateDir: string, run: RunRecord): number | null {
+  // Canonicalize before comparing: migration-created records store logFile
+  // as an absolute path while normal legacy records store the same physical
+  // file as a stateDir-relative "logs/{shortId}.log" — a raw string compare
+  // would fail to group them and leave the older run's replay unbounded.
+  const logFileOf = (r: RunRecord): string | null =>
+    r.logFile ? resolve(stateDir, r.logFile) : null;
+  const runLogFile = logFileOf(run);
   let bound: number | null = null;
   for (const r of listRunsForThread(stateDir, run.shortId)) {
     if (r.runId === run.runId) continue;
+    if (logFileOf(r) !== runLogFile) continue;
     const later = r.logOffset > run.logOffset
       || (r.logOffset === run.logOffset && laterThan(r, run));
     if (later && (bound === null || r.logOffset < bound)) {
@@ -230,9 +240,9 @@ interface FollowOutcome {
  *  (replay + live tail). Prints the header and the final status line. */
 async function followRun(ws: WorkspacePaths, run: RunRecord, render: RenderOptions): Promise<FollowOutcome> {
   const shortId = run.shortId;
-  // Same resolution as `output`: prefer the workspace log, fall back to the
-  // run record's logFile for migrated runs whose log lives elsewhere.
-  const logPath = resolveReadableLogPath(ws.stateDir, ws.logsDir, shortId);
+  // The run's own log file (per-run records) or the shared thread log
+  // (legacy records / migration fallback), confined to the logs dirs.
+  const logPath = resolveRunLogPath(ws.stateDir, ws.logsDir, run);
   // Computed fresh before every read (loop top and finish) — see below.
   let bound: number | null = null;
 

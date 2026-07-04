@@ -16,6 +16,7 @@ import {
   listRunsForThread,
   getLatestRun,
   pruneRuns,
+  ensureLedgerVersion,
   migrateGlobalState,
   removeLegacyGlobalThread,
 } from "./threads";
@@ -309,20 +310,31 @@ describe("run ledger", () => {
     expect(loaded!.threadId).toBe("thr_test"); // unchanged
   });
 
-  test("legacy 'cancelled' records normalize to 'interrupted' on every read path", () => {
+  test("ensureLedgerVersion sweeps legacy 'cancelled' records to 'interrupted' once", () => {
     const run = makeRun();
+    const untouched = makeRun();
     createRun(testDir, run);
-    // Simulate a record written before the status unification.
+    createRun(testDir, untouched);
+    // Simulate a record written before the status unification, plus a
+    // pre-sweep (missing) version marker.
     const filePath = join(testDir, "runs", `${run.runId}.json`);
     writeFileSync(filePath, readFileSync(filePath, "utf-8").replace('"completed"', '"cancelled"'));
+    const versionPath = join(testDir, "runs", ".ledger-version");
+    rmSync(versionPath, { force: true });
 
-    expect(loadRun(testDir, run.runId)!.status).toBe("interrupted");
-    expect(listRuns(testDir).find(r => r.runId === run.runId)!.status).toBe("interrupted");
+    ensureLedgerVersion(testDir);
 
-    // updateRun persists the normalized value even when the patch doesn't touch status.
-    updateRun(testDir, run.runId, { error: "x" });
+    // The sweep rewrote the file on disk — read paths need no normalizer.
     expect(readFileSync(filePath, "utf-8")).not.toContain("cancelled");
     expect(loadRun(testDir, run.runId)!.status).toBe("interrupted");
+    expect(loadRun(testDir, untouched.runId)!.status).toBe("completed");
+    expect(readFileSync(versionPath, "utf-8")).toBe("2");
+
+    // Stamped marker short-circuits: a new legacy record is NOT swept (no
+    // current writer produces "cancelled", so this only guards the fast path).
+    writeFileSync(filePath, readFileSync(filePath, "utf-8").replace('"interrupted"', '"cancelled"'));
+    ensureLedgerVersion(testDir);
+    expect(readFileSync(filePath, "utf-8")).toContain("cancelled");
   });
 
   test("updateRun throws on unknown run instead of silently no-op", () => {
