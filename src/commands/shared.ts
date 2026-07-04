@@ -41,7 +41,6 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
-  statSync,
 } from "fs";
 import { resolve, join, dirname } from "path";
 import type {

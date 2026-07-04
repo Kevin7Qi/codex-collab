@@ -214,49 +214,10 @@ export async function handleThreads(args: string[]): Promise<void> {
 // output
 // ---------------------------------------------------------------------------
 
-/**
- * Resolve a thread's log path for reading, preferring the workspace-local
- * file but falling back to the run record's `logFile` if the workspace file
- * is absent.
- *
- * This handles the migration edge case: if `migrateGlobalState`'s
- * `copyFileSync` from the legacy `{dataDir}/logs` to `{stateDir}/logs` ever
- * fails (rare — transient I/O or restrictive source perms), the run record's
- * `logFile` falls back to the legacy global path while no workspace-local
- * file is created. With the migration marker stamped, migration won't retry
- * the copy — so without this fallback, `output` and `progress` would return
- * an empty/missing-file diagnostic even though the log content still exists
- * at the legacy path. (Run records created by normal turns store `logFile`
- * as a workspace-relative `logs/<shortId>.log` — see commands/shared.ts's
- * createRun call; legacy/migration synthetic records may instead carry an
- * absolute global path. `resolve(stateDir, …)` handles both cases.)
- *
- * The fallback is confined to the workspace `logsDir` or the legacy
- * `globalLogsDir` (defaults to `~/.codex-collab/logs`) so a corrupted or
- * adversarial run record cannot point us at arbitrary filesystem paths
- * (mirrors the confinement in pruneRuns' resolveLogFile).
- */
-export function resolveReadableLogPath(
-  stateDir: string,
-  logsDir: string,
-  shortId: string,
-  globalLogsDir: string = config.logsDir,
-): string {
-  const wsLog = join(logsDir, `${shortId}.log`);
-  if (existsSync(wsLog)) return wsLog;
-  const latest = getLatestRun(stateDir, shortId);
-  if (latest && latest.logFile) {
-    const fallback = resolve(stateDir, latest.logFile);
-    const confined = isPathInside(fallback, resolve(logsDir))
-      || isPathInside(fallback, resolve(globalLogsDir));
-    if (confined && existsSync(fallback)) return fallback;
-  }
-  return wsLog; // let the caller's existing not-found handling fire
-}
-
 /** Resolve one run's own log file: the record's `logFile` (confined to the
- *  workspace or legacy-global logs dirs, like resolveReadableLogPath), with
- *  the shared thread log as the legacy fallback. Per-run records always
+ *  workspace or legacy-global logs dirs so a corrupted or adversarial run
+ *  record cannot point us at arbitrary filesystem paths), with the shared
+ *  thread log as the legacy fallback. Per-run records always
  *  point inside `logs/{shortId}/`; legacy records point at the shared file
  *  or (migration edge) an absolute global path. */
 export function resolveRunLogPath(
