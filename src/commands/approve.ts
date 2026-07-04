@@ -17,7 +17,8 @@ import {
   markGuardianDenialOverridden,
   resolveGuardianDenial,
 } from "../guardian";
-import { findShortId } from "../threads";
+import { findShortId, loadThreadIndex } from "../threads";
+import type { GuardianDenialRecord } from "../types";
 
 function findApprovalRequest(currentPath: string, approvalId: string): string | null {
   if (existsSync(currentPath)) return currentPath;
@@ -81,6 +82,34 @@ async function handleApproveOrDecline(
  *  approving that exact action into the thread (no turn starts); the agent
  *  acts on it the next time the thread runs. With no ID, list pending
  *  denials instead. */
+/** Resolve a denial ID against the current workspace first, then across all
+ *  workspaces — mirroring findApprovalRequest, because the override hint is
+ *  printed by the run and the user may act on it from a different cwd. */
+function findGuardianDenial(
+  stateDir: string,
+  guardianDir: string,
+  idOrPrefix: string,
+): { record: GuardianDenialRecord; stateDir: string; guardianDir: string } | null {
+  const local = resolveGuardianDenial(guardianDir, idOrPrefix);
+  if (local) return { record: local, stateDir, guardianDir };
+
+  const workspacesDir = join(config.dataDir, "workspaces");
+  if (!existsSync(workspacesDir)) return null;
+
+  const matches: Array<{ record: GuardianDenialRecord; stateDir: string; guardianDir: string }> = [];
+  for (const workspaceName of readdirSync(workspacesDir)) {
+    const wsStateDir = join(workspacesDir, workspaceName);
+    if (wsStateDir === stateDir) continue;
+    const wsGuardianDir = join(wsStateDir, "guardian");
+    const record = resolveGuardianDenial(wsGuardianDir, idOrPrefix);
+    if (record) matches.push({ record, stateDir: wsStateDir, guardianDir: wsGuardianDir });
+  }
+  if (matches.length > 1) {
+    die(`Guardian denial ${idOrPrefix} matches in multiple workspaces. Re-run from the workspace directory or pass -d <workspace>.`);
+  }
+  return matches[0] ?? null;
+}
+
 async function handleGuardianOverride(
   stateDir: string,
   guardianDir: string,
@@ -102,13 +131,14 @@ async function handleGuardianOverride(
     return;
   }
 
-  let record;
+  let found;
   try {
-    record = resolveGuardianDenial(guardianDir, idOrPrefix);
+    found = findGuardianDenial(stateDir, guardianDir, idOrPrefix);
   } catch (e) {
     die(e instanceof Error ? e.message : String(e));
   }
-  if (!record) die(`No Guardian denial found for: ${idOrPrefix}`);
+  if (!found) die(`No Guardian denial found for: ${idOrPrefix}`);
+  const { record } = found;
   if (record.overriddenAt) die(`Denial ${record.reviewId} was already overridden at ${record.overriddenAt}`);
 
   let event;
@@ -119,15 +149,19 @@ async function handleGuardianOverride(
   }
 
   const threadId = record.threadId;
+  // Connect in the thread's own workspace so a cross-workspace override
+  // reuses that workspace's broker (and its already-loaded thread) instead
+  // of spawning a server keyed to the current cwd.
+  const threadCwd = loadThreadIndex(found.stateDir)[findShortId(found.stateDir, threadId) ?? ""]?.cwd;
   await withClient(async (client) => {
     // The RPC needs the thread loaded in the app-server; a minimal resume
     // loads it without starting a turn or changing settings.
     await client.request("thread/resume", { threadId, persistExtendedHistory: false });
     await client.request("thread/approveGuardianDeniedAction", { threadId, event });
-  });
+  }, threadCwd);
 
-  markGuardianDenialOverridden(guardianDir, record.reviewId);
-  const thread = findShortId(stateDir, threadId) ?? threadId;
+  markGuardianDenialOverridden(found.guardianDir, record.reviewId);
+  const thread = findShortId(found.stateDir, threadId) ?? threadId;
   console.log(`Guardian denial overridden: ${describeGuardianAction(record)}`);
   console.log(
     `The approval was recorded in thread ${thread}; it takes effect on the next run (e.g. codex-collab run --resume ${thread} "continue").`,
