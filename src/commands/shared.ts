@@ -20,6 +20,7 @@ import {
   updateThreadStatus,
   generateRunId,
   runLogRelPath,
+  ensureLedgerVersion,
   createRun,
   updateRun,
   loadRun,
@@ -85,6 +86,9 @@ export function getWorkspacePaths(cwd: string): WorkspacePaths {
   mkdirSync(config.dataDir, { recursive: true, mode: 0o700 });
   // Migrate legacy global state to per-workspace layout (idempotent)
   migrateGlobalState(cwd);
+  // One-time run-ledger sweep (legacy "cancelled" → "interrupted"); cheap
+  // version-marker check on every subsequent access.
+  ensureLedgerVersion(stateDir);
   return paths;
 }
 
