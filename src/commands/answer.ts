@@ -124,7 +124,32 @@ export async function handleAnswer(args: string[]): Promise<void> {
 }
 
 export async function handleQuestions(args: string[]): Promise<void> {
-  const { options } = parseOptions(args);
+  const { positional, options } = parseOptions(args);
+
+  // `questions <id>` — the full record for one question. The list view and
+  // the live prompt both clip long questions and point here, so this path
+  // must never truncate.
+  const idArg = positional[0];
+  if (idArg) {
+    validateIdOrDie(idArg);
+    const found = findQuestion(options.dir, idArg);
+    if (!found) die(`No pending question: ${idArg} (list them with: codex-collab questions)`);
+    const { record } = found;
+    const expiresAtMs = Date.parse(record.expiresAt);
+    const remainingSec = Number.isFinite(expiresAtMs)
+      ? Math.max(0, Math.round((expiresAtMs - Date.now()) / 1000))
+      : null;
+    console.log(`Question ${record.id}  asked ${formatAge(Date.parse(record.askedAt) / 1000)}${
+      remainingSec === null ? "" : remainingSec >= 60
+        ? `  expires in ${Math.round(remainingSec / 60)}m`
+        : `  expires in ${remainingSec}s`
+    }`);
+    console.log("");
+    console.log(record.question);
+    console.log(`\nAnswer with: codex-collab answer ${record.id} "<text>"  (or: answer ${record.id} - for stdin)`);
+    return;
+  }
+
   const mailboxDir = resolveMailboxDir(options.dir);
   const pending = listPendingQuestions(mailboxDir);
 
@@ -147,5 +172,5 @@ export async function handleQuestions(args: string[]): Promise<void> {
       `  ${record.id}  asked ${asked} ago${remaining}  ${questionSummary(record.question, 100)}`,
     );
   }
-  console.log('\nAnswer with: codex-collab answer <id> "<text>"');
+  console.log('\nFull text: codex-collab questions <id>   Answer with: codex-collab answer <id> "<text>"');
 }

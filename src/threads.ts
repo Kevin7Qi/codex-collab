@@ -398,13 +398,16 @@ export function updateRun(stateDir: string, runId: string, patch: RunPatch): voi
 }
 
 /** Append a resolved ask-channel question to a run's audit trail and clear
- *  the pending mirror in the same write. */
+ *  the pending mirror in the same write — unless the mirror already shows a
+ *  different (still-live) question, which must survive this resolution. */
 export function appendRunQuestion(stateDir: string, runId: string, entry: ResolvedQuestion): void {
   const record = loadRun(stateDir, runId);
   if (!record) throw new Error(`Cannot append question to unknown run ${runId}`);
   updateRun(stateDir, runId, {
     questions: [...(record.questions ?? []), entry],
-    pendingQuestion: null,
+    ...(record.pendingQuestion == null || record.pendingQuestion.id === entry.id
+      ? { pendingQuestion: null }
+      : {}),
   });
 }
 

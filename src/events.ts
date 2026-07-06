@@ -400,7 +400,7 @@ export class EventDispatcher {
       const questionLines = record.question.split("\n");
       for (const qLine of questionLines.slice(0, 6)) this.announce(`  ${qLine}`);
       if (questionLines.length > 6) {
-        this.announce(`  … (${questionLines.length - 6} more lines — \`codex-collab questions\` shows the full text)`);
+        this.announce(`  … (${questionLines.length - 6} more lines — \`codex-collab questions ${id}\` shows the full text)`);
       }
     }
     // shellQuote, not naive interpolation — a quote in the workspace path

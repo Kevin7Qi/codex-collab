@@ -91,11 +91,30 @@ export function looksLikeAskInvocation(command: string): boolean {
 
 /** True iff the ask invocation reads its question from stdin (`ask -`) —
  *  the one form whose question text cannot be matched against the command
- *  line. Quote/whitespace-normalized before testing. */
+ *  line. Quote/whitespace-normalized before testing. The dash may follow
+ *  options (`ask --timeout 60 -`), so skip leading option/value pairs and
+ *  decide on the first positional token: `-` means stdin, anything else is
+ *  the question text (quote-stripping merges it into the token stream, so
+ *  a dash *inside* the question must not count). Tokens are cut at the
+ *  first shell operator so a `-` in a downstream pipe segment can't match.
+ *  A boolean flag directly before the dash reads it as the flag's value —
+ *  an accepted false negative (enrichment-only cost, like the prefix
+ *  wrappers above). */
 export function isStdinAskInvocation(command: string): boolean {
-  return /codex-collab ask -(?:\s|$)/.test(
-    command.replace(/[\\'"]/g, "").replace(/\s+/g, " "),
-  );
+  const normalized = command.replace(/[\\'"]/g, "").replace(/\s+/g, " ");
+  const match = normalized.match(/codex-collab ask (.*)$/);
+  if (!match) return false;
+  const tokens = match[1].split(/[;&|()<>]/, 1)[0].trim().split(" ");
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.length > 1 && token.startsWith("-")) {
+      // Option: also skip its value when the next token isn't dash-led.
+      if (i + 1 < tokens.length && !tokens[i + 1].startsWith("-")) i++;
+      continue;
+    }
+    return token === "-";
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------------------

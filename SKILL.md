@@ -169,6 +169,7 @@ A pending question surfaces in the progress stream (and `follow`):
 
 ```bash
 codex-collab questions            # list pending questions (id, age, time left)
+codex-collab questions <id>       # full text of one question (list view clips long ones)
 codex-collab answer <id> "text"   # answer one (prefix matching works)
 ```
 
@@ -225,7 +226,7 @@ codex-collab delete <id> --purge        # Permanently delete server-side instead
 codex-collab clean                      # Delete old logs, stale mappings, old question files
 codex-collab approve <id> | decline <id> # Answer a pending approval
 codex-collab answer <id> "text"         # Answer a pending ask-channel question (see The Ask Channel)
-codex-collab questions                  # List pending questions in this workspace
+codex-collab questions [id]             # List pending questions (with an ID: show its full text)
 codex-collab next [--timeout <sec>]     # Block until a question/approval needs you; print one JSON event
                                         # (exit 0 = event, 10 = workspace idle, 3 = timeout)
 codex-collab ask "q" [--timeout <sec>]  # (invoked BY CODEX mid-turn, not by you) post a question, wait, fail open

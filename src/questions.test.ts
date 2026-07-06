@@ -346,6 +346,15 @@ describe("review-hardening regressions", () => {
     expect(isStdinAskInvocation(`/bin/zsh -lc 'cat q.md | codex-collab ask -'`)).toBe(true);
     expect(isStdinAskInvocation(`codex-collab ask - --timeout 60`)).toBe(true);
     expect(isStdinAskInvocation(`codex-collab ask "a question"`)).toBe(false);
+    // Options may precede the dash — still a stdin ask.
+    expect(isStdinAskInvocation(`codex-collab ask --timeout 60 -`)).toBe(true);
+    expect(isStdinAskInvocation(`/bin/zsh -lc 'cat q.md | codex-collab ask --timeout 60 -'`)).toBe(true);
+    // A dash inside the question text is not a stdin marker (quote-stripping
+    // merges the question into the token stream).
+    expect(isStdinAskInvocation(`codex-collab ask "pros - cons?"`)).toBe(false);
+    expect(isStdinAskInvocation(`codex-collab ask "a question" --timeout 60`)).toBe(false);
+    // A dash in a downstream pipe segment is not a stdin marker either.
+    expect(isStdinAskInvocation(`codex-collab ask "q" | grep -`)).toBe(false);
   });
 
   test("loadQuestion rejects a record missing askedAt instead of crashing listQuestions", () => {

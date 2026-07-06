@@ -117,7 +117,7 @@ codex-collab follow --watch
 | `peek <id>` | Show recent conversation slice from server |
 | `ask "question"` | (for Codex, mid-turn) Post a question to the collaborator and wait for the answer; `--timeout <sec>` sets the deadline (default 600). Fails open: on expiry it prints proceed-on-your-judgment guidance and exits 0 |
 | `answer <id> "text"` | Answer a pending question (`answer <id> -` reads the answer from stdin) |
-| `questions` | List pending questions in this workspace |
+| `questions [id]` | List pending questions in this workspace; with an ID, show that question's full text |
 | `next` | Block until something needs attention (question or approval), print one JSON event line, exit |
 | `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |

@@ -123,7 +123,8 @@ Commands:
                           expiry it prints proceed-on-your-judgment guidance
                           and exits 0
   answer <id> "text"      Answer a pending question (answer <id> - for stdin)
-  questions               List pending questions in this workspace
+  questions [id]          List pending questions in this workspace; with an
+                          ID, show that question's full text
   next                    Block until something needs attention (question or
                           approval), print one JSON event line, exit
   approve <id>            Approve a pending request
