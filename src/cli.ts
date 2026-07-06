@@ -115,6 +115,13 @@ Commands:
   config [key] [value]    Show or set persistent defaults
   models                  List available models
   templates               List available prompt templates
+  ask "question"          (for Codex, mid-turn) Post a question to the
+                          collaborator and wait for the answer; --timeout <sec>
+                          sets the deadline (default 600). Fails open: on
+                          expiry it prints proceed-on-your-judgment guidance
+                          and exits 0
+  answer <id> "text"      Answer a pending question (answer <id> - for stdin)
+  questions               List pending questions in this workspace
   approve <id>            Approve a pending request
   approve --guardian [id] Override a Guardian denial (no id: list pending
                           denials); takes effect on the thread's next run
@@ -286,7 +293,7 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
-    "peek", "version",
+    "peek", "version", "ask", "answer", "questions",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -326,6 +333,12 @@ async function main() {
       return (await import("./commands/config")).handleModels(rest);
     case "templates":
       return (await import("./commands/config")).handleTemplates(rest);
+    case "ask":
+      return (await import("./commands/ask")).handleAsk(rest);
+    case "answer":
+      return (await import("./commands/answer")).handleAnswer(rest);
+    case "questions":
+      return (await import("./commands/answer")).handleQuestions(rest);
     case "approve":
       return (await import("./commands/approve")).handleApprove(rest);
     case "decline":

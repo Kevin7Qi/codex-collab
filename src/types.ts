@@ -503,6 +503,25 @@ export interface PendingApproval {
   requestedAt: string;
 }
 
+// --- Ask channel (Codex asks mid-turn, anyone answers) ---
+
+/** On-disk shape of a mailbox question file (`{id}.json`). Written by
+ *  `codex-collab ask` from INSIDE Codex's sandbox — which is why the mailbox
+ *  lives in temp space (resolveMailboxDir), not the workspace state dir. */
+export interface QuestionRecord {
+  id: string;
+  question: string;
+  askedAt: string;
+  expiresAt: string;
+  workspaceDir: string;
+  /** PID of the asking process (orphan detection for sweeps). */
+  pid: number;
+  /** Set when the deadline lapsed unanswered; the file is kept for the
+   *  audit trail until `clean` sweeps it. */
+  expired?: boolean;
+}
+
+
 export interface RunRecord {
   runId: string;
   threadId: string;
