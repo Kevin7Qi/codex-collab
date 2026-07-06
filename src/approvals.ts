@@ -28,7 +28,9 @@ export const autoApproveHandler: ApprovalHandler = {
 /** Max time to wait for a human approval decision before giving up. */
 const APPROVAL_TIMEOUT_MS = 3_600_000; // 1 hour
 
-function shellQuote(value: string): string {
+/** Quote a value for safe copy-paste into a shell — used by the approve/
+ *  decline and answer hints, whose `-d` paths may contain quotes or spaces. */
+export function shellQuote(value: string): string {
   if (process.platform === "win32") {
     return `'${value.replace(/'/g, "''")}'`;
   }

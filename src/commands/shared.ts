@@ -3,6 +3,7 @@
 import {
   config,
   resolveStateDir,
+  resolveMailboxDir,
   resolveModel,
   validateId,
   type ReasoningEffort,
@@ -27,6 +28,7 @@ import {
   loadRun,
   pruneRuns,
   migrateGlobalState,
+  appendRunQuestion,
 } from "../threads";
 import type { PendingApproval } from "../types";
 import { RpcError, TurnTimeoutError } from "../types";
@@ -700,6 +702,39 @@ export function createDispatcher(
   );
 }
 
+/** Arm the ask channel on a dispatcher: `codex-collab ask` inside the turn
+ *  surfaces via mailbox watchers and output markers, mirrored onto this run
+ *  record (pendingQuestion while waiting, questions[] audit trail on
+ *  resolution). Callers MUST call dispatcher.setQuestionContext(null) in
+ *  their finally — the watchers are unref'd timers that outlive the turn,
+ *  and a late callback would otherwise stamp pendingQuestion onto a record
+ *  already written terminal. Observers never throw into the event path. */
+export function armQuestionChannel(
+  dispatcher: EventDispatcher,
+  ws: WorkspacePaths,
+  runId: string,
+  workspaceDir: string,
+): void {
+  dispatcher.setQuestionContext({
+    mailboxDir: resolveMailboxDir(workspaceDir),
+    workspaceDir,
+    onPending: (pending) => {
+      try {
+        updateRun(ws.stateDir, runId, { pendingQuestion: pending });
+      } catch (e) {
+        console.error(`[codex] Warning: could not mirror pending question: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    onResolved: (resolved) => {
+      try {
+        appendRunQuestion(ws.stateDir, runId, resolved);
+      } catch (e) {
+        console.error(`[codex] Warning: could not record resolved question: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Model auto-selection
 // ---------------------------------------------------------------------------
@@ -1153,8 +1188,9 @@ export function recordTerminalRunState(
       error: result.error ?? null,
       // A kill/timeout can end the run while the approval poll is asleep and
       // the process exits before its cleanup tick — never leave a terminal
-      // record claiming an approval is still pending.
+      // record claiming an approval (or ask-channel question) is still pending.
       pendingApproval: null,
+      pendingQuestion: null,
     });
   } catch (e) {
     console.error(`[codex] CRITICAL: could not save run state for ${runId}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1198,8 +1234,9 @@ export function recordRunFailure(
       completedAt: new Date().toISOString(),
       error: error instanceof Error ? error.message : String(error),
       // Same guarantee as recordTerminalRunState: terminal records never
-      // claim a pending approval.
+      // claim a pending approval or question.
       pendingApproval: null,
+      pendingQuestion: null,
     });
   } catch (e) {
     console.error(`[codex] Warning: could not record run failure for ${runId}: ${e instanceof Error ? e.message : String(e)}`);

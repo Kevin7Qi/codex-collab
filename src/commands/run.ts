@@ -15,6 +15,7 @@ import {
   resolveDefaults,
   startOrResumeThread,
   createDispatcher,
+  armQuestionChannel,
   getApprovalHandler,
   getWorkspacePaths,
   turnOverrides,
@@ -249,6 +250,7 @@ export async function handleRun(args: string[]): Promise<void> {
     writePidFile(ws.pidsDir, shortId);
 
     const dispatcher = createDispatcher(join(ws.stateDir, runLogRelPath(shortId, runId)), options, ws.guardianDir);
+    armQuestionChannel(dispatcher, ws, runId, options.dir);
 
     try {
       const result = await runTurn(
@@ -303,6 +305,12 @@ export async function handleRun(args: string[]): Promise<void> {
       }
       throw e;
     } finally {
+      // Disarm the ask channel BEFORE the run record goes terminal — its
+      // watchers are unref'd timers that survive the turn, and a late
+      // callback would stamp pendingQuestion onto a terminal record (the
+      // broker-busy retry path would even aim the old dispatcher's timers
+      // at this same sticky runId).
+      dispatcher.setQuestionContext(null);
       setActiveThreadId(undefined);
       setActiveShortId(undefined);
       setActiveTurnId(undefined);
