@@ -278,7 +278,9 @@ describe("mailbox privacy verification", () => {
     expect(loadQuestion(dir, record.id)).toEqual(record);
   });
 
-  test("a group/world-writable mailbox is refused", () => {
+  // POSIX-only by design: verifyMailboxDir is a documented no-op on Windows
+  // (per-user %TEMP%; POSIX ownership/mode semantics don't apply).
+  test.skipIf(process.platform === "win32")("a group/world-writable mailbox is refused", () => {
     const dir = freshMailbox();
     chmodSync(dir, 0o777);
     expect(() => verifyMailboxDir(dir)).toThrow(/not private/);
@@ -287,7 +289,7 @@ describe("mailbox privacy verification", () => {
     chmodSync(dir, 0o700); // restore for cleanup
   });
 
-  test("a symlinked mailbox is refused", () => {
+  test.skipIf(process.platform === "win32")("a symlinked mailbox is refused", () => {
     const realDir = freshMailbox();
     const linkPath = join(tmpRoot, `mb-link-${Date.now()}`);
     symlinkSync(realDir, linkPath);

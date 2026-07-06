@@ -810,9 +810,11 @@ describe("ask-channel answer hint quoting", () => {
     });
     dispatcher.reset();
 
+    const { shellQuote } = require("./approvals") as typeof import("./approvals");
     const log = readFileSync(logPath, "utf-8");
-    // POSIX escaping: '…it'\''s ws' — the raw -d '/tmp/it's ws' form must not appear.
-    expect(log).toContain(`-d '/tmp/it'\\''s ws'`);
+    // The hint must carry shellQuote's (platform-appropriate) escaping —
+    // the raw unescaped form must never appear.
+    expect(log).toContain(`-d ${shellQuote("/tmp/it's ws")}`);
     expect(log).not.toContain(`-d '/tmp/it's ws'`);
   });
 });
