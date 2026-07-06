@@ -240,7 +240,8 @@ describe("CLI questions <id>", () => {
         cwd: import.meta.dir + "/..",
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 5000,
-        env: { ...process.env, HOME: TEST_HOME, TMPDIR: tmp },
+        // TMPDIR steers os.tmpdir() on POSIX; TEMP/TMP do the same on Windows.
+        env: { ...process.env, HOME: TEST_HOME, TMPDIR: tmp, TEMP: tmp, TMP: tmp },
       });
       const stdout = (result.stdout ?? "") as string;
       expect(result.status).toBe(0);
@@ -263,7 +264,8 @@ describe("CLI questions <id>", () => {
         cwd: import.meta.dir + "/..",
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 5000,
-        env: { ...process.env, HOME: TEST_HOME, TMPDIR: tmp },
+        // TMPDIR steers os.tmpdir() on POSIX; TEMP/TMP do the same on Windows.
+        env: { ...process.env, HOME: TEST_HOME, TMPDIR: tmp, TEMP: tmp, TMP: tmp },
       });
       expect(result.status).toBe(1);
       expect((result.stderr ?? "") as string).toContain("No pending question");
