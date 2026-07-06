@@ -23,6 +23,7 @@ codex-collab health
 | `src/turns.ts` | Turn lifecycle (runTurn, runReview), event wiring |
 | `src/events.ts` | Event dispatcher (progress lines, log writer, output accumulator) |
 | `src/approvals.ts` | Approval handler abstraction (auto-approve, interactive IPC) |
+| `src/questions.ts` | Ask-channel mailbox (Codex asks mid-turn via `ask`, fail-open on timeout; markers, temp-space mailbox) |
 | `src/types.ts` | Protocol types (JSON-RPC, threads, turns, items, approvals) |
 | `src/config.ts` | Configuration constants, workspace resolution |
 | `src/broker.ts` | Shared app-server lifecycle (connection pooling) |
