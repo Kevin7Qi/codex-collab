@@ -6,7 +6,7 @@ import { config } from "./config";
 import type { AppServerClient } from "./client";
 import { updateThreadStatus, updateRun } from "./threads";
 import { tryInterruptTurn } from "./turns";
-import { getThreadGoal, pauseThreadGoal } from "./goals";
+import { pauseThreadGoal, readThreadGoal } from "./goals";
 import {
   activeClient,
   activeThreadId,
@@ -73,9 +73,15 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
   const interruptThreadId = activeReviewThreadId ?? activeThreadId;
   if (activeClient && activeThreadId && !activeReviewThreadId) {
     try {
-      if ((await getThreadGoal(activeClient, activeThreadId))?.status === "active") {
-        await pauseThreadGoal(activeClient, activeThreadId);
-        console.error("[codex] Goal paused — a new turn on this thread resumes it.");
+      // Fail closed: skip the pause only when the read POSITIVELY says no
+      // active goal. A transient read failure must still attempt the pause —
+      // interrupting an active goal without pausing respawns a continuation
+      // that runs headless after this process exits.
+      const { goal, ok } = await readThreadGoal(activeClient, activeThreadId);
+      if (!ok || goal?.status === "active") {
+        if (await pauseThreadGoal(activeClient, activeThreadId)) {
+          console.error("[codex] Goal paused — a new turn on this thread resumes it.");
+        }
       }
     } catch (e) {
       console.error(`[codex] Warning: could not check/pause goal during shutdown: ${e instanceof Error ? e.message : String(e)}`);
