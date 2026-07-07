@@ -7,7 +7,7 @@ import {
   type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
   type ErrorNotificationParams, type AutoApprovalReviewParams,
   type FileChange, type CommandExec,
-  type PendingQuestion, type ResolvedQuestion,
+  type PendingQuestion, type QuestionRecord, type ResolvedQuestion,
 } from "./types";
 import { saveGuardianDenial } from "./guardian";
 import { shellQuote } from "./approvals";
@@ -19,6 +19,7 @@ import {
   looksLikeAskInvocation,
   parseQuestionMarker,
   questionSummary,
+  sanitizeForTerminal,
 } from "./questions";
 
 type ProgressCallback = (line: string) => void;
@@ -221,7 +222,7 @@ export class EventDispatcher {
    *  observers that don't own this process's stdout — `follow`, Monitor
    *  scripts, `output` — see the same event stream. */
   logLine(text: string): void {
-    this.log(`[codex] ${text}`);
+    this.log(`[codex] ${sanitizeForTerminal(text)}`);
     this.flush();
   }
 
@@ -269,7 +270,27 @@ export class EventDispatcher {
     const marker = parseQuestionMarker(line);
     if (!marker) return;
     if (marker.kind === "posted") {
-      this.emitPosted(marker.id, loadQuestion(this.questionCtx.mailboxDir, marker.id), marker.seconds);
+      const record = loadQuestion(this.questionCtx.mailboxDir, marker.id);
+      if (record) {
+        this.emitPosted(marker.id, record);
+      } else {
+        // No mailbox record backs this marker: either the question already
+        // resolved and `ask` cleaned up (the aggregated-output fallback runs
+        // after the fact), or the line is forged — an ask compounded with
+        // another command (`ask "q" && cat notes.md`) scans the whole item's
+        // stream, and file content can carry marker-shaped lines. Only the
+        // real `ask` can write the privacy-verified mailbox, so without a
+        // record NO live state is created: no announce, no pending mirror,
+        // no resolution watcher. The id is still tracked so a resolution
+        // marker in the same stream completes the audit entry (the legit
+        // already-cleaned-up case); a forged posted/resolved pair can
+        // pollute at most that trail, never a live question prompt.
+        const key = `${marker.id}:posted`;
+        if (!this.seenQuestionMarkers.has(key)) {
+          this.seenQuestionMarkers.add(key);
+          this.postedQuestions.set(marker.id, { summary: null, askedAt: new Date().toISOString() });
+        }
+      }
     } else {
       // Resolution markers only count for questions posted in THIS turn —
       // a resolved-marker for an unknown id must not append audit entries.
@@ -378,17 +399,16 @@ export class EventDispatcher {
     }
   }
 
-  private emitPosted(id: string, record: ReturnType<typeof loadQuestion>, deadlineSec?: number): void {
+  private emitPosted(id: string, record: QuestionRecord): void {
     const ctx = this.questionCtx;
     if (!ctx) return;
     const key = `${id}:posted`;
     if (this.seenQuestionMarkers.has(key)) return;
     this.seenQuestionMarkers.add(key);
 
-    const summary = record ? questionSummary(record.question) : null;
-    const askedAt = record?.askedAt ?? new Date().toISOString();
-    const expiresAt = record?.expiresAt
-      ?? new Date(Date.now() + (deadlineSec ?? 600) * 1000).toISOString();
+    const summary = questionSummary(record.question);
+    const askedAt = record.askedAt;
+    const expiresAt = record.expiresAt;
     this.postedQuestions.set(id, { summary, askedAt });
 
     const remainingSec = Math.max(0, Math.round((Date.parse(expiresAt) - Date.now()) / 1000));
@@ -396,12 +416,10 @@ export class EventDispatcher {
     // visible even under --content-only — announce bypasses the progress
     // console gate but still lands in the thread log for follow/next/output.
     this.announce(`QUESTION FROM CODEX (expires in ${formatSeconds(remainingSec)})`);
-    if (record) {
-      const questionLines = record.question.split("\n");
-      for (const qLine of questionLines.slice(0, 6)) this.announce(`  ${qLine}`);
-      if (questionLines.length > 6) {
-        this.announce(`  … (${questionLines.length - 6} more lines — \`codex-collab questions ${id}\` shows the full text)`);
-      }
+    const questionLines = record.question.split("\n");
+    for (const qLine of questionLines.slice(0, 6)) this.announce(`  ${qLine}`);
+    if (questionLines.length > 6) {
+      this.announce(`  … (${questionLines.length - 6} more lines — \`codex-collab questions ${id}\` shows the full text)`);
     }
     // shellQuote, not naive interpolation — a quote in the workspace path
     // would break the hint or worse (it's meant to be copy-pasted).
@@ -431,10 +449,14 @@ export class EventDispatcher {
       resolved = { id, summary, outcome };
     }
     // The mirror shows the newest still-live question; only blank it when
-    // nothing else from this turn is awaiting an answer.
-    this.livePendingQuestions.delete(id);
-    const remaining = [...this.livePendingQuestions.values()];
-    this.notifyQuestionPending(remaining.length > 0 ? remaining[remaining.length - 1] : null);
+    // nothing else from this turn is awaiting an answer. A question that was
+    // never live (recordless marker tracking) never touched the mirror, so
+    // its resolution must not touch it either.
+    const wasLive = this.livePendingQuestions.delete(id);
+    if (wasLive) {
+      const remaining = [...this.livePendingQuestions.values()];
+      this.notifyQuestionPending(remaining.length > 0 ? remaining[remaining.length - 1] : null);
+    }
     try {
       this.questionCtx?.onResolved?.(resolved);
     } catch (e) {
@@ -454,8 +476,9 @@ export class EventDispatcher {
    *  must stay visible under --content-only, mirroring how approval prompts
    *  bypass the progress gate. */
   private announce(text: string): void {
-    console.log(`[codex] ${text}`);
-    this.log(`[codex] ${text}`);
+    const clean = sanitizeForTerminal(text);
+    console.log(`[codex] ${clean}`);
+    this.log(`[codex] ${clean}`);
     this.flush();
   }
 
@@ -587,9 +610,14 @@ export class EventDispatcher {
     }
   }
 
+  /** Progress lines carry Codex-controlled text (command lines, message
+   *  previews, guardian rationale) into terminals — live here, and replayed
+   *  by follow/output from the log. Strip escape sequences at this single
+   *  boundary so embedded ANSI can't redraw or disguise what's shown. */
   private progress(text: string): void {
-    this.onProgress(text);
-    this.log(`[codex] ${text}`);
+    const clean = sanitizeForTerminal(text);
+    this.onProgress(clean);
+    this.log(`[codex] ${clean}`);
     this.flush();
   }
 

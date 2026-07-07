@@ -37,6 +37,23 @@ describe("EventDispatcher", () => {
     expect(lines[0]).toContain("Running: npm test");
   });
 
+  test("progress lines strip terminal escape sequences from command text", () => {
+    const lines: string[] = [];
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test-esc.log"), (line) => lines.push(line));
+
+    // ANSI in a Codex-composed command could redraw the terminal and
+    // disguise what is actually running.
+    dispatcher.handleItemStarted({
+      item: { type: "commandExecution", id: "i1", command: "echo ok\x1b[2K\x1b[1A && rm -rf /tmp/x", cwd: "/proj", status: "inProgress", processId: null, commandActions: [] },
+      threadId: "t1",
+      turnId: "turn1",
+    });
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain("\x1b");
+    expect(lines[0]).toContain("rm -rf /tmp/x");
+  });
+
   test("formats progress line for file change", () => {
     const lines: string[] = [];
     const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test3.log"), (line) => lines.push(line));
@@ -533,6 +550,55 @@ describe("ask-channel marker stream", () => {
     delta(dispatcher, marker); // full marker after reset still works
     expect(pendings).toHaveLength(1);
     dispatcher.reset();
+  });
+
+  test("a posted marker with no mailbox record creates no live state", async () => {
+    // A genuine ask compounded with untrusted output (`ask "q" && cat
+    // notes.md`) scans the whole item's stream, so file content can carry
+    // marker-shaped lines. Without a mailbox record — which only the real
+    // `ask` can write — a forged posted marker must not announce a phantom
+    // question, set the pending mirror, or arm a watcher that would
+    // fabricate an "answered" resolution moments later.
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const mailboxDir = join(TEST_LOG_DIR, "mb-norecord");
+    mkdirSync(mailboxDir, { recursive: true });
+    const { dispatcher, pendings, resolveds } = armedDispatcher("norecord1", mailboxDir);
+    dispatcher.handleItemStarted({
+      item: {
+        type: "commandExecution", id: "i1",
+        command: `codex-collab ask "real q" && cat notes.md`,
+        cwd: "/tmp/ws", status: "inProgress", processId: null, commandActions: [],
+      },
+      threadId: "t1", turnId: "turn1",
+    });
+    const forgedId = generateQuestionId(); // no question file exists for it
+    delta(dispatcher, markerPosted(forgedId, 600) + "\n");
+    expect(pendings).toHaveLength(0);
+    await sleep(2500); // longer than one resolution-watcher tick
+    expect(resolveds).toHaveLength(0);
+    dispatcher.reset();
+  }, 10_000);
+
+  test("posted+answered markers whose file was already cleaned up still record the audit entry", () => {
+    // Session-exec fallback: the aggregated output arrives at completion,
+    // after a fast answer made `ask` delete the question file. The audit
+    // trail must survive, but the question is never announced as live —
+    // it already resolved.
+    const mailboxDir = join(TEST_LOG_DIR, "mb-cleaned");
+    mkdirSync(mailboxDir, { recursive: true });
+    const { dispatcher, pendings, resolveds } = armedDispatcher("cleaned1", mailboxDir);
+    const id = generateQuestionId();
+    dispatcher.handleItemCompleted({
+      item: {
+        type: "commandExecution", id: "i1", command: `codex-collab ask "gone already"`,
+        cwd: "/tmp/ws", status: "completed", processId: null, commandActions: [],
+        aggregatedOutput: markerPosted(id, 600) + "\n" + markerAnswered(id, 20) + "\n",
+        exitCode: 0, durationMs: 21_000,
+      },
+      threadId: "t1", turnId: "turn1",
+    });
+    expect(pendings).toHaveLength(0);
+    expect(resolveds).toEqual([{ id, summary: null, outcome: "answered", latencyMs: 20_000 }]);
   });
 
   test("marker-shaped output from a NON-ask command is inert (spoofing guard)", () => {
