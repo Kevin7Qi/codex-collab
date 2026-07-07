@@ -2,7 +2,7 @@
 
 import { describe, it, expect, setDefaultTimeout, afterAll } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import pkg from "../package.json";
@@ -214,5 +214,63 @@ describe("CLI global options before command", () => {
     const { stderr, exitCode } = run("--reasoning", "invalid", "run", "prompt");
     expect(exitCode).toBe(1);
     expect(stderr).toContain("Invalid reasoning level");
+  });
+});
+
+describe("CLI questions <id>", () => {
+  it("prints the full multiline question without truncation", () => {
+    // Isolated TMPDIR so the mailbox scan can't touch (or pollute) the real
+    // workspace mailbox; findQuestion's cross-mailbox fallback locates the
+    // record whatever the workspace key resolves to.
+    const tmp = mkdtempSync(join(tmpdir(), "codex-collab-mb-"));
+    try {
+      const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
+      const mailboxDir = join(tmp, `codex-collab-${uid}`, "ws-testkey", "questions");
+      mkdirSync(mailboxDir, { recursive: true });
+      const longQuestion = Array.from({ length: 10 }, (_, i) => `question line ${i + 1}`).join("\n");
+      writeFileSync(join(mailboxDir, "q1234abc.json"), JSON.stringify({
+        id: "q1234abc", question: longQuestion,
+        askedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        workspaceDir: tmp, pid: process.pid,
+      }), { mode: 0o600 });
+
+      const result = spawnSync("bun", ["run", CLI, "questions", "q1234abc"], {
+        encoding: "utf-8",
+        cwd: import.meta.dir + "/..",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
+        // TMPDIR steers os.tmpdir() on POSIX; TEMP/TMP do the same on Windows.
+        env: { ...process.env, HOME: TEST_HOME, TMPDIR: tmp, TEMP: tmp, TMP: tmp },
+      });
+      const stdout = (result.stdout ?? "") as string;
+      expect(result.status).toBe(0);
+      // The live prompt clips at 6 lines and the list view at 100 chars —
+      // this path is the escape hatch, so every line must be present.
+      expect(stdout).toContain("Question q1234abc");
+      expect(stdout).toContain("question line 1");
+      expect(stdout).toContain("question line 10");
+      expect(stdout).toContain('Answer with: codex-collab answer q1234abc');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("unknown id exits nonzero with a pointer to the list", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "codex-collab-mb-"));
+    try {
+      const result = spawnSync("bun", ["run", CLI, "questions", "qdead999"], {
+        encoding: "utf-8",
+        cwd: import.meta.dir + "/..",
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 5000,
+        // TMPDIR steers os.tmpdir() on POSIX; TEMP/TMP do the same on Windows.
+        env: { ...process.env, HOME: TEST_HOME, TMPDIR: tmp, TEMP: tmp, TMP: tmp },
+      });
+      expect(result.status).toBe(1);
+      expect((result.stderr ?? "") as string).toContain("No pending question");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

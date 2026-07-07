@@ -48,8 +48,10 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
           error: "Interrupted by signal",
           // Ctrl-C while blocked on an approval exits before the approval
           // poll's cleanup tick — terminal records must never claim a
-          // pending approval (same guarantee as recordTerminalRunState).
+          // pending approval or ask-channel question (same guarantee as
+          // recordTerminalRunState).
           pendingApproval: null,
+          pendingQuestion: null,
         });
       } catch (e) {
         console.error(`[codex] Warning: could not update run record during shutdown: ${e instanceof Error ? e.message : String(e)}`);
@@ -115,6 +117,16 @@ Commands:
   config [key] [value]    Show or set persistent defaults
   models                  List available models
   templates               List available prompt templates
+  ask "question"          (for Codex, mid-turn) Post a question to the
+                          collaborator and wait for the answer; --timeout <sec>
+                          sets the deadline (default 600). Fails open: on
+                          expiry it prints proceed-on-your-judgment guidance
+                          and exits 0
+  answer <id> "text"      Answer a pending question (answer <id> - for stdin)
+  questions [id]          List pending questions in this workspace; with an
+                          ID, show that question's full text
+  next                    Block until something needs attention (question or
+                          approval), print one JSON event line, exit
   approve <id>            Approve a pending request
   approve --guardian [id] Override a Guardian denial (no id: list pending
                           denials); takes effect on the thread's next run
@@ -161,6 +173,10 @@ Exit codes (run, review):
                            5  died blocked on an approval (request now void —
                               resume with a longer --timeout or --approval auto)
                            6  broker busy and fallback unavailable (transient; retry)
+
+Exit codes (next):
+  0  event delivered (JSON on stdout)   3  --timeout elapsed with no event
+  10 workspace idle — nothing running, nothing pending
 
 Examples:
   codex-collab run "what does this project do?" -s read-only --content-only
@@ -286,7 +302,7 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
-    "peek", "version",
+    "peek", "version", "ask", "answer", "questions", "next",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -326,6 +342,14 @@ async function main() {
       return (await import("./commands/config")).handleModels(rest);
     case "templates":
       return (await import("./commands/config")).handleTemplates(rest);
+    case "ask":
+      return (await import("./commands/ask")).handleAsk(rest);
+    case "answer":
+      return (await import("./commands/answer")).handleAnswer(rest);
+    case "questions":
+      return (await import("./commands/answer")).handleQuestions(rest);
+    case "next":
+      return (await import("./commands/next")).handleNext(rest);
     case "approve":
       return (await import("./commands/approve")).handleApprove(rest);
     case "decline":

@@ -9,6 +9,7 @@ import type {
   PendingApproval,
 } from "./types";
 import { validateId } from "./config";
+import { sanitizeForTerminal } from "./questions";
 
 export interface ApprovalHandler {
   handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision>;
@@ -28,7 +29,9 @@ export const autoApproveHandler: ApprovalHandler = {
 /** Max time to wait for a human approval decision before giving up. */
 const APPROVAL_TIMEOUT_MS = 3_600_000; // 1 hour
 
-function shellQuote(value: string): string {
+/** Quote a value for safe copy-paste into a shell — used by the approve/
+ *  decline and answer hints, whose `-d` paths may contain quotes or spaces. */
+export function shellQuote(value: string): string {
   if (process.platform === "win32") {
     return `'${value.replace(/'/g, "''")}'`;
   }
@@ -78,8 +81,12 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     const cwd = this.workspaceDir ?? req.cwd;
     const dirFlag = cwd ? ` -d ${shellQuote(cwd)}` : "";
     this.onProgress(`APPROVAL NEEDED`);
-    this.onProgress(`  Command: ${req.command ?? "(no command)"}`);
-    if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
+    // The command and reason are Codex-proposed text headed for the user's
+    // terminal at the moment of a permission decision — strip escape
+    // sequences so embedded ANSI can't redraw the prompt and disguise what
+    // is being approved.
+    this.onProgress(`  Command: ${sanitizeForTerminal(req.command ?? "(no command)")}`);
+    if (req.reason) this.onProgress(`  Reason: ${sanitizeForTerminal(req.reason)}`);
     this.onProgress(`  Approve: codex-collab approve ${id}${dirFlag}`);
     this.onProgress(`  Decline: codex-collab decline ${id}${dirFlag}`);
 
@@ -107,7 +114,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     const cwd = this.workspaceDir ?? req.grantRoot;
     const dirFlag = cwd ? ` -d ${shellQuote(cwd)}` : "";
     this.onProgress(`APPROVAL NEEDED (file change)`);
-    if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
+    if (req.reason) this.onProgress(`  Reason: ${sanitizeForTerminal(req.reason)}`);
     this.onProgress(`  Approve: codex-collab approve ${id}${dirFlag}`);
     this.onProgress(`  Decline: codex-collab decline ${id}${dirFlag}`);
 

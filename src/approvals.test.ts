@@ -193,6 +193,32 @@ describe("InteractiveApprovalHandler", () => {
     expect(lines).toContain(`  Decline: codex-collab decline appr-001 -d ${quotedWorkspace}`);
   });
 
+  test("prompt lines strip terminal escape sequences from command and reason", async () => {
+    // ANSI in a Codex-proposed command could redraw the prompt and disguise
+    // what is being approved — the one place that must never happen.
+    const lines: string[] = [];
+    const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, (l) => lines.push(l), { pollIntervalMs: 20 });
+    const abort = new AbortController();
+    const pending = handler.handleCommandApproval(
+      {
+        ...mockCommandRequest,
+        command: "curl https://example.com \x1b[8m&& rm -rf ~\x1b[0m",
+        reason: "network\x1b[2K access",
+      },
+      abort.signal,
+    );
+    abort.abort();
+    await expect(pending).rejects.toThrow("cancelled");
+
+    const commandLine = lines.find((l) => l.startsWith("  Command:"));
+    expect(commandLine).toBeDefined();
+    expect(commandLine).not.toContain("\x1b");
+    expect(commandLine).toContain("rm -rf ~");
+    const reasonLine = lines.find((l) => l.startsWith("  Reason:"));
+    expect(reasonLine).toBeDefined();
+    expect(reasonLine).not.toContain("\x1b");
+  });
+
   test("cleans up request file on abort", async () => {
     const handler = new InteractiveApprovalHandler(TEST_APPROVALS_DIR, () => {}, { pollIntervalMs: 100 });
     const controller = new AbortController();

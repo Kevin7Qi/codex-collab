@@ -20,6 +20,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
 - **Thread reuse** — Resume existing threads to send follow-up prompts, build on previous responses, or steer the work in a new direction.
 - **Approval control** — Configurable approval policies for tool calls: auto-approve, interactive, deny, or Codex's Guardian auto-reviewer (`--approval auto`).
+- **Two-way ask channel** — Codex can ask a question mid-turn (`ask`) and keep working once the answer arrives (`answer`); `next` blocks until something needs attention. Fail-open: an unanswered question never stalls a run.
 - **Live observability** — `run --detach` hands a long task to a detached runner; `follow --watch` is a purpose-built live view that tracks every run in a terminal pane.
 - **Memory isolation** — Threads created by codex-collab are excluded from Codex's memory feature by default, so agent-driven sessions don't shape Codex's learned picture of how *you* work. Opt back in with `--memory` (see Options for details).
 
@@ -114,6 +115,10 @@ codex-collab follow --watch
 | `output <id> [--last]` | Full log for thread (`--last`: only the latest turn's output) |
 | `progress <id>` | Recent activity (tail of log) |
 | `peek <id>` | Show recent conversation slice from server |
+| `ask "question"` | (for Codex, mid-turn) Post a question to the collaborator and wait for the answer; `--timeout <sec>` sets the deadline (default 600). Fails open: on expiry it prints proceed-on-your-judgment guidance and exits 0 |
+| `answer <id> "text"` | Answer a pending question (`answer <id> -` reads the answer from stdin) |
+| `questions [id]` | List pending questions in this workspace; with an ID, show that question's full text |
+| `next` | Block until something needs attention (question or approval), print one JSON event line, exit |
 | `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |
 | `templates` | List available prompt templates |
@@ -157,12 +162,14 @@ codex-collab follow --watch
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
 | `--last` | (output) Only the latest turn's output instead of the whole thread history (implies `--content-only`) |
 | `--session` | (threads) Only threads the current session has run |
-| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483) |
+| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483). For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 | `--` | End of options; remaining arguments are treated as prompt text |
 | `-` | (run) Read the prompt from stdin |
 
 `run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` died blocked on an approval (the request is void — resume with a longer `--timeout` or `--approval auto`), `6` broker busy (transient — retry).
+
+`next` exits `0` when an event was delivered (JSON on stdout), `3` when `--timeout` elapsed with no event, and `10` when the workspace is idle — nothing running, nothing pending.
 
 </details>
 

@@ -12,6 +12,7 @@ import {
   createRun,
   loadRun,
   updateRun,
+  appendRunQuestion,
   listRuns,
   listRunsForThread,
   getLatestRun,
@@ -340,6 +341,46 @@ describe("run ledger", () => {
   test("updateRun throws on unknown run instead of silently no-op", () => {
     expect(() => updateRun(testDir, "run-does-not-exist", { status: "completed" }))
       .toThrow(/unknown run/i);
+  });
+
+  test("appendRunQuestion clears the pending mirror when it shows the resolved question", () => {
+    const run = makeRun({ status: "running" });
+    createRun(testDir, run);
+    const asked = new Date().toISOString();
+    const expires = new Date(Date.now() + 600_000).toISOString();
+    updateRun(testDir, run.runId, {
+      pendingQuestion: { id: "q1111111", summary: "first?", askedAt: asked, expiresAt: expires },
+    });
+    appendRunQuestion(testDir, run.runId, {
+      id: "q1111111", summary: "first?", outcome: "answered", latencyMs: 1000,
+    });
+    const loaded = loadRun(testDir, run.runId)!;
+    expect(loaded.pendingQuestion).toBeNull();
+    expect(loaded.questions).toEqual([
+      expect.objectContaining({ id: "q1111111", outcome: "answered" }),
+    ]);
+  });
+
+  test("appendRunQuestion preserves a different still-live pending question", () => {
+    // Overlapping asks: the dispatcher mirrors the remaining live question
+    // (q2) BEFORE q1's resolution is appended — the append must not wipe it.
+    const run = makeRun({ status: "running" });
+    createRun(testDir, run);
+    const asked = new Date().toISOString();
+    const expires = new Date(Date.now() + 600_000).toISOString();
+    updateRun(testDir, run.runId, {
+      pendingQuestion: { id: "q2222222", summary: "second?", askedAt: asked, expiresAt: expires },
+    });
+    appendRunQuestion(testDir, run.runId, {
+      id: "q1111111", summary: "first?", outcome: "answered", latencyMs: 1000,
+    });
+    const loaded = loadRun(testDir, run.runId)!;
+    expect(loaded.pendingQuestion).toEqual(
+      expect.objectContaining({ id: "q2222222", summary: "second?" }),
+    );
+    expect(loaded.questions).toEqual([
+      expect.objectContaining({ id: "q1111111", outcome: "answered" }),
+    ]);
   });
 
   test("listRuns returns all runs sorted by startedAt descending", () => {

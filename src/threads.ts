@@ -13,7 +13,7 @@ import { randomBytes, createHash } from "crypto";
 import { basename, dirname, join, resolve } from "path";
 import { config, validateId, resolveWorkspaceDir, isPathInside, STATE_SCHEMA_VERSION, MIGRATION_STATE_FILENAME } from "./config";
 import { acquireLockSync, LockTimeoutError } from "./lock";
-import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus } from "./types";
+import type { ThreadIndex, ThreadIndexEntry, RunRecord, RunStatus, ResolvedQuestion } from "./types";
 
 // ─── Advisory file lock ────────────────────────────────────────────────────
 
@@ -367,7 +367,7 @@ export function loadRun(stateDir: string, runId: string): RunRecord | null {
 type RunPatch = Partial<Pick<RunRecord,
   "status" | "phase" | "sessionId" | "completedAt" | "elapsed" |
   "output" | "filesChanged" | "commandsRun" | "error" | "logOffset" |
-  "pendingApproval"
+  "pendingApproval" | "pendingQuestion" | "questions"
 >>;
 
 /**
@@ -395,6 +395,20 @@ export function updateRun(stateDir: string, runId: string, patch: RunPatch): voi
   } catch (e) {
     throw new Error(`Failed to write run ${runId}: ${e instanceof Error ? e.message : e}`);
   }
+}
+
+/** Append a resolved ask-channel question to a run's audit trail and clear
+ *  the pending mirror in the same write — unless the mirror already shows a
+ *  different (still-live) question, which must survive this resolution. */
+export function appendRunQuestion(stateDir: string, runId: string, entry: ResolvedQuestion): void {
+  const record = loadRun(stateDir, runId);
+  if (!record) throw new Error(`Cannot append question to unknown run ${runId}`);
+  updateRun(stateDir, runId, {
+    questions: [...(record.questions ?? []), entry],
+    ...(record.pendingQuestion == null || record.pendingQuestion.id === entry.id
+      ? { pendingQuestion: null }
+      : {}),
+  });
 }
 
 export function listRuns(stateDir: string, opts?: { sessionId?: string }): RunRecord[] {

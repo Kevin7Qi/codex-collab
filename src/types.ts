@@ -503,6 +503,46 @@ export interface PendingApproval {
   requestedAt: string;
 }
 
+// --- Ask channel (Codex asks mid-turn, anyone answers) ---
+
+/** On-disk shape of a mailbox question file (`{id}.json`). Written by
+ *  `codex-collab ask` from INSIDE Codex's sandbox — which is why the mailbox
+ *  lives in temp space (resolveMailboxDir), not the workspace state dir. */
+export interface QuestionRecord {
+  id: string;
+  question: string;
+  askedAt: string;
+  expiresAt: string;
+  workspaceDir: string;
+  /** PID of the asking process (orphan detection for sweeps). */
+  pid: number;
+  /** Set when the deadline lapsed unanswered; the file is kept for the
+   *  audit trail until `clean` sweeps it. */
+  expired?: boolean;
+}
+
+/** A question awaiting an answer, mirrored onto the run record — the on-disk
+ *  signal observers (`next`, `follow`, Monitor scripts) use to see a run
+ *  asking for steering without owning its stdout. Unlike PendingApproval,
+ *  this never blocks the run terminally: questions fail open. */
+export interface PendingQuestion {
+  id: string;
+  summary: string | null;
+  askedAt: string;
+  expiresAt: string;
+}
+
+/** Terminal state of an ask-channel question, appended to the run record so
+ *  a long autonomous run's post-mortem says plainly how often it was steered
+ *  and how often it decided alone. */
+export interface ResolvedQuestion {
+  id: string;
+  summary: string | null;
+  outcome: "answered" | "expired";
+  /** Posting-to-answer latency; absent for expired questions. */
+  latencyMs?: number;
+}
+
 export interface RunRecord {
   runId: string;
   threadId: string;
@@ -529,6 +569,10 @@ export interface RunRecord {
   error: string | null;
   /** Set while an interactive approval is blocking the run; null/absent otherwise. */
   pendingApproval?: PendingApproval | null;
+  /** Set while a `codex-collab ask` question awaits an answer; null/absent otherwise. */
+  pendingQuestion?: PendingQuestion | null;
+  /** Resolved ask-channel questions, in resolution order. */
+  questions?: ResolvedQuestion[];
 }
 
 // --- Broker state (per-workspace) ---

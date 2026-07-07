@@ -1,6 +1,6 @@
 // src/config.ts — Configuration for codex-collab
 
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { join, basename, resolve, sep } from "path";
 import { createHash } from "crypto";
 import { realpathSync, existsSync, readFileSync, readdirSync } from "fs";
@@ -160,13 +160,15 @@ export function resolveWorkspaceDir(cwd: string): string {
 }
 
 /**
- * Compute per-workspace state directory:
- * `~/.codex-collab/workspaces/{slug}-{hash}/`
+ * `{slug}-{hash}` key identifying a workspace:
  *
  * - slug: sanitized lowercase basename of the workspace root
  * - hash: first 16 chars of SHA-256 of the canonical (realpath) path
+ *
+ * Shared by the state dir and the ask-channel mailbox so any process that
+ * knows the workspace can derive both.
  */
-export function resolveStateDir(cwd: string): string {
+export function workspaceKey(cwd: string): string {
   const wsRoot = resolveWorkspaceDir(cwd);
   let canonical: string;
   try {
@@ -176,7 +178,32 @@ export function resolveStateDir(cwd: string): string {
   }
   const slug = basename(canonical).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
   const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-  return join(getHome(), ".codex-collab", "workspaces", `${slug}-${hash}`);
+  return `${slug}-${hash}`;
+}
+
+/**
+ * Compute per-workspace state directory:
+ * `~/.codex-collab/workspaces/{slug}-{hash}/`
+ */
+export function resolveStateDir(cwd: string): string {
+  return join(getHome(), ".codex-collab", "workspaces", workspaceKey(cwd));
+}
+
+/** Root under which every workspace's ask-channel mailbox lives. Temp space,
+ *  not ~/.codex-collab: the mailbox writer (`codex-collab ask`) runs INSIDE
+ *  Codex's sandbox, where the home state dir is not writable but the temp
+ *  dir is (verified: the sandbox propagates TMPDIR verbatim and permits
+ *  writes under it). The uid suffix keeps the root private on multi-user
+ *  hosts where the temp dir is shared. */
+export function mailboxRoot(): string {
+  const uid = typeof process.getuid === "function" ? String(process.getuid()) : "u";
+  return join(tmpdir(), `codex-collab-${uid}`);
+}
+
+/** Ask-channel question mailbox for a workspace:
+ *  `{tmp}/codex-collab-{uid}/{slug}-{hash}/questions/` */
+export function resolveMailboxDir(cwd: string): string {
+  return join(mailboxRoot(), workspaceKey(cwd), "questions");
 }
 
 /**

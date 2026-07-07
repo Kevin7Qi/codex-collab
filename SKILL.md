@@ -33,7 +33,8 @@ cat prompt.md | codex-collab run - --content-only
 - For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: surface the result per Context Efficiency & Result Visibility below.
 - `run --detach` returns in seconds — run it in the **foreground**.
 - `follow` on a live run blocks until that run completes, and `follow --watch` never exits: both are primarily the **user's** view for their own terminal pane — don't run `--watch` yourself. The one agent-facing use: `follow <id>` in background Bash is the completion signal for a detached run (see Detached Runs below). `follow` on an already-finished run is a quick foreground replay.
-- All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
+- `next` blocks until something needs a response — run it in the **background**; its exit is your notification (see the `next` section below).
+- All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `answer`, `questions`, `clean`, `delete`, `config`, `models`, `templates`, `health`, `version`): run in the **foreground** — they complete in seconds.
 
 If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or `codex-collab progress <id>` for just the log tail. `<id>` is the codex-collab thread short ID (8-char hex), not the Claude Code task ID — it appears in the first progress line (`[codex] Thread a1b2c3d4 started`); `codex-collab threads` lists them. Progress lines stream in real time:
 
@@ -122,19 +123,54 @@ codex-collab run "large refactor task" --detach --approval auto
 
 **Completion signal for detached runs (agent-facing):** the detach parent exits when the turn *starts*, not when it finishes — so backgrounding `run --detach` gives you no completion notification. When you need one, run `codex-collab follow <id>` in background Bash: it exits exactly when the run reaches a terminal state (exit 0 = completed), and that exit is your notification.
 
-### Watching for approvals without polling (Monitor pattern)
+### Watching for questions and approvals without polling (`next`)
 
-**Only arm this when the approval mode can actually block**: `on-request`, `on-failure`, or `untrusted`. Under the default `never` there are no approval requests, and under `auto` Guardian decides everything autonomously (approve or deny — it never blocks on a human), so a watcher there is waste.
+`codex-collab next` blocks until the first event that needs a response in the workspace — an ask-channel question (see The Ask Channel below) or a pending interactive approval — prints **one JSON event line**, and exits. Exit codes: `0` event delivered · `10` workspace idle (nothing running, nothing pending — the self-cleaning path, so a watcher never dangles after the run ends) · `3` only with an explicit `--timeout <sec>`.
 
-When you run codex-collab in background Bash, you're notified when the *process exits* — but an approval request blocks mid-run without exiting. Watch on-disk state instead; both signals below appear regardless of which process owns the run:
+**Arm it whenever a run can produce something answerable**: any run using the ask channel (`--template collab`), or an approval mode that can block (`on-request`, `on-failure`, `untrusted`). Under `--approval never` with no ask template, nothing can fire — a watcher there is waste (it will exit `10` when the run ends). Under `auto`, Guardian handles approvals autonomously, but questions still fire.
 
-- an approval request file appears at `~/.codex-collab/workspaces/*/approvals/<id>.json` while a request is pending (and disappears when answered); its JSON carries the command, reason, and `workspaceDir`
-- the run record (`workspaces/*/runs/<runId>.json`) carries `"pendingApproval": {id, kind, summary, requestedAt}` while blocked, `null` otherwise
-
-Arm a single-shot watcher alongside the background run and keep working — approval appears → notification → `codex-collab approve <id>` → the run continues (no kill/resume cycle, no polling in your context). With the Monitor tool, this is the command; without it, run the same loop as a second background Bash command and its *exit* becomes your notification:
+The pattern: launch the run and `next` as two background Bash commands in the same breath, then keep working — `next` exiting *is* your notification. **`next` watches one workspace** — arm it with the same `-d` you gave the run (bare `next` watches the cwd workspace only, and will exit `10` without ever seeing another workspace's events):
 
 ```bash
-until [ -n "$(ls ~/.codex-collab/workspaces/*/approvals/*.json 2>/dev/null)" ]; do sleep 2; done; cat ~/.codex-collab/workspaces/*/approvals/*.json
+codex-collab next -d /path/to/project   # in background Bash; its exit = something needs you
+# → {"type":"question","id":"q7f3a2c1","summary":"…","expiresAt":"…","answerWith":"codex-collab answer q7f3a2c1 \"<text>\""}
+```
+
+**Respond and re-arm in the same message**: when `next` exits, issue the `answer` (or `approve`) and a fresh `next` as parallel tool calls — each event then costs exactly one wake-up plus one turn. Re-arm only *after* answering; `next` has no memory of delivered events, so re-arming while a question is still pending fires immediately with the same event. A parked `next` consumes zero context, and long runs can ask several times — keep the loop going until the run completes (its own exit notifies you) or `next` exits `10`.
+
+On-disk state backs all of this regardless of which process owns the run: the run record (`workspaces/*/runs/<runId>.json`) carries `pendingQuestion` and `pendingApproval` while blocked, and `questions[]` as the resolved audit trail.
+
+## The Ask Channel (Codex Asks, You Answer)
+
+On long or autonomous runs, Codex can pause mid-turn to ask you a question — without betting the run on your reply. Launch the run with the built-in `collab` template to teach it the channel:
+
+```bash
+codex-collab run "large refactor task…" --template collab --timeout 3600
+```
+
+Mid-turn, Codex runs `codex-collab ask "…"`, which waits up to 10 minutes and then resolves one of two ways, both printed into Codex's own context: your answer (steering), or a graceful no-answer notice (fail-open; the run continues, and the unanswered question lands in the run record). Questions are *judgment*, not permission — unlike approvals they never block the run terminally. The template declares the channel and its costs but deliberately prescribes no rules: whether and when to ask is Codex's own call.
+
+**Restate the channel when you resume a long collab thread.** The channel instructions ride the first prompt, and long threads compact oldest-first — so include one line in your own words in the resume prompt (e.g. "the collaboration channel is still open — `codex-collab ask` reaches me"). Codex only needs the gist; the mechanics are rediscoverable from `codex-collab --help`.
+
+A pending question surfaces in the progress stream (and `follow`):
+
+```
+[codex] QUESTION FROM CODEX (expires in 10m)
+[codex]   Migrating auth to JWT next. Drop the FK constraints or dual-write?
+[codex]   Answer: codex-collab answer q7f3a2c1 "<text>" -d '/path/to/project'
+```
+
+**Triage, in order of preference:**
+1. **Answer from your own context** — you launched the run; you usually hold exactly what the question needs. Questions are interrupt-priority: Codex is burning its deadline budget while you deliberate.
+2. **Escalate to the user** when it's a preference or product call above your mandate — relay the question, relay their answer back.
+3. **Decline explicitly** — `codex-collab answer <id> "Your call — proceed and note the decision"` — rather than letting it expire silently, so the audit trail can distinguish a deliberate "proceed" from nobody having been around to answer.
+
+**Answer craft: transfer judgment, not tokens.** State the choice, the reason, and the condition under which Codex should deviate or ask again — a bare "yes" steers one decision; a reasoned answer steers the next ten. Long answers: `codex-collab answer <id> -` reads stdin.
+
+```bash
+codex-collab questions            # list pending questions (id, age, time left)
+codex-collab questions <id>       # full text of one question (list view clips long ones)
+codex-collab answer <id> "text"   # answer one (prefix matching works)
 ```
 
 ## Approvals
@@ -187,8 +223,13 @@ codex-collab peek <id> [--limit N --full] # Recent conversation slice from serve
 codex-collab kill <id>                  # Stop a running thread
 codex-collab delete <id>                # Archive thread (recoverable via `codex unarchive`), delete local files
 codex-collab delete <id> --purge        # Permanently delete server-side instead — NOT recoverable; needs explicit user intent
-codex-collab clean                      # Delete old logs and stale mappings
+codex-collab clean                      # Delete old logs, stale mappings, old question files
 codex-collab approve <id> | decline <id> # Answer a pending approval
+codex-collab answer <id> "text"         # Answer a pending ask-channel question (see The Ask Channel)
+codex-collab questions [id]             # List pending questions (with an ID: show its full text)
+codex-collab next [--timeout <sec>]     # Block until a question/approval needs you; print one JSON event
+                                        # (exit 0 = event, 10 = workspace idle, 3 = timeout)
+codex-collab ask "q" [--timeout <sec>]  # (invoked BY CODEX mid-turn, not by you) post a question, wait, fail open
 codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, reasoning, sandbox, approval, timeout, memory)
 codex-collab models | templates | health | version
 ```
@@ -204,7 +245,7 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
-| `--timeout <sec>` | Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes. Increase for large reviews or complex tasks. |
+| `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes; increase for large reviews or complex tasks. (ask) Answer deadline, default 600. (next) Wait bound, default none — it waits until an event or workspace idle. |
 | `--approval <policy>` | never, on-request, on-failure, untrusted, auto (default: never) — see Approvals |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--detach` | (run) Return once the turn is running — see Detached Runs |
@@ -244,7 +285,7 @@ To hand off a thread to the Codex TUI, look up the full thread ID with `codex-co
 
 - **`run --resume` requires a prompt.** `review --resume` works without one (it uses the review workflow), but `run --resume <id>` will error if no prompt is given.
 - **Omit `-d` if already in the project directory** — it defaults to cwd. Only pass `-d` when the target project differs from your current directory.
-- **Multiple concurrent threads** are supported. Threads share a per-workspace broker for efficient resource usage.
+- **Multiple concurrent threads** are supported. Threads share a per-workspace broker for efficient resource usage. Ask-channel questions are workspace-scoped by design — `next` and `questions` see every run's questions, whoever answers first wins, and a second answer gets a clean "already answered" error.
 - **Validate Codex's findings.** After reading Codex's review or analysis output, verify each finding against the actual source code before presenting to the user. Drop false positives, note which findings you verified.
 - **Per-workspace scoping.** Threads and state are scoped per workspace (git repo root). Different repos have independent thread lists.
 - **First invocation per workspace** may take slightly longer to initialize; subsequent calls in the same session reuse the connection context.
@@ -258,3 +299,4 @@ To hand off a thread to the Codex TUI, look up the full thread ID with `codex-co
 | Thread not found | Use `codex-collab threads` to list active threads |
 | Process crashed mid-task | Resume with `--resume <id>` — thread state is persisted |
 | Approval request hanging | Run `codex-collab approve <id>` or `codex-collab decline <id>` |
+| Question expired before answering | Codex already proceeded on its own judgment — the decision is in the run output and `questions[]` on the run record. To steer now, `run --resume <id>` once the run ends. |

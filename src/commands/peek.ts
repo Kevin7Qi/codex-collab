@@ -2,6 +2,8 @@
 
 import type { Turn, ThreadItem, Thread, UserMessageItem, AgentMessageItem } from "../types";
 
+import { sanitizeForTerminal } from "../questions";
+
 import {
   die,
   parseOptions,
@@ -143,7 +145,10 @@ export function formatPeekHuman(
   }
   void shortId;
   void thread;
-  return lines.join("\n");
+  // The human view renders server-side conversation content (messages,
+  // command lines) straight to a terminal — strip escape sequences at the
+  // boundary. --json output stays verbatim for programmatic consumers.
+  return sanitizeForTerminal(lines.join("\n"));
 }
 
 export async function handlePeek(args: string[]): Promise<void> {

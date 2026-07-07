@@ -14,6 +14,7 @@ import {
   resolveDefaults,
   startOrResumeThread,
   createDispatcher,
+  armQuestionChannel,
   getApprovalHandler,
   getWorkspacePaths,
   recordTerminalRunState,
@@ -106,6 +107,10 @@ export async function handleReview(args: string[]): Promise<void> {
     // thread/resume on the dead thread would fail. Denials still show in the
     // progress stream and log.
     const dispatcher = createDispatcher(join(ws.stateDir, runLogRelPath(shortId, runId)), options);
+    // Reviews arm the ask channel too: `review --resume` on a thread that
+    // was taught the channel leaves the instructions in Codex's history, so
+    // a mid-review ask must surface instead of silently stalling.
+    armQuestionChannel(dispatcher, ws, runId, options.dir);
 
     // Note: model/cwd/approval/sandbox already reached the server via the
     // thread start/fork params in startOrResumeThread; review/start itself
@@ -137,6 +142,8 @@ export async function handleReview(args: string[]): Promise<void> {
       recordRunFailure(ws, threadId, runId, e);
       throw e;
     } finally {
+      // Same disposal contract as handleRun — see armQuestionChannel.
+      dispatcher.setQuestionContext(null);
       setActiveThreadId(undefined);
       setActiveReviewThreadId(undefined);
       setActiveShortId(undefined);
