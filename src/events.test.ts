@@ -199,6 +199,25 @@ describe("EventDispatcher", () => {
     expect(content).toContain("echo flush-test");
   });
 
+  test("flushOutput is incremental — repeated flushes never duplicate earlier output", () => {
+    // Goal-following runs flush once per followed turn; re-writing the whole
+    // accumulation would repeat turn 1's text in every later block.
+    const logPath = join(TEST_LOG_DIR, "test-incremental-flush.log");
+    const dispatcher = new EventDispatcher(logPath, () => {});
+
+    dispatcher.handleDelta("item/agentMessage/delta", { threadId: "t1", turnId: "u1", itemId: "i1", delta: "turn one." });
+    dispatcher.flushOutput();
+    dispatcher.flushOutput(); // nothing new — must be a no-op
+    dispatcher.handleDelta("item/agentMessage/delta", { threadId: "t1", turnId: "u2", itemId: "i2", delta: "turn two." });
+    dispatcher.flushOutput();
+    dispatcher.flush();
+
+    const content = readFileSync(logPath, "utf-8");
+    expect(content.split("turn one.").length - 1).toBe(1); // exactly once
+    expect(content.split("turn two.").length - 1).toBe(1);
+    expect(content.split("<<END_AGENT_OUTPUT>>").length - 1).toBe(2); // one block per flush with new content
+  });
+
   test("collects file changes and commands", () => {
     const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "test5.log"));
 

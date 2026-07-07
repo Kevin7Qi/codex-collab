@@ -7,6 +7,7 @@ import {
   isKnownItem,
   TurnTimeoutError,
   type UserInput, type TurnStartParams, type TurnStartResponse, type TurnCompletedParams,
+  type TurnStartedParams, type ThreadGoal, type ThreadGoalUpdatedParams, type ThreadGoalClearedParams,
   type ReviewTarget, type ReviewStartParams, type ReviewDelivery,
   type TurnResult, type ItemStartedParams, type ItemCompletedParams, type DeltaParams,
   type ErrorNotificationParams, type AutoApprovalReviewParams,
@@ -16,6 +17,7 @@ import {
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
 import { config } from "./config";
+import { pauseThreadGoal, readThreadGoal } from "./goals";
 
 const STALE_KILL_SIGNAL_MS = 1000;
 
@@ -83,6 +85,21 @@ export interface TurnOptions {
    *  CLI signal handler target the right thread for `turn/interrupt`. Never
    *  fires for normal turns. */
   onReviewThreadId?: (reviewThreadId: string) => void;
+  /** Called BEFORE the cleanup turn/interrupt on abnormal exits (timeout,
+   *  kill, errors). Goal-following installs its pause brake here: with an
+   *  active goal, interrupting first lets the server spawn one more
+   *  headless continuation in the gap before the wrapper's own pause runs.
+   *  Failures are swallowed — the interrupt must still happen. */
+  onBeforeInterrupt?: () => Promise<void>;
+}
+
+/** Run the pre-interrupt hook, never letting its failure block the interrupt. */
+async function runBeforeInterruptHook(opts: TurnOptions): Promise<void> {
+  try {
+    await opts.onBeforeInterrupt?.();
+  } catch (e) {
+    console.error(`[codex] Warning: pre-interrupt hook failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 export interface ReviewOptions extends TurnOptions {
@@ -132,11 +149,465 @@ export async function runReview(
   return executeTurn(client, "review/start", params, opts);
 }
 
+export interface GoalRunOptions extends TurnOptions {
+  /** Fired on every goal mutation seen during the run (create_goal /
+   *  update_goal / server budget stamps) and once per followed continuation
+   *  turn — callers mirror this onto the run record for observers. */
+  onGoalUpdate?: (goal: ThreadGoal, continuationTurns: number) => void;
+}
+
+export interface GoalRunResult extends TurnResult {
+  /** Final goal state: null when no goal ever appeared OR the goal was
+   *  cleared after being seen (disambiguate with goalSeen). Completion
+   *  normally arrives as status "complete" with the goal still present. */
+  goal: ThreadGoal | null;
+  /** A goal existed at some point during this run. */
+  goalSeen: boolean;
+  /** Server-driven continuation turns this run followed (0 = single turn). */
+  continuationTurns: number;
+}
+
+/** How long past turn/completed we keep waiting for the server to start the
+ *  continuation turn before re-polling goal state. Continuations start
+ *  within milliseconds (verified 0.142.3); the re-poll loop is the backstop
+ *  for pause/clear landing from elsewhere while we wait. */
+const GOAL_CONTINUATION_POLL_MS = 500;
+/** Re-read thread/goal/get at this cadence while waiting for a continuation
+ *  turn, in case a goal/updated notification was lost. */
+const GOAL_REPOLL_INTERVAL_MS = 5_000;
+
+/**
+ * Run a turn, then — if the thread has an active goal — keep following the
+ * server's continuation turns in the same dispatcher/log until the goal is
+ * terminal. This makes a `run` correspond to the unit of work: Codex's goal
+ * runtime auto-starts a new turn the instant one completes while the goal
+ * is active, so returning after the first turn would leave the goal working
+ * headless and unobserved (issue #19).
+ *
+ * `opts.timeoutMs` is GOAL-SCOPED here: one deadline for the whole span. On
+ * expiry the goal is paused BEFORE the active turn is interrupted (interrupt
+ * alone just makes the server start a fresh continuation), then a
+ * TurnTimeoutError propagates as usual. A kill signal mid-goal takes the
+ * same pause-then-interrupt path and returns status "interrupted".
+ */
+export async function runTurnWithGoalFollow(
+  client: AppServerClient,
+  threadId: string,
+  input: UserInput[],
+  opts: GoalRunOptions,
+): Promise<GoalRunResult> {
+  const deadlineMs = Date.now() + opts.timeoutMs;
+  const startTime = Date.now();
+
+  // Goal tracking spans the whole run: a goal created mid-turn-1 (create_goal
+  // tool call) is seen live, and its updates mirror onto the run record.
+  let lastGoal: ThreadGoal | null = null;
+  let goalSeen = false;
+  let goalCleared = false;
+  let continuationTurns = 0;
+  const unsubs: Array<() => void> = [];
+  const notifyGoal = (goal: ThreadGoal): void => {
+    lastGoal = goal;
+    goalSeen = true;
+    goalCleared = false;
+    try {
+      opts.onGoalUpdate?.(goal, continuationTurns);
+    } catch (e) {
+      console.error(`[codex] Warning: goal-update observer failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  unsubs.push(client.on("thread/goal/updated", (params) => {
+    const p = params as ThreadGoalUpdatedParams;
+    if (p?.threadId !== threadId || !p.goal) return;
+    notifyGoal(p.goal);
+  }));
+  unsubs.push(client.on("thread/goal/cleared", (params) => {
+    if ((params as ThreadGoalClearedParams)?.threadId !== threadId) return;
+    lastGoal = null;
+    goalCleared = true;
+  }));
+
+  // Continuation turns are buffered from the START of the run: the server
+  // begins a continuation within milliseconds of turn/completed, easily
+  // beating the goal/get round-trip that decides whether to follow. Our own
+  // turn is filtered out via onTurnId. Item ROUTING is gated on the follow
+  // phase — during the first turn executeTurn owns routing, and dispatching
+  // here too would duplicate output and progress lines.
+  const ownTurnIds = new Set<string>();
+  const followedTurnIds = new Set<string>();
+  const startedTurnIds: string[] = [];
+  let following = false;
+  const wrappedOpts: GoalRunOptions = {
+    ...opts,
+    onTurnId: (id) => {
+      // turn/started for our own turn can beat the turn/start response —
+      // un-queue it, or the follow loop would try to follow our own turn.
+      ownTurnIds.add(id);
+      followedTurnIds.delete(id);
+      const queued = startedTurnIds.indexOf(id);
+      if (queued !== -1) startedTurnIds.splice(queued, 1);
+      opts.onTurnId?.(id);
+    },
+    // executeTurn's abnormal-exit cleanup interrupts the FIRST turn before
+    // our catch handlers run — with an active goal, that interrupt spawns
+    // one more headless continuation in the gap. The hook pauses first,
+    // preserving pause-before-interrupt on the first turn too. (defined
+    // below; only invoked during runTurn's cleanup, long after init)
+    onBeforeInterrupt: () => pauseIfActive("before interrupt"),
+  };
+  unsubs.push(client.on("turn/started", (params) => {
+    const p = params as TurnStartedParams;
+    if (p?.threadId !== threadId || !p.turn?.id || ownTurnIds.has(p.turn.id)) return;
+    followedTurnIds.add(p.turn.id);
+    startedTurnIds.push(p.turn.id);
+  }));
+  // A continuation can start AND stream while we are still doing the
+  // post-turn goal read — before `following` arms. Those events are
+  // buffered (not dropped) and replayed the moment follow mode starts.
+  // Only events carrying a followed turn's id land here, and own turns
+  // never enter followedTurnIds, so nothing double-dispatches with
+  // executeTurn's routing during the first turn.
+  const preFollowBuffer: Array<{ method: string; params: unknown }> = [];
+  unsubs.push(...DISPATCHED_NOTIFICATION_METHODS.map((method) =>
+    client.on(method, (params) => {
+      const routing = params as { threadId?: unknown; turnId?: unknown };
+      if (routing?.threadId !== threadId) return;
+      if (typeof routing?.turnId === "string" && !followedTurnIds.has(routing.turnId)) return;
+      if (!following) {
+        // No-turnId events stay dropped pre-follow: ownership is ambiguous
+        // with the first turn's own routing.
+        if (typeof routing?.turnId === "string") preFollowBuffer.push({ method, params });
+        return;
+      }
+      dispatchNotification(opts.dispatcher, method, params);
+    }),
+  ));
+  // Buffers turn/completed from the start too — a fast continuation can
+  // complete before the follow loop reaches waitFor.
+  const completion = createTurnCompletionAwaiter(client, opts.timeoutMs);
+  unsubs.push(completion.unsubscribe);
+
+  // Connection loss must never read as "goal completed": a dead connection
+  // makes getThreadGoal return null, which the follow loop would otherwise
+  // take for a cleared (= completed) goal.
+  let connectionDown: Error | null = null;
+
+  /** Authoritative goal state; refreshes lastGoal/goalSeen. A FAILED read
+   *  returns the last known state instead of null — one transient RPC error
+   *  must not read as "goal cleared" (= completed) and end the follow with
+   *  a false success while the server keeps working. The repoll cadence
+   *  retries; the deadline is the backstop if reads never recover. */
+  const readGoal = async (): Promise<ThreadGoal | null> => {
+    const { goal, ok } = await readThreadGoal(client, threadId);
+    if (!ok) return lastGoal;
+    if (goal) notifyGoal(goal);
+    else if (goalSeen && connectionDown === null) {
+      lastGoal = null;
+      goalCleared = true;
+    }
+    return goal;
+  };
+
+  /** Pause the goal iff it is (or may be) active. Fresh read first:
+   *  `kill --clear` may have already cleared (or paused) the goal, and
+   *  pausing a goal that no longer exists is noise, not a brake. Skip ONLY
+   *  on a positive answer — a failed read must not skip the pause (fail
+   *  closed: this is the lever that stops headless token burn). */
+  const pauseIfActive = async (context: string): Promise<void> => {
+    const { goal: current, ok } = await readThreadGoal(client, threadId);
+    if (ok && (current === null || current.status !== "active")) return;
+    const paused = await pauseThreadGoal(client, threadId);
+    if (!paused) {
+      opts.dispatcher.progressLine(
+        `WARNING: could not pause the goal ${context} — it may keep running headless. ` +
+        `Stop it with: codex-collab kill <id> (or --clear to abandon it).`,
+      );
+    } else {
+      opts.dispatcher.progressLine(`Goal paused ${context} — resume by running a new turn on this thread.`);
+      // Stamp the pause locally: the server's goal/updated notification races
+      // our exit, and losing that race would leave the terminal run record
+      // claiming an "active" goal that is in fact paused.
+      const stamped = current ?? (lastGoal as ThreadGoal | null);
+      if (stamped) notifyGoal({ ...stamped, status: "paused" });
+    }
+  };
+
+  /** The brake for every abnormal exit while a goal is active: pause FIRST
+   *  (so no fresh continuation spawns), then interrupt the live turn. */
+  const pauseAndInterrupt = async (activeTurnId: string | null, context: string): Promise<void> => {
+    await pauseIfActive(context);
+    if (activeTurnId !== null) {
+      await tryInterruptTurn(client, threadId, activeTurnId, context);
+    }
+  };
+
+  const finish = (result: TurnResult): GoalRunResult => ({
+    ...result,
+    durationMs: Date.now() - startTime,
+    goal: lastGoal,
+    goalSeen,
+    continuationTurns,
+  });
+
+  /** Follow-phase kill: brake, flush, clean up the signal file (executeTurn's
+   *  finally only covers the first turn), and shape the interrupted result. */
+  const finishKilled = async (activeTurnId: string | null): Promise<GoalRunResult> => {
+    await pauseAndInterrupt(activeTurnId, "on kill");
+    opts.dispatcher.flushOutput();
+    opts.dispatcher.flush();
+    removeOwnKillSignal(opts.killSignalsDir ?? config.killSignalsDir, threadId);
+    return finish({
+      status: "interrupted",
+      output: opts.dispatcher.getTurnOutput(),
+      filesChanged: opts.dispatcher.getFilesChanged(),
+      commandsRun: opts.dispatcher.getCommandsRun(),
+      error: "Thread killed by user",
+      durationMs: 0,
+    });
+  };
+
+  try {
+    // Read the goal BEFORE the turn: a goal that predates this run (resumed
+    // goal-mode thread) fires no goal/updated during our turn, and every
+    // abnormal-exit brake below keys off knowing it exists. The get also
+    // travels through the broker, which learns the active goal from it and
+    // retains stream ownership across the coming continuation turns.
+    await readGoal();
+
+    let first: TurnResult;
+    try {
+      first = await runTurn(client, threadId, input, wrappedOpts);
+    } catch (e) {
+      // A first-turn timeout with an active goal must not leave the goal
+      // burning headless after the CLI exits with code 3. pauseAndInterrupt
+      // does its own authoritative read — cached flags would miss a goal
+      // that appeared mid-turn without any notification reaching us.
+      if (e instanceof TurnTimeoutError) {
+        await pauseAndInterrupt(null, "on timeout");
+      }
+      throw e;
+    }
+
+    if (first.status === "interrupted") {
+      // Killed during turn 1. The goal-aware `kill` pauses the goal itself,
+      // but older kills, SIGINT paths, and server-side interrupts don't —
+      // never exit "interrupted" while the server keeps continuing.
+      await pauseAndInterrupt(null, "on kill");
+      return finish(first);
+    }
+
+    // Goal check is authoritative (not just notifications): a goal created
+    // before this run — e.g. resuming a goal-mode thread — never fires
+    // goal/updated during our turn.
+    let goal = await readGoal();
+    if (!goal || goal.status !== "active") return finish(first);
+
+    opts.dispatcher.progressLine(
+      `Goal active — following continuation turns (${goalProgress(goal)}). Objective: ${clipLine(goal.objective)}`,
+    );
+
+    // --- Follow phase ---------------------------------------------------
+    // The server owns turn creation now; we attach to each continuation
+    // turn as it starts and stream it into the same dispatcher/log.
+    const followAbort = new AbortController();
+    const followUnsubs: Array<() => void> = [];
+    try {
+      following = true;
+      // Replay events a fast continuation streamed before follow mode armed.
+      // Synchronous — no await between arming and replay, so live events
+      // cannot interleave out of order.
+      for (const buffered of preFollowBuffer.splice(0)) {
+        dispatchNotification(opts.dispatcher, buffered.method, buffered.params);
+      }
+      followUnsubs.push(...registerApprovalHandlers(client, opts, followAbort.signal));
+
+      let connectionLost: ((err: Error) => void) | null = null;
+      const connectionLossPromise = new Promise<never>((_resolve, reject) => {
+        connectionLost = reject;
+      });
+      connectionLossPromise.catch(() => {});
+      followUnsubs.push(client.onClose(() => {
+        connectionDown = new Error("Connection to Codex lost mid-goal (app-server or broker exited)");
+        connectionLost?.(connectionDown);
+      }));
+
+      const killSignal = createKillSignalAwaiter(
+        threadId, opts.killSignalsDir ?? config.killSignalsDir, 500, followAbort.signal,
+      );
+      let killed = false;
+      killSignal.catch((e) => {
+        if (e instanceof KillSignalError) killed = true;
+        else console.error(`[codex] Unexpected error in kill signal awaiter: ${e instanceof Error ? e.message : String(e)}`);
+      });
+
+      let lastTurnStatus: TurnResult["status"] = first.status;
+      let lastTurnError: string | undefined = first.error;
+      for (;;) {
+        if (connectionDown !== null) throw connectionDown;
+        if (goal === null || goal.status !== "active") break;
+
+        // Wait for the continuation turn to start; re-check the world as we
+        // wait (kill, deadline, goal changed under us, lost notifications).
+        let turnId: string | null = null;
+        let lastRepoll = Date.now();
+        while (turnId === null) {
+          const next = startedTurnIds.shift();
+          if (next !== undefined) { turnId = next; break; }
+          if (killed) break;
+          if (connectionDown !== null) throw connectionDown;
+          if (Date.now() >= deadlineMs) {
+            await pauseAndInterrupt(null, "on timeout");
+            throw new TurnTimeoutError(
+              `Goal did not complete within ${Math.round(opts.timeoutMs / 1000)}s — goal paused (resume with a new turn, or kill --clear to abandon)`,
+            );
+          }
+          if (goalCleared || (lastGoal !== null && (lastGoal as ThreadGoal).status !== "active")) break;
+          if (Date.now() - lastRepoll >= GOAL_REPOLL_INTERVAL_MS) {
+            lastRepoll = Date.now();
+            await readGoal();
+          }
+          await new Promise((r) => setTimeout(r, GOAL_CONTINUATION_POLL_MS));
+        }
+        if (killed) return await finishKilled(turnId);
+        if (turnId === null) { goal = await readGoal(); continue; }
+
+        continuationTurns++;
+        opts.onTurnId?.(turnId);
+        if (lastGoal) notifyGoal(lastGoal as ThreadGoal); // refresh continuationTurns on the record
+        opts.dispatcher.progressLine(`Goal continuation turn ${continuationTurns} started${lastGoal ? ` (${goalProgress(lastGoal as ThreadGoal)})` : ""}`);
+
+        try {
+          const completed = await Promise.race([
+            completion.waitFor(turnId, Math.max(1, deadlineMs - Date.now())),
+            killSignal,
+            connectionLossPromise,
+          ]);
+          lastTurnStatus = completed.turn.status as TurnResult["status"];
+          lastTurnError = completed.turn.error?.message;
+        } catch (e) {
+          if (e instanceof KillSignalError) {
+            return await finishKilled(turnId);
+          }
+          if (e instanceof TurnTimeoutError) {
+            await pauseAndInterrupt(turnId, "on timeout");
+            throw new TurnTimeoutError(
+              `Goal did not complete within ${Math.round(opts.timeoutMs / 1000)}s — goal paused (resume with a new turn, or kill --clear to abandon)`,
+            );
+          }
+          // Connection loss and everything else: the goal may genuinely keep
+          // running server-side (that can be desirable — broker path), but we
+          // can no longer observe or brake it. Surface loudly and rethrow.
+          throw e;
+        }
+
+        opts.dispatcher.flushOutput();
+        opts.dispatcher.flush();
+        goal = await readGoal();
+      }
+
+      // Goal reached a non-active state. Success is status "complete"
+      // (observed live) — a cleared goal after being seen reads the same.
+      const endGoal = lastGoal as ThreadGoal | null;
+      if (endGoal === null || endGoal.status === "complete") {
+        opts.dispatcher.progressLine(
+          `Goal complete after ${continuationTurns + 1} turns${endGoal ? ` (${goalProgress(endGoal)})` : ""}.`,
+        );
+      } else {
+        opts.dispatcher.progressLine(`Goal ${endGoal.status} after ${continuationTurns + 1} turns (${goalProgress(endGoal)}).`);
+      }
+      return finish({
+        status: lastTurnStatus,
+        output: opts.dispatcher.getTurnOutput(),
+        filesChanged: opts.dispatcher.getFilesChanged(),
+        commandsRun: opts.dispatcher.getCommandsRun(),
+        error: lastTurnError,
+        durationMs: 0,
+      });
+    } finally {
+      followAbort.abort();
+      for (const unsub of followUnsubs) unsub();
+    }
+  } finally {
+    for (const unsub of unsubs) unsub();
+  }
+}
+
+/** "12,345 tokens used" / "12,345 / 100,000 tokens" for progress lines. */
+function goalProgress(goal: ThreadGoal): string {
+  const used = goal.tokensUsed.toLocaleString("en-US");
+  return goal.tokenBudget !== null
+    ? `${used} / ${goal.tokenBudget.toLocaleString("en-US")} tokens`
+    : `${used} tokens used`;
+}
+
+/** First ~80 chars of a goal objective for a progress line. */
+function clipLine(text: string): string {
+  const firstLine = text.split("\n", 1)[0].trim();
+  return firstLine.length > 80 ? firstLine.slice(0, 79) + "…" : firstLine;
+}
+
 /** Error thrown when a kill signal file is detected during turn execution. */
 class KillSignalError extends Error {
   constructor(public readonly threadId: string) {
     super(`Thread ${threadId} killed by user`);
     this.name = "KillSignalError";
+  }
+}
+
+/** Remove a kill-signal file iff it targets this process (empty, wildcard,
+ *  or our PID) — a different LIVE pid's signal belongs to a concurrent run
+ *  on the thread, and deleting it would make that kill silently never land. */
+function removeOwnKillSignal(signalsDir: string, threadId: string): void {
+  const signalPath = join(signalsDir, threadId);
+  try {
+    const content = readFileSync(signalPath, "utf-8").trim();
+    if (content === "" || content === "*" || content === String(process.pid)) {
+      unlinkSync(signalPath);
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[codex] Warning: could not clean up kill signal: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
+/** Notification methods routed into the EventDispatcher — shared by the
+ *  single-turn path (executeTurn) and the goal-following path. */
+const DISPATCHED_NOTIFICATION_METHODS = [
+  "item/started",
+  "item/completed",
+  "item/agentMessage/delta",
+  "item/commandExecution/outputDelta",
+  "item/autoApprovalReview/started",
+  "item/autoApprovalReview/completed",
+  "guardianWarning",
+  "error",
+] as const;
+
+/** Route one already-filtered notification into the dispatcher. Callers own
+ *  the turn/thread filtering — this is just the method→handler fan-out. */
+function dispatchNotification(dispatcher: EventDispatcher, method: string, params: unknown): void {
+  switch (method) {
+    case "item/started":
+      dispatcher.handleItemStarted(params as ItemStartedParams);
+      break;
+    case "item/completed":
+      dispatcher.handleItemCompleted(params as ItemCompletedParams);
+      break;
+    case "item/agentMessage/delta":
+    case "item/commandExecution/outputDelta":
+      dispatcher.handleDelta(method, params as DeltaParams);
+      break;
+    case "item/autoApprovalReview/started":
+    case "item/autoApprovalReview/completed":
+      dispatcher.handleAutoApprovalReview(method, params as AutoApprovalReviewParams);
+      break;
+    case "guardianWarning":
+      dispatcher.handleGuardianWarning(params as { message?: unknown });
+      break;
+    case "error":
+      dispatcher.handleError(params as ErrorNotificationParams);
+      break;
   }
 }
 
@@ -248,54 +719,23 @@ async function executeTurn(
         return;
       }
     }
-    switch (method) {
-      case "item/started": {
-        const p = params as ItemStartedParams;
-        opts.dispatcher.handleItemStarted(p);
-        // Completion inference: if new non-reasoning work starts after a
-        // final_answer, cancel the inference timer to avoid premature
-        // completion synthesis. Reasoning items are excluded: the model can
-        // begin a reasoning trace concurrent with or after the final answer
-        // without that implying further work.
-        if (inferenceResolver) {
-          const item = p.item as { type?: string } | undefined;
-          if (item?.type !== "reasoning") clearInferenceTimer();
-        }
-        break;
+    dispatchNotification(opts.dispatcher, method, params);
+    if (method === "item/started") {
+      // Completion inference: if new non-reasoning work starts after a
+      // final_answer, cancel the inference timer to avoid premature
+      // completion synthesis. Reasoning items are excluded: the model can
+      // begin a reasoning trace concurrent with or after the final answer
+      // without that implying further work.
+      if (inferenceResolver) {
+        const item = (params as ItemStartedParams).item as { type?: string } | undefined;
+        if (item?.type !== "reasoning") clearInferenceTimer();
       }
-      case "item/completed": {
-        const p = params as ItemCompletedParams;
-        opts.dispatcher.handleItemCompleted(p);
-        processItemCompleted(p);
-        break;
-      }
-      case "item/agentMessage/delta":
-      case "item/commandExecution/outputDelta":
-        opts.dispatcher.handleDelta(method, params as DeltaParams);
-        break;
-      case "item/autoApprovalReview/started":
-      case "item/autoApprovalReview/completed":
-        opts.dispatcher.handleAutoApprovalReview(method, params as AutoApprovalReviewParams);
-        break;
-      case "guardianWarning":
-        opts.dispatcher.handleGuardianWarning(params as { message?: unknown });
-        break;
-      case "error":
-        opts.dispatcher.handleError(params as ErrorNotificationParams);
-        break;
+    } else if (method === "item/completed") {
+      processItemCompleted(params as ItemCompletedParams);
     }
   }
 
-  for (const method of [
-    "item/started",
-    "item/completed",
-    "item/agentMessage/delta",
-    "item/commandExecution/outputDelta",
-    "item/autoApprovalReview/started",
-    "item/autoApprovalReview/completed",
-    "guardianWarning",
-    "error",
-  ]) {
+  for (const method of DISPATCHED_NOTIFICATION_METHODS) {
     unsubs.push(
       client.on(method, (params) => {
         if (turnId === null) {
@@ -458,6 +898,7 @@ async function executeTurn(
       opts.dispatcher.flushOutput();
       opts.dispatcher.flush();
       if (turnId !== null) {
+        await runBeforeInterruptHook(opts);
         await tryInterruptTurn(client, interruptThreadId, turnId, "on kill");
       }
       return {
@@ -470,6 +911,7 @@ async function executeTurn(
       };
     }
     if (turnId !== null) {
+      await runBeforeInterruptHook(opts);
       await tryInterruptTurn(client, interruptThreadId, turnId);
     }
     throw e;
@@ -641,7 +1083,7 @@ function createTurnCompletionAwaiter(
   client: AppServerClient,
   timeoutMs: number,
 ): {
-  waitFor: (turnId: string) => Promise<TurnCompletedParams>;
+  waitFor: (turnId: string, timeoutOverrideMs?: number) => Promise<TurnCompletedParams>;
   unsubscribe: () => void;
 } {
   const buffer: TurnCompletedParams[] = [];
@@ -661,17 +1103,20 @@ function createTurnCompletionAwaiter(
   });
 
   return {
-    waitFor(turnId: string): Promise<TurnCompletedParams> {
+    // timeoutOverrideMs: per-call budget (goal following hands each
+    // continuation turn whatever remains of the goal-scoped deadline).
+    waitFor(turnId: string, timeoutOverrideMs?: number): Promise<TurnCompletedParams> {
       const found = buffer.find((p) => p.turn.id === turnId);
       if (found) return Promise.resolve(found);
+      const effectiveTimeoutMs = timeoutOverrideMs ?? timeoutMs;
 
       return new Promise((resolve, reject) => {
         timer = setTimeout(() => {
           resolver = null;
           targetId = null;
           unsub();
-          reject(new TurnTimeoutError(`Turn timed out after ${Math.round(timeoutMs / 1000)}s`));
-        }, timeoutMs);
+          reject(new TurnTimeoutError(`Turn timed out after ${Math.round(effectiveTimeoutMs / 1000)}s`));
+        }, effectiveTimeoutMs);
         // Set resolver before targetId so the notification handler never
         // sees targetId set without a resolver to call.
         resolver = (p) => {

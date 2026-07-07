@@ -19,4 +19,6 @@ Channel mechanics and costs:
 - An answer is their judgment, possibly informed by context you lack. Weigh it against what you know; if you disagree, say so — ask a follow-up or record the disagreement — rather than silently complying.
 - If a decision genuinely blocks you, ending your turn with `QUESTION FOR COLLABORATOR:` on its own line pauses the task until the collaborator resumes it.
 
+If you work under a goal (create_goal): your collaborator's session stays attached for the whole goal, and their `--timeout` pauses the goal when it expires. A `token_budget` on the goal is a second, independent brake — one you size to the work. The ask channel works the same mid-goal as mid-turn.
+
 Whether to consult, when, how often, and what to do with the answers is yours to decide.

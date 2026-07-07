@@ -216,6 +216,12 @@ export class EventDispatcher {
     }
   }
 
+  /** Public entry for out-of-band progress lines from the turn owner (goal
+   *  following announcements) — same path as internal progress lines. */
+  progressLine(text: string): void {
+    this.progress(text);
+  }
+
   /** Log-only sink for out-of-band lines that already reached the console by
    *  another path (e.g. approval prompts, which must stay visible even under
    *  --content-only). Writes the `[codex]`-tagged entry to the thread log so
@@ -579,6 +585,7 @@ export class EventDispatcher {
 
   reset(): void {
     this.accumulatedOutput = "";
+    this.flushedOutputLength = 0;
     this.finalAnswerOutput = "";
     this.reviewOutput = "";
     this.filesChanged = [];
@@ -592,10 +599,19 @@ export class EventDispatcher {
     for (const id of [...this.resolutionWatchers.keys()]) this.stopResolutionWatcher(id);
   }
 
-  /** Write accumulated agent output to the log (called before final flush). */
+  /** How much of accumulatedOutput has already been written to the log —
+   *  goal-following runs flush once per followed turn, and re-writing the
+   *  whole accumulation each time would duplicate earlier turns' output. */
+  private flushedOutputLength = 0;
+
+  /** Write agent output accrued since the last call to the log, as one
+   *  block per call (matches extractAgentOutputBlocks' one-block-per-turn
+   *  reading). Idempotent when nothing new accrued. */
   flushOutput(): void {
-    if (this.accumulatedOutput) {
-      this.log(`agent output:\n${this.accumulatedOutput}\n<<END_AGENT_OUTPUT>>`);
+    const pending = this.accumulatedOutput.slice(this.flushedOutputLength);
+    if (pending) {
+      this.log(`agent output:\n${pending}\n<<END_AGENT_OUTPUT>>`);
+      this.flushedOutputLength = this.accumulatedOutput.length;
     }
   }
 

@@ -60,6 +60,24 @@ function createMockCodex(dir: string, opts?: {
   /** Delay in ms before responding to review/start. Lets tests disconnect
    *  the client mid-request to exercise the orphan-turn cleanup path. */
   reviewDelay?: number;
+  /** If true, simulate a goal-mode thread: turn/start's completion is
+   *  followed by a server-driven continuation turn (turn/started → delta →
+   *  turn/completed) while the goal is active, then the goal completes. */
+  goalContinuation?: boolean;
+  /** If true, simulate a goal paused in the between-turns gap: the goal is
+   *  active when turn 1 completes, but no continuation ever starts — a
+   *  goal/updated(paused) lands instead (the kill/timeout brake). */
+  goalPausedInGap?: boolean;
+  /** If true, simulate a PRE-EXISTING active goal (resumed goal-mode
+   *  thread): thread/goal/get answers with an active goal, but NO
+   *  goal/updated notification ever fires — the broker can only learn the
+   *  goal from the get traffic. A continuation turn starts after turn 1. */
+  goalPreexisting?: boolean;
+  /** If true, simulate the fast-turn race on a goal thread: goal/updated
+   *  (active) AND turn/completed are written BEFORE the turn/start
+   *  response, then a continuation turn starts. The broker must claim
+   *  ownership despite the already-completed first turn. */
+  goalFastFirstTurn?: boolean;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
@@ -67,6 +85,10 @@ function createMockCodex(dir: string, opts?: {
   const turnCompletedDelay = opts?.turnCompletedDelay ?? 10;
   const completeBeforeResponse = opts?.completeBeforeResponse ?? false;
   const reviewDelay = opts?.reviewDelay ?? 0;
+  const goalContinuation = opts?.goalContinuation ?? false;
+  const goalPausedInGap = opts?.goalPausedInGap ?? false;
+  const goalPreexisting = opts?.goalPreexisting ?? false;
+  const goalFastFirstTurn = opts?.goalFastFirstTurn ?? false;
 
   const interruptLog = join(dir, "interrupts.log");
   const scriptPath = join(dir, "codex");
@@ -116,8 +138,34 @@ process.stdin.on("data", (chunk) => {
         }});
         break;
 
+      case "thread/goal/get": {
+        ${goalPreexisting ? `
+        respond({ id: msg.id, result: { goal: {
+          threadId: msg.params?.threadId || "thread-001", objective: "pre-existing objective",
+          status: "active", tokenBudget: 1000, tokensUsed: 100, timeUsedSeconds: 1,
+          createdAt: 1, updatedAt: 2,
+        }}});
+        ` : `
+        respond({ id: msg.id, result: { goal: null } });
+        `}
+        break;
+      }
+
       case "turn/start": {
         const threadId = msg.params?.threadId || "thread-001";
+        ${goalFastFirstTurn ? `
+        // Fast-turn race on a goal thread: goal becomes active and the turn
+        // completes BEFORE the turn/start response reaches the broker.
+        respond({ method: "thread/goal/updated", params: { threadId: threadId, turnId: "turn-001", goal: {
+          threadId: threadId, objective: "fast goal", status: "active", tokenBudget: 1000,
+          tokensUsed: 50, timeUsedSeconds: 1, createdAt: 1, updatedAt: 2,
+        }}});
+        respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+        setTimeout(() => {
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+          respond({ method: "item/agentMessage/delta", params: { threadId: threadId, turnId: "turn-002", itemId: "m2", delta: "continuation output" } });
+        }, 60);
+        ` : ""}
         ${completeBeforeResponse ? `
         // Fast-turn race: write turn/completed BEFORE the turn/start
         // response so they arrive at the broker in a single read chunk
@@ -153,7 +201,54 @@ process.stdin.on("data", (chunk) => {
           }, 5);
           ` : ""}
 
-          ${sendTurnCompleted ? `
+          ${goalContinuation ? `
+          // Goal-mode cascade: goal active → turn 1 completes → the server
+          // starts a continuation on its own → continuation completes →
+          // goal complete. Timings compressed but ordered like the real one.
+          const goal = (status, tokensUsed) => ({
+            threadId: threadId, objective: "mock objective", status: status,
+            tokenBudget: 1000, tokensUsed: tokensUsed, timeUsedSeconds: 1,
+            createdAt: 1, updatedAt: 2,
+          });
+          setTimeout(() => {
+            respond({ method: "thread/goal/updated", params: { threadId: threadId, turnId: "turn-001", goal: goal("active", 100) } });
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, ${turnCompletedDelay});
+          setTimeout(() => {
+            respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+            respond({ method: "item/agentMessage/delta", params: { threadId: threadId, turnId: "turn-002", itemId: "m2", delta: "continuation output" } });
+          }, ${turnCompletedDelay} + 30);
+          setTimeout(() => {
+            respond({ method: "thread/goal/updated", params: { threadId: threadId, turnId: "turn-002", goal: goal("complete", 200) } });
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-002", items: [], status: "completed", error: null } } });
+          }, ${turnCompletedDelay} + 60);
+          ` : goalPausedInGap ? `
+          // Goal active at turn 1's completion, then paused in the gap —
+          // no continuation turn ever starts.
+          const goal = (status) => ({
+            threadId: threadId, objective: "mock objective", status: status,
+            tokenBudget: 1000, tokensUsed: 100, timeUsedSeconds: 1,
+            createdAt: 1, updatedAt: 2,
+          });
+          setTimeout(() => {
+            respond({ method: "thread/goal/updated", params: { threadId: threadId, turnId: "turn-001", goal: goal("active") } });
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, ${turnCompletedDelay});
+          setTimeout(() => {
+            respond({ method: "thread/goal/updated", params: { threadId: threadId, turnId: null, goal: goal("paused") } });
+          }, ${turnCompletedDelay} + 40);
+          ` : goalPreexisting ? `
+          // Pre-existing goal: NO goal/updated notifications at all — the
+          // broker only knows the goal from thread/goal/get traffic. Turn 1
+          // completes, then the server starts the continuation.
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, ${turnCompletedDelay});
+          setTimeout(() => {
+            respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+            respond({ method: "item/agentMessage/delta", params: { threadId: threadId, turnId: "turn-002", itemId: "m2", delta: "continuation output" } });
+          }, ${turnCompletedDelay} + 30);
+          ` : sendTurnCompleted ? `
           setTimeout(() => {
             respond({
               method: "turn/completed",
@@ -1125,6 +1220,187 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         expect(notifications2.length).toBe(0);
 
         await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+  });
+
+  describe("goal-mode stream retention", () => {
+    test("continuation-turn notifications keep flowing to the owner while the goal is active, and ownership releases when it completes", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, { goalContinuation: true });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "work the goal" }],
+        });
+
+        // Pre-fix, ownership released at turn-001's completion and every
+        // continuation notification was dropped: the goal-following client
+        // never saw turn-002 start, stream, or complete.
+        await waitFor(() => notifications.some(
+          (n) => n.method === "turn/completed" && (n.params as any)?.turn?.id === "turn-002",
+        ), 5000);
+
+        const methods = notifications.map((n) => n.method);
+        expect(methods).toContain("turn/started");
+        expect(methods).toContain("item/agentMessage/delta");
+        expect(notifications.some(
+          (n) => n.method === "thread/goal/updated" && (n.params as any)?.goal?.status === "complete",
+        )).toBe(true);
+
+        // Goal complete + final turn/completed → ownership released: a
+        // second client's streaming request must not be rejected busy.
+        const client2 = await TestClient.connectAndInit(sockPath);
+        const res = await client2.request("turn/start", {
+          threadId: "thread-002",
+          input: [{ type: "text", text: "next" }],
+        });
+        expect((res as any)?.turn?.id).toBeDefined();
+
+        await client.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a PRE-EXISTING goal (no notifications) is learned from goal/get traffic and retains ownership", async () => {
+      // Resumed goal-mode thread: the goal predates every client, so no
+      // thread/goal/updated ever fires. The goal-following CLI's pre-turn
+      // thread/goal/get is the broker's only signal — pre-fix, ownership
+      // released at turn 1's completion and the continuation was invisible.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, { goalPreexisting: true });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        // The CLI's pre-turn goal read — this is what teaches the broker.
+        const goalRes = await client.request("thread/goal/get", { threadId: "thread-001" });
+        expect((goalRes as any)?.goal?.status).toBe("active");
+
+        await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "resume the goal" }],
+        });
+
+        await waitFor(() => notifications.some((n) => n.method === "turn/started"), 5000);
+        // The delta rides a separate chunk — await it rather than assert it.
+        await waitFor(() => notifications.some((n) => n.method === "item/agentMessage/delta"), 5000);
+
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a first goal turn completing before the turn/start response still claims ownership", async () => {
+      // Fast-turn race: turn/completed arrives in the same chunk as the
+      // turn/start response, so the normal claim is skipped — but the goal
+      // is active and continuations are coming. Pre-fix, they had no owner
+      // and the goal-following client waited blind until its timeout.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false, goalFastFirstTurn: true });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "work the goal" }],
+        });
+
+        await waitFor(() => notifications.some((n) => n.method === "turn/started"), 5000);
+        await waitFor(() => notifications.some((n) => n.method === "item/agentMessage/delta"), 5000);
+
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("goal ops are allowed through from another socket while a stream is owned", async () => {
+      // kill/kill --clear must be able to read and brake a goal whose
+      // following run owns the broker stream for the goal's whole lifetime.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const owner = await TestClient.connectAndInit(sockPath);
+        await owner.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "long turn" }],
+        });
+
+        const killer = await TestClient.connectAndInit(sockPath);
+        const res = await killer.request("thread/goal/get", { threadId: "thread-001" });
+        expect((res as any)).toHaveProperty("goal"); // forwarded, not busy-rejected
+
+        await owner.close();
+        await killer.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a goal paused in the between-turns gap releases retained ownership", async () => {
+      // Retention holds ownership after turn/completed while the goal is
+      // active. If the goal is paused BEFORE the continuation starts (the
+      // kill/timeout brake), no turn/completed will ever arrive — pre-fix
+      // the broker stayed busy until the 30-minute orphan watchdog.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, { goalPausedInGap: true });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "work the goal" }],
+        });
+        await waitFor(() => notifications.some(
+          (n) => n.method === "thread/goal/updated" && (n.params as any)?.goal?.status === "paused",
+        ), 5000);
+
+        // Ownership must be free again: a second client can stream.
+        const client2 = await TestClient.connectAndInit(sockPath);
+        const res = await client2.request("turn/start", {
+          threadId: "thread-002",
+          input: [{ type: "text", text: "next" }],
+        });
+        expect((res as any)?.turn?.id).toBeDefined();
+
+        await client.close();
         await client2.close();
       } finally {
         proc.kill();

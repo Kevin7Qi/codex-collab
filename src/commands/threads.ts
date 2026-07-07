@@ -181,6 +181,16 @@ export async function handleThreads(args: string[]): Promise<void> {
   const displayLimit = applyDiscoverLimit(options);
   if (displayLimit !== Infinity) entries = entries.slice(0, displayLimit);
 
+  // Goal state from each thread's LATEST run record only — an older run's
+  // goal snapshot is history, not the thread's current situation.
+  const latestRunSeen = new Set<string>();
+  const goalByThread = new Map<string, NonNullable<RunRecord["goal"]>>();
+  for (const r of listRuns(ws.stateDir)) {
+    if (latestRunSeen.has(r.threadId)) continue;
+    latestRunSeen.add(r.threadId);
+    if (r.goal) goalByThread.set(r.threadId, r.goal);
+  }
+
   if (options.json) {
     const enriched = entries.map(e => ({
       shortId: e.shortId,
@@ -191,6 +201,7 @@ export async function handleThreads(args: string[]): Promise<void> {
       preview: e.preview ?? null,
       createdAt: e.createdAt,
       updatedAt: e.updatedAt ?? e.createdAt,
+      goal: goalByThread.get(e.threadId) ?? null,
     }));
     console.log(JSON.stringify(enriched, null, 2));
   } else {
@@ -204,11 +215,21 @@ export async function handleThreads(args: string[]): Promise<void> {
       const age = formatAge(ts);
       const model = e.model ? ` (${e.model})` : "";
       const preview = e.preview ? ` ${e.preview.slice(0, 50)}` : "";
+      const goal = goalByThread.get(e.threadId);
+      const goalNote = goal ? `  [goal ${goal.status}: ${formatGoalTokens(goal)}]` : "";
       console.log(
-        `  ${e.shortId}  ${status.padEnd(12)} ${age.padEnd(8)} ${e.cwd ?? ""}${model}${preview}`,
+        `  ${e.shortId}  ${status.padEnd(12)} ${age.padEnd(8)} ${e.cwd ?? ""}${model}${preview}${goalNote}`,
       );
     }
   }
+}
+
+/** "45k/100k tokens" (budgeted) or "45k tokens" for the threads listing. */
+function formatGoalTokens(goal: NonNullable<RunRecord["goal"]>): string {
+  const compact = (n: number): string => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+  return goal.tokenBudget !== null
+    ? `${compact(goal.tokensUsed)}/${compact(goal.tokenBudget)} tokens`
+    : `${compact(goal.tokensUsed)} tokens`;
 }
 
 // ---------------------------------------------------------------------------

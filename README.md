@@ -110,7 +110,7 @@ codex-collab follow --watch
 | `run "prompt" [opts]` | Start thread, send prompt, wait, print output (`run -` reads the prompt from stdin — no shell-quoting hazards) |
 | `review [opts]` | Code review (PR, uncommitted, commit) |
 | `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server, `--session` for only threads the current session has run) |
-| `kill <id>` | Interrupt running thread |
+| `kill <id> [--clear]` | Interrupt running thread. An active goal is paused first — interrupt alone would just respawn a continuation turn; `--clear` abandons the goal instead |
 | `follow [id]` | Live view of a running thread; exits with its status (replays the last run when already finished). Without an ID, attaches to the workspace's active run — or replays the most recent one. With `--watch`, stays open and follows each new run (every run shown once, in start order) |
 | `output <id> [--last]` | Full log for thread (`--last`: only the latest turn's output) |
 | `progress <id>` | Recent activity (tail of log) |
@@ -162,12 +162,14 @@ codex-collab follow --watch
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
 | `--last` | (output) Only the latest turn's output instead of the whole thread history (implies `--content-only`) |
 | `--session` | (threads) Only threads the current session has run |
-| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483). For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
+| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483). When a goal is active it scopes the whole goal, and expiry pauses the goal before exiting. For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 | `--` | End of options; remaining arguments are treated as prompt text |
 | `-` | (run) Read the prompt from stdin |
 
-`run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` died blocked on an approval (the request is void — resume with a longer `--timeout` or `--approval auto`), `6` broker busy (transient — retry).
+`run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` died blocked on an approval (the request is void — resume with a longer `--timeout` or `--approval auto`), `6` broker busy (transient — retry), `7` goal ended blocked or usage/budget-limited — Codex needs steering (resume the thread, or `kill --clear` to abandon the goal).
+
+**Goal mode**: Codex's Goal mode (`goals = true` in `~/.codex/config.toml`) makes threads self-continue — the server starts a new turn the moment one completes while the goal is active. When a goal is (or becomes) active on the thread, a `run` follows every continuation turn in the same run record and log until the goal is terminal: the run corresponds to the unit of work, not just its first turn. `--timeout` then bounds the whole goal, and on expiry the goal is **paused** (resumable, no headless token burn) before the CLI exits `3`. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
 
 `next` exits `0` when an event was delivered (JSON on stdout), `3` when `--timeout` elapsed with no event, and `10` when the workspace is idle — nothing running, nothing pending.
 
