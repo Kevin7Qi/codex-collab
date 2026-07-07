@@ -75,18 +75,89 @@ export function parseQuestionMarker(line: string): QuestionMarker | null {
 
 /** True iff a command line looks like it INVOKES `codex-collab ask`, as
  *  opposed to merely mentioning it (grep over docs, echo, a path segment).
- *  `codex-collab` must sit at a command position: start of string, after a
- *  shell separator (`;`, `&`, `|`, `(`), or at the start of a `sh -c` /
- *  `zsh -lc` wrapper string. Bare whitespace is deliberately NOT a command
- *  position — `grep -rh codex-collab ask logs/` is a mention, and prefix
- *  forms like `timeout 600 codex-collab ask` are accepted false negatives:
- *  a miss only degrades run-record enrichment (the mailbox watchers and
- *  `next` see the question file regardless), while a false positive feeds
- *  marker parsing from arbitrary command output. */
-const ASK_INVOCATION_RE = /(?:^|[;&|(]|-l?c\s+['"])\s*codex-collab\s+ask(?:\s|$)/;
-
+ *  `codex-collab` must sit at a command position: start of string, or after
+ *  a shell separator (`;`, `&`, `|`, `(`, newline) that is OUTSIDE quotes —
+ *  a separator inside a quoted argument (`printf '; codex-collab ask …'`)
+ *  is data, and treating it as a command position would let arbitrary
+ *  command output feed marker parsing. `sh -c` / `zsh -lc` wrapper payloads
+ *  are scanned as command lines in their own right. Bare whitespace is
+ *  deliberately NOT a command position — `grep -rh codex-collab ask logs/`
+ *  is a mention, and prefix forms like `timeout 600 codex-collab ask` are
+ *  accepted false negatives: a miss only degrades run-record enrichment
+ *  (the mailbox watchers and `next` see the question file regardless),
+ *  while a false positive feeds marker parsing from untrusted output. */
 export function looksLikeAskInvocation(command: string): boolean {
-  return ASK_INVOCATION_RE.test(command);
+  // Wrapper payloads (`-c`/`-lc` string arguments) queue up for their own
+  // scan; one level of nesting per payload, no recursion depth to blow.
+  const commandLines = [command];
+  while (commandLines.length > 0) {
+    if (scanCommandLineForAsk(commandLines.pop()!, commandLines)) return true;
+  }
+  return false;
+}
+
+const WORD_BREAK_CHARS = " \t\n\r;&|()<>";
+
+function scanCommandLineForAsk(cmd: string, wrapperPayloads: string[]): boolean {
+  let i = 0;
+  let atCommandPos = true;   // next word starts a simple command
+  let expectAsk = false;     // previous word was command-position `codex-collab`
+  let expectPayload = false; // previous word was a `-c`/`-lc` wrapper flag
+  while (i < cmd.length) {
+    const ch = cmd[i];
+    if (ch === " " || ch === "\t") {
+      i++;
+      continue;
+    }
+    if (ch === ";" || ch === "&" || ch === "|" || ch === "(" || ch === "\n" || ch === "\r") {
+      atCommandPos = true;
+      expectAsk = false;
+      expectPayload = false;
+      i++;
+      continue;
+    }
+    if (ch === ")" || ch === "<" || ch === ">") {
+      expectAsk = false;
+      expectPayload = false;
+      i++;
+      continue;
+    }
+    // Read one word, resolving quotes and backslash escapes so quoted
+    // separators stay inside the word instead of opening a command position.
+    let word = "";
+    while (i < cmd.length && !WORD_BREAK_CHARS.includes(cmd[i])) {
+      const c = cmd[i];
+      if (c === "'") {
+        const end = cmd.indexOf("'", i + 1);
+        word += end === -1 ? cmd.slice(i + 1) : cmd.slice(i + 1, end);
+        i = end === -1 ? cmd.length : end + 1;
+      } else if (c === '"') {
+        let j = i + 1;
+        while (j < cmd.length && cmd[j] !== '"') {
+          if (cmd[j] === "\\" && j + 1 < cmd.length) {
+            word += cmd[j + 1];
+            j += 2;
+          } else {
+            word += cmd[j];
+            j++;
+          }
+        }
+        i = j < cmd.length ? j + 1 : cmd.length;
+      } else if (c === "\\" && i + 1 < cmd.length) {
+        word += cmd[i + 1];
+        i += 2;
+      } else {
+        word += c;
+        i++;
+      }
+    }
+    if (expectAsk && word === "ask") return true;
+    if (expectPayload) wrapperPayloads.push(word);
+    expectAsk = atCommandPos && word === "codex-collab";
+    expectPayload = /^-l?c$/.test(word);
+    atCommandPos = false;
+  }
+  return false;
 }
 
 /** True iff the ask invocation reads its question from stdin (`ask -`) —
