@@ -1,9 +1,33 @@
 // src/commands/kill.ts — kill command handler
 
-import { loadThreadIndex, updateThreadStatus } from "../threads";
+import { getLatestRun, loadThreadIndex, updateRun, updateThreadStatus } from "../threads";
 import { writeFileSync } from "fs";
 import { join } from "path";
-import { getThreadGoal, pauseThreadGoal, clearThreadGoal } from "../goals";
+import { pauseThreadGoal, clearThreadGoal, isGoalFeatureUnavailable } from "../goals";
+import type { AppServerClient } from "../client";
+import type { ThreadGoal } from "../types";
+
+/** Read the thread goal with a few retries: a live goal-following run owns
+ *  the broker stream and its own in-flight polls can transiently bounce our
+ *  request with "broker busy" — exactly the moment kill is most used. */
+async function readGoalWithRetry(
+  client: AppServerClient,
+  threadId: string,
+): Promise<{ goal: ThreadGoal | null; readFailed: boolean }> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const res = await client.request<{ goal: ThreadGoal | null }>("thread/goal/get", { threadId });
+      return { goal: res.goal ?? null, readFailed: false };
+    } catch (e) {
+      if (isGoalFeatureUnavailable(e)) return { goal: null, readFailed: false };
+      if (attempt >= 2) {
+        console.error(`[codex] Warning: could not read thread goal: ${e instanceof Error ? e.message : String(e)}`);
+        return { goal: null, readFailed: true };
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+}
 import {
   die,
   parseOptions,
@@ -76,7 +100,7 @@ export async function handleKill(args: string[]): Promise<void> {
       // keeps the goal resumable (a later turn continues it); --clear
       // abandons it entirely.
       try {
-        const goal = await getThreadGoal(client, threadId);
+        const { goal, readFailed } = await readGoalWithRetry(client, threadId);
         if (goal) {
           if (options.clear) {
             if (await clearThreadGoal(client, threadId)) {
@@ -89,11 +113,38 @@ export async function handleKill(args: string[]): Promise<void> {
               progress("Paused goal — a new turn on this thread resumes it; `kill --clear` abandons it.");
             }
           }
+        } else if (readFailed && options.clear) {
+          // Can't see the goal but the user asked for it gone — clear blindly
+          // (clearing a goal-less thread is a no-op server-side).
+          if (await clearThreadGoal(client, threadId)) {
+            goalStopped = true;
+            progress("Cleared goal (state was unreadable — cleared blindly).");
+          }
+        } else if (readFailed) {
+          progress("Could not read goal state — if a goal is active, the running process pauses it on kill.");
         } else if (options.clear) {
           progress("No goal on this thread.");
         }
       } catch (e) {
         console.error(`[codex] Warning: could not stop thread goal: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      // After --clear, reconcile the ledger: the latest run's goal mirror is
+      // what `threads` shows, and leaving it "paused"/"active" would keep
+      // advertising a goal that no longer exists (inviting a pointless
+      // resume). Stamped even when the server had no goal — that's exactly
+      // the stale-mirror case.
+      if (options.clear && shortId) {
+        try {
+          const latest = getLatestRun(ws.stateDir, shortId);
+          if (latest?.goal && latest.goal.status !== "complete" && latest.goal.status !== "cleared") {
+            updateRun(ws.stateDir, latest.runId, {
+              goal: { ...latest.goal, status: "cleared", updatedAt: new Date().toISOString() },
+            });
+          }
+        } catch (e) {
+          console.error(`[codex] Warning: could not update run record goal state: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
 
       try {

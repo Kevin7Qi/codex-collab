@@ -27,8 +27,8 @@ export function isTerminalGoalStatus(status: ThreadGoalStatus): boolean {
  *  (`blocked`, stamped after 3 consecutive no-progress turns) or a server
  *  brake engaged (usage/token-budget). Mapped to their own exit code so
  *  callers can distinguish "goal needs attention" from success/failure.
- *  Accepts the run-record widening ("completed") for caller convenience. */
-export function goalNeedsAttention(status: ThreadGoalStatus | "completed"): boolean {
+ *  Accepts the run-record widening ("cleared") for caller convenience. */
+export function goalNeedsAttention(status: ThreadGoalStatus | "cleared"): boolean {
   return status === "blocked" || status === "usageLimited" || status === "budgetLimited";
 }
 

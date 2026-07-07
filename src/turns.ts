@@ -281,6 +281,12 @@ export async function runTurnWithGoalFollow(
       );
     } else {
       opts.dispatcher.progressLine(`Goal paused ${context} — resume by running a new turn on this thread.`);
+      // Stamp the pause locally: the server's goal/updated notification races
+      // our exit, and losing that race would leave the terminal run record
+      // claiming an "active" goal that is in fact paused.
+      if (lastGoal !== null && (lastGoal as ThreadGoal).status === "active") {
+        notifyGoal({ ...(lastGoal as ThreadGoal), status: "paused" });
+      }
     }
     if (activeTurnId !== null) {
       await tryInterruptTurn(client, threadId, activeTurnId, context);
@@ -444,10 +450,13 @@ export async function runTurnWithGoalFollow(
         goal = await readGoal();
       }
 
-      // Goal reached a non-active state (or was cleared = completed).
+      // Goal reached a non-active state. Success is status "complete"
+      // (observed live) — a cleared goal after being seen reads the same.
       const endGoal = lastGoal as ThreadGoal | null;
-      if (endGoal === null) {
-        opts.dispatcher.progressLine(`Goal completed after ${continuationTurns + 1} turns.`);
+      if (endGoal === null || endGoal.status === "complete") {
+        opts.dispatcher.progressLine(
+          `Goal complete after ${continuationTurns + 1} turns${endGoal ? ` (${goalProgress(endGoal)})` : ""}.`,
+        );
       } else {
         opts.dispatcher.progressLine(`Goal ${endGoal.status} after ${continuationTurns + 1} turns (${goalProgress(endGoal)}).`);
       }

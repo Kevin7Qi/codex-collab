@@ -6,6 +6,7 @@ import { config } from "./config";
 import type { AppServerClient } from "./client";
 import { updateThreadStatus, updateRun } from "./threads";
 import { tryInterruptTurn } from "./turns";
+import { getThreadGoal, pauseThreadGoal } from "./goals";
 import {
   activeClient,
   activeThreadId,
@@ -66,7 +67,20 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
   // alone only detaches from the broker; the turn would keep running and
   // hold the broker stream busy. For reviews the turn lives on a review
   // subthread distinct from activeThreadId — route there when known.
+  // An active GOAL must be paused before the interrupt: interrupt alone
+  // makes the server start a fresh continuation turn, so Ctrl-C would
+  // leave the goal burning tokens headless after this process exits.
   const interruptThreadId = activeReviewThreadId ?? activeThreadId;
+  if (activeClient && activeThreadId && !activeReviewThreadId) {
+    try {
+      if ((await getThreadGoal(activeClient, activeThreadId))?.status === "active") {
+        await pauseThreadGoal(activeClient, activeThreadId);
+        console.error("[codex] Goal paused — a new turn on this thread resumes it.");
+      }
+    } catch (e) {
+      console.error(`[codex] Warning: could not check/pause goal during shutdown: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   if (activeClient && interruptThreadId && activeTurnId) {
     await tryInterruptTurn(activeClient, interruptThreadId, activeTurnId);
   }

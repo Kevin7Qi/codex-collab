@@ -309,7 +309,7 @@ export async function handleRun(args: string[]): Promise<void> {
 
       // Final goal snapshot: a goal that ended non-active keeps its wire
       // status; a goal that disappeared after being seen was cleared by the
-      // server = completed.
+      // server — record it with the wire's success status.
       const snapshot = goalSnapshot as RunGoalState | null; // local copy: closure mutation defeats narrowing
       const finalGoal: RunGoalState | null | undefined = !result.goalSeen || snapshot === null
         ? undefined
@@ -322,7 +322,7 @@ export async function handleRun(args: string[]): Promise<void> {
               turns: result.continuationTurns + 1,
               updatedAt: new Date().toISOString(),
             }
-          : { ...snapshot, status: "completed", turns: result.continuationTurns + 1, updatedAt: new Date().toISOString() };
+          : { ...snapshot, status: "complete", turns: result.continuationTurns + 1, updatedAt: new Date().toISOString() };
 
       const exit = recordTerminalRunState(ws, threadId, runId, result, "Turn", options.contentOnly, finalGoal);
       // A completed run whose goal ended blocked/limited still needs the

@@ -140,6 +140,33 @@ async function main() {
    *  finished. Keyed by turnId (unique per turn) so a leaked entry from a
    *  prior turn cannot poison a future turn on the same thread. */
   const completedStreamTurnIds = new Set<string>();
+  /** Threads whose goal is currently active (tracked from thread/goal/*
+   *  notifications). Goal mode is server-driven multi-turn: a continuation
+   *  turn starts the instant one completes, so releasing stream ownership at
+   *  turn/completed would drop every continuation notification on the floor
+   *  — the goal-following client only ever sees turn 1. While the goal is
+   *  active and the owner is still connected, ownership spans the turns. */
+  const goalActiveThreads = new Set<string>();
+  /** Threads whose ownership was retained across a turn boundary and whose
+   *  continuation turn has NOT started yet. If the goal leaves `active` in
+   *  this gap (kill/timeout pausing it between turns), no continuation will
+   *  start and no turn/completed will ever arrive — ownership must be
+   *  released here or the broker reports busy until the orphan watchdog. */
+  const retainedAwaitingContinuation = new Set<string>();
+
+  /** Release retained stream ownership for a thread whose goal ended in the
+   *  between-turns gap. */
+  function releaseGapRetention(threadId: string): void {
+    if (!retainedAwaitingContinuation.delete(threadId)) return;
+    if (activeStreamTargets?.has(threadId)) {
+      activeStreamSocket = null;
+      activeStreamTargets = null;
+      if (orphanWatchdog) {
+        clearTimeout(orphanWatchdog);
+        orphanWatchdog = null;
+      }
+    }
+  }
   /** Pending forwarded requests (e.g. approval requests sent to a client socket,
    *  awaiting a response routed through the main data handler). */
   const pendingForwardedRequests = new Map<string, {
@@ -259,6 +286,40 @@ async function main() {
       send(target, message);
     }
 
+    // Track goal state per thread — it decides whether turn/completed
+    // releases stream ownership (see goalActiveThreads).
+    if (method === "thread/goal/updated") {
+      const p = notifParams as { threadId?: unknown; goal?: { status?: unknown } } | undefined;
+      if (typeof p?.threadId === "string") {
+        if (p.goal?.status === "active") {
+          goalActiveThreads.add(p.threadId);
+        } else {
+          goalActiveThreads.delete(p.threadId);
+          releaseGapRetention(p.threadId);
+        }
+      }
+    } else if (method === "thread/goal/cleared") {
+      const p = notifParams as { threadId?: unknown } | undefined;
+      if (typeof p?.threadId === "string") {
+        goalActiveThreads.delete(p.threadId);
+        releaseGapRetention(p.threadId);
+      }
+    }
+
+    // A goal continuation turn starting on an owned thread re-targets the
+    // orphan bookkeeping: if the owner later disconnects, the watchdog must
+    // interrupt the CURRENT turn, not the long-finished first one.
+    if (method === "turn/started") {
+      const p = notifParams as { threadId?: unknown; turn?: { id?: unknown } } | undefined;
+      if (
+        typeof p?.threadId === "string" && typeof p?.turn?.id === "string" &&
+        activeStreamSocket !== null && activeStreamTargets?.has(p.threadId)
+      ) {
+        activeStreamTargets.set(p.threadId, p.turn.id);
+        retainedAwaitingContinuation.delete(p.threadId);
+      }
+    }
+
     // If turn/completed, release the stream ownership — even if the owning
     // socket has disconnected (orphaned turn completing naturally).
     if (method === "turn/completed") {
@@ -286,7 +347,26 @@ async function main() {
         typeof threadId !== "string" ||
         !activeStreamTargets ||
         activeStreamTargets.has(threadId);
-      if (matchesStream && (activeStreamSocket === target || activeStreamSocket === null)) {
+      // Goal-mode retention: with an active goal, the server starts the next
+      // continuation turn within milliseconds. As long as the owning client
+      // is still CONNECTED (a disconnected sentinel means headless
+      // continuation — release as usual so recovery paths run), keep the
+      // stream ownership so continuation notifications keep flowing to it.
+      // The goal leaving `active` (complete/paused/blocked/limits/cleared)
+      // updates goalActiveThreads above, so the goal's final turn/completed
+      // releases normally.
+      const goalContinues =
+        typeof threadId === "string" &&
+        goalActiveThreads.has(threadId) &&
+        activeStreamSocket !== null &&
+        sockets.has(activeStreamSocket);
+      if (goalContinues) {
+        if (completedTurnId) completedStreamTurnIds.delete(completedTurnId);
+        // Between turns now — if the goal is paused/cleared before the
+        // continuation starts, releaseGapRetention frees the ownership.
+        retainedAwaitingContinuation.add(threadId as string);
+      } else if (matchesStream && (activeStreamSocket === target || activeStreamSocket === null)) {
+        if (typeof threadId === "string") retainedAwaitingContinuation.delete(threadId);
         // If we're releasing actual stream ownership (activeStreamSocket was set),
         // also clean up the tracked turn ID so the bounded set stays small.
         // In the fast-turn race (activeStreamSocket is null), keep the entry

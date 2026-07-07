@@ -342,11 +342,12 @@ export interface TurnStartedParams {
 /** Goal lifecycle. `active` is the only state the server continues from —
  *  the goal runtime auto-starts a new turn the moment one completes while
  *  the goal is active. Everything else is terminal for a run's purposes:
- *  `paused` is deliberate (our timeout/kill path sets it), `blocked` means
- *  Codex stalled 3 consecutive turns and needs a human, the *Limited pair
- *  are the server's own brakes. */
+ *  `complete` is success (observed live: update_goal stamps it, the goal is
+ *  NOT cleared), `paused` is deliberate (our timeout/kill path sets it),
+ *  `blocked` means Codex stalled 3 consecutive turns and needs a human,
+ *  the *Limited pair are the server's own brakes. */
 export type ThreadGoalStatus =
-  | "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited";
+  | "active" | "complete" | "paused" | "blocked" | "usageLimited" | "budgetLimited";
 
 /** Wire shape verified against codex 0.142.3 (thread/goal/get|set responses
  *  and thread/goal/updated notifications). Timestamps are unix SECONDS. */
@@ -623,12 +624,13 @@ export interface RunRecord {
 
 /** Observer-facing goal snapshot on the run record. `turns` counts the turns
  *  THIS run followed (first turn + continuations), not the thread's total.
- *  `status` extends the wire enum with "completed": the server CLEARS a goal
- *  on completion rather than stamping a status, so the record keeps the last
- *  known snapshot re-labeled. */
+ *  A goal that disappeared (cleared) after being seen DURING the run is
+ *  recorded with the wire's success status, "complete"; "cleared" is the
+ *  post-hoc state `kill --clear` stamps so `threads` stops advertising a
+ *  paused goal that no longer exists. */
 export interface RunGoalState {
   objective: string;
-  status: ThreadGoalStatus | "completed";
+  status: ThreadGoalStatus | "cleared";
   tokenBudget: number | null;
   tokensUsed: number;
   turns: number;

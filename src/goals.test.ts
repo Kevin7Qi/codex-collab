@@ -41,7 +41,7 @@ const goal: ThreadGoal = {
 describe("goal status classification", () => {
   test("only active is non-terminal", () => {
     expect(isTerminalGoalStatus("active")).toBe(false);
-    for (const s of ["paused", "blocked", "usageLimited", "budgetLimited"] as const) {
+    for (const s of ["complete", "paused", "blocked", "usageLimited", "budgetLimited"] as const) {
       expect(isTerminalGoalStatus(s)).toBe(true);
     }
   });
@@ -52,7 +52,7 @@ describe("goal status classification", () => {
     expect(goalNeedsAttention("budgetLimited")).toBe(true);
     expect(goalNeedsAttention("active")).toBe(false);
     expect(goalNeedsAttention("paused")).toBe(false);
-    expect(goalNeedsAttention("completed")).toBe(false);
+    expect(goalNeedsAttention("complete")).toBe(false);
   });
 });
 
