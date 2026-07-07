@@ -1,12 +1,12 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { runTurn, runReview, belongsToTurn } from "./turns";
+import { runTurn, runReview, runTurnWithGoalFollow, belongsToTurn } from "./turns";
 import { EventDispatcher } from "./events";
 import { autoApproveHandler } from "./approvals";
 import type { ApprovalHandler } from "./approvals";
 import type { AppServerClient } from "./client";
 import type {
   TurnCompletedParams, TurnStartResponse,
-  ReviewStartResponse,
+  ReviewStartResponse, ThreadGoal,
 } from "./types";
 import { mkdirSync, rmSync, existsSync, writeFileSync, utimesSync } from "fs";
 import { join } from "path";
@@ -992,6 +992,307 @@ describe("approval wiring", () => {
 
     expect(approvalCalls).toContain("cmd:sudo rm -rf");
     expect(approvalCalls).toContain("file:/etc");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Goal-following runs
+// ---------------------------------------------------------------------------
+
+function makeGoal(status: ThreadGoal["status"], tokensUsed = 10_000): ThreadGoal {
+  return {
+    threadId: "thr-1",
+    objective: "refactor the module end to end",
+    status,
+    tokenBudget: 100_000,
+    tokensUsed,
+    timeUsedSeconds: 30,
+    createdAt: 1_700_000_000,
+    updatedAt: 1_700_000_030,
+  };
+}
+
+/** turn/started notification for a continuation turn. */
+function startedTurn(turnId: string) {
+  return { threadId: "thr-1", turn: { id: turnId, items: [], status: "inProgress", error: null } };
+}
+
+describe("runTurnWithGoalFollow", () => {
+  const baseOpts = (name: string, extra?: Record<string, unknown>) => ({
+    dispatcher: new EventDispatcher(join(TEST_LOG_DIR, `${name}.log`), () => {}),
+    approvalHandler: autoApproveHandler,
+    timeoutMs: 5000,
+    killSignalsDir: TEST_KILL_DIR,
+    ...extra,
+  });
+
+  test("no goal: behaves like a single turn", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") return { goal: null };
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "hi" }], baseOpts("goal-none"));
+    expect(result.status).toBe("completed");
+    expect(result.goalSeen).toBe(false);
+    expect(result.goal).toBeNull();
+    expect(result.continuationTurns).toBe(0);
+  });
+
+  test("goals feature unavailable: behaves like a single turn", async () => {
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") throw new Error("goals feature is disabled");
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "hi" }], baseOpts("goal-disabled"));
+    expect(result.status).toBe("completed");
+    expect(result.goalSeen).toBe(false);
+    expect(result.continuationTurns).toBe(0);
+  });
+
+  test("active goal: follows continuation turns until the goal clears, accumulating output", async () => {
+    // Turn 1 completes with an active goal; the server starts turn-2
+    // IMMEDIATELY (before the goal/get round-trip finishes — the race the
+    // early buffering exists for), streams output, completes; the goal is
+    // then cleared (= completed).
+    let goalGets = 0;
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/agentMessage/delta", { threadId: "thr-1", turnId: "turn-1", itemId: "m1", delta: "first." });
+          emit("turn/completed", completedTurn("turn-1"));
+          // Continuation races ahead of the client's goal/get.
+          emit("turn/started", startedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") {
+        goalGets++;
+        if (goalGets === 1) {
+          // Goal active after turn 1; continuation streams shortly after.
+          setTimeout(() => {
+            emit("item/agentMessage/delta", { threadId: "thr-1", turnId: "turn-2", itemId: "m2", delta: "second." });
+            emit("turn/completed", completedTurn("turn-2"));
+          }, 30);
+          return { goal: makeGoal("active") };
+        }
+        // After turn-2: goal cleared server-side (completed).
+        setTimeout(() => emit("thread/goal/cleared", { threadId: "thr-1" }), 1);
+        return { goal: null };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const goalUpdates: Array<{ status: string; turns: number }> = [];
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-follow", {
+      onGoalUpdate: (g: ThreadGoal, turns: number) => goalUpdates.push({ status: g.status, turns }),
+    }));
+
+    expect(result.status).toBe("completed");
+    expect(result.goalSeen).toBe(true);
+    expect(result.goal).toBeNull(); // cleared = completed
+    expect(result.continuationTurns).toBe(1);
+    expect(result.output).toBe("first.second.");
+    expect(goalUpdates.length).toBeGreaterThanOrEqual(1);
+    expect(goalUpdates[0].status).toBe("active");
+  });
+
+  test("goal ending blocked is surfaced on the result", async () => {
+    let goalGets = 0;
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("turn/completed", completedTurn("turn-1"));
+          emit("turn/started", startedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") {
+        goalGets++;
+        if (goalGets === 1) {
+          setTimeout(() => emit("turn/completed", completedTurn("turn-2")), 30);
+          return { goal: makeGoal("active") };
+        }
+        return { goal: makeGoal("blocked", 55_000) };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-blocked"));
+    expect(result.status).toBe("completed");
+    expect(result.goal?.status).toBe("blocked");
+    expect(result.continuationTurns).toBe(1);
+  });
+
+  test("timeout mid-goal pauses the goal BEFORE interrupting, then throws", async () => {
+    const calls: string[] = [];
+    const { client, emit } = buildMockClient((method, params) => {
+      calls.push(method);
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("turn/completed", completedTurn("turn-1"));
+          emit("turn/started", startedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") return { goal: makeGoal("active") };
+      if (method === "thread/goal/set") {
+        expect((params as { status: string }).status).toBe("paused");
+        return { goal: makeGoal("paused") };
+      }
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    await expect(
+      runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-timeout", { timeoutMs: 700 })),
+    ).rejects.toThrow(/Goal did not complete.*paused/);
+
+    const pauseIdx = calls.indexOf("thread/goal/set");
+    const interruptIdx = calls.indexOf("turn/interrupt");
+    expect(pauseIdx).toBeGreaterThan(-1);
+    expect(interruptIdx).toBeGreaterThan(-1);
+    // Pause must precede interrupt — interrupt-first respawns a continuation.
+    expect(pauseIdx).toBeLessThan(interruptIdx);
+  });
+
+  test("kill mid-goal pauses the goal, interrupts, and returns interrupted", async () => {
+    const calls: string[] = [];
+    const { client, emit } = buildMockClient((method, params) => {
+      calls.push(method);
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("turn/completed", completedTurn("turn-1"));
+          emit("turn/started", startedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") return { goal: makeGoal("active") };
+      if (method === "thread/goal/set") {
+        expect((params as { status: string }).status).toBe("paused");
+        return { goal: makeGoal("paused") };
+      }
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    // Kill lands while the follow loop waits on turn-2's completion.
+    setTimeout(() => {
+      writeFileSync(join(TEST_KILL_DIR, "thr-1"), "*", { mode: 0o600 });
+    }, 150);
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-kill"));
+    expect(result.status).toBe("interrupted");
+    expect(calls).toContain("thread/goal/set");
+    expect(calls.indexOf("thread/goal/set")).toBeLessThan(calls.indexOf("turn/interrupt"));
+  });
+
+  test("connection loss mid-goal rejects and is never read as goal completion", async () => {
+    const { client, emit, triggerClose } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("turn/completed", completedTurn("turn-1"));
+          emit("turn/started", startedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") {
+        setTimeout(() => triggerClose(), 30);
+        return { goal: makeGoal("active") };
+      }
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    await expect(
+      runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-connloss")),
+    ).rejects.toThrow("Connection to Codex lost");
+  });
+
+  test("approval requests during continuation turns are still forwarded", async () => {
+    const approvals: string[] = [];
+    const handler: ApprovalHandler = {
+      async handleCommandApproval(req) {
+        approvals.push(req.command ?? "");
+        return "accept";
+      },
+      async handleFileChangeApproval() {
+        return "accept";
+      },
+    };
+
+    let goalGets = 0;
+    const { client, emit, requestHandlers } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("turn/completed", completedTurn("turn-1"));
+          emit("turn/started", startedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") {
+        goalGets++;
+        if (goalGets === 1) {
+          setTimeout(async () => {
+            // Approval fired from the CONTINUATION turn.
+            const cmdHandler = requestHandlers.get("item/commandExecution/requestApproval");
+            if (cmdHandler) {
+              await cmdHandler({
+                threadId: "thr-1", turnId: "turn-2", itemId: "i1",
+                approvalId: "appr-goal-1", command: "make deploy", cwd: "/",
+              });
+            }
+            emit("turn/completed", completedTurn("turn-2"));
+          }, 30);
+          return { goal: makeGoal("active") };
+        }
+        return { goal: null };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-approvals", {
+      approvalHandler: handler,
+    }));
+    expect(result.status).toBe("completed");
+    expect(approvals).toEqual(["make deploy"]);
+  });
+
+  test("goal created before the run (resume) is picked up via goal/get, not notifications", async () => {
+    // Resuming a goal-mode thread: no goal/updated fires during our turn —
+    // the authoritative post-turn goal/get must find it anyway.
+    let goalGets = 0;
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => emit("turn/completed", completedTurn("turn-1")), 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") {
+        goalGets++;
+        if (goalGets === 1) {
+          setTimeout(() => {
+            emit("turn/started", startedTurn("turn-2"));
+            emit("turn/completed", completedTurn("turn-2"));
+          }, 30);
+          return { goal: makeGoal("active") };
+        }
+        return { goal: null };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "resume" }], baseOpts("goal-preexisting"));
+    expect(result.goalSeen).toBe(true);
+    expect(result.continuationTurns).toBe(1);
   });
 });
 

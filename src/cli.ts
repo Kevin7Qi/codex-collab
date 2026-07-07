@@ -105,7 +105,9 @@ Commands:
   review "instructions"   Custom review with specific focus
   threads [--json] [--all] List threads (--limit <n>, --discover,
                           --session: only threads this session has run)
-  kill <id>               Stop a running thread
+  kill <id> [--clear]     Stop a running thread. An active goal is paused
+                          first (interrupt alone would just respawn a
+                          continuation turn); --clear abandons the goal
   follow [id] [--watch]   Live view of a running thread; exits on completion
                           (no id: attach to the workspace's active run,
                           or replay the most recent one; --watch: keep the
@@ -144,7 +146,9 @@ Options:
                           (default: ${config.defaultSandbox})
   -d, --dir <path>        Working directory (default: cwd)
   --resume <id>           Resume existing thread
-  --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout})
+  --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout}).
+                          When a goal is active it scopes the WHOLE goal;
+                          on expiry the goal is paused, never left running
   --approval <policy>     Approval: ${config.approvalModes.join(", ")} (default: ${config.defaultApprovalPolicy})
                           "auto": Codex's Guardian reviewer approves or denies
                           each request autonomously (never blocks on a human)
@@ -168,11 +172,18 @@ Options:
   -v, --version           Print version and exit (before the command only)
 
 Exit codes (run, review):
-  0  turn completed        3  turn timed out (--timeout; resume with --resume <id>)
-  1  turn/command failed   4  turn interrupted (kill)
+  0  turn completed        3  turn/goal timed out (--timeout; goal is paused;
+  1  turn/command failed      resume with --resume <id>)
+                           4  turn interrupted (kill)
                            5  died blocked on an approval (request now void —
                               resume with a longer --timeout or --approval auto)
                            6  broker busy and fallback unavailable (transient; retry)
+                           7  goal ended blocked or usage/budget-limited —
+                              Codex needs you (steer with --resume, or kill --clear)
+
+Goal mode: when Codex creates a goal (goals = true in ~/.codex/config.toml),
+a run follows the server's continuation turns until the goal completes, is
+paused, or gets blocked — the run IS the goal, not just its first turn.
 
 Exit codes (next):
   0  event delivered (JSON on stdout)   3  --timeout elapsed with no event

@@ -220,7 +220,7 @@ codex-collab progress <id>              # Recent activity (tail of log)
 codex-collab threads [--all|--discover] # List threads (--discover: include server-side, top 5)
 codex-collab threads --session          # Only threads the current session has run
 codex-collab peek <id> [--limit N --full] # Recent conversation slice from server
-codex-collab kill <id>                  # Stop a running thread
+codex-collab kill <id> [--clear]        # Stop a running thread; an active goal is paused first (--clear abandons it)
 codex-collab delete <id>                # Archive thread (recoverable via `codex unarchive`), delete local files
 codex-collab delete <id> --purge        # Permanently delete server-side instead — NOT recoverable; needs explicit user intent
 codex-collab clean                      # Delete old logs, stale mappings, old question files
@@ -245,7 +245,7 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
-| `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes; increase for large reviews or complex tasks. (ask) Answer deadline, default 600. (next) Wait bound, default none — it waits until an event or workspace idle. |
+| `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes; increase for large reviews or complex tasks. When a goal is active the timeout scopes the WHOLE goal and expiry pauses it (see Goal Mode). (ask) Answer deadline, default 600. (next) Wait bound, default none — it waits until an event or workspace idle. |
 | `--approval <policy>` | never, on-request, on-failure, untrusted, auto (default: never) — see Approvals |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--detach` | (run) Return once the turn is running — see Detached Runs |
@@ -267,7 +267,16 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 
 ### Exit codes (run, review)
 
-`0` completed · `1` failed · `3` timed out · `4` interrupted (kill) · `5` died blocked on an approval — the request is void, so don't try to answer it; resume with a longer `--timeout` or `--approval auto` · `6` broker busy and fallback unavailable — transient, retry. For backgrounded runs, branch on the exit code instead of text-sniffing the output.
+`0` completed · `1` failed · `3` timed out (an active goal is paused, resumable) · `4` interrupted (kill) · `5` died blocked on an approval — the request is void, so don't try to answer it; resume with a longer `--timeout` or `--approval auto` · `6` broker busy and fallback unavailable — transient, retry · `7` goal ended blocked or usage/budget-limited — Codex needs steering: resume the thread with guidance, or `kill --clear` to abandon the goal. For backgrounded runs, branch on the exit code instead of text-sniffing the output.
+
+## Goal Mode
+
+If Codex creates a goal during a turn (its Goal mode, `goals = true` in the user's `~/.codex/config.toml`), the server keeps starting continuation turns on its own until the goal is done. `run` follows the whole goal: continuation turns stream into the same run record and log, `follow`/`output`/`threads` see them, and the run's exit code reflects the goal's end — completed (0), blocked/limited (7), timed out and paused (3). Practical implications:
+
+- Give goal runs a generous `--timeout` (hours, not minutes) — it bounds the whole goal, and expiry pauses the goal safely rather than leaving it running headless.
+- A paused goal resumes when a new turn runs on that thread (`run --resume <id> "..."`); `kill --clear` abandons it.
+- Mid-goal, the ask channel and approvals work normally — `next` sees questions from continuation turns too.
+- `threads` shows the latest goal state per thread: `[goal active: 45k/100k tokens]`.
 
 ## Templates
 

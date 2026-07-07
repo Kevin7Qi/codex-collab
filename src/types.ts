@@ -332,6 +332,48 @@ export interface TurnCompletedParams {
   turn: Turn;
 }
 
+export interface TurnStartedParams {
+  threadId: string;
+  turn: Turn;
+}
+
+// --- Goals (server-driven multi-turn; `goals = true` in Codex config) ---
+
+/** Goal lifecycle. `active` is the only state the server continues from —
+ *  the goal runtime auto-starts a new turn the moment one completes while
+ *  the goal is active. Everything else is terminal for a run's purposes:
+ *  `paused` is deliberate (our timeout/kill path sets it), `blocked` means
+ *  Codex stalled 3 consecutive turns and needs a human, the *Limited pair
+ *  are the server's own brakes. */
+export type ThreadGoalStatus =
+  | "active" | "paused" | "blocked" | "usageLimited" | "budgetLimited";
+
+/** Wire shape verified against codex 0.142.3 (thread/goal/get|set responses
+ *  and thread/goal/updated notifications). Timestamps are unix SECONDS. */
+export interface ThreadGoal {
+  threadId: string;
+  objective: string;
+  status: ThreadGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** thread/goal/updated — fired on every goal mutation (create_goal /
+ *  update_goal tool calls, thread/goal/set, server-side budget stamps).
+ *  turnId is null for out-of-turn mutations (e.g. our own goal/set). */
+export interface ThreadGoalUpdatedParams {
+  threadId: string;
+  turnId: string | null;
+  goal: ThreadGoal;
+}
+
+export interface ThreadGoalClearedParams {
+  threadId: string;
+}
+
 export interface ErrorNotificationParams {
   error: {
     message: string;
@@ -573,6 +615,24 @@ export interface RunRecord {
   pendingQuestion?: PendingQuestion | null;
   /** Resolved ask-channel questions, in resolution order. */
   questions?: ResolvedQuestion[];
+  /** Goal-mode progress mirrored from thread/goal/updated. Present iff a
+   *  goal was seen during this run; survives completion so post-mortems can
+   *  say how the goal ended and what it cost. */
+  goal?: RunGoalState | null;
+}
+
+/** Observer-facing goal snapshot on the run record. `turns` counts the turns
+ *  THIS run followed (first turn + continuations), not the thread's total.
+ *  `status` extends the wire enum with "completed": the server CLEARS a goal
+ *  on completion rather than stamping a status, so the record keeps the last
+ *  known snapshot re-labeled. */
+export interface RunGoalState {
+  objective: string;
+  status: ThreadGoalStatus | "completed";
+  tokenBudget: number | null;
+  tokensUsed: number;
+  turns: number;
+  updatedAt: string;
 }
 
 // --- Broker state (per-workspace) ---

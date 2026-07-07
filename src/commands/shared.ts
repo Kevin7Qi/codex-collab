@@ -30,7 +30,7 @@ import {
   migrateGlobalState,
   appendRunQuestion,
 } from "../threads";
-import type { PendingApproval } from "../types";
+import type { PendingApproval, RunGoalState } from "../types";
 import { RpcError, TurnTimeoutError } from "../types";
 import { EventDispatcher } from "../events";
 import {
@@ -112,6 +112,8 @@ export interface Options {
   watch: boolean;
   /** delete: permanently delete the thread server-side instead of archiving. */
   purge: boolean;
+  /** kill: clear (abandon) the thread's goal instead of pausing it. */
+  clear: boolean;
   /** output: print only the latest turn's agent output (implies contentOnly). */
   last: boolean;
   /** approve: override a Guardian denial instead of answering a pending
@@ -180,6 +182,11 @@ export const EXIT_CODES = {
   /** Broker stream owned by another invocation and the direct-connection
    *  fallback did not absorb it — transient, safe to retry. */
   brokerBusy: 6,
+  /** The run followed a goal that ended needing a human: `blocked` (Codex
+   *  stalled 3 consecutive turns) or a server brake (usage/token-budget
+   *  limit). The goal persists on the thread — steer with a resume turn, or
+   *  abandon it with `kill --clear`. */
+  goalBlocked: 7,
 } as const;
 
 /** Errors can carry an explicit exit code (set where the context to classify
@@ -262,6 +269,7 @@ export function defaultOptions(): Options {
     detach: false,
     watch: false,
     purge: false,
+    clear: false,
     guardian: false,
     dir: process.cwd(),
     last: false,
@@ -401,6 +409,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.watch = true;
     } else if (arg === "--purge") {
       options.purge = true;
+    } else if (arg === "--clear") {
+      options.clear = true;
     } else if (arg === "--last") {
       options.last = true;
       options.contentOnly = true;
@@ -1165,6 +1175,9 @@ export function recordTerminalRunState(
   result: TurnResult,
   label: "Turn" | "Review",
   contentOnly: boolean,
+  /** Final goal snapshot for the record; undefined leaves the field as the
+   *  live mirror last wrote it (non-goal runs never have one). */
+  goal?: RunGoalState | null,
 ): number {
   // Snapshot before the terminal write below clears it: a non-completed end
   // with an approval still pending is the "healthy turn killed while blocked
@@ -1191,6 +1204,7 @@ export function recordTerminalRunState(
       // record claiming an approval (or ask-channel question) is still pending.
       pendingApproval: null,
       pendingQuestion: null,
+      ...(goal !== undefined ? { goal } : {}),
     });
   } catch (e) {
     console.error(`[codex] CRITICAL: could not save run state for ${runId}: ${e instanceof Error ? e.message : String(e)}`);

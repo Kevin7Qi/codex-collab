@@ -4,7 +4,9 @@ import { spawn as childSpawn, spawnSync } from "node:child_process";
 import { openSync, closeSync, readFileSync } from "fs";
 import { join } from "path";
 import { updateThreadStatus, generateRunId, loadRun, updateRun, runLogRelPath } from "../threads";
-import { runTurn } from "../turns";
+import { runTurnWithGoalFollow } from "../turns";
+import { goalNeedsAttention } from "../goals";
+import type { RunGoalState, ThreadGoal } from "../types";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
 import { wrapBrokerBusy, isBrokerBusyError } from "../broker";
 import {
@@ -252,8 +254,30 @@ export async function handleRun(args: string[]): Promise<void> {
     const dispatcher = createDispatcher(join(ws.stateDir, runLogRelPath(shortId, runId)), options, ws.guardianDir);
     armQuestionChannel(dispatcher, ws, runId, options.dir);
 
+    // Live mirror of the thread goal onto the run record, so observers
+    // (threads/follow/next) can see a goal-mode run's progress without
+    // owning its stdout. Snapshot kept locally: a goal that COMPLETES is
+    // cleared server-side, and the record's final state is this snapshot
+    // re-labeled "completed".
+    let goalSnapshot: RunGoalState | null = null;
+    const mirrorGoal = (goal: ThreadGoal, continuationTurns: number): void => {
+      goalSnapshot = {
+        objective: goal.objective,
+        status: goal.status,
+        tokenBudget: goal.tokenBudget,
+        tokensUsed: goal.tokensUsed,
+        turns: continuationTurns + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      try {
+        updateRun(ws.stateDir, runId, { goal: goalSnapshot });
+      } catch (e) {
+        console.error(`[codex] Warning: could not mirror goal state: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+
     try {
-      const result = await runTurn(
+      const result = await runTurnWithGoalFollow(
         client,
         threadId,
         [{ type: "text", text: prompt }],
@@ -278,11 +302,36 @@ export async function handleRun(args: string[]): Promise<void> {
               console.error(`[codex] Warning: could not update run phase: ${e instanceof Error ? e.message : String(e)}`);
             }
           },
+          onGoalUpdate: mirrorGoal,
           ...turnOverrides(options),
         },
       );
 
-      return recordTerminalRunState(ws, threadId, runId, result, "Turn", options.contentOnly);
+      // Final goal snapshot: a goal that ended non-active keeps its wire
+      // status; a goal that disappeared after being seen was cleared by the
+      // server = completed.
+      const snapshot = goalSnapshot as RunGoalState | null; // local copy: closure mutation defeats narrowing
+      const finalGoal: RunGoalState | null | undefined = !result.goalSeen || snapshot === null
+        ? undefined
+        : result.goal !== null
+          ? {
+              objective: result.goal.objective,
+              status: result.goal.status,
+              tokenBudget: result.goal.tokenBudget,
+              tokensUsed: result.goal.tokensUsed,
+              turns: result.continuationTurns + 1,
+              updatedAt: new Date().toISOString(),
+            }
+          : { ...snapshot, status: "completed", turns: result.continuationTurns + 1, updatedAt: new Date().toISOString() };
+
+      const exit = recordTerminalRunState(ws, threadId, runId, result, "Turn", options.contentOnly, finalGoal);
+      // A completed run whose goal ended blocked/limited still needs the
+      // user — that outcome outranks the last turn's clean status.
+      if (exit === EXIT_CODES.ok && finalGoal && goalNeedsAttention(finalGoal.status)) {
+        progress(`Goal needs attention (${finalGoal.status}) — steer with: codex-collab run --resume ${shortId} "..."`);
+        return EXIT_CODES.goalBlocked;
+      }
+      return exit;
     } catch (e) {
       e = wrapBrokerBusy(e);
       // A broker-busy error here is about to be retried by withClient over a
