@@ -78,6 +78,40 @@ export async function getThreadGoal(
   return (await readThreadGoal(client, threadId)).goal;
 }
 
+/** Create the thread's goal, or replace its objective if one exists — the
+ *  programmatic equivalent of the TUI's `/goal` (`run --goal`). Unlike the
+ *  read helpers this is a user-REQUESTED action: failure must fail the run,
+ *  so errors propagate (isGoalFeatureUnavailable lets the caller turn the
+ *  feature-off case into a usable message).
+ *
+ *  Call this while a TURN IS RUNNING (the lifecycle Codex's own create_goal
+ *  tool has). On an idle thread, an active goal makes the goal runtime start
+ *  its own continuation turn immediately — a subsequently prompted turn
+ *  never runs (verified live, 0.142.x). */
+export async function setThreadGoal(
+  client: AppServerClient,
+  threadId: string,
+  objective: string,
+  tokenBudget?: number,
+): Promise<ThreadGoal> {
+  const res = await client.request<{ goal: ThreadGoal }>("thread/goal/set", {
+    threadId,
+    objective,
+    ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+  });
+  return res.goal;
+}
+
+/** Appended to the objective when `--goal` is combined with the collab
+ *  template: the objective is re-injected into every server-started
+ *  continuation turn, so it's the one place channel awareness survives a
+ *  long goal (the template itself rides only the first prompt). Wording is
+ *  cost-fit, not a rule — whether to ask stays Codex's call. */
+export const GOAL_COLLAB_ASK_NOTE =
+  "If a decision or blocker warrants your collaborator's judgment, `codex-collab ask \"…\"` "
+  + "reaches them mid-turn — it blocks up to 10 minutes and fails open, so it pays off "
+  + "where their answer beats your best guess.";
+
 /** Pause the thread's goal so the server stops auto-continuing. This is the
  *  brake the timeout and kill paths depend on — returns false on failure so
  *  the caller can warn that the goal may keep burning tokens headless.

@@ -5,7 +5,7 @@ import { openSync, closeSync, readFileSync } from "fs";
 import { join } from "path";
 import { updateThreadStatus, generateRunId, loadRun, updateRun, runLogRelPath } from "../threads";
 import { runTurnWithGoalFollow } from "../turns";
-import { goalNeedsAttention } from "../goals";
+import { goalNeedsAttention, setThreadGoal, isGoalFeatureUnavailable, GOAL_COLLAB_ASK_NOTE } from "../goals";
 import type { RunGoalState, ThreadGoal } from "../types";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
 import { wrapBrokerBusy, isBrokerBusyError } from "../broker";
@@ -194,6 +194,9 @@ export async function handleRun(args: string[]): Promise<void> {
   if (positional.length === 0) {
     die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
   }
+  if (options.budget !== null && options.goal === null) {
+    die("--budget requires --goal");
+  }
 
   // `run -` reads the prompt from stdin — the safe channel for long,
   // quote-riddled agent-generated prompts that shell quoting would mangle.
@@ -276,7 +279,59 @@ export async function handleRun(args: string[]): Promise<void> {
       }
     };
 
+    // The goal is set once the FIRST TURN IS RUNNING, not before it:
+    // setting an active goal on an idle thread makes the goal runtime start
+    // its own continuation turn immediately, and the prompt's turn/start
+    // never runs (verified live) — mid-turn set is the lifecycle Codex's
+    // own create_goal tool has. Feature availability is still checked
+    // up front so a disabled feature fails before any tokens burn.
+    let goalSetup: Promise<void> | null = null;
+    let goalSetupError: Error | null = null;
+
     try {
+      let existingGoal: ThreadGoal | null = null;
+      if (options.goal !== null) {
+        try {
+          const res = await client.request<{ goal: ThreadGoal | null }>("thread/goal/get", { threadId });
+          existingGoal = res.goal ?? null;
+        } catch (e) {
+          if (isGoalFeatureUnavailable(e)) {
+            throw new Error("--goal requires Codex's Goal mode — set goals = true in ~/.codex/config.toml");
+          }
+          throw e;
+        }
+      }
+
+      const setGoalOnceRunning = (): void => {
+        if (options.goal === null || goalSetup !== null) return;
+        // The objective is re-injected into every continuation turn — the
+        // durable slot for channel awareness on long goals (the collab
+        // template itself rides only the first prompt).
+        const objective = options.template === "collab"
+          ? `${options.goal}\n\n${GOAL_COLLAB_ASK_NOTE}`
+          : options.goal;
+        goalSetup = (async () => {
+          let lastError: unknown;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
+            try {
+              const goal = await setThreadGoal(client, threadId, objective, options.budget ?? undefined);
+              const budgetNote = goal.tokenBudget !== null
+                ? ` (budget ${goal.tokenBudget.toLocaleString("en-US")} tokens)`
+                : "";
+              progress(existingGoal !== null ? `Goal objective replaced${budgetNote}` : `Goal set${budgetNote}`);
+              return;
+            } catch (e) {
+              lastError = e;
+            }
+          }
+          goalSetupError = new Error(
+            `--goal could not be set: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+          );
+          progress(`Warning: ${goalSetupError.message}`);
+        })();
+      };
+
       const result = await runTurnWithGoalFollow(
         client,
         threadId,
@@ -301,11 +356,17 @@ export async function handleRun(args: string[]): Promise<void> {
             } catch (e) {
               console.error(`[codex] Warning: could not update run phase: ${e instanceof Error ? e.message : String(e)}`);
             }
+            setGoalOnceRunning();
           },
           onGoalUpdate: mirrorGoal,
           ...turnOverrides(options),
         },
       );
+
+      // A run the user asked to be goal-scoped that silently ran as a plain
+      // turn is a false success — surface the set failure as the run's.
+      if (goalSetup !== null) await goalSetup;
+      if (goalSetupError !== null) throw goalSetupError;
 
       // Final goal snapshot: a goal that ended non-active keeps its wire
       // status; a goal that disappeared after being seen was cleared by the

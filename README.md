@@ -118,7 +118,7 @@ codex-collab follow --watch
 | `ask "question"` | (for Codex, mid-turn) Post a question to the collaborator and wait for the answer; `--timeout <sec>` sets the deadline (default 600). Fails open: on expiry it prints proceed-on-your-judgment guidance and exits 0 |
 | `answer <id> "text"` | Answer a pending question (`answer <id> -` reads the answer from stdin) |
 | `questions [id]` | List pending questions in this workspace; with an ID, show that question's full text |
-| `next` | Block until something needs attention (question or approval), print one JSON event line, exit |
+| `next` | Block until something needs attention (question or approval), print it in full with how to respond, exit |
 | `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |
 | `templates` | List available prompt templates |
@@ -154,6 +154,8 @@ codex-collab follow --watch
 | `--detach` | (run) Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
 | `-w, --watch` | (follow) Don't exit when the run finishes — keep following each new run (Ctrl-C to stop) |
 | `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
+| `--goal <objective>` | (run) Create the thread's goal before the first turn (replaces the objective on `--resume`); requires `goals = true` in `~/.codex/config.toml`. With `--template collab` the objective also gets a one-line ask-channel note — re-injected into every continuation turn, so channel awareness survives long goals |
+| `--budget <tokens>` | (run) Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k |
 | `--json` | JSON output for supported commands (`threads`, `peek`) |
 | `--all` | List all threads with no display limit |
 | `--discover` | Query Codex server for threads not in the local index |
@@ -169,9 +171,9 @@ codex-collab follow --watch
 
 `run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` died blocked on an approval (the request is void — resume with a longer `--timeout` or `--approval auto`), `6` broker busy (transient — retry), `7` goal ended blocked or usage/budget-limited — Codex needs steering (resume the thread, or `kill --clear` to abandon the goal).
 
-**Goal mode**: Codex's Goal mode (`goals = true` in `~/.codex/config.toml`) makes threads self-continue — the server starts a new turn the moment one completes while the goal is active. When a goal is (or becomes) active on the thread, a `run` follows every continuation turn in the same run record and log until the goal is terminal: the run corresponds to the unit of work, not just its first turn. `--timeout` then bounds the whole goal, and on expiry the goal is **paused** (resumable, no headless token burn) before the CLI exits `3`. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
+**Goal mode**: Codex's Goal mode (`goals = true` in `~/.codex/config.toml`) makes threads self-continue — the server starts a new turn the moment one completes while the goal is active. Codex can create a goal mid-turn, or set one explicitly with `run --goal "objective" [--budget <tokens>]` — a natural fit for open-ended objectives that take an unknown number of turns. When a goal is (or becomes) active on the thread, a `run` follows every continuation turn in the same run record and log until the goal is terminal: the run corresponds to the unit of work, not just its first turn. `--timeout` then bounds the whole goal, and on expiry the goal is **paused** (resumable, no headless token burn) before the CLI exits `3`. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
 
-`next` exits `0` when an event was delivered (JSON on stdout), `3` when `--timeout` elapsed with no event, and `10` when the workspace is idle — nothing running, nothing pending.
+`next` exits `0` when an event was delivered (printed in full on stdout), `3` when `--timeout` elapsed with no event, and `10` when the workspace is idle — nothing running, nothing pending.
 
 </details>
 

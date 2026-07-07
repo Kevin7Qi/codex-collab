@@ -6,6 +6,7 @@ import {
   isGoalFeatureUnavailable,
   isTerminalGoalStatus,
   pauseThreadGoal,
+  setThreadGoal,
 } from "./goals";
 import type { AppServerClient } from "./client";
 import type { ThreadGoal } from "./types";
@@ -119,5 +120,33 @@ describe("pauseThreadGoal / clearThreadGoal", () => {
     });
     expect(await clearThreadGoal(client, "thr-1")).toBe(true);
     expect(cleared).toBe(true);
+  });
+});
+
+describe("setThreadGoal", () => {
+  test("sends objective and budget, returns the created goal", async () => {
+    let sent: unknown;
+    const client = clientWith((method, params) => {
+      expect(method).toBe("thread/goal/set");
+      sent = params;
+      return { goal };
+    });
+    expect(await setThreadGoal(client, "thr-1", "ship it", 100_000)).toEqual(goal);
+    expect(sent).toEqual({ threadId: "thr-1", objective: "ship it", tokenBudget: 100_000 });
+  });
+
+  test("omits tokenBudget entirely when not given", async () => {
+    let sent: unknown;
+    const client = clientWith((method, params) => {
+      sent = params;
+      return { goal: { ...goal, tokenBudget: null } };
+    });
+    await setThreadGoal(client, "thr-1", "ship it");
+    expect(sent).toEqual({ threadId: "thr-1", objective: "ship it" });
+  });
+
+  test("errors propagate — a user-requested set must not fail silently", async () => {
+    const client = clientWith(() => { throw new Error("goals feature is disabled"); });
+    await expect(setThreadGoal(client, "thr-1", "ship it")).rejects.toThrow("goals feature is disabled");
   });
 });
