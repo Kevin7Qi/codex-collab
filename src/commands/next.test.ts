@@ -4,8 +4,8 @@ import { describe, expect, test, afterAll } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "node:child_process";
-import { isRunAlive } from "./next";
-import type { RunRecord } from "../types";
+import { formatApprovalEvent, formatQuestionEvent, isRunAlive } from "./next";
+import type { QuestionRecord, RunRecord } from "../types";
 
 const tmpRoot = join(process.env.TMPDIR ?? "/tmp", "next-test-" + process.pid);
 afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
@@ -73,5 +73,46 @@ describe("findLiveApproval", () => {
     // A killed run's leftover file, with no live run referencing it: nothing fires.
     expect(findLiveApproval([stale], aliveRuns)).toBeUndefined();
     expect(findLiveApproval([stale, live], [])).toBeUndefined();
+  });
+});
+
+describe("event formatting", () => {
+  const question: QuestionRecord = {
+    id: "q86a9a94",
+    question: "SPEC.md says JSON.\nThe goal text says YAML.\nWhich wins?",
+    askedAt: new Date(Date.now() - 30_000).toISOString(),
+    expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    workspaceDir: "/tmp/my project",
+    pid: 1234,
+  };
+
+  test("question event carries the FULL body — no follow-up round-trip", () => {
+    const text = formatQuestionEvent(question);
+    expect(text).toContain("Question q86a9a94  expires in 2m");
+    expect(text).toContain("SPEC.md says JSON.\nThe goal text says YAML.\nWhich wins?");
+    // The -d hint is shell-quoted — the path has a space and must survive copy-paste.
+    expect(text).toContain(`answer q86a9a94 "<text>" -d '/tmp/my project'`);
+  });
+
+  test("untrusted text is sanitized at the output boundary", () => {
+    const text = formatQuestionEvent({ ...question, question: "evil\x1b[2Jquestion" });
+    expect(text).toContain("evil[2Jquestion");
+    expect(text).not.toContain("\x1b");
+  });
+
+  test("approval event names the kind, payload, and both responses", () => {
+    const text = formatApprovalEvent(
+      { id: "aaaa1111", kind: "commandExecution", summary: "rm -rf node_modules" },
+      "/tmp/ws",
+    );
+    expect(text).toContain("Approval aaaa1111 (commandExecution)");
+    expect(text).toContain("  rm -rf node_modules");
+    expect(text).toContain("approve aaaa1111 -d '/tmp/ws'  (or: decline aaaa1111)");
+  });
+
+  test("missing kind/summary degrade gracefully", () => {
+    const text = formatApprovalEvent({ id: "aaaa1111", kind: null, summary: null }, "/tmp/ws");
+    expect(text).toContain("Approval aaaa1111\n");
+    expect(text).toContain("(no details)");
   });
 });

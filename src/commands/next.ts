@@ -1,11 +1,14 @@
 // src/commands/next.ts — next command handler (the attention primitive)
 //
 // Blocks until the first attention-worthy event in the workspace — a pending
-// ask-channel question or a pending interactive approval — prints ONE JSON
-// event line, and exits. Replaces the POSIX `until`-loop the skill used to
-// document for approvals with a single command that behaves identically on
-// macOS, Linux, and Windows, and self-terminates when the workspace goes
-// idle so a watcher armed alongside a run never dangles after the run ends.
+// ask-channel question or a pending interactive approval — prints it in
+// full (readable text, not JSON: the consumer is an agent or a human, and
+// the full body inline saves the follow-up `questions <id>` round-trip),
+// and exits. The exit code carries the machine-readable semantics; scripts
+// that want structured state have the run record (pendingQuestion /
+// pendingApproval in runs/<runId>.json). Self-terminates when the workspace
+// goes idle so a watcher armed alongside a run never dangles after the run
+// ends.
 //
 // Exit codes: 0 = event delivered · 10 = workspace idle (nothing running,
 // nothing pending) · 3 = --timeout elapsed with no event.
@@ -13,10 +16,11 @@
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { resolveMailboxDir } from "../config";
-import { listPendingQuestions, questionSummary, QUESTION_POLL_INTERVAL_MS } from "../questions";
+import { listPendingQuestions, sanitizeForTerminal, QUESTION_POLL_INTERVAL_MS } from "../questions";
 import { listRuns } from "../threads";
+import { shellQuote } from "../approvals";
 import { getWorkspacePaths, parseOptions, readPidFile } from "./shared";
-import type { RunRecord } from "../types";
+import type { QuestionRecord, RunRecord } from "../types";
 
 export const NEXT_EXIT_CODES = {
   event: 0,
@@ -91,8 +95,42 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function emit(event: Record<string, unknown>, code: number): never {
-  console.log(JSON.stringify(event));
+/** "expires in 4m" / "expires in 40s", empty when unparseable. */
+function formatExpiry(expiresAt: string, now = Date.now()): string {
+  const expiresAtMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresAtMs)) return "";
+  const remainingSec = Math.max(0, Math.round((expiresAtMs - now) / 1000));
+  return remainingSec >= 60
+    ? `  expires in ${Math.round(remainingSec / 60)}m`
+    : `  expires in ${remainingSec}s`;
+}
+
+/** Full question, inline — the whole point of the event is that the reader
+ *  can answer without a `questions <id>` round-trip. Exported for tests. */
+export function formatQuestionEvent(question: QuestionRecord, now = Date.now()): string {
+  const dirHint = question.workspaceDir ? ` -d ${shellQuote(question.workspaceDir)}` : "";
+  return [
+    `Question ${question.id}${formatExpiry(question.expiresAt, now)}`,
+    "",
+    sanitizeForTerminal(question.question),
+    "",
+    `Answer with: codex-collab answer ${question.id} "<text>"${dirHint}  (or: answer ${question.id} - for stdin)`,
+  ].join("\n");
+}
+
+/** Exported for tests. */
+export function formatApprovalEvent(approval: PendingApprovalFile, workspaceDir: string): string {
+  return [
+    `Approval ${approval.id}${approval.kind ? ` (${approval.kind})` : ""}`,
+    "",
+    `  ${sanitizeForTerminal(approval.summary ?? "(no details)")}`,
+    "",
+    `Respond with: codex-collab approve ${approval.id} -d ${shellQuote(workspaceDir)}  (or: decline ${approval.id})`,
+  ].join("\n");
+}
+
+function emit(text: string, code: number): never {
+  console.log(text);
   process.exit(code);
 }
 
@@ -109,15 +147,7 @@ export async function handleNext(args: string[]): Promise<void> {
   while (true) {
     const question = listPendingQuestions(mailboxDir)[0];
     if (question) {
-      emit({
-        type: "question",
-        id: question.id,
-        summary: questionSummary(question.question),
-        askedAt: question.askedAt,
-        expiresAt: question.expiresAt,
-        workspaceDir: question.workspaceDir,
-        answerWith: `codex-collab answer ${question.id} "<text>"`,
-      }, NEXT_EXIT_CODES.event);
+      emit(formatQuestionEvent(question), NEXT_EXIT_CODES.event);
     }
 
     const aliveRuns = listRuns(ws.stateDir).filter(
@@ -130,23 +160,17 @@ export async function handleNext(args: string[]): Promise<void> {
     // later `next` fire instantly with a dead event.
     const approval = findLiveApproval(listPendingApprovals(ws.approvalsDir), aliveRuns);
     if (approval) {
-      emit({
-        type: "approval",
-        id: approval.id,
-        kind: approval.kind,
-        summary: approval.summary,
-        answerWith: `codex-collab approve ${approval.id} (or decline)`,
-      }, NEXT_EXIT_CODES.event);
+      emit(formatApprovalEvent(approval, options.dir), NEXT_EXIT_CODES.event);
     }
 
     if (aliveRuns.length > 0) {
       sawActiveRun = true;
     } else if (sawActiveRun || Date.now() - startedAt > LAUNCH_GRACE_MS) {
-      emit({ type: "idle" }, NEXT_EXIT_CODES.idle);
+      emit("Workspace idle — nothing running, nothing pending.", NEXT_EXIT_CODES.idle);
     }
 
     if (Date.now() - startedAt >= timeoutMs) {
-      emit({ type: "timeout" }, NEXT_EXIT_CODES.timeout);
+      emit(`No event within ${options.timeout}s.`, NEXT_EXIT_CODES.timeout);
     }
     await new Promise((r) => setTimeout(r, QUESTION_POLL_INTERVAL_MS));
   }
