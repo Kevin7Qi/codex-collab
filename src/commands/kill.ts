@@ -6,6 +6,17 @@ import { join } from "path";
 import { pauseThreadGoal, clearThreadGoal, isGoalFeatureUnavailable } from "../goals";
 import type { AppServerClient } from "../client";
 import type { ThreadGoal } from "../types";
+import {
+  die,
+  parseOptions,
+  validateIdOrDie,
+  resolveThreadIdAllowRaw,
+  progress,
+  withClient,
+  readPidFile,
+  removePidFile,
+  getWorkspacePaths,
+} from "./shared";
 
 /** Read the thread goal with a few retries: a live goal-following run owns
  *  the broker stream and its own in-flight polls can transiently bounce our
@@ -28,17 +39,6 @@ async function readGoalWithRetry(
     }
   }
 }
-import {
-  die,
-  parseOptions,
-  validateIdOrDie,
-  resolveThreadIdAllowRaw,
-  progress,
-  withClient,
-  readPidFile,
-  removePidFile,
-  getWorkspacePaths,
-} from "./shared";
 
 export async function handleKill(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);

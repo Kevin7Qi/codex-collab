@@ -1196,6 +1196,71 @@ describe("runTurnWithGoalFollow", () => {
     expect(result.status).toBe("interrupted");
     expect(calls).toContain("thread/goal/set");
     expect(calls.indexOf("thread/goal/set")).toBeLessThan(calls.indexOf("turn/interrupt"));
+    // The follow-phase kill must clean up its own signal file — executeTurn's
+    // finally only covers the first turn.
+    expect(existsSync(join(TEST_KILL_DIR, "thr-1"))).toBe(false);
+  });
+
+  test("a transient goal-read failure mid-follow is not taken for goal completion", async () => {
+    // One failed thread/goal/get must not end the follow with a false
+    // success: the loop keeps acting on the last known (active) state, and
+    // the continuation that starts AFTER the failed read is still followed.
+    let goalGets = 0;
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("turn/completed", completedTurn("turn-1"));
+          emit("turn/started", startedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") {
+        goalGets++;
+        if (goalGets === 1) return { goal: null }; // pre-turn read
+        if (goalGets === 2) {
+          setTimeout(() => emit("turn/completed", completedTurn("turn-2")), 30);
+          return { goal: makeGoal("active") };
+        }
+        if (goalGets === 3) {
+          // Transient failure right after turn-2 — pre-fix this read as
+          // "cleared" and the run exited 0 while the goal kept working.
+          setTimeout(() => {
+            emit("turn/started", startedTurn("turn-3"));
+            emit("turn/completed", completedTurn("turn-3"));
+          }, 30);
+          throw new Error("socket hang up");
+        }
+        return { goal: null }; // genuinely cleared after turn-3
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-transient-read"));
+    expect(result.status).toBe("completed");
+    expect(result.continuationTurns).toBe(2); // turn-3 followed DESPITE the failed read
+  }, 10_000);
+
+  test("the pause brake fails CLOSED when the goal read fails at timeout", async () => {
+    // If thread/goal/get errors at brake time, the pause must still be
+    // attempted — skipping it on an unknown state is exactly the headless
+    // burn the brake exists to stop.
+    const calls: string[] = [];
+    const { client } = buildMockClient((method, params) => {
+      calls.push(method);
+      if (method === "turn/start") return inProgressTurn("turn-1"); // never completes
+      if (method === "thread/goal/get") throw new Error("socket hang up");
+      if (method === "thread/goal/set") {
+        expect((params as { status: string }).status).toBe("paused");
+        return { goal: makeGoal("paused") };
+      }
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    await expect(
+      runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-brake-closed", { timeoutMs: 300 })),
+    ).rejects.toThrow(/timed out/);
+    expect(calls).toContain("thread/goal/set");
   });
 
   test("connection loss mid-goal rejects and is never read as goal completion", async () => {

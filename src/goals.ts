@@ -44,22 +44,38 @@ export function isGoalFeatureUnavailable(e: unknown): boolean {
     || msg.includes("sqlite state db unavailable");
 }
 
-/** Read the thread's goal. Returns null when there is no goal, the feature
- *  is unavailable, or the read fails (with a warning for real failures) —
- *  goal awareness must never break a run that would otherwise work. */
+export interface GoalReadResult {
+  goal: ThreadGoal | null;
+  /** False iff the read FAILED (transient RPC error) — distinct from "no
+   *  goal". The follow loop must not take a failed read for a cleared
+   *  (= completed) goal, and the pause brake must not fail open on it. */
+  ok: boolean;
+}
+
+/** Read the thread's goal, reporting read failures distinctly. A missing
+ *  goals feature counts as a successful "no goal" — there is nothing to
+ *  follow or brake. */
+export async function readThreadGoal(
+  client: AppServerClient,
+  threadId: string,
+): Promise<GoalReadResult> {
+  try {
+    const res = await client.request<{ goal: ThreadGoal | null }>("thread/goal/get", { threadId });
+    return { goal: res.goal ?? null, ok: true };
+  } catch (e) {
+    if (isGoalFeatureUnavailable(e)) return { goal: null, ok: true };
+    console.error(`[codex] Warning: could not read thread goal: ${e instanceof Error ? e.message : String(e)}`);
+    return { goal: null, ok: false };
+  }
+}
+
+/** Convenience read for callers where "unknown" and "none" coincide (display,
+ *  best-effort checks). Never breaks a run that would otherwise work. */
 export async function getThreadGoal(
   client: AppServerClient,
   threadId: string,
 ): Promise<ThreadGoal | null> {
-  try {
-    const res = await client.request<{ goal: ThreadGoal | null }>("thread/goal/get", { threadId });
-    return res.goal ?? null;
-  } catch (e) {
-    if (!isGoalFeatureUnavailable(e)) {
-      console.error(`[codex] Warning: could not read thread goal: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    return null;
-  }
+  return (await readThreadGoal(client, threadId)).goal;
 }
 
 /** Pause the thread's goal so the server stops auto-continuing. This is the

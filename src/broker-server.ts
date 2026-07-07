@@ -186,6 +186,7 @@ async function main() {
     if (activeStreamTargets?.has(threadId)) {
       activeStreamSocket = null;
       activeStreamTargets = null;
+      retainedAwaitingContinuation.clear(); // ownership is singular — nothing else awaits
       if (orphanWatchdog) {
         clearTimeout(orphanWatchdog);
         orphanWatchdog = null;
@@ -245,6 +246,7 @@ async function main() {
         if (activeStreamSocket !== null && activeStreamTargets === ownedTargets) {
           activeStreamSocket = null;
           activeStreamTargets = null;
+          retainedAwaitingContinuation.clear(); // ownership gone — no gap markers
           // Don't touch activeRequestSocket — a fresh non-streaming request
           // (kill, threads, etc.) may have claimed it during the await.
         }
@@ -391,7 +393,10 @@ async function main() {
         // continuation starts, releaseGapRetention frees the ownership.
         retainedAwaitingContinuation.add(threadId as string);
       } else if (matchesStream && (activeStreamSocket === target || activeStreamSocket === null)) {
-        if (typeof threadId === "string") retainedAwaitingContinuation.delete(threadId);
+        // Ownership is singular — releasing it means nothing is awaiting a
+        // continuation anymore; a stale entry would trigger a premature
+        // gap-release against a FUTURE owner of the same thread.
+        retainedAwaitingContinuation.clear();
         // If we're releasing actual stream ownership (activeStreamSocket was set),
         // also clean up the tracked turn ID so the bounded set stays small.
         // In the fast-turn race (activeStreamSocket is null), keep the entry
@@ -704,6 +709,7 @@ async function main() {
           if (reviewThreadId) orphanTargets.set(reviewThreadId, turnId);
           activeStreamSocket = socket;
           activeStreamTargets = orphanTargets;
+          retainedAwaitingContinuation.clear(); // fresh ownership — no stale gap markers
           armOrphanWatchdog(orphanTargets);
           try {
             await appClient.request("turn/interrupt", { threadId: interruptThreadId, turnId });
@@ -744,6 +750,7 @@ async function main() {
         if (!alreadyCompleted && streamTargets.size > 0) {
           activeStreamSocket = socket;
           activeStreamTargets = streamTargets;
+          retainedAwaitingContinuation.clear(); // fresh ownership — no stale gap markers
         }
         if (newTurnId) completedStreamTurnIds.delete(newTurnId);
       }

@@ -17,7 +17,7 @@ import {
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
 import { config } from "./config";
-import { getThreadGoal, pauseThreadGoal } from "./goals";
+import { pauseThreadGoal, readThreadGoal } from "./goals";
 
 const STALE_KILL_SIGNAL_MS = 1000;
 
@@ -143,8 +143,8 @@ export interface GoalRunOptions extends TurnOptions {
 
 export interface GoalRunResult extends TurnResult {
   /** Final goal state: null when no goal ever appeared OR the goal was
-   *  cleared (Codex clears the goal on completion — there is no "completed"
-   *  status on the wire; disambiguate with goalSeen). */
+   *  cleared after being seen (disambiguate with goalSeen). Completion
+   *  normally arrives as status "complete" with the goal still present. */
   goal: ThreadGoal | null;
   /** A goal existed at some point during this run. */
   goalSeen: boolean;
@@ -259,9 +259,14 @@ export async function runTurnWithGoalFollow(
   // take for a cleared (= completed) goal.
   let connectionDown: Error | null = null;
 
-  /** Authoritative goal state; refreshes lastGoal/goalSeen. */
+  /** Authoritative goal state; refreshes lastGoal/goalSeen. A FAILED read
+   *  returns the last known state instead of null — one transient RPC error
+   *  must not read as "goal cleared" (= completed) and end the follow with
+   *  a false success while the server keeps working. The repoll cadence
+   *  retries; the deadline is the backstop if reads never recover. */
   const readGoal = async (): Promise<ThreadGoal | null> => {
-    const goal = await getThreadGoal(client, threadId);
+    const { goal, ok } = await readThreadGoal(client, threadId);
+    if (!ok) return lastGoal;
     if (goal) notifyGoal(goal);
     else if (goalSeen && connectionDown === null) {
       lastGoal = null;
@@ -275,8 +280,10 @@ export async function runTurnWithGoalFollow(
   const pauseAndInterrupt = async (activeTurnId: string | null, context: string): Promise<void> => {
     // Fresh read: `kill --clear` may have already cleared (or paused) the
     // goal — pausing a goal that no longer exists is noise, not a brake.
-    const current = await getThreadGoal(client, threadId);
-    if (current === null || current.status !== "active") {
+    // Skip ONLY on a positive answer: a failed read must not skip the pause
+    // (fail closed — this is the lever that stops headless token burn).
+    const { goal: current, ok } = await readThreadGoal(client, threadId);
+    if (ok && (current === null || current.status !== "active")) {
       if (activeTurnId !== null) {
         await tryInterruptTurn(client, threadId, activeTurnId, context);
       }
@@ -293,7 +300,8 @@ export async function runTurnWithGoalFollow(
       // Stamp the pause locally: the server's goal/updated notification races
       // our exit, and losing that race would leave the terminal run record
       // claiming an "active" goal that is in fact paused.
-      notifyGoal({ ...current, status: "paused" });
+      const stamped = current ?? (lastGoal as ThreadGoal | null);
+      if (stamped) notifyGoal({ ...stamped, status: "paused" });
     }
     if (activeTurnId !== null) {
       await tryInterruptTurn(client, threadId, activeTurnId, context);
@@ -307,6 +315,23 @@ export async function runTurnWithGoalFollow(
     goalSeen,
     continuationTurns,
   });
+
+  /** Follow-phase kill: brake, flush, clean up the signal file (executeTurn's
+   *  finally only covers the first turn), and shape the interrupted result. */
+  const finishKilled = async (activeTurnId: string | null): Promise<GoalRunResult> => {
+    await pauseAndInterrupt(activeTurnId, "on kill");
+    opts.dispatcher.flushOutput();
+    opts.dispatcher.flush();
+    removeOwnKillSignal(opts.killSignalsDir ?? config.killSignalsDir, threadId);
+    return finish({
+      status: "interrupted",
+      output: opts.dispatcher.getTurnOutput(),
+      filesChanged: opts.dispatcher.getFilesChanged(),
+      commandsRun: opts.dispatcher.getCommandsRun(),
+      error: "Thread killed by user",
+      durationMs: 0,
+    });
+  };
 
   try {
     // Read the goal BEFORE the turn: a goal that predates this run (resumed
@@ -404,19 +429,7 @@ export async function runTurnWithGoalFollow(
           }
           await new Promise((r) => setTimeout(r, GOAL_CONTINUATION_POLL_MS));
         }
-        if (killed) {
-          await pauseAndInterrupt(turnId, "on kill");
-          opts.dispatcher.flushOutput();
-          opts.dispatcher.flush();
-          return finish({
-            status: "interrupted",
-            output: opts.dispatcher.getTurnOutput(),
-            filesChanged: opts.dispatcher.getFilesChanged(),
-            commandsRun: opts.dispatcher.getCommandsRun(),
-            error: "Thread killed by user",
-            durationMs: 0,
-          });
-        }
+        if (killed) return await finishKilled(turnId);
         if (turnId === null) { goal = await readGoal(); continue; }
 
         continuationTurns++;
@@ -434,17 +447,7 @@ export async function runTurnWithGoalFollow(
           lastTurnError = completed.turn.error?.message;
         } catch (e) {
           if (e instanceof KillSignalError) {
-            await pauseAndInterrupt(turnId, "on kill");
-            opts.dispatcher.flushOutput();
-            opts.dispatcher.flush();
-            return finish({
-              status: "interrupted",
-              output: opts.dispatcher.getTurnOutput(),
-              filesChanged: opts.dispatcher.getFilesChanged(),
-              commandsRun: opts.dispatcher.getCommandsRun(),
-              error: "Thread killed by user",
-              durationMs: 0,
-            });
+            return await finishKilled(turnId);
           }
           if (e instanceof TurnTimeoutError) {
             await pauseAndInterrupt(turnId, "on timeout");
@@ -509,6 +512,23 @@ class KillSignalError extends Error {
   constructor(public readonly threadId: string) {
     super(`Thread ${threadId} killed by user`);
     this.name = "KillSignalError";
+  }
+}
+
+/** Remove a kill-signal file iff it targets this process (empty, wildcard,
+ *  or our PID) — a different LIVE pid's signal belongs to a concurrent run
+ *  on the thread, and deleting it would make that kill silently never land. */
+function removeOwnKillSignal(signalsDir: string, threadId: string): void {
+  const signalPath = join(signalsDir, threadId);
+  try {
+    const content = readFileSync(signalPath, "utf-8").trim();
+    if (content === "" || content === "*" || content === String(process.pid)) {
+      unlinkSync(signalPath);
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.error(`[codex] Warning: could not clean up kill signal: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 }
 
