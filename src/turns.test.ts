@@ -1364,10 +1364,11 @@ describe("runTurnWithGoalFollow", () => {
     expect(result.continuationTurns).toBe(1);
   });
 
-  test("first-turn timeout with a PRE-EXISTING goal still pauses it", async () => {
+  test("first-turn timeout with a PRE-EXISTING goal pauses BEFORE the cleanup interrupt", async () => {
     // Resumed goal-mode thread whose first turn times out before any goal
-    // notification arrives: the brake must not depend on goalSeen — the
-    // timeout path re-reads the goal authoritatively and pauses it.
+    // notification arrives: the brake must not depend on goalSeen, and it
+    // must land before executeTurn's cleanup turn/interrupt — interrupting
+    // an active goal first spawns one more headless continuation.
     const calls: string[] = [];
     const { client } = buildMockClient((method, params) => {
       calls.push(method);
@@ -1384,7 +1385,39 @@ describe("runTurnWithGoalFollow", () => {
     await expect(
       runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "resume" }], baseOpts("goal-preexisting-timeout", { timeoutMs: 300 })),
     ).rejects.toThrow(/timed out/);
-    expect(calls).toContain("thread/goal/set");
+    const pauseIdx = calls.indexOf("thread/goal/set");
+    const interruptIdx = calls.indexOf("turn/interrupt");
+    expect(pauseIdx).toBeGreaterThan(-1);
+    expect(interruptIdx).toBeGreaterThan(-1);
+    expect(pauseIdx).toBeLessThan(interruptIdx);
+  });
+
+  test("first-turn kill with an active goal pauses BEFORE the cleanup interrupt", async () => {
+    // Same inversion as the timeout path: executeTurn's KillSignalError
+    // branch interrupts the first turn during cleanup — the pause hook must
+    // run before that interrupt.
+    const calls: string[] = [];
+    const { client } = buildMockClient((method, params) => {
+      calls.push(method);
+      if (method === "turn/start") {
+        setTimeout(() => {
+          writeFileSync(join(TEST_KILL_DIR, "thr-1"), "*", { mode: 0o600 });
+        }, 100);
+        return inProgressTurn("turn-1"); // never completes; kill ends it
+      }
+      if (method === "thread/goal/get") return { goal: makeGoal("active") };
+      if (method === "thread/goal/set") return { goal: makeGoal("paused") };
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-firstturn-kill"));
+    expect(result.status).toBe("interrupted");
+    const pauseIdx = calls.indexOf("thread/goal/set");
+    const interruptIdx = calls.indexOf("turn/interrupt");
+    expect(pauseIdx).toBeGreaterThan(-1);
+    expect(interruptIdx).toBeGreaterThan(-1);
+    expect(pauseIdx).toBeLessThan(interruptIdx);
   });
 });
 

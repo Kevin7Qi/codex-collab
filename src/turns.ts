@@ -85,6 +85,21 @@ export interface TurnOptions {
    *  CLI signal handler target the right thread for `turn/interrupt`. Never
    *  fires for normal turns. */
   onReviewThreadId?: (reviewThreadId: string) => void;
+  /** Called BEFORE the cleanup turn/interrupt on abnormal exits (timeout,
+   *  kill, errors). Goal-following installs its pause brake here: with an
+   *  active goal, interrupting first lets the server spawn one more
+   *  headless continuation in the gap before the wrapper's own pause runs.
+   *  Failures are swallowed — the interrupt must still happen. */
+  onBeforeInterrupt?: () => Promise<void>;
+}
+
+/** Run the pre-interrupt hook, never letting its failure block the interrupt. */
+async function runBeforeInterruptHook(opts: TurnOptions): Promise<void> {
+  try {
+    await opts.onBeforeInterrupt?.();
+  } catch (e) {
+    console.error(`[codex] Warning: pre-interrupt hook failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 export interface ReviewOptions extends TurnOptions {
@@ -233,6 +248,12 @@ export async function runTurnWithGoalFollow(
       if (queued !== -1) startedTurnIds.splice(queued, 1);
       opts.onTurnId?.(id);
     },
+    // executeTurn's abnormal-exit cleanup interrupts the FIRST turn before
+    // our catch handlers run — with an active goal, that interrupt spawns
+    // one more headless continuation in the gap. The hook pauses first,
+    // preserving pause-before-interrupt on the first turn too. (defined
+    // below; only invoked during runTurn's cleanup, long after init)
+    onBeforeInterrupt: () => pauseIfActive("before interrupt"),
   };
   unsubs.push(client.on("turn/started", (params) => {
     const p = params as TurnStartedParams;
@@ -275,20 +296,14 @@ export async function runTurnWithGoalFollow(
     return goal;
   };
 
-  /** The brake for every abnormal exit while a goal is active: pause FIRST
-   *  (so no fresh continuation spawns), then interrupt the live turn. */
-  const pauseAndInterrupt = async (activeTurnId: string | null, context: string): Promise<void> => {
-    // Fresh read: `kill --clear` may have already cleared (or paused) the
-    // goal — pausing a goal that no longer exists is noise, not a brake.
-    // Skip ONLY on a positive answer: a failed read must not skip the pause
-    // (fail closed — this is the lever that stops headless token burn).
+  /** Pause the goal iff it is (or may be) active. Fresh read first:
+   *  `kill --clear` may have already cleared (or paused) the goal, and
+   *  pausing a goal that no longer exists is noise, not a brake. Skip ONLY
+   *  on a positive answer — a failed read must not skip the pause (fail
+   *  closed: this is the lever that stops headless token burn). */
+  const pauseIfActive = async (context: string): Promise<void> => {
     const { goal: current, ok } = await readThreadGoal(client, threadId);
-    if (ok && (current === null || current.status !== "active")) {
-      if (activeTurnId !== null) {
-        await tryInterruptTurn(client, threadId, activeTurnId, context);
-      }
-      return;
-    }
+    if (ok && (current === null || current.status !== "active")) return;
     const paused = await pauseThreadGoal(client, threadId);
     if (!paused) {
       opts.dispatcher.progressLine(
@@ -303,6 +318,12 @@ export async function runTurnWithGoalFollow(
       const stamped = current ?? (lastGoal as ThreadGoal | null);
       if (stamped) notifyGoal({ ...stamped, status: "paused" });
     }
+  };
+
+  /** The brake for every abnormal exit while a goal is active: pause FIRST
+   *  (so no fresh continuation spawns), then interrupt the live turn. */
+  const pauseAndInterrupt = async (activeTurnId: string | null, context: string): Promise<void> => {
+    await pauseIfActive(context);
     if (activeTurnId !== null) {
       await tryInterruptTurn(client, threadId, activeTurnId, context);
     }
@@ -859,6 +880,7 @@ async function executeTurn(
       opts.dispatcher.flushOutput();
       opts.dispatcher.flush();
       if (turnId !== null) {
+        await runBeforeInterruptHook(opts);
         await tryInterruptTurn(client, interruptThreadId, turnId, "on kill");
       }
       return {
@@ -871,6 +893,7 @@ async function executeTurn(
       };
     }
     if (turnId !== null) {
+      await runBeforeInterruptHook(opts);
       await tryInterruptTurn(client, interruptThreadId, turnId);
     }
     throw e;
