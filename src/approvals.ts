@@ -9,6 +9,7 @@ import type {
   PendingApproval,
 } from "./types";
 import { validateId } from "./config";
+import { sanitizeForTerminal } from "./questions";
 
 export interface ApprovalHandler {
   handleCommandApproval(req: CommandApprovalRequest, signal?: AbortSignal): Promise<ApprovalDecision>;
@@ -80,8 +81,12 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     const cwd = this.workspaceDir ?? req.cwd;
     const dirFlag = cwd ? ` -d ${shellQuote(cwd)}` : "";
     this.onProgress(`APPROVAL NEEDED`);
-    this.onProgress(`  Command: ${req.command ?? "(no command)"}`);
-    if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
+    // The command and reason are Codex-proposed text headed for the user's
+    // terminal at the moment of a permission decision — strip escape
+    // sequences so embedded ANSI can't redraw the prompt and disguise what
+    // is being approved.
+    this.onProgress(`  Command: ${sanitizeForTerminal(req.command ?? "(no command)")}`);
+    if (req.reason) this.onProgress(`  Reason: ${sanitizeForTerminal(req.reason)}`);
     this.onProgress(`  Approve: codex-collab approve ${id}${dirFlag}`);
     this.onProgress(`  Decline: codex-collab decline ${id}${dirFlag}`);
 
@@ -109,7 +114,7 @@ export class InteractiveApprovalHandler implements ApprovalHandler {
     const cwd = this.workspaceDir ?? req.grantRoot;
     const dirFlag = cwd ? ` -d ${shellQuote(cwd)}` : "";
     this.onProgress(`APPROVAL NEEDED (file change)`);
-    if (req.reason) this.onProgress(`  Reason: ${req.reason}`);
+    if (req.reason) this.onProgress(`  Reason: ${sanitizeForTerminal(req.reason)}`);
     this.onProgress(`  Approve: codex-collab approve ${id}${dirFlag}`);
     this.onProgress(`  Decline: codex-collab decline ${id}${dirFlag}`);
 
