@@ -1077,7 +1077,8 @@ describe("runTurnWithGoalFollow", () => {
       }
       if (method === "thread/goal/get") {
         goalGets++;
-        if (goalGets === 1) {
+        if (goalGets === 1) return { goal: null }; // pre-turn read: goal not created yet
+        if (goalGets === 2) {
           // Goal active after turn 1; continuation streams shortly after.
           setTimeout(() => {
             emit("item/agentMessage/delta", { threadId: "thr-1", turnId: "turn-2", itemId: "m2", delta: "second." });
@@ -1118,7 +1119,8 @@ describe("runTurnWithGoalFollow", () => {
       }
       if (method === "thread/goal/get") {
         goalGets++;
-        if (goalGets === 1) {
+        if (goalGets === 1) return { goal: null }; // pre-turn read
+        if (goalGets === 2) {
           setTimeout(() => emit("turn/completed", completedTurn("turn-2")), 30);
           return { goal: makeGoal("active") };
         }
@@ -1241,7 +1243,8 @@ describe("runTurnWithGoalFollow", () => {
       }
       if (method === "thread/goal/get") {
         goalGets++;
-        if (goalGets === 1) {
+        if (goalGets === 1) return { goal: null }; // pre-turn read
+        if (goalGets === 2) {
           setTimeout(async () => {
             // Approval fired from the CONTINUATION turn.
             const cmdHandler = requestHandlers.get("item/commandExecution/requestApproval");
@@ -1269,7 +1272,7 @@ describe("runTurnWithGoalFollow", () => {
 
   test("goal created before the run (resume) is picked up via goal/get, not notifications", async () => {
     // Resuming a goal-mode thread: no goal/updated fires during our turn —
-    // the authoritative post-turn goal/get must find it anyway.
+    // the authoritative pre/post-turn goal/get must find it anyway.
     let goalGets = 0;
     const { client, emit } = buildMockClient((method) => {
       if (method === "turn/start") {
@@ -1278,7 +1281,8 @@ describe("runTurnWithGoalFollow", () => {
       }
       if (method === "thread/goal/get") {
         goalGets++;
-        if (goalGets === 1) {
+        if (goalGets === 1) return { goal: makeGoal("active") }; // pre-existing, seen pre-turn
+        if (goalGets === 2) {
           setTimeout(() => {
             emit("turn/started", startedTurn("turn-2"));
             emit("turn/completed", completedTurn("turn-2"));
@@ -1293,6 +1297,29 @@ describe("runTurnWithGoalFollow", () => {
     const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "resume" }], baseOpts("goal-preexisting"));
     expect(result.goalSeen).toBe(true);
     expect(result.continuationTurns).toBe(1);
+  });
+
+  test("first-turn timeout with a PRE-EXISTING goal still pauses it", async () => {
+    // Resumed goal-mode thread whose first turn times out before any goal
+    // notification arrives: the brake must not depend on goalSeen — the
+    // timeout path re-reads the goal authoritatively and pauses it.
+    const calls: string[] = [];
+    const { client } = buildMockClient((method, params) => {
+      calls.push(method);
+      if (method === "turn/start") return inProgressTurn("turn-1"); // never completes
+      if (method === "thread/goal/get") return { goal: makeGoal("active") };
+      if (method === "thread/goal/set") {
+        expect((params as { status: string }).status).toBe("paused");
+        return { goal: makeGoal("paused") };
+      }
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    await expect(
+      runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "resume" }], baseOpts("goal-preexisting-timeout", { timeoutMs: 300 })),
+    ).rejects.toThrow(/timed out/);
+    expect(calls).toContain("thread/goal/set");
   });
 });
 

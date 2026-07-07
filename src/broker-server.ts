@@ -154,6 +154,31 @@ async function main() {
    *  released here or the broker reports busy until the orphan watchdog. */
   const retainedAwaitingContinuation = new Set<string>();
 
+  /** Learn goal state from request/response traffic passing through the
+   *  broker. Notifications cover goals that CHANGE, but a goal that
+   *  predates every client (resumed goal-mode thread) may never fire one
+   *  before the first turn/completed — the goal-following client's own
+   *  pre-turn thread/goal/get is then the broker's only signal to retain
+   *  ownership across the continuation turns. */
+  function learnGoalFromTraffic(method: unknown, params: unknown, result: unknown): void {
+    if (method === "thread/goal/get" || method === "thread/goal/set") {
+      const goal = (result as { goal?: { threadId?: unknown; status?: unknown } } | undefined)?.goal;
+      if (!goal || typeof goal.threadId !== "string") return;
+      if (goal.status === "active") {
+        goalActiveThreads.add(goal.threadId);
+      } else {
+        goalActiveThreads.delete(goal.threadId);
+        releaseGapRetention(goal.threadId);
+      }
+    } else if (method === "thread/goal/clear") {
+      const threadId = (params as { threadId?: unknown } | undefined)?.threadId;
+      if (typeof threadId === "string") {
+        goalActiveThreads.delete(threadId);
+        releaseGapRetention(threadId);
+      }
+    }
+  }
+
   /** Release retained stream ownership for a thread whose goal ended in the
    *  between-turns gap. */
   function releaseGapRetention(threadId: string): void {
@@ -573,13 +598,20 @@ async function main() {
     const isReadOnly =
       typeof message.method === "string" &&
       (message.method === "thread/read" || message.method === "thread/list");
+    const isGoalOp =
+      typeof message.method === "string" &&
+      (message.method === "thread/goal/get" ||
+        message.method === "thread/goal/set" ||
+        message.method === "thread/goal/clear");
 
-    // Allow interrupt and read-only requests through even when another
-    // client owns the stream — but only when there's no pending request.
-    // Read-only methods are needed by `kill` (reads thread to get turn ID)
-    // and `threads` (lists threads while a turn is running).
+    // Allow interrupt, read-only, and goal requests through even when
+    // another client owns the stream — but only when there's no pending
+    // request. Read-only methods are needed by `kill` (reads thread to get
+    // turn ID) and `threads` (lists threads while a turn is running); goal
+    // ops are needed by `kill`/`kill --clear` to brake a goal whose
+    // following run owns the stream for the goal's whole lifetime.
     const allowDuringActiveStream =
-      (isInterrupt || isReadOnly) &&
+      (isInterrupt || isReadOnly || isGoalOp) &&
       activeStreamSocket !== null &&
       activeStreamSocket !== socket &&
       activeRequestSocket === null;
@@ -599,13 +631,14 @@ async function main() {
       return;
     }
 
-    // Forward interrupt/read-only during active stream (special path)
+    // Forward interrupt/read-only/goal ops during active stream (special path)
     if (allowDuringActiveStream) {
       try {
         const result = await appClient.request(
           message.method as string,
           (message.params ?? {}) as Record<string, unknown>,
         );
+        learnGoalFromTraffic(message.method, message.params, result);
         send(socket, { id: message.id, result });
       } catch (error) {
         send(socket, {
@@ -630,6 +663,7 @@ async function main() {
         message.method as string,
         (message.params ?? {}) as Record<string, unknown>,
       );
+      learnGoalFromTraffic(message.method, message.params, result);
 
       // If the requesting client disconnected while we were waiting for the
       // response, the turn has started on the app-server but nobody is

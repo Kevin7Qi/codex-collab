@@ -99,12 +99,18 @@ export async function handleKill(args: string[]): Promise<void> {
       // alone just makes the server start a fresh continuation turn. Pause
       // keeps the goal resumable (a later turn continues it); --clear
       // abandons it entirely.
+      // Whether the goal is CONFIRMED gone server-side (cleared now, or the
+      // server said there is none). The ledger reconciliation below must not
+      // outrun reality: stamping "cleared" while the clear actually failed
+      // would leave a resumable server-side goal the user believes abandoned.
+      let goalKnownGone = false;
       try {
         const { goal, readFailed } = await readGoalWithRetry(client, threadId);
         if (goal) {
           if (options.clear) {
             if (await clearThreadGoal(client, threadId)) {
               goalStopped = true;
+              goalKnownGone = true;
               progress(`Cleared goal (was ${goal.status}): ${goal.objective.split("\n", 1)[0].slice(0, 80)}`);
             }
           } else if (goal.status === "active") {
@@ -118,12 +124,14 @@ export async function handleKill(args: string[]): Promise<void> {
           // (clearing a goal-less thread is a no-op server-side).
           if (await clearThreadGoal(client, threadId)) {
             goalStopped = true;
+            goalKnownGone = true;
             progress("Cleared goal (state was unreadable — cleared blindly).");
           }
         } else if (readFailed) {
           progress("Could not read goal state — if a goal is active, the running process pauses it on kill.");
-        } else if (options.clear) {
-          progress("No goal on this thread.");
+        } else {
+          goalKnownGone = true; // read succeeded: no goal on this thread
+          if (options.clear) progress("No goal on this thread.");
         }
       } catch (e) {
         console.error(`[codex] Warning: could not stop thread goal: ${e instanceof Error ? e.message : String(e)}`);
@@ -132,9 +140,9 @@ export async function handleKill(args: string[]): Promise<void> {
       // After --clear, reconcile the ledger: the latest run's goal mirror is
       // what `threads` shows, and leaving it "paused"/"active" would keep
       // advertising a goal that no longer exists (inviting a pointless
-      // resume). Stamped even when the server had no goal — that's exactly
-      // the stale-mirror case.
-      if (options.clear && shortId) {
+      // resume). Only once the server-side goal is confirmed gone — the
+      // no-goal-but-stale-mirror case included.
+      if (options.clear && goalKnownGone && shortId) {
         try {
           const latest = getLatestRun(ws.stateDir, shortId);
           if (latest?.goal && latest.goal.status !== "complete" && latest.goal.status !== "cleared") {

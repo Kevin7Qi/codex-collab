@@ -273,6 +273,15 @@ export async function runTurnWithGoalFollow(
   /** The brake for every abnormal exit while a goal is active: pause FIRST
    *  (so no fresh continuation spawns), then interrupt the live turn. */
   const pauseAndInterrupt = async (activeTurnId: string | null, context: string): Promise<void> => {
+    // Fresh read: `kill --clear` may have already cleared (or paused) the
+    // goal — pausing a goal that no longer exists is noise, not a brake.
+    const current = await getThreadGoal(client, threadId);
+    if (current === null || current.status !== "active") {
+      if (activeTurnId !== null) {
+        await tryInterruptTurn(client, threadId, activeTurnId, context);
+      }
+      return;
+    }
     const paused = await pauseThreadGoal(client, threadId);
     if (!paused) {
       opts.dispatcher.progressLine(
@@ -284,9 +293,7 @@ export async function runTurnWithGoalFollow(
       // Stamp the pause locally: the server's goal/updated notification races
       // our exit, and losing that race would leave the terminal run record
       // claiming an "active" goal that is in fact paused.
-      if (lastGoal !== null && (lastGoal as ThreadGoal).status === "active") {
-        notifyGoal({ ...(lastGoal as ThreadGoal), status: "paused" });
-      }
+      notifyGoal({ ...current, status: "paused" });
     }
     if (activeTurnId !== null) {
       await tryInterruptTurn(client, threadId, activeTurnId, context);
@@ -302,15 +309,23 @@ export async function runTurnWithGoalFollow(
   });
 
   try {
+    // Read the goal BEFORE the turn: a goal that predates this run (resumed
+    // goal-mode thread) fires no goal/updated during our turn, and every
+    // abnormal-exit brake below keys off knowing it exists. The get also
+    // travels through the broker, which learns the active goal from it and
+    // retains stream ownership across the coming continuation turns.
+    await readGoal();
+
     let first: TurnResult;
     try {
       first = await runTurn(client, threadId, input, wrappedOpts);
     } catch (e) {
       // A first-turn timeout with an active goal must not leave the goal
-      // burning headless after the CLI exits with code 3.
-      if (e instanceof TurnTimeoutError && goalSeen && lastGoal !== null) {
-        const g = lastGoal as ThreadGoal;
-        if (g.status === "active") await pauseAndInterrupt(null, "on timeout");
+      // burning headless after the CLI exits with code 3. pauseAndInterrupt
+      // does its own authoritative read — cached flags would miss a goal
+      // that appeared mid-turn without any notification reaching us.
+      if (e instanceof TurnTimeoutError) {
+        await pauseAndInterrupt(null, "on timeout");
       }
       throw e;
     }
@@ -319,9 +334,7 @@ export async function runTurnWithGoalFollow(
       // Killed during turn 1. The goal-aware `kill` pauses the goal itself,
       // but older kills, SIGINT paths, and server-side interrupts don't —
       // never exit "interrupted" while the server keeps continuing.
-      if (goalSeen && (await readGoal())?.status === "active") {
-        await pauseAndInterrupt(null, "on kill");
-      }
+      await pauseAndInterrupt(null, "on kill");
       return finish(first);
     }
 
