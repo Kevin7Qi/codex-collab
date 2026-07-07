@@ -1282,7 +1282,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         });
 
         await waitFor(() => notifications.some((n) => n.method === "turn/started"), 5000);
-        expect(notifications.some((n) => n.method === "item/agentMessage/delta")).toBe(true);
+        // The delta rides a separate chunk — await it rather than assert it.
+        await waitFor(() => notifications.some((n) => n.method === "item/agentMessage/delta"), 5000);
 
         await client.close();
       } finally {
