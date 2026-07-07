@@ -73,6 +73,11 @@ function createMockCodex(dir: string, opts?: {
    *  goal/updated notification ever fires — the broker can only learn the
    *  goal from the get traffic. A continuation turn starts after turn 1. */
   goalPreexisting?: boolean;
+  /** If true, simulate the fast-turn race on a goal thread: goal/updated
+   *  (active) AND turn/completed are written BEFORE the turn/start
+   *  response, then a continuation turn starts. The broker must claim
+   *  ownership despite the already-completed first turn. */
+  goalFastFirstTurn?: boolean;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
@@ -83,6 +88,7 @@ function createMockCodex(dir: string, opts?: {
   const goalContinuation = opts?.goalContinuation ?? false;
   const goalPausedInGap = opts?.goalPausedInGap ?? false;
   const goalPreexisting = opts?.goalPreexisting ?? false;
+  const goalFastFirstTurn = opts?.goalFastFirstTurn ?? false;
 
   const interruptLog = join(dir, "interrupts.log");
   const scriptPath = join(dir, "codex");
@@ -147,6 +153,19 @@ process.stdin.on("data", (chunk) => {
 
       case "turn/start": {
         const threadId = msg.params?.threadId || "thread-001";
+        ${goalFastFirstTurn ? `
+        // Fast-turn race on a goal thread: goal becomes active and the turn
+        // completes BEFORE the turn/start response reaches the broker.
+        respond({ method: "thread/goal/updated", params: { threadId: threadId, turnId: "turn-001", goal: {
+          threadId: threadId, objective: "fast goal", status: "active", tokenBudget: 1000,
+          tokensUsed: 50, timeUsedSeconds: 1, createdAt: 1, updatedAt: 2,
+        }}});
+        respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+        setTimeout(() => {
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+          respond({ method: "item/agentMessage/delta", params: { threadId: threadId, turnId: "turn-002", itemId: "m2", delta: "continuation output" } });
+        }, 60);
+        ` : ""}
         ${completeBeforeResponse ? `
         // Fast-turn race: write turn/completed BEFORE the turn/start
         // response so they arrive at the broker in a single read chunk
@@ -1283,6 +1302,36 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
         await waitFor(() => notifications.some((n) => n.method === "turn/started"), 5000);
         // The delta rides a separate chunk — await it rather than assert it.
+        await waitFor(() => notifications.some((n) => n.method === "item/agentMessage/delta"), 5000);
+
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a first goal turn completing before the turn/start response still claims ownership", async () => {
+      // Fast-turn race: turn/completed arrives in the same chunk as the
+      // turn/start response, so the normal claim is skipped — but the goal
+      // is active and continuations are coming. Pre-fix, they had no owner
+      // and the goal-following client waited blind until its timeout.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false, goalFastFirstTurn: true });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "work the goal" }],
+        });
+
+        await waitFor(() => notifications.some((n) => n.method === "turn/started"), 5000);
         await waitFor(() => notifications.some((n) => n.method === "item/agentMessage/delta"), 5000);
 
         await client.close();

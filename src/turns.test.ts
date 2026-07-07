@@ -1201,6 +1201,43 @@ describe("runTurnWithGoalFollow", () => {
     expect(existsSync(join(TEST_KILL_DIR, "thr-1"))).toBe(false);
   });
 
+  test("a continuation that streams BEFORE follow mode arms loses no output", async () => {
+    // The continuation can start and emit deltas while the wrapper is still
+    // awaiting the post-turn goal read. Those events must be buffered and
+    // replayed, not dropped — the run's output and log must contain every
+    // followed turn in full.
+    let goalGets = 0;
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "turn/start") {
+        setTimeout(() => {
+          emit("item/agentMessage/delta", { threadId: "thr-1", turnId: "turn-1", itemId: "m1", delta: "first." });
+          emit("turn/completed", completedTurn("turn-1"));
+          // Continuation starts, streams, AND completes before the post-turn
+          // goal read below resolves.
+          emit("turn/started", startedTurn("turn-2"));
+          emit("item/agentMessage/delta", { threadId: "thr-1", turnId: "turn-2", itemId: "m2", delta: "second." });
+          emit("turn/completed", completedTurn("turn-2"));
+        }, 20);
+        return inProgressTurn("turn-1");
+      }
+      if (method === "thread/goal/get") {
+        goalGets++;
+        if (goalGets === 1) return { goal: null }; // pre-turn read
+        if (goalGets === 2) {
+          // Slow post-turn read — everything above lands pre-follow.
+          return new Promise((resolve) => setTimeout(() => resolve({ goal: makeGoal("active") }), 60));
+        }
+        return { goal: null }; // cleared after turn-2
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+
+    const result = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "go" }], baseOpts("goal-prefollow-buffer"));
+    expect(result.status).toBe("completed");
+    expect(result.continuationTurns).toBe(1);
+    expect(result.output).toBe("first.second."); // pre-follow delta replayed, not dropped
+  });
+
   test("a transient goal-read failure mid-follow is not taken for goal completion", async () => {
     // One failed thread/goal/get must not end the follow with a false
     // success: the loop keeps acting on the last known (active) state, and

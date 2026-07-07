@@ -747,10 +747,23 @@ async function main() {
         // ownership: turn/completed matches by thread ID, so nothing could
         // ever release the slot and the broker would stay busy until the
         // owner disconnects.
-        if (!alreadyCompleted && streamTargets.size > 0) {
+        //
+        // Goal-mode exception to the fast-turn skip: the turn may already be
+        // over, but an ACTIVE goal means the server is about to start a
+        // continuation — skipping the claim would leave those notifications
+        // with no target, and the goal-following client would wait blind
+        // until its timeout pauses a goal that in fact continued. Claim
+        // anyway (owner still connected) and mark the between-turns gap so
+        // a pause landing before the continuation still releases the slot.
+        const goalThreadId = [...streamTargets.keys()].find((t) => goalActiveThreads.has(t)) ?? null;
+        const claimForGoal = alreadyCompleted && goalThreadId !== null && sockets.has(socket);
+        if ((!alreadyCompleted || claimForGoal) && streamTargets.size > 0) {
           activeStreamSocket = socket;
           activeStreamTargets = streamTargets;
           retainedAwaitingContinuation.clear(); // fresh ownership — no stale gap markers
+          if (claimForGoal && goalThreadId !== null) {
+            retainedAwaitingContinuation.add(goalThreadId);
+          }
         }
         if (newTurnId) completedStreamTurnIds.delete(newTurnId);
       }

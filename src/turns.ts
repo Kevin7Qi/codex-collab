@@ -261,12 +261,24 @@ export async function runTurnWithGoalFollow(
     followedTurnIds.add(p.turn.id);
     startedTurnIds.push(p.turn.id);
   }));
+  // A continuation can start AND stream while we are still doing the
+  // post-turn goal read — before `following` arms. Those events are
+  // buffered (not dropped) and replayed the moment follow mode starts.
+  // Only events carrying a followed turn's id land here, and own turns
+  // never enter followedTurnIds, so nothing double-dispatches with
+  // executeTurn's routing during the first turn.
+  const preFollowBuffer: Array<{ method: string; params: unknown }> = [];
   unsubs.push(...DISPATCHED_NOTIFICATION_METHODS.map((method) =>
     client.on(method, (params) => {
-      if (!following) return;
       const routing = params as { threadId?: unknown; turnId?: unknown };
       if (routing?.threadId !== threadId) return;
       if (typeof routing?.turnId === "string" && !followedTurnIds.has(routing.turnId)) return;
+      if (!following) {
+        // No-turnId events stay dropped pre-follow: ownership is ambiguous
+        // with the first turn's own routing.
+        if (typeof routing?.turnId === "string") preFollowBuffer.push({ method, params });
+        return;
+      }
       dispatchNotification(opts.dispatcher, method, params);
     }),
   ));
@@ -401,6 +413,12 @@ export async function runTurnWithGoalFollow(
     const followUnsubs: Array<() => void> = [];
     try {
       following = true;
+      // Replay events a fast continuation streamed before follow mode armed.
+      // Synchronous — no await between arming and replay, so live events
+      // cannot interleave out of order.
+      for (const buffered of preFollowBuffer.splice(0)) {
+        dispatchNotification(opts.dispatcher, buffered.method, buffered.params);
+      }
       followUnsubs.push(...registerApprovalHandlers(client, opts, followAbort.signal));
 
       let connectionLost: ((err: Error) => void) | null = null;
