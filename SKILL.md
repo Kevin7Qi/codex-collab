@@ -288,7 +288,8 @@ codex-collab run "survey the call sites first" --goal "migrate all call sites to
 - Give goal runs a generous `--timeout` (hours, not minutes) — it bounds the whole goal, and expiry pauses the goal safely rather than leaving it running headless.
 - A paused goal resumes when a new turn runs on that thread (`run --resume <id> "..."`); `kill --clear` abandons it.
 - Mid-goal, the ask channel and approvals work normally — `next` sees questions from continuation turns too.
-- With `--template collab`, `--goal` appends a one-line ask-channel note to the objective. The server re-injects the objective into every continuation turn, so channel awareness survives long goals (the template itself rides only the first prompt).
+- The server re-injects the objective into every continuation turn — the first prompt (and any template) rides only turn one. An objective too big to state in a sentence can point at a spec or plan file in the repo instead.
+- With `--template collab`, `--goal` appends a one-line ask-channel note to the objective, so channel awareness survives long goals.
 - `threads` shows the latest goal state per thread: `[goal active: 45k/100k tokens]`.
 
 ## Templates
