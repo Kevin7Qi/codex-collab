@@ -144,7 +144,7 @@ codex-collab follow --watch
 |------|-------------|
 | `-d, --dir <path>` | Working directory |
 | `-m, --model <model>` | Model name (default: auto — latest available) |
-| `-r, --reasoning <level>` | none, minimal, low, medium, high, xhigh (default: auto — highest for model) |
+| `-r, --reasoning <level>` | none, minimal, low, medium, high, xhigh, max, ultra (default: auto — highest the model supports, up to `xhigh`) |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
 | `--ref <hash>` | Commit ref for `--mode commit` |
@@ -179,7 +179,9 @@ codex-collab follow --watch
 
 ## Defaults & Configuration
 
-By default, codex-collab auto-selects the **latest model** (preferring `-codex` variants) and the **highest reasoning effort** supported by that model. No configuration needed — it stays current as new models are released.
+By default, codex-collab auto-selects the **latest model** (the server's default, followed up its upgrade chain, preferring a `-codex` variant where one exists) and the **highest reasoning effort that model supports, up to `xhigh`**. No configuration needed — it stays current as new models are released.
+
+The `max` and `ultra` tiers are opt-in rather than auto-selected: reach for them with `-r max` / `-r ultra` on a single run, or make one the standing default with `codex-collab config reasoning`.
 
 To override defaults persistently, use `codex-collab config`:
 
@@ -188,7 +190,7 @@ To override defaults persistently, use `codex-collab config`:
 codex-collab config
 
 # Set a preferred model
-codex-collab config model gpt-5.3-codex
+codex-collab config model gpt-5.6-sol
 
 # Set default reasoning effort
 codex-collab config reasoning high
