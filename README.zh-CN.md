@@ -140,22 +140,48 @@ codex-collab follow --watch
 <details>
 <summary>选项</summary>
 
+**通用**
+
 | 参数 | 说明 |
 |------|------|
 | `-d, --dir <path>` | 工作目录 |
 | `-m, --model <model>` | 模型名称（默认: 自动选择最新可用模型） |
 | `-r, --reasoning <level>` | none, minimal, low, medium, high, xhigh, max, ultra（默认: 自动选择模型支持的最高级别，上限为 `xhigh`） |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access（默认: workspace-write；review 始终使用 read-only） |
-| `--mode <mode>` | 审查模式: pr, uncommitted, commit, custom |
-| `--ref <hash>` | 指定 commit 哈希（配合 `--mode commit`） |
 | `--resume <id>` | 恢复已有会话 |
 | `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted, auto（默认: never）。`auto`: Codex 的 Guardian 审查器自主批准或拒绝每个请求，绝不阻塞等待人工；决策以 Guardian 进度行的形式实时展示 |
 | `--memory` | 允许 Codex 的记忆功能学习本次运行创建的会话。默认: 创建的会话会执行 `thread/memoryMode/set mode=disabled`；恢复的会话永不改动（该标记按会话持久保存，你自己创建的会话应继续进入你的记忆）。只作用于 Codex 的*本地*记忆整合（`~/.codex/memories`）；`personality` 属于显式用户配置（非学习所得），不受影响。持久化设置: `config memory true` |
-| `--detach` | （run）在轮次真正开始运行后立即返回；用 `follow <id>` 观看。任务的生命周期与发起它的 shell 解耦 |
-| `-w, --watch` | （follow）运行结束后不退出，继续跟踪每一次新运行（Ctrl-C 停止） |
-| `--template <name>` | 提示词模板（run 命令；优先使用 `~/.codex-collab/templates/`，然后使用内置模板） |
-| `--goal <objective>` | （run）在第一轮开始前为会话创建 goal（配合 `--resume` 时替换已有目标）；需要在 `~/.codex/config.toml` 中设置 `goals = true`。配合 `--template collab` 时，目标末尾会附加一行 ask 通道说明；由于目标文本会在每个后续轮次重新注入，这条说明在整个 goal 期间始终有效 |
-| `--budget <tokens>` | （run）`--goal` 的 token 预算。请预留充足余量：用量按每轮的完整上下文计算，即使很小的一轮也可能消耗约 6 万 token |
+| `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200，最大 2147483）。存在进行中的 goal 时，该时限约束整个 goal，超时会先暂停 goal 再退出。用于 `ask` 时为回答等待时限（默认 600）；用于 `next` 时为等待上限（默认无限期等待） |
+| `--` | 选项结束标记；其后的参数一律视为提示词文本 |
+
+**run**
+
+| 参数 | 说明 |
+|------|------|
+| `--detach` | 在轮次真正开始运行后立即返回；用 `follow <id>` 观看。任务的生命周期与发起它的 shell 解耦 |
+| `--template <name>` | 提示词模板（优先使用 `~/.codex-collab/templates/`，然后使用内置模板） |
+| `--goal <objective>` | 在第一轮开始前为会话创建 goal（配合 `--resume` 时替换已有目标）；需要在 `~/.codex/config.toml` 中设置 `goals = true`。配合 `--template collab` 时，目标末尾会附加一行 ask 通道说明；由于目标文本会在每个后续轮次重新注入，这条说明在整个 goal 期间始终有效 |
+| `--budget <tokens>` | `--goal` 的 token 预算。请预留充足余量：用量按每轮的完整上下文计算，即使很小的一轮也可能消耗约 6 万 token |
+| `-` | 从标准输入读取提示词 |
+
+**review**
+
+| 参数 | 说明 |
+|------|------|
+| `--mode <mode>` | 审查模式: pr, uncommitted, commit, custom |
+| `--ref <hash>` | 指定 commit 哈希（配合 `--mode commit`） |
+| `--base <branch>` | PR 审查的基准分支（默认: 自动检测默认分支） |
+
+**follow**
+
+| 参数 | 说明 |
+|------|------|
+| `-w, --watch` | 运行结束后不退出，继续跟踪每一次新运行（Ctrl-C 停止） |
+
+**列表与输出**
+
+| 参数 | 说明 |
+|------|------|
 | `--json` | 对支持的命令输出 JSON（`threads`、`peek`） |
 | `--all` | 列出全部会话，不限制显示数量 |
 | `--discover` | 从 Codex app server 查询本地索引中没有的会话 |
@@ -164,16 +190,32 @@ codex-collab follow --watch
 | `--content-only` | 隐藏进度输出；配合 `output` 时仅返回正文内容 |
 | `--last` | （output）只输出最近一轮的结果，而非整个会话历史（隐含 `--content-only`） |
 | `--session` | （threads）只列当前会话期运行过的会话 |
-| `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200，最大 2147483）。存在进行中的 goal 时，该时限约束整个 goal，超时会先暂停 goal 再退出。用于 `ask` 时为回答等待时限（默认 600）；用于 `next` 时为等待上限（默认无限期等待） |
-| `--base <branch>` | PR 审查的基准分支（默认: 自动检测默认分支） |
-| `--` | 选项结束标记；其后的参数一律视为提示词文本 |
-| `-` | （run）从标准输入读取提示词 |
 
-`run` 和 `review` 的退出码标识运行结果：`0` 完成、`1` 失败、`3` 超时、`4` 被中断、`5` 因等待审批而中止（该审批请求已失效，请用更长的 `--timeout` 恢复，或改用 `--approval auto`）、`6` broker 占用（瞬态，可重试）、`7` goal 因受阻或用量/预算达到上限而结束，需要人工介入（用 `--resume` 恢复会话并给出指引，或用 `kill --clear` 放弃该 goal）。
+</details>
 
-**Goal 模式**：Codex 的 Goal 模式（在 `~/.codex/config.toml` 中设置 `goals = true`）让会话自动持续推进：只要 goal 尚未结束，每轮完成后 app server 会立即启动下一轮。goal 可由 Codex 在任务中途自行创建，也可以用 `run --goal "objective" [--budget <tokens>]` 显式设置，适合无法预估轮数的开放式目标。目标文本会在每个后续轮次重新注入；内容较复杂的目标，可以改为指向仓库中的规格或计划文档。当会话存在（或中途出现）进行中的 goal 时，`run` 会在同一份运行记录和日志中跟踪每个后续轮次，直到 goal 结束：一次运行对应一个完整的工作单元，而不只是第一轮。此时 `--timeout` 约束整个 goal，超时会先**暂停** goal（可随时恢复，不会在无人值守的情况下持续消耗 token），再以 `3` 退出。`threads` 会显示每个会话最新的 goal 状态（`[goal active: 45k/100k tokens]`）。
+<details>
+<summary>退出码</summary>
 
-`next` 的退出码：`0` 收到事件（内容完整打印到标准输出）、`3` `--timeout` 时限内没有事件、`10` 工作区空闲（没有运行中的任务，也没有待处理的事件）。
+`run` 与 `review`：
+
+| 退出码 | 含义 |
+|--------|------|
+| `0` | 完成 |
+| `1` | 失败 |
+| `3` | 超时；进行中的 goal 会先被暂停（可恢复） |
+| `4` | 被中断（`kill`） |
+| `5` | 因等待审批而中止；该审批请求已失效，请用更长的 `--timeout` 恢复，或改用 `--approval auto` |
+| `6` | broker 占用且无可用回退；瞬态问题，可重试 |
+| `7` | goal 因受阻或用量/预算达到上限而结束；用 `run --resume` 恢复并给出指引，或用 `kill --clear` 放弃 |
+
+`next`：`0` 收到事件（内容完整打印到标准输出）、`3` `--timeout` 时限内没有事件、`10` 工作区空闲（没有运行中的任务，也没有待处理的事件）。
+
+</details>
+
+<details>
+<summary>Goal 模式</summary>
+
+在 `~/.codex/config.toml` 中设置 `goals = true` 后，goal（由 Codex 在任务中途自行创建，或用 `run --goal "objective" [--budget <tokens>]` 显式设置）会让 app server 不断启动后续轮次，直到目标完成；`run` 会在同一份运行记录和日志中跟踪整个 goal，退出码反映 goal 的最终状态。目标文本会在每个后续轮次重新注入；内容较复杂的目标，可以改为指向仓库中的规格或计划文档。`threads` 会显示每个会话最新的 goal 状态（`[goal active: 45k/100k tokens]`）。
 
 </details>
 
