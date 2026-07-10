@@ -794,10 +794,12 @@ export function pickBestModel(models: Model[]): string | undefined {
   return current.id;
 }
 
-/** Pick the highest reasoning effort a model supports. */
-function pickHighestEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
+/** Pick the highest reasoning effort a model supports, capped at the
+ *  auto-select ceiling. */
+function pickAutoEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
   const available = new Set(supported.map(s => s.reasoningEffort));
-  for (let i = config.reasoningEfforts.length - 1; i >= 0; i--) {
+  const ceiling = config.reasoningEfforts.indexOf(config.autoEffortCeiling);
+  for (let i = ceiling; i >= 0; i--) {
     if (available.has(config.reasoningEfforts[i])) return config.reasoningEfforts[i];
   }
   return undefined;
@@ -833,7 +835,7 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
   if (needReasoning) {
     const modelData = models.find(m => m.id === opts.model);
     if (modelData?.supportedReasoningEfforts?.length) {
-      opts.reasoning = pickHighestEffort(modelData.supportedReasoningEfforts);
+      opts.reasoning = pickAutoEffort(modelData.supportedReasoningEfforts);
     }
   }
 }
@@ -911,7 +913,15 @@ export async function startOrResumeThread(
         : resolved
           ? loadThreadIndex(ws.stateDir)[resolved.shortId]?.model
           : undefined;
-      if (reviewModel) forkParams.config = { review_model: reviewModel };
+      // Effort is pinned only when explicitly asked for: resolveDefaults bails
+      // on resume, so an unpinned fork inherits the source thread's effort
+      // rather than re-resolving it — matching how -m behaves here.
+      const forkConfig: Record<string, unknown> = {};
+      if (reviewModel) forkConfig.review_model = reviewModel;
+      if (opts.explicit.has("reasoning") && opts.reasoning) {
+        forkConfig.model_reasoning_effort = opts.reasoning;
+      }
+      if (Object.keys(forkConfig).length > 0) forkParams.config = forkConfig;
       // Reviews must run in read-only mode. `thread/resume.sandbox` is not
       // reliable for already-loaded broker threads, and `review/start` has no
       // per-turn sandbox override, so fork the resumed context into a fresh
@@ -969,8 +979,16 @@ export async function startOrResumeThread(
     if (opts.model) startParams.model = opts.model;
     // Same review_model pin as the fork path above: without it, a
     // review_model in ~/.codex/config.toml would win over the model shown in
-    // our own "started for review" progress line.
-    if (isReview && opts.model) startParams.config = { review_model: opts.model };
+    // our own "started for review" progress line. model_reasoning_effort is
+    // pinned for the same reason and by necessity: review/start carries no
+    // effort field, so this config key is the only way an effort reaches the
+    // review sub-agent at all.
+    if (isReview) {
+      const reviewConfig: Record<string, unknown> = {};
+      if (opts.model) reviewConfig.review_model = opts.model;
+      if (opts.reasoning) reviewConfig.model_reasoning_effort = opts.reasoning;
+      if (Object.keys(reviewConfig).length > 0) startParams.config = reviewConfig;
+    }
     effective = await client.request<ThreadStartResponse>(
       "thread/start",
       startParams,

@@ -20,7 +20,7 @@ export async function handleConfig(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
 
   const VALID_KEYS: Record<string, { validate: (v: string) => boolean; hint: string }> = {
-    model:     { validate: v => v.length > 0 && !/[^a-zA-Z0-9._\-\/:]/.test(v), hint: "model name (e.g. gpt-5.4, gpt-5.3-codex)" },
+    model:     { validate: v => v.length > 0 && !/[^a-zA-Z0-9._\-\/:]/.test(v), hint: "model name (e.g. gpt-5.6-sol, gpt-5.5)" },
     reasoning: { validate: v => (config.reasoningEfforts as readonly string[]).includes(v), hint: config.reasoningEfforts.join(", ") },
     sandbox:   { validate: v => (config.sandboxModes as readonly string[]).includes(v), hint: config.sandboxModes.join(", ") },
     approval:  { validate: v => (config.approvalModes as readonly string[]).includes(v), hint: config.approvalModes.join(", ") },

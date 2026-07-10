@@ -47,7 +47,13 @@ describe("config object", () => {
   });
 
   test("has accepted reasoning efforts", () => {
-    expect(config.reasoningEfforts).toEqual(["none", "minimal", "low", "medium", "high", "xhigh"]);
+    expect(config.reasoningEfforts).toEqual(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+  });
+
+  test("auto-select ceiling is a known effort below the top of the enum", () => {
+    const efforts = config.reasoningEfforts as readonly string[];
+    expect(efforts).toContain(config.autoEffortCeiling);
+    expect(efforts.indexOf(config.autoEffortCeiling)).toBeLessThan(efforts.length - 1);
   });
 
   test("is frozen", () => {
@@ -132,13 +138,12 @@ describe("resolveModel", () => {
 
 describe("validateEffort", () => {
   test("accepts all valid effort levels", () => {
-    for (const level of ["none", "minimal", "low", "medium", "high", "xhigh"] as const) {
+    for (const level of ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const) {
       expect(validateEffort(level)).toBe(level);
     }
   });
 
   test("throws on invalid effort", () => {
-    expect(() => validateEffort("max")).toThrow();
     expect(() => validateEffort("turbo")).toThrow();
     expect(() => validateEffort("")).toThrow();
   });

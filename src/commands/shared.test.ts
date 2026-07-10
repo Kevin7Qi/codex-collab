@@ -1381,6 +1381,81 @@ describe("startOrResumeThread", () => {
     expect((runStart?.params as Record<string, unknown>).config).toBeUndefined();
   });
 
+  test("fresh review thread pins model_reasoning_effort: review/start carries no effort field", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const client = recordingClient(calls, {
+      "thread/start": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+    opts.model = "gpt-5.6-sol";
+    opts.reasoning = "xhigh";
+
+    await startOrResumeThread(
+      client, opts, freshWorkspace("review-start-effort-pin"), { sandbox: "read-only" }, "Review PR", true,
+    );
+    const start = calls.find(c => c.method === "thread/start");
+    expect(start?.params).toMatchObject({
+      config: { review_model: "gpt-5.6-sol", model_reasoning_effort: "xhigh" },
+    });
+  });
+
+  test("plain run sends no effort pin — effort rides turn/start instead", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const client = recordingClient(calls, {
+      "thread/start": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+    opts.model = "gpt-5.6-sol";
+    opts.reasoning = "xhigh";
+
+    await startOrResumeThread(client, opts, freshWorkspace("run-start-no-effort-pin"), undefined, "task", false);
+    const start = calls.find(c => c.method === "thread/start");
+    expect((start?.params as Record<string, unknown>).config).toBeUndefined();
+  });
+
+  test("review --resume pins effort only when -r was explicit (else inherits the forked thread's)", async () => {
+    const sourceThreadId = "01900000000070008000000000000011";
+    const forkedThreadId = "01900000000070008000000000000012";
+
+    // Explicit -r: pinned.
+    const explicitCalls: Array<{ method: string; params: unknown }> = [];
+    const explicitClient = recordingClient(explicitCalls, {
+      "thread/fork": () => threadStartResponse(forkedThreadId, "/tmp/proj"),
+    });
+    const wsA = freshWorkspace("review-resume-effort-explicit");
+    const shortIdA = registerThread(wsA.stateDir, sourceThreadId, { model: "gpt-5.6-sol" });
+    const explicitOpts = defaultOptions();
+    explicitOpts.dir = "/tmp/proj";
+    explicitOpts.resumeId = shortIdA;
+    explicitOpts.reasoning = "low";
+    explicitOpts.explicit.add("reasoning");
+
+    await startOrResumeThread(explicitClient, explicitOpts, wsA, { sandbox: "read-only" }, "Review", true);
+    const explicitFork = explicitCalls.find(c => c.method === "thread/fork");
+    expect(explicitFork?.params).toMatchObject({
+      config: { review_model: "gpt-5.6-sol", model_reasoning_effort: "low" },
+    });
+
+    // Auto-resolved (not explicit): no effort pin, so the fork inherits.
+    const autoCalls: Array<{ method: string; params: unknown }> = [];
+    const autoClient = recordingClient(autoCalls, {
+      "thread/fork": () => threadStartResponse(forkedThreadId, "/tmp/proj"),
+    });
+    const wsB = freshWorkspace("review-resume-effort-auto");
+    const shortIdB = registerThread(wsB.stateDir, sourceThreadId, { model: "gpt-5.6-sol" });
+    const autoOpts = defaultOptions();
+    autoOpts.dir = "/tmp/proj";
+    autoOpts.resumeId = shortIdB;
+    autoOpts.reasoning = "xhigh"; // present on Options, but never flagged explicit
+
+    await startOrResumeThread(autoClient, autoOpts, wsB, { sandbox: "read-only" }, "Review", true);
+    const autoFork = autoCalls.find(c => c.method === "thread/fork");
+    const autoConfig = (autoFork?.params as Record<string, unknown>).config as Record<string, unknown>;
+    expect(autoConfig).toEqual({ review_model: "gpt-5.6-sol" });
+  });
+
   test("new thread with --memory: no memoryMode call", async () => {
     const calls: Array<{ method: string; params: unknown }> = [];
     const client = recordingClient(calls, {

@@ -21,7 +21,9 @@ const MODEL_ALIASES: Record<string, string> = {
 
 // ─── Effort levels ──────────────────────────────────────────────────────────
 
-const VALID_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"] as const;
+// The full effort enum the app server accepts, ascending. Not every model
+// advertises every level in its `supportedReasoningEfforts`.
+const VALID_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 
 // ─── Workspace state schema version ─────────────────────────────────────────
 // Bumped whenever the on-disk shape of a workspace state dir
@@ -47,6 +49,9 @@ export function isPathInside(candidate: string, root: string): boolean {
 export const config = {
   // Reasoning effort levels
   reasoningEfforts: VALID_EFFORTS,
+  // Highest level auto-selection will settle on. Levels above it stay reachable
+  // through an explicit -r flag or user config, but are never chosen for you.
+  autoEffortCeiling: "xhigh" as const,
 
   // Sandbox modes
   sandboxModes: ["read-only", "workspace-write", "danger-full-access"] as const,

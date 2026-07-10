@@ -39,7 +39,7 @@ cat prompt.md | codex-collab run - --content-only
 If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or `codex-collab progress <id>` for just the log tail. `<id>` is the codex-collab thread short ID (8-char hex), not the Claude Code task ID — it appears in the first progress line (`[codex] Thread a1b2c3d4 started`); `codex-collab threads` lists them. Progress lines stream in real time:
 
 ```
-[codex] Thread a1b2c3d4 started (gpt-5.4, workspace-write)
+[codex] Thread a1b2c3d4 started (gpt-5.6-sol, workspace-write)
 [codex] Running: npm test
 [codex] Edited: src/auth.ts (update)
 [codex] Turn completed (2m 14s, 1 file changed)
@@ -113,7 +113,7 @@ If you've lost track of the thread ID, use `codex-collab threads` to find active
 
 ```bash
 codex-collab run "large refactor task" --detach --approval auto
-# [codex] Detached: thread a1b2c3d4 running (gpt-5.4)
+# [codex] Detached: thread a1b2c3d4 running (gpt-5.6-sol)
 # [codex]   Follow:   codex-collab follow a1b2c3d4
 ```
 
@@ -241,7 +241,7 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | Flag | Description |
 |------|-------------|
 | `-m, --model <model>` | Model name (default: auto — latest available) |
-| `-r, --reasoning <level>` | Reasoning effort: none, minimal, low, medium, high, xhigh (default: auto — highest for model) |
+| `-r, --reasoning <level>` | Reasoning effort: none, minimal, low, medium, high, xhigh, max, ultra (default: auto — highest the model supports, up to `xhigh`) |
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |

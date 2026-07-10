@@ -91,7 +91,8 @@ export async function handleReview(args: string[]): Promise<void> {
       if (options.resumeId) {
         progress(`Forked thread ${shortId} for read-only review`);
       } else {
-        progress(`Thread ${shortId} started for review (${effective.model}, read-only)`);
+        const effort = effective.reasoningEffort ? `, ${effective.reasoningEffort}` : "";
+        progress(`Thread ${shortId} started for review (${effective.model}${effort}, read-only)`);
       }
     }
 
