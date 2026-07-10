@@ -794,10 +794,12 @@ export function pickBestModel(models: Model[]): string | undefined {
   return current.id;
 }
 
-/** Pick the highest reasoning effort a model supports. */
-function pickHighestEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
+/** Pick the highest reasoning effort a model supports, capped at the
+ *  auto-select ceiling. */
+function pickAutoEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
   const available = new Set(supported.map(s => s.reasoningEffort));
-  for (let i = config.reasoningEfforts.length - 1; i >= 0; i--) {
+  const ceiling = config.reasoningEfforts.indexOf(config.autoEffortCeiling);
+  for (let i = ceiling; i >= 0; i--) {
     if (available.has(config.reasoningEfforts[i])) return config.reasoningEfforts[i];
   }
   return undefined;
@@ -833,7 +835,7 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
   if (needReasoning) {
     const modelData = models.find(m => m.id === opts.model);
     if (modelData?.supportedReasoningEfforts?.length) {
-      opts.reasoning = pickHighestEffort(modelData.supportedReasoningEfforts);
+      opts.reasoning = pickAutoEffort(modelData.supportedReasoningEfforts);
     }
   }
 }
