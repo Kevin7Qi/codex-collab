@@ -56,6 +56,23 @@ The codebase is organized into focused modules:
 | `src/process.ts` | Process spawn/lifecycle utilities |
 | `src/lock.ts` | Advisory file locks (sync/async, single-winner stale breaking) |
 | `src/git.ts` | Git operations (default-branch detection for reviews) |
+| `src/skill.ts` | Installed-skill rendering (embedded SKILL.md source), drift detection, unified diff |
+| `src/update.ts` | Release checking, update-notice state (`~/.codex-collab/update-check.json`) |
+
+## Releases
+
+`codex-collab update` installs from GitHub releases, so publishing one is what makes a version reachable by self-update:
+
+```bash
+# 1. Bump the version
+#    edit package.json "version" (e.g. 0.3.0), commit
+# 2. Tag and publish — release notes double as the changelog `update` shows users
+git tag v0.3.0
+git push origin main v0.3.0
+gh release create v0.3.0 --generate-notes
+```
+
+The tag must be `v<version>` matching `package.json` — `update` compares the release tag against the binary's embedded version and downloads the tag's source tarball (built locally by the release's own installer).
 
 ## Pull Requests
 
