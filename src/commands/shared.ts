@@ -139,6 +139,13 @@ export interface Options {
   goal: string | null;
   /** run: token budget for --goal. */
   budget: number | null;
+  /** skill sync, update: apply without prompting — the consent gate for
+   *  writes; only pass it after the user has explicitly agreed. */
+  yes: boolean;
+  /** update: report what's available without installing anything. */
+  check: boolean;
+  /** update: mute update notices for the latest release. */
+  skip: boolean;
   /** Flags explicitly provided on the command line (forwarded on resume). */
   explicit: Set<string>;
   /** Flags set by user config file (suppress auto-detection but NOT forwarded on resume). */
@@ -293,6 +300,9 @@ export function defaultOptions(): Options {
     template: null,
     goal: null,
     budget: null,
+    yes: false,
+    check: false,
+    skip: false,
     explicit: new Set<string>(),
     configured: new Set<string>(),
   };
@@ -521,6 +531,12 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.template = argv[++i];
     } else if (arg === "--unset") {
       options.explicit.add("unset");
+    } else if (arg === "--yes") {
+      options.yes = true;
+    } else if (arg === "--check") {
+      options.check = true;
+    } else if (arg === "--skip") {
+      options.skip = true;
     } else if (arg !== "-" && arg.startsWith("-")) {
       // Bare "-" is a positional by Unix convention (`run -` = prompt on stdin).
       console.error(`Error: Unknown option: ${arg}`);

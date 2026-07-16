@@ -13,7 +13,7 @@ import type { BrokerState, SessionState, ParsedEndpoint } from "./types";
 import { connectDirect, type AppServerClient } from "./client";
 import { config, resolveStateDir } from "./config";
 import { acquireLockAsync, LockTimeoutError } from "./lock";
-import { terminateProcessTree, isProcessAlive } from "./process";
+import { terminateProcessTree, isProcessAlive, processLooksLikeBun } from "./process";
 
 /** JSON-RPC error code returned when the broker is busy with another request. */
 export const BROKER_BUSY_RPC_CODE = -32001;
@@ -87,7 +87,8 @@ export function loadBrokerState(stateDir: string): BrokerState | null {
       (typeof parsed.endpoint === "string" || parsed.endpoint === null) &&
       (typeof parsed.pid === "number" || parsed.pid === null) &&
       typeof parsed.sessionDir === "string" &&
-      typeof parsed.startedAt === "string"
+      typeof parsed.startedAt === "string" &&
+      (typeof parsed.version === "string" || parsed.version === undefined)
     ) {
       return parsed as BrokerState;
     }
@@ -459,6 +460,26 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
    */
   const connectToExisting = async (state: BrokerState | null): Promise<AppServerClient | null> => {
     if (!state?.endpoint) return null;
+    // A broker from another codex-collab version serves that version's code
+    // (an update only replaces files on disk). Don't reuse it — and don't
+    // kill it either: it may carry another process's in-flight turn, and any
+    // liveness-then-kill check races a client that connected in between.
+    // Bypass with a direct connection; unfed, its idle timeout retires it.
+    // Decide liveness by PID, NOT the socket probe: a bare probe connect
+    // resets the broker's idle timer, which would keep the old broker alive
+    // (and every command on a direct connection) indefinitely under regular
+    // use. A dead PID falls through to the spawn path's artifact cleanup.
+    if (state.version !== config.clientVersion) {
+      // processLooksLikeBun: an exited broker's PID can be recycled by an
+      // unrelated long-lived process, which would otherwise pin this
+      // workspace on direct connections until that process exits.
+      if (state.pid === null || !isProcessAlive(state.pid) || !processLooksLikeBun(state.pid)) return null;
+      console.error(
+        `[broker] Existing broker was spawned by codex-collab ${state.version ?? "(pre-0.3)"}, this is ${config.clientVersion} — using a direct connection until it retires on idle.`,
+      );
+      saveSession();
+      return connectDirect({ cwd });
+    }
     if (!(await isBrokerAlive(state.endpoint))) return null;
     try {
       const { connectToBroker } = await import("./broker-client");
@@ -548,7 +569,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
     // 5. Connect to the new broker
     try {
       const now = new Date().toISOString();
-      saveBrokerState(stateDir, { endpoint, pid: spawned.pid, sessionDir: stateDir, startedAt: now });
+      saveBrokerState(stateDir, { endpoint, pid: spawned.pid, sessionDir: stateDir, startedAt: now, version: config.clientVersion });
       saveSessionState(stateDir, { sessionId, startedAt: sessionStartedAt });
     } catch (e) {
       console.error(`[broker] Warning: failed to persist broker state: ${(e as Error).message}. Next invocation may not find this broker.`);

@@ -644,6 +644,11 @@ export interface BrokerState {
   pid: number | null;
   sessionDir: string;
   startedAt: string;
+  /** codex-collab version that spawned this broker. Clients bypass a broker
+   *  whose version differs from their own (it serves the pre-update code
+   *  until its idle timeout retires it). Absent in pre-0.3 state files,
+   *  which reads as a mismatch — exactly right. */
+  version?: string;
 }
 
 export interface SessionState {

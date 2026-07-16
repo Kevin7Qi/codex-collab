@@ -51,23 +51,26 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 ### 升级
 
-升级已有安装时，拉取最新代码并重新运行安装脚本即可：
+已安装的 codex-collab 可以自我更新，无需手动执行 `git pull`：
+
+```bash
+codex-collab update            # 显示最新版本及更新日志，确认后安装
+codex-collab update --check    # 仅查看，不安装
+```
+
+`update` 会从 GitHub 下载锁定到发布标签的源码包，在本地重新构建并重装 skill bundle 与可执行文件 shim，随后打印本次更新对 SKILL.md 的改动 diff。任何安装动作都必须先获得同意：交互式终端中为 `y/N` 确认，非交互式会话则需显式传入 `--yes`。存在新版本时，`run`、`review`、`health` 会在 stderr 打印一行提示（每天至多检查一次，绝不自行安装）；`update --skip` 可屏蔽针对某个版本的提示，设置 `CODEX_COLLAB_NO_UPDATE_CHECK=1` 则完全关闭该联网检查（本地的 SKILL.md 漂移提示无需联网，不受影响）。
+
+此外，当已安装的 SKILL.md 与当前可执行文件或模板集不一致时（例如新增自定义模板之后），`codex-collab skill sync` 会先展示待应用的 diff，确认后写入。
+
+手动升级依然可行：在克隆目录中拉取最新代码并重新运行安装脚本（开发模式安装 —— `install.sh --dev` —— 只能通过这种方式升级）：
 
 ```bash
 git pull
-./install.sh
+./install.sh    # Windows: powershell -ExecutionPolicy Bypass -File install.ps1
 codex-collab health
 ```
 
-Windows:
-
-```powershell
-git pull
-powershell -ExecutionPolicy Bypass -File install.ps1
-codex-collab health
-```
-
-安装脚本会替换已安装的 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下已有的配置、模板、会话历史和运行日志都会保留。请将 `~/.claude/skills/codex-collab/` 视为安装脚本管理的目录：升级时其中的手动修改可能会被覆盖。
+两种方式都会替换已安装的 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下已有的配置、模板、会话历史和运行日志都会保留。请将 `~/.claude/skills/codex-collab/` 视为安装脚本管理的目录：升级时其中的手动修改可能会被覆盖（`skill sync` 会在覆盖前以 diff 形式展示这些改动）。
 
 从旧版本升级时，codex-collab 会在首次使用时自动把会话状态迁移到按工作区划分的新布局，无需手动迁移状态。旧的 `jobs` 命令仍可作为 `threads` 的已弃用别名使用。
 
@@ -122,6 +125,8 @@ codex-collab follow --watch
 | `config [key] [value]` | 查看或设置持久化默认值 |
 | `models` | 列出可用模型 |
 | `templates` | 列出可用提示词模板 |
+| `skill sync [--yes]` | 当已安装的 SKILL.md 与可执行文件或模板集不一致时重新生成——先打印 diff，确认后才写入 |
+| `update` | 检查 GitHub 上是否有新版本并显示更新日志，经确认后下载、构建并重装——见[升级](#升级) |
 | `health` | 检查依赖项 |
 | `version` | 打印版本号（也可在命令前使用 `-v`/`--version`） |
 
@@ -177,6 +182,14 @@ codex-collab follow --watch
 | 参数 | 说明 |
 |------|------|
 | `-w, --watch` | 运行结束后不退出，继续跟踪每一次新运行（Ctrl-C 停止） |
+
+**skill 与 update**
+
+| 参数 | 说明 |
+|------|------|
+| `--yes` | 跳过确认直接应用——供非交互式会话使用的显式同意标志 |
+| `--check` | （update）仅显示最新版本及更新日志，不安装 |
+| `--skip` | （update）屏蔽针对当前最新版本的更新提示；更新的版本发布后会再次提示 |
 
 **列表与输出**
 

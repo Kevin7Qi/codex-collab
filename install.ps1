@@ -62,51 +62,23 @@ try {
 # Generate SKILL.md with injected template table
 # ---------------------------------------------------------------------------
 
+# SKILL.md generation lives in the CLI itself (`skill render`: embedded
+# SKILL.md source + current template table) so the installers and
+# `codex-collab skill sync` share one implementation.
 function Generate-SkillMd {
-    param([string]$OutPath)
-
-    $rows = @()
-
-    # Scan built-in templates
-    $builtinDir = Join-Path $RepoDir "src\prompts"
-    if (Test-Path $builtinDir) {
-        foreach ($tmpl in Get-ChildItem $builtinDir -Filter "*.md") {
-            $name = $tmpl.BaseName
-            $content = Get-Content $tmpl.FullName -Raw
-            $desc = "(no description)"; $sandbox = ""
-            if ($content -match "(?ms)^---\s*\n(.+?)\n---") {
-                $fm = $Matches[1]
-                if ($fm -match "description:\s*(.+)") { $desc = $Matches[1].Trim() }
-                if ($fm -match "sandbox:\s*(.+)") { $sandbox = " ($($Matches[1].Trim()))" }
-            }
-            $rows += "| ``$name`` | $desc$sandbox |"
-        }
+    param([string]$Entry, [string]$OutPath)
+    # PowerShell 5.1 decodes captured native stdout with the CONSOLE code page,
+    # which mojibakes SKILL.md's non-ASCII on non-UTF-8 hosts — force UTF-8
+    # around the capture and restore afterwards.
+    $prevEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $lines = & bun $Entry skill render
+        if ($LASTEXITCODE -ne 0) { throw "'skill render' failed with exit code $LASTEXITCODE" }
+    } finally {
+        [Console]::OutputEncoding = $prevEncoding
     }
-
-    # Scan user templates
-    $userDir = Join-Path $env:USERPROFILE ".codex-collab\templates"
-    if (Test-Path $userDir) {
-        foreach ($tmpl in Get-ChildItem $userDir -Filter "*.md") {
-            $name = $tmpl.BaseName
-            $content = Get-Content $tmpl.FullName -Raw
-            $desc = "(no description)"; $sandbox = ""
-            if ($content -match "(?ms)^---\s*\n(.+?)\n---") {
-                $fm = $Matches[1]
-                if ($fm -match "description:\s*(.+)") { $desc = $Matches[1].Trim() }
-                if ($fm -match "sandbox:\s*(.+)") { $sandbox = " ($($Matches[1].Trim()))" }
-            }
-            $rows += "| ``$name`` | $desc$sandbox |"
-        }
-    }
-
-    $skillContent = Get-Content (Join-Path $RepoDir "SKILL.md") -Raw
-    if ($rows.Count -gt 0) {
-        $table = "| Template | Description |`n|----------|-------------|`n" + ($rows -join "`n")
-        $skillContent = $skillContent -replace "<!-- TEMPLATES -->", $table
-    } else {
-        $skillContent = $skillContent -replace "<!-- TEMPLATES -->", "No templates found."
-    }
-    [System.IO.File]::WriteAllText($OutPath, $skillContent, [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText($OutPath, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
 }
 
 if ($Dev) {
@@ -117,7 +89,7 @@ if ($Dev) {
     New-Item -ItemType Directory -Path (Join-Path $SkillDir "scripts") -Force | Out-Null
 
     # Generate SKILL.md with template table (can't inject into a symlink)
-    Generate-SkillMd -OutPath (Join-Path $SkillDir "SKILL.md")
+    Generate-SkillMd -Entry (Join-Path $RepoDir "src\cli.ts") -OutPath (Join-Path $SkillDir "SKILL.md")
 
     # Symlink skill files (requires Developer Mode or elevated privileges)
     $links = @(
@@ -174,11 +146,12 @@ if ($Dev) {
         }
     }
 
-    # Copy prompts (needed at runtime for built-in templates)
+    # Copy prompts BEFORE rendering — `skill render` resolves built-in
+    # templates relative to the built binary (scripts\prompts)
     Copy-Item (Join-Path $RepoDir "src\prompts") (Join-Path $skillBuild "scripts\prompts") -Recurse
 
     # Generate SKILL.md with injected template table, copy LICENSE
-    Generate-SkillMd -OutPath (Join-Path $skillBuild "SKILL.md")
+    Generate-SkillMd -Entry $cliBuild -OutPath (Join-Path $skillBuild "SKILL.md")
     Copy-Item (Join-Path $RepoDir "LICENSE") (Join-Path $skillBuild "LICENSE.txt")
 
     # Install skill

@@ -51,23 +51,26 @@ The installer builds a self-contained bundle, deploys it to your home directory 
 
 ### Upgrading
 
-To upgrade an existing install, pull the latest version and rerun the installer:
+An installed codex-collab can update itself — no manual `git pull` needed:
+
+```bash
+codex-collab update            # show the latest release and changelog, confirm, then install
+codex-collab update --check    # report only, install nothing
+```
+
+`update` downloads the pinned release tag from GitHub, rebuilds locally, reinstalls the skill bundle and binary shim, and prints the SKILL.md diff it applied. Nothing is installed without consent: an interactive `y/N` prompt, or an explicit `--yes` in non-interactive sessions. `run`, `review`, and `health` print a one-line notice when a newer release exists (checked at most once a day, never installing anything on their own); `update --skip` mutes notices for a given release, and `CODEX_COLLAB_NO_UPDATE_CHECK=1` disables the release check entirely (the local skill-drift notice is offline and stays on).
+
+Relatedly, if the installed SKILL.md drifts from the binary or your template set (e.g., after adding a custom template), `codex-collab skill sync` shows the pending diff and applies it on confirmation.
+
+Upgrading manually still works: pull the latest version in your clone and rerun the installer (dev installs — `install.sh --dev` — always update this way):
 
 ```bash
 git pull
-./install.sh
+./install.sh    # Windows: powershell -ExecutionPolicy Bypass -File install.ps1
 codex-collab health
 ```
 
-On Windows:
-
-```powershell
-git pull
-powershell -ExecutionPolicy Bypass -File install.ps1
-codex-collab health
-```
-
-The installer replaces the installed skill bundle and binary shim. Existing configuration, templates, thread history, and run logs under `~/.codex-collab/` are preserved. Treat `~/.claude/skills/codex-collab/` as installer-managed: manual edits there may be overwritten on upgrade.
+Either path replaces the installed skill bundle and binary shim. Existing configuration, templates, thread history, and run logs under `~/.codex-collab/` are preserved. Treat `~/.claude/skills/codex-collab/` as installer-managed: manual edits there may be overwritten on upgrade (`skill sync` surfaces them as a diff before overwriting).
 
 When upgrading from older versions, codex-collab automatically migrates thread state to the per-workspace layout on first use. No manual state migration is required. The old `jobs` command remains available as a deprecated alias for `threads`.
 
@@ -122,6 +125,8 @@ codex-collab follow --watch
 | `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |
 | `templates` | List available prompt templates |
+| `skill sync [--yes]` | Regenerate the installed SKILL.md when it drifts from the binary or template set — prints the diff, applies only on confirmation |
+| `update` | Check GitHub for a newer release, show its changelog, and (with confirmation) download, build, and reinstall — see [Upgrading](#upgrading) |
 | `health` | Check dependencies |
 | `version` | Print version (also `-v`/`--version` before a command) |
 
@@ -177,6 +182,14 @@ codex-collab follow --watch
 | Flag | Description |
 |------|-------------|
 | `-w, --watch` | Don't exit when the run finishes — keep following each new run (Ctrl-C to stop) |
+
+**skill & update**
+
+| Flag | Description |
+|------|-------------|
+| `--yes` | Apply without prompting — the explicit consent flag for non-interactive sessions |
+| `--check` | (update) Show the latest release and changelog without installing |
+| `--skip` | (update) Mute update notices for the latest release; a later release notifies again |
 
 **Listing & output**
 

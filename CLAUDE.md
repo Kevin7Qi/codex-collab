@@ -32,6 +32,8 @@ codex-collab health
 | `src/process.ts` | Process spawn/lifecycle utilities |
 | `src/lock.ts` | Advisory file locks (sync/async, single-winner stale breaking) |
 | `src/git.ts` | Git operations (default-branch detection for reviews) |
+| `src/skill.ts` | Installed-skill rendering (embedded SKILL.md source), drift detection, unified diff |
+| `src/update.ts` | Release checking, update notices (`skill sync` / `update` commands live in `src/commands/update.ts`) |
 | `SKILL.md` | Claude Code skill definition |
 
 ## Dependencies

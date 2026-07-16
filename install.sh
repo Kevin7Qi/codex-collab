@@ -53,61 +53,19 @@ echo "Installing dependencies..."
 # Generate SKILL.md with injected template table
 # ---------------------------------------------------------------------------
 
+# SKILL.md generation lives in the CLI itself (`skill render`: embedded
+# SKILL.md source + current template table) so the installers and
+# `codex-collab skill sync` share one implementation.
 generate_skill_md() {
-  local out="$1"
-  local table_file
-  table_file=$(mktemp)
-
-  # Helper: extract a frontmatter field from a template file
-  extract_field() {
-    local file="$1" field="$2"
-    awk -v f="$field" '
-      /^---$/ { if (++c==2) exit }
-      c==1 && $0 ~ "^"f":" { sub("^"f":[ ]*",""); print; exit }
-    ' "$file"
-  }
-
-  # Scan a directory for templates and append rows to table_file
-  scan_dir() {
-    local dir="$1"
-    [ -d "$dir" ] || return 0
-    for tmpl in "$dir"/*.md; do
-      [ -f "$tmpl" ] || continue
-      local name desc sandbox sb_col
-      name=$(basename "$tmpl" .md)
-      desc=$(extract_field "$tmpl" "description")
-      sandbox=$(extract_field "$tmpl" "sandbox")
-      [ -z "$desc" ] && desc="(no description)"
-      sb_col=""; [ -n "$sandbox" ] && sb_col=" ($sandbox)"
-      printf '| `%s` | %s%s |\n' "$name" "$desc" "$sb_col" >> "$table_file"
-    done
-  }
-
-  scan_dir "$REPO_DIR/src/prompts"
-  scan_dir "$HOME/.codex-collab/templates"
-
-  # Build the output: read SKILL.md line by line, replace the placeholder.
-  # Write to a temp file first to avoid clobbering the source via symlinks.
-  local out_tmp
+  local entry="$1" out="$2" out_tmp
+  # Render to a temp file first: writing straight to $out would truncate the
+  # installed SKILL.md before bun even runs, so a render failure (set -e)
+  # would leave a dev install with an empty file and the old one gone.
   out_tmp=$(mktemp)
-  while IFS= read -r line || [ -n "$line" ]; do
-    if [ "$line" = "<!-- TEMPLATES -->" ]; then
-      if [ -s "$table_file" ]; then
-        printf '| Template | Description |\n'
-        printf '|----------|-------------|\n'
-        cat "$table_file"
-      else
-        printf 'No templates found.\n'
-      fi
-    else
-      printf '%s\n' "$line"
-    fi
-  done < "$REPO_DIR/SKILL.md" > "$out_tmp"
-
-  # Remove old file/symlink before placing generated file
+  bun "$entry" skill render > "$out_tmp"
+  # Remove old file/symlink so a stale symlink is never written through.
   rm -f "$out"
   mv "$out_tmp" "$out"
-  rm -f "$table_file"
 }
 
 if [ "$MODE" = "dev" ]; then
@@ -115,7 +73,7 @@ if [ "$MODE" = "dev" ]; then
 
   # Generate SKILL.md with template table (can't inject into a symlink)
   mkdir -p "$SKILL_DIR/scripts"
-  generate_skill_md "$SKILL_DIR/SKILL.md"
+  generate_skill_md "$REPO_DIR/src/cli.ts" "$SKILL_DIR/SKILL.md"
   ln -sf "$REPO_DIR/src/cli.ts" "$SKILL_DIR/scripts/codex-collab"
   ln -sf "$REPO_DIR/src/broker-server.ts" "$SKILL_DIR/scripts/broker-server"
   ln -sf "$REPO_DIR/LICENSE" "$SKILL_DIR/LICENSE.txt"
@@ -149,11 +107,12 @@ else
     chmod +x "$BUILT"
   done
 
-  # Copy prompts (needed at runtime for built-in templates)
+  # Copy prompts BEFORE rendering — `skill render` resolves built-in
+  # templates relative to the built binary (scripts/prompts)
   cp -r "$REPO_DIR/src/prompts" "$REPO_DIR/skill/codex-collab/scripts/prompts"
 
   # Generate SKILL.md with injected template table, copy LICENSE
-  generate_skill_md "$REPO_DIR/skill/codex-collab/SKILL.md"
+  generate_skill_md "$REPO_DIR/skill/codex-collab/scripts/codex-collab" "$REPO_DIR/skill/codex-collab/SKILL.md"
   cp "$REPO_DIR/LICENSE" "$REPO_DIR/skill/codex-collab/LICENSE.txt"
 
   # Install skill (copy to ~/.claude/skills/)
