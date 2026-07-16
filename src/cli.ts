@@ -156,6 +156,14 @@ Commands:
   clean                   Delete old logs and stale mappings
   delete <id> [--purge]   Archive thread (recoverable) and delete local files;
                           --purge permanently deletes it server-side instead
+  skill sync [--yes]      Regenerate the installed SKILL.md if stale — shows
+                          the diff and asks before writing (--yes: apply
+                          without prompting; skill render: print the
+                          generated SKILL.md to stdout, used by installers)
+  update                  Check GitHub for a newer release and show its
+                          changelog; with consent (prompt or --yes) download,
+                          build, and reinstall (--check: report only;
+                          --skip: mute notices for the latest release)
   health                  Check prerequisites
   version                 Print version
 
@@ -193,6 +201,10 @@ Options:
   --json                  JSON output (threads, peek commands)
   --all                   List all threads without the display limit
   --discover              Merge server-side threads into the local list (threads)
+  --yes                   (skill sync, update) Apply without prompting — pass
+                          only after the user has explicitly agreed
+  --check                 (update) Show the latest release without installing
+  --skip                  (update) Mute update notices for the latest release
   --                      End of options; remaining args are prompt text
   -v, --version           Print version and exit (before the command only)
 
@@ -274,6 +286,9 @@ const BOOLEAN_FLAGS = new Set([
   "--last",
   "--guardian",
   "--session",
+  "--yes",
+  "--check",
+  "--skip",
 ]);
 
 function extractCommand(args: string[]): { command: string; rest: string[] } {
@@ -343,7 +358,7 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
-    "peek", "version", "ask", "answer", "questions", "next",
+    "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -357,6 +372,14 @@ async function main() {
   if (optionTokens.includes("-h") || optionTokens.includes("--help")) {
     showHelp();
     process.exit(0);
+  }
+
+  // Staleness notices (stderr, detection only — applying anything requires
+  // an explicit `skill sync`/`update` invocation). Ride only the heavyweight
+  // commands so quick commands stay instant and Codex-invoked ones (`ask`,
+  // sandboxed) never see them.
+  if (command === "run" || command === "review" || command === "health") {
+    await (await import("./update")).maybeNotifyUpdates();
   }
 
   switch (command) {
@@ -401,6 +424,10 @@ async function main() {
       return (await import("./commands/threads")).handleDelete(rest);
     case "health":
       return (await import("./commands/config")).handleHealth(rest);
+    case "skill":
+      return (await import("./commands/update")).handleSkill(rest);
+    case "update":
+      return (await import("./commands/update")).handleUpdate(rest);
     case "peek":
       return (await import("./commands/peek")).handlePeek(rest);
     case "version":
