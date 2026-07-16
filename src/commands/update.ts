@@ -6,6 +6,7 @@
 // that invocation IS the "show me first" step for an agent-driven session.
 
 import { join } from "path";
+import { homedir } from "os";
 import { spawnSync } from "child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "fs";
 import { config } from "../config";
@@ -328,8 +329,15 @@ async function skipLatest(): Promise<void> {
  *  Failures THROW (never die/process.exit): the caller holds the update
  *  lock and its finally must run, and process.exit would skip it. */
 async function downloadAndInstall(release: ReleaseInfo): Promise<void> {
-  const workDir = join(config.dataDir, "updates", release.tag);
-  rmSync(workDir, { recursive: true, force: true });
+  let workDir = join(config.dataDir, "updates", release.tag);
+  try {
+    rmSync(workDir, { recursive: true, force: true });
+  } catch {
+    // A leftover dir can be held open on Windows (see the cleanup note
+    // below) — fall back to a unique sibling rather than failing the update.
+    workDir = `${workDir}-${process.pid}`;
+    rmSync(workDir, { recursive: true, force: true });
+  }
   mkdirSync(workDir, { recursive: true });
   const tarball = join(workDir, "source.tar.gz");
   const url = `${releaseDownloadBase()}/${REPO_SLUG}/archive/refs/tags/${release.tag}.tar.gz`;
@@ -358,7 +366,12 @@ async function downloadAndInstall(release: ReleaseInfo): Promise<void> {
     process.platform === "win32"
       ? ["powershell", "-ExecutionPolicy", "Bypass", "-File", join(srcDir, "install.ps1")]
       : ["bash", join(srcDir, "install.sh")];
-  const run = Bun.spawnSync(installer, { cwd: srcDir, stdout: "inherit", stderr: "inherit" });
+  // cwd must be OUTSIDE workDir: the installer scripts resolve their own
+  // location from $0/$MyInvocation (cwd-independent), but their final health
+  // check spawns a detached broker that INHERITS this cwd — and Windows
+  // refuses to rm a directory that is a live process's cwd (EBUSY), which
+  // failed the whole update after a successful install.
+  const run = Bun.spawnSync(installer, { cwd: homedir(), stdout: "inherit", stderr: "inherit" });
   if (run.exitCode !== 0) {
     throw new Error(`Installer exited with code ${run.exitCode} — the previous install may still be in place.`);
   }
@@ -378,7 +391,16 @@ async function downloadAndInstall(release: ReleaseInfo): Promise<void> {
     console.log("SKILL.md is unchanged by this update.");
   }
 
-  rmSync(workDir, { recursive: true, force: true });
+  // Best-effort cleanup — a failure here must never fail a COMPLETED update
+  // (this fired as a fatal EBUSY on Windows when a lingering process held
+  // the dir, reporting failure after a successful install).
+  try {
+    rmSync(workDir, { recursive: true, force: true });
+  } catch (e) {
+    console.error(
+      `Note: could not remove the update work dir (${e instanceof Error ? e.message : String(e)}) — safe to delete later: ${workDir}`,
+    );
+  }
 
   // No broker sweep here: killing brokers races commands that connected but
   // haven't recorded a run yet. Instead, brokers carry the version that
