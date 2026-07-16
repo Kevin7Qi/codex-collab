@@ -81,10 +81,20 @@ export interface ReleaseInfo {
   url: string; // release page
 }
 
+/** Base URLs for the release API and tag-tarball downloads. The env
+ *  overrides exist so tests can exercise the full update path against a
+ *  local mock server — production always uses the GitHub hosts. */
+export function releaseApiBase(): string {
+  return process.env.CODEX_COLLAB_RELEASE_API_BASE || "https://api.github.com";
+}
+export function releaseDownloadBase(): string {
+  return process.env.CODEX_COLLAB_RELEASE_DL_BASE || "https://github.com";
+}
+
 /** Latest GitHub release, or null when the repo has no releases yet.
  *  Throws on network failure or non-404 API errors. */
 export async function fetchLatestRelease(timeoutMs = 10_000): Promise<ReleaseInfo | null> {
-  const res = await fetch(`https://api.github.com/repos/${REPO_SLUG}/releases/latest`, {
+  const res = await fetch(`${releaseApiBase()}/repos/${REPO_SLUG}/releases/latest`, {
     headers: { Accept: "application/vnd.github+json", "User-Agent": config.clientName },
     signal: AbortSignal.timeout(timeoutMs),
   });

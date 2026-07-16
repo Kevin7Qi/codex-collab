@@ -23,6 +23,7 @@ import {
   compareVersions,
   fetchLatestRelease,
   loadUpdateState,
+  releaseDownloadBase,
   saveUpdateState,
   updateStateFile,
 } from "../update";
@@ -330,7 +331,7 @@ async function downloadAndInstall(release: ReleaseInfo): Promise<void> {
   rmSync(workDir, { recursive: true, force: true });
   mkdirSync(workDir, { recursive: true });
   const tarball = join(workDir, "source.tar.gz");
-  const url = `https://github.com/${REPO_SLUG}/archive/refs/tags/${release.tag}.tar.gz`;
+  const url = `${releaseDownloadBase()}/${REPO_SLUG}/archive/refs/tags/${release.tag}.tar.gz`;
 
   console.log(`Downloading ${url}`);
   const res = await fetch(url, {
