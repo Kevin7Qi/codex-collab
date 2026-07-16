@@ -27,6 +27,7 @@ bun test              # run all tests (integration tests are skipped by default)
 bun run typecheck     # type checking
 
 RUN_INTEGRATION=1 bun test   # include integration tests (requires codex CLI + credentials)
+RUN_UPDATE_E2E=1 bun test src/update-e2e.test.ts   # self-update E2E against a local mock release host (POSIX, requires codex CLI)
 ```
 
 All tests must pass and type checking must be clean before submitting a PR.
