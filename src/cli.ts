@@ -377,9 +377,11 @@ async function main() {
   // Staleness notices (stderr, detection only — applying anything requires
   // an explicit `skill sync`/`update` invocation). Ride only the heavyweight
   // commands so quick commands stay instant and Codex-invoked ones (`ask`,
-  // sandboxed) never see them.
+  // sandboxed) never see them. The background release fetch is reserved for
+  // run/review: those live long enough for it to finish, while a pending
+  // fetch would hold `health`'s exit open when offline.
   if (command === "run" || command === "review" || command === "health") {
-    await (await import("./update")).maybeNotifyUpdates();
+    await (await import("./update")).maybeNotifyUpdates(command !== "health");
   }
 
   switch (command) {

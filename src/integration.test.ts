@@ -28,8 +28,11 @@ function runCli(args: string[], env?: Record<string, string>): RunResult {
   const result = Bun.spawnSync(["bun", "run", CLI, ...args], {
     // Short broker idle timeout so any detached broker self-exits in seconds
     // instead of lingering for 30 min. HOME stays opt-in per caller so the
-    // gated live test keeps the real ~/.codex auth.
-    env: { ...process.env, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000", ...env },
+    // gated live test keeps the real ~/.codex auth. No-update-check: without
+    // it, run/review/health spawns do a live GitHub fetch and write
+    // update-check state — into the REAL ~/.codex-collab when HOME isn't
+    // overridden.
+    env: { ...process.env, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000", CODEX_COLLAB_NO_UPDATE_CHECK: "1", ...env },
     timeout: 10_000,
   });
   return {
@@ -142,7 +145,7 @@ describe("health command", () => {
     const result = Bun.spawnSync(["bun", "run", CLI, "health"], {
       // Isolated HOME so this never spawns a broker in the real ~/.codex-collab,
       // and a short idle timeout so that broker self-exits in seconds.
-      env: { ...process.env, HOME: TEST_DATA_DIR, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000" },
+      env: { ...process.env, HOME: TEST_DATA_DIR, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000", CODEX_COLLAB_NO_UPDATE_CHECK: "1" },
       timeout: 3_000,
     });
     const combined = result.stdout.toString() + result.stderr.toString();

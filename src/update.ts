@@ -21,11 +21,15 @@ export const REPO_SLUG: string = (() => {
   return match ? match[1] : "Kevin7Qi/codex-collab";
 })();
 
-const REMOTE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const REMOTE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface UpdateState {
   /** ISO timestamp of the last remote release check (attempted, not necessarily successful). */
   lastRemoteCheck?: string;
+  /** ISO timestamp of the last SUCCESSFUL check (fetch completed, including a
+   *  definitive "no releases"). lastRemoteCheck throttles attempts; this one
+   *  vouches that latestVersion/latestUrl reflect a completed answer. */
+  lastSuccessAt?: string;
   /** Latest release version seen on GitHub (no leading "v"). */
   latestVersion?: string;
   /** Release page URL for latestVersion. */
@@ -109,8 +113,14 @@ export function shouldNotifyRelease(current: string, state: UpdateState): boolea
 /** Print staleness notices to stderr (called from heavyweight commands only).
  *  Detection only — nothing is ever downloaded or written to the skill dir
  *  here; both notices point at an explicit command. Fails silent throughout:
- *  a staleness check must never break or delay a real command. */
-export async function maybeNotifyUpdates(): Promise<void> {
+ *  a staleness check must never break or delay a real command.
+ *
+ *  `allowRemoteFetch=false` skips starting the background release fetch (and
+ *  leaves the throttle stamp untouched so a later command still fetches):
+ *  a pending fetch keeps the event loop alive up to its timeout, which would
+ *  stall the exit of short-lived commands like `health` when offline.
+ *  Notices always print from cached state either way. */
+export async function maybeNotifyUpdates(allowRemoteFetch = true): Promise<void> {
   if (process.env.CODEX_COLLAB_NO_UPDATE_CHECK) return;
 
   try {
@@ -127,20 +137,34 @@ export async function maybeNotifyUpdates(): Promise<void> {
     const file = updateStateFile();
     const state = loadUpdateState(file);
     const last = state.lastRemoteCheck ? Date.parse(state.lastRemoteCheck) : NaN;
-    if (Number.isNaN(last) || Date.now() - last > REMOTE_CHECK_INTERVAL_MS) {
-      // Stamp the attempt (not just success) so an offline machine retries
-      // daily instead of on every command.
+    if (allowRemoteFetch && (Number.isNaN(last) || Date.now() - last > REMOTE_CHECK_INTERVAL_MS)) {
+      // Stamp and persist the attempt BEFORE fetching so an offline machine
+      // retries daily instead of on every command, then fetch WITHOUT
+      // awaiting: command startup must never wait on the network. The result
+      // lands in the cache for the next command's notice; run/review live
+      // long enough for it to complete, quick commands may cut it short.
       state.lastRemoteCheck = new Date().toISOString();
-      try {
-        const release = await fetchLatestRelease(2_500);
-        if (release) {
-          state.latestVersion = release.version;
-          state.latestUrl = release.url;
-        }
-      } catch {
-        // offline or rate-limited — try again next interval
-      }
       saveUpdateState(state, file);
+      void fetchLatestRelease(2_500)
+        .then((release) => {
+          // Reload rather than reuse: don't clobber state written since
+          // (e.g. an `update --skip` racing this background fetch).
+          const fresh = loadUpdateState(file);
+          fresh.lastSuccessAt = new Date().toISOString();
+          if (release) {
+            fresh.latestVersion = release.version;
+            fresh.latestUrl = release.url;
+          } else {
+            // Definitive "no releases": a cached one was withdrawn — stop
+            // advertising a version that update can no longer install.
+            delete fresh.latestVersion;
+            delete fresh.latestUrl;
+          }
+          saveUpdateState(fresh, file);
+        })
+        .catch(() => {
+          // offline or rate-limited — try again next interval
+        });
     }
     if (shouldNotifyRelease(config.clientVersion, state)) {
       console.error(

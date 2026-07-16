@@ -26,7 +26,9 @@ function run(...args: string[]): { stdout: string; stderr: string; exitCode: num
     cwd: import.meta.dir + "/..",
     stdio: ["pipe", "pipe", "pipe"],
     timeout: 5000,
-    env: { ...process.env, HOME: TEST_HOME, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000" },
+    // No-update-check: run/review/health would otherwise do a live GitHub
+    // fetch (and stamp update-check state) on their first spawn per test HOME.
+    env: { ...process.env, HOME: TEST_HOME, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000", CODEX_COLLAB_NO_UPDATE_CHECK: "1" },
   });
   return {
     stdout: (result.stdout ?? "") as string,
