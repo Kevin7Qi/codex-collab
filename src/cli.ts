@@ -252,6 +252,8 @@ const VALUE_FLAGS = new Set([
   "--base",
   "--resume",
   "--template",
+  "--goal",
+  "--budget",
 ]);
 
 // Boolean flags recognized by commands/shared.ts parseOptions. Combined with
@@ -268,7 +270,9 @@ const BOOLEAN_FLAGS = new Set([
   "--detach",
   "-w", "--watch",
   "--purge",
+  "--clear",
   "--last",
+  "--guardian",
   "--session",
 ]);
 
