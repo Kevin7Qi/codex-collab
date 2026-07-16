@@ -58,7 +58,7 @@ codex-collab update            # show the latest release and changelog, confirm,
 codex-collab update --check    # report only, install nothing
 ```
 
-`update` downloads the pinned release tag from GitHub, rebuilds locally, reinstalls the skill bundle and binary shim, and prints the SKILL.md diff it applied. Nothing is installed without consent: an interactive `y/N` prompt, or an explicit `--yes` in non-interactive sessions. `run`, `review`, and `health` print a one-line notice when a newer release exists (checked at most once a day, never installing anything on their own); `update --skip` mutes notices for a given release, and `CODEX_COLLAB_NO_UPDATE_CHECK=1` disables the check entirely.
+`update` downloads the pinned release tag from GitHub, rebuilds locally, reinstalls the skill bundle and binary shim, and prints the SKILL.md diff it applied. Nothing is installed without consent: an interactive `y/N` prompt, or an explicit `--yes` in non-interactive sessions. `run`, `review`, and `health` print a one-line notice when a newer release exists (checked at most once a day, never installing anything on their own); `update --skip` mutes notices for a given release, and `CODEX_COLLAB_NO_UPDATE_CHECK=1` disables the release check entirely (the local skill-drift notice is offline and stays on).
 
 Relatedly, if the installed SKILL.md drifts from the binary or your template set (e.g., after adding a custom template), `codex-collab skill sync` shows the pending diff and applies it on confirmation.
 

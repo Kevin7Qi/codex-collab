@@ -121,8 +121,10 @@ export function shouldNotifyRelease(current: string, state: UpdateState): boolea
  *  stall the exit of short-lived commands like `health` when offline.
  *  Notices always print from cached state either way. */
 export async function maybeNotifyUpdates(allowRemoteFetch = true): Promise<void> {
-  if (process.env.CODEX_COLLAB_NO_UPDATE_CHECK) return;
-
+  // CODEX_COLLAB_NO_UPDATE_CHECK gates only the REMOTE release check below —
+  // its purpose is stopping network traffic. The drift check is local and
+  // free; disabling it too would leave the skill silently stale for anyone
+  // (or any CI) that sets the var.
   try {
     if (skillInSync() === false) {
       console.error(
@@ -132,6 +134,8 @@ export async function maybeNotifyUpdates(allowRemoteFetch = true): Promise<void>
   } catch {
     // never let a staleness check break a real command
   }
+
+  if (process.env.CODEX_COLLAB_NO_UPDATE_CHECK) return;
 
   try {
     const file = updateStateFile();
