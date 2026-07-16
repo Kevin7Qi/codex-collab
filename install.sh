@@ -57,10 +57,15 @@ echo "Installing dependencies..."
 # SKILL.md source + current template table) so the installers and
 # `codex-collab skill sync` share one implementation.
 generate_skill_md() {
-  local entry="$1" out="$2"
-  # Remove old file/symlink first so a stale symlink is never written through.
+  local entry="$1" out="$2" out_tmp
+  # Render to a temp file first: writing straight to $out would truncate the
+  # installed SKILL.md before bun even runs, so a render failure (set -e)
+  # would leave a dev install with an empty file and the old one gone.
+  out_tmp=$(mktemp)
+  bun "$entry" skill render > "$out_tmp"
+  # Remove old file/symlink so a stale symlink is never written through.
   rm -f "$out"
-  bun "$entry" skill render > "$out"
+  mv "$out_tmp" "$out"
 }
 
 if [ "$MODE" = "dev" ]; then

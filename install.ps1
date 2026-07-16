@@ -67,8 +67,17 @@ try {
 # `codex-collab skill sync` share one implementation.
 function Generate-SkillMd {
     param([string]$Entry, [string]$OutPath)
-    $lines = & bun $Entry skill render
-    if ($LASTEXITCODE -ne 0) { throw "'skill render' failed with exit code $LASTEXITCODE" }
+    # PowerShell 5.1 decodes captured native stdout with the CONSOLE code page,
+    # which mojibakes SKILL.md's non-ASCII on non-UTF-8 hosts — force UTF-8
+    # around the capture and restore afterwards.
+    $prevEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $lines = & bun $Entry skill render
+        if ($LASTEXITCODE -ne 0) { throw "'skill render' failed with exit code $LASTEXITCODE" }
+    } finally {
+        [Console]::OutputEncoding = $prevEncoding
+    }
     [System.IO.File]::WriteAllText($OutPath, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
 }
 
