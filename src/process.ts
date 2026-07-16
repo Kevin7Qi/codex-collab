@@ -21,6 +21,31 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 /**
+ * Best-effort check that `pid` names a Bun process (the broker server runs
+ * under bun). Guards PID-recycling misclassification when deciding whether a
+ * version-mismatched broker is still alive WITHOUT touching its socket (a
+ * probe connect would reset its idle timer). Asymmetric failure handling: a
+ * false "yes" only costs a direct connection, while a false "no" would let
+ * the spawn path clear artifacts under a live broker — so indeterminate
+ * answers (ps unavailable, Windows) return true.
+ */
+export function processLooksLikeBun(pid: number): boolean {
+  if (isWindows) return true; // tasklist filtering is slow and localized — accept the PID check alone
+  try {
+    const r = spawnSync("ps", ["-o", "comm=", "-p", String(pid)], {
+      encoding: "utf-8",
+      timeout: 2000,
+    });
+    if (r.error) return true; // ps itself failed — indeterminate
+    if (r.status !== 0) return false; // no such process
+    const comm = (r.stdout ?? "").trim().toLowerCase();
+    return comm === "" ? true : comm.includes("bun");
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Kill a process and its children.
  *
  * - Unix: sends SIGTERM first; if the process is still alive, schedules
