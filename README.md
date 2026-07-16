@@ -118,7 +118,7 @@ codex-collab follow --watch
 | `ask "question"` | (for Codex, mid-turn) Post a question to the collaborator and wait for the answer; `--timeout <sec>` sets the deadline (default 600). Fails open: on expiry it prints proceed-on-your-judgment guidance and exits 0 |
 | `answer <id> "text"` | Answer a pending question (`answer <id> -` reads the answer from stdin) |
 | `questions [id]` | List pending questions in this workspace; with an ID, show that question's full text |
-| `next` | Block until something needs attention (question or approval), print one JSON event line, exit |
+| `next` | Block until something needs attention (question or approval), print it in full with how to respond, exit |
 | `config [key] [value]` | Show or set persistent defaults |
 | `models` | List available models |
 | `templates` | List available prompt templates |
@@ -140,20 +140,48 @@ codex-collab follow --watch
 <details>
 <summary>Options</summary>
 
+**General**
+
 | Flag | Description |
 |------|-------------|
 | `-d, --dir <path>` | Working directory |
 | `-m, --model <model>` | Model name (default: auto — latest available) |
 | `-r, --reasoning <level>` | none, minimal, low, medium, high, xhigh, max, ultra (default: auto — highest the model supports, up to `xhigh`) |
 | `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
-| `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
-| `--ref <hash>` | Commit ref for `--mode commit` |
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto`: Codex's Guardian reviewer approves or denies each request autonomously — never blocks on a human; decisions stream as Guardian lines |
 | `--memory` | Let Codex's memory feature learn from threads this run creates. Default: created threads get `thread/memoryMode/set mode=disabled`; resumed threads are never touched (the flag is persistent per-thread, and a thread you created yourself should keep feeding your memory). Governs Codex's *local* memory consolidation (`~/.codex/memories`) only — the `personality` feature is explicit user config (not learned) and unaffected. Persistent form: `config memory true` |
-| `--detach` | (run) Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
-| `-w, --watch` | (follow) Don't exit when the run finishes — keep following each new run (Ctrl-C to stop) |
-| `--template <name>` | Prompt template for run command (user `~/.codex-collab/templates/` or built-in) |
+| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483). When a goal is active it scopes the whole goal, and expiry pauses the goal before exiting. For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
+| `--` | End of options; remaining arguments are treated as prompt text |
+
+**run**
+
+| Flag | Description |
+|------|-------------|
+| `--detach` | Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
+| `--template <name>` | Prompt template (user `~/.codex-collab/templates/` or built-in) |
+| `--goal <objective>` | Create the thread's goal before the first turn (replaces the objective on `--resume`); requires `goals = true` in `~/.codex/config.toml`. With `--template collab` the objective also gets a one-line ask-channel note — re-injected into every continuation turn, so channel awareness survives long goals |
+| `--budget <tokens>` | Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k |
+| `-` | Read the prompt from stdin |
+
+**review**
+
+| Flag | Description |
+|------|-------------|
+| `--mode <mode>` | Review mode: pr, uncommitted, commit, custom |
+| `--ref <hash>` | Commit ref for `--mode commit` |
+| `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
+
+**follow**
+
+| Flag | Description |
+|------|-------------|
+| `-w, --watch` | Don't exit when the run finishes — keep following each new run (Ctrl-C to stop) |
+
+**Listing & output**
+
+| Flag | Description |
+|------|-------------|
 | `--json` | JSON output for supported commands (`threads`, `peek`) |
 | `--all` | List all threads with no display limit |
 | `--discover` | Query Codex server for threads not in the local index |
@@ -162,16 +190,32 @@ codex-collab follow --watch
 | `--content-only` | Suppress progress lines; with `output`, return only extracted content |
 | `--last` | (output) Only the latest turn's output instead of the whole thread history (implies `--content-only`) |
 | `--session` | (threads) Only threads the current session has run |
-| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483). When a goal is active it scopes the whole goal, and expiry pauses the goal before exiting. For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
-| `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
-| `--` | End of options; remaining arguments are treated as prompt text |
-| `-` | (run) Read the prompt from stdin |
 
-`run` and `review` exit with a status code that classifies the outcome: `0` completed, `1` failed, `3` timed out, `4` interrupted, `5` died blocked on an approval (the request is void — resume with a longer `--timeout` or `--approval auto`), `6` broker busy (transient — retry), `7` goal ended blocked or usage/budget-limited — Codex needs steering (resume the thread, or `kill --clear` to abandon the goal).
+</details>
 
-**Goal mode**: Codex's Goal mode (`goals = true` in `~/.codex/config.toml`) makes threads self-continue — the server starts a new turn the moment one completes while the goal is active. When a goal is (or becomes) active on the thread, a `run` follows every continuation turn in the same run record and log until the goal is terminal: the run corresponds to the unit of work, not just its first turn. `--timeout` then bounds the whole goal, and on expiry the goal is **paused** (resumable, no headless token burn) before the CLI exits `3`. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
+<details>
+<summary>Exit codes</summary>
 
-`next` exits `0` when an event was delivered (JSON on stdout), `3` when `--timeout` elapsed with no event, and `10` when the workspace is idle — nothing running, nothing pending.
+`run` and `review`:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Completed |
+| `1` | Failed |
+| `3` | Timed out — an active goal is paused first (resumable) |
+| `4` | Interrupted (`kill`) |
+| `5` | Died blocked on an approval — the request is void; resume with a longer `--timeout`, or use `--approval auto` |
+| `6` | Broker busy and fallback unavailable — transient, retry |
+| `7` | Goal ended blocked or usage/budget-limited — steer with `run --resume`, or abandon with `kill --clear` |
+
+`next`: `0` event delivered (printed in full on stdout) · `3` `--timeout` elapsed with no event · `10` workspace idle (nothing running, nothing pending).
+
+</details>
+
+<details>
+<summary>Goal mode</summary>
+
+With `goals = true` in `~/.codex/config.toml`, a goal — created by Codex mid-turn, or explicitly with `run --goal "objective" [--budget <tokens>]` — makes the server keep starting continuation turns until the objective is done, and a `run` follows the whole goal in one run record and log; its exit code reflects the goal's end. The objective is re-injected into every continuation turn; one too big to state in a sentence can point at a spec or plan file in the repo. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
 
 </details>
 

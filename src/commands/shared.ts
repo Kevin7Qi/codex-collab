@@ -134,6 +134,11 @@ export interface Options {
   full: boolean;
   help: boolean;
   template: string | null;
+  /** run: create (or replace) the thread's goal with this objective before
+   *  the first turn — the programmatic equivalent of the TUI's /goal. */
+  goal: string | null;
+  /** run: token budget for --goal. */
+  budget: number | null;
   /** Flags explicitly provided on the command line (forwarded on resume). */
   explicit: Set<string>;
   /** Flags set by user config file (suppress auto-detection but NOT forwarded on resume). */
@@ -286,6 +291,8 @@ export function defaultOptions(): Options {
     full: false,
     help: false,
     template: null,
+    goal: null,
+    budget: null,
     explicit: new Set<string>(),
     configured: new Set<string>(),
   };
@@ -422,6 +429,28 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.contentOnly = true;
     } else if (arg === "--json") {
       options.json = true;
+    } else if (arg === "--goal") {
+      if (!hasFlagValue(argv, i)) {
+        console.error("Error: --goal requires an objective");
+        process.exit(1);
+      }
+      const objective = argv[++i].trim();
+      if (!objective) {
+        console.error("Error: --goal objective is empty");
+        process.exit(1);
+      }
+      options.goal = objective;
+    } else if (arg === "--budget") {
+      if (!hasFlagValue(argv, i)) {
+        console.error("Error: --budget requires a value");
+        process.exit(1);
+      }
+      const val = Number(argv[++i]);
+      if (!Number.isInteger(val) || val <= 0) {
+        console.error(`Error: Invalid budget: ${argv[i]} (must be a positive integer of tokens)`);
+        process.exit(1);
+      }
+      options.budget = val;
     } else if (arg === "--timeout") {
       if (!hasFlagValue(argv, i)) {
         console.error("Error: --timeout requires a value");

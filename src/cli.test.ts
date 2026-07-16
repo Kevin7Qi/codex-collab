@@ -2,7 +2,7 @@
 
 import { describe, it, expect, setDefaultTimeout, afterAll } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import pkg from "../package.json";
@@ -214,6 +214,80 @@ describe("CLI global options before command", () => {
     const { stderr, exitCode } = run("--reasoning", "invalid", "run", "prompt");
     expect(exitCode).toBe(1);
     expect(stderr).toContain("Invalid reasoning level");
+  });
+
+  it("--goal <objective> before the command is skipped by the pre-scan and forwarded", () => {
+    // If --goal were missing from VALUE_FLAGS, "  " would be taken as the
+    // command ("Unknown command"). parseOptions rejecting the blank objective
+    // proves the pair was both skipped by the pre-scan and forwarded intact.
+    const { stderr, exitCode } = run("--goal", "  ", "run", "prompt");
+    expect(exitCode).toBe(1);
+    expect(stderr).not.toContain("Unknown command");
+    expect(stderr).toContain("--goal objective is empty");
+  });
+
+  it("--budget <tokens> before the command is skipped by the pre-scan and forwarded", () => {
+    const { stderr, exitCode } = run("--budget", "0", "run", "prompt");
+    expect(exitCode).toBe(1);
+    expect(stderr).not.toContain("Unknown command");
+    expect(stderr).toContain("Invalid budget");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-scan flag sets stay in sync with parseOptions
+// ---------------------------------------------------------------------------
+
+describe("CLI pre-scan flag sets", () => {
+  // VALUE_FLAGS/BOOLEAN_FLAGS in cli.ts must mirror the branches of
+  // parseOptions in commands/shared.ts, or pre-command invocations break for
+  // the drifted flag (a value flag's argument gets misread as the command).
+  // cli.ts runs main() on import, so compare the two at the source level:
+  // parseOptions branches are uniform enough that value-taking ones are
+  // exactly those calling hasFlagValue().
+
+  const cliSrc = readFileSync(join(import.meta.dir, "cli.ts"), "utf-8");
+  const sharedSrc = readFileSync(join(import.meta.dir, "commands", "shared.ts"), "utf-8");
+
+  function declaredSet(name: string): string[] {
+    const m = cliSrc.match(new RegExp(`const ${name} = new Set\\(\\[([\\s\\S]*?)\\]\\)`));
+    expect(m).not.toBeNull(); // cli.ts must declare the set
+    return [...m![1].matchAll(/"([^"]+)"/g)].map((f) => f[1]).sort();
+  }
+
+  function parseOptionsFlags(): { value: string[]; boolean: string[] } {
+    const start = sharedSrc.indexOf("export function parseOptions");
+    const end = sharedSrc.indexOf("\nexport function", start + 1);
+    expect(start).toBeGreaterThan(-1);
+    const body = sharedSrc.slice(start, end === -1 ? undefined : end);
+
+    const branchRe = /if \((arg === "[^"]+"(?:\s*\|\|\s*arg === "[^"]+")*)\)/g;
+    const branches = [...body.matchAll(branchRe)];
+    expect(branches.length).toBeGreaterThan(20); // parseOptions found and parsed
+
+    const value: string[] = [];
+    const boolean: string[] = [];
+    for (let i = 0; i < branches.length; i++) {
+      const flags = [...branches[i][1].matchAll(/"([^"]+)"/g)].map((f) => f[1]);
+      const bodyEnd = i + 1 < branches.length ? branches[i + 1].index : body.length;
+      const branchBody = body.slice(branches[i].index, bodyEnd);
+      const isValue = branchBody.includes("hasFlagValue(");
+      for (const flag of flags) {
+        // "--" (end of options) and -h/--help (handled by extractCommand's
+        // own early-exit path) are deliberately in neither pre-scan set.
+        if (flag === "--" || flag === "-h" || flag === "--help") continue;
+        (isValue ? value : boolean).push(flag);
+      }
+    }
+    return { value: value.sort(), boolean: boolean.sort() };
+  }
+
+  it("VALUE_FLAGS matches parseOptions' value-taking branches", () => {
+    expect(declaredSet("VALUE_FLAGS")).toEqual(parseOptionsFlags().value);
+  });
+
+  it("BOOLEAN_FLAGS matches parseOptions' boolean branches", () => {
+    expect(declaredSet("BOOLEAN_FLAGS")).toEqual(parseOptionsFlags().boolean);
   });
 });
 

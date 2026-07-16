@@ -5,7 +5,7 @@ import { openSync, closeSync, readFileSync } from "fs";
 import { join } from "path";
 import { updateThreadStatus, generateRunId, loadRun, updateRun, runLogRelPath } from "../threads";
 import { runTurnWithGoalFollow } from "../turns";
-import { goalNeedsAttention } from "../goals";
+import { goalNeedsAttention, setThreadGoal, readThreadGoal, pauseThreadGoal, isGoalFeatureUnavailable, GOAL_COLLAB_ASK_NOTE } from "../goals";
 import type { RunGoalState, ThreadGoal } from "../types";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
 import { wrapBrokerBusy, isBrokerBusyError } from "../broker";
@@ -194,6 +194,9 @@ export async function handleRun(args: string[]): Promise<void> {
   if (positional.length === 0) {
     die("No prompt provided\nUsage: codex-collab run \"prompt\" [options]");
   }
+  if (options.budget !== null && options.goal === null) {
+    die("--budget requires --goal");
+  }
 
   // `run -` reads the prompt from stdin — the safe channel for long,
   // quote-riddled agent-generated prompts that shell quoting would mangle.
@@ -276,7 +279,59 @@ export async function handleRun(args: string[]): Promise<void> {
       }
     };
 
+    // The goal is set once the FIRST TURN IS RUNNING, not before it:
+    // setting an active goal on an idle thread makes the goal runtime start
+    // its own continuation turn immediately, and the prompt's turn/start
+    // never runs (verified live) — mid-turn set is the lifecycle Codex's
+    // own create_goal tool has. Feature availability is still checked
+    // up front so a disabled feature fails before any tokens burn.
+    let goalSetup: Promise<void> | null = null;
+    let goalSetupError: Error | null = null;
+
     try {
+      let existingGoal: ThreadGoal | null = null;
+      if (options.goal !== null) {
+        try {
+          const res = await client.request<{ goal: ThreadGoal | null }>("thread/goal/get", { threadId });
+          existingGoal = res.goal ?? null;
+        } catch (e) {
+          if (isGoalFeatureUnavailable(e)) {
+            throw new Error("--goal requires Codex's Goal mode — set goals = true in ~/.codex/config.toml");
+          }
+          throw e;
+        }
+      }
+
+      const setGoalOnceRunning = (): void => {
+        if (options.goal === null || goalSetup !== null) return;
+        // The objective is re-injected into every continuation turn — the
+        // durable slot for channel awareness on long goals (the collab
+        // template itself rides only the first prompt).
+        const objective = options.template === "collab"
+          ? `${options.goal}\n\n${GOAL_COLLAB_ASK_NOTE}`
+          : options.goal;
+        goalSetup = (async () => {
+          let lastError: unknown;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) await new Promise((r) => setTimeout(r, 400));
+            try {
+              const goal = await setThreadGoal(client, threadId, objective, options.budget ?? undefined);
+              const budgetNote = goal.tokenBudget !== null
+                ? ` (budget ${goal.tokenBudget.toLocaleString("en-US")} tokens)`
+                : "";
+              progress(existingGoal !== null ? `Goal objective replaced${budgetNote}` : `Goal set${budgetNote}`);
+              return;
+            } catch (e) {
+              lastError = e;
+            }
+          }
+          goalSetupError = new Error(
+            `--goal could not be set: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+          );
+          progress(`Warning: ${goalSetupError.message}`);
+        })();
+      };
+
       const result = await runTurnWithGoalFollow(
         client,
         threadId,
@@ -301,17 +356,23 @@ export async function handleRun(args: string[]): Promise<void> {
             } catch (e) {
               console.error(`[codex] Warning: could not update run phase: ${e instanceof Error ? e.message : String(e)}`);
             }
+            setGoalOnceRunning();
           },
           onGoalUpdate: mirrorGoal,
           ...turnOverrides(options),
         },
       );
 
+      // A run the user asked to be goal-scoped that silently ran as a plain
+      // turn is a false success — surface the set failure as the run's.
+      if (goalSetup !== null) await goalSetup;
+      if (goalSetupError !== null) throw goalSetupError;
+
       // Final goal snapshot: a goal that ended non-active keeps its wire
       // status; a goal that disappeared after being seen was cleared by the
       // server — record it with the wire's success status.
       const snapshot = goalSnapshot as RunGoalState | null; // local copy: closure mutation defeats narrowing
-      const finalGoal: RunGoalState | null | undefined = !result.goalSeen || snapshot === null
+      let finalGoal: RunGoalState | null | undefined = !result.goalSeen || snapshot === null
         ? undefined
         : result.goal !== null
           ? {
@@ -324,6 +385,36 @@ export async function handleRun(args: string[]): Promise<void> {
             }
           : { ...snapshot, status: "complete", turns: result.continuationTurns + 1, updatedAt: new Date().toISOString() };
 
+      // A set that landed only AFTER the follow decision (short first turn
+      // plus a retried or slow set) leaves an ACTIVE goal on an idle thread:
+      // the server starts continuation turns headless, with no follower and
+      // no brake, behind a clean exit. Brake it — authoritative read, then
+      // pause; a failed read must not fail open (same rule as the follow
+      // brakes). goalSeen false with a successful set is the tell: a set
+      // that landed in time was seen by the follow decision.
+      let lateGoalRace = false;
+      if (goalSetup !== null && !result.goalSeen) {
+        const { goal: lateGoal, ok } = await readThreadGoal(client, threadId);
+        let latePaused = false;
+        if (lateGoal?.status === "active" || !ok) {
+          lateGoalRace = true;
+          latePaused = await pauseThreadGoal(client, threadId);
+          progress(latePaused
+            ? `Goal was set after the turn ended — paused before it could continue headless. Resume with: codex-collab run --resume ${shortId} "continue"`
+            : `Warning: the goal may be continuing headless — pause failed. Stop it with: codex-collab kill ${shortId}`);
+        }
+        if (lateGoal) {
+          finalGoal = {
+            objective: lateGoal.objective,
+            status: latePaused ? "paused" : lateGoal.status,
+            tokenBudget: lateGoal.tokenBudget,
+            tokensUsed: lateGoal.tokensUsed,
+            turns: 0, // no turn ran under the goal
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      }
+
       const exit = recordTerminalRunState(ws, threadId, runId, result, "Turn", options.contentOnly, finalGoal);
       // A completed run whose goal ended blocked/limited still needs the
       // user — that outcome outranks the last turn's clean status.
@@ -331,8 +422,33 @@ export async function handleRun(args: string[]): Promise<void> {
         progress(`Goal needs attention (${finalGoal.status}) — steer with: codex-collab run --resume ${shortId} "..."`);
         return EXIT_CODES.goalBlocked;
       }
+      // The late-set race is never a clean success: the user asked for a
+      // goal-scoped run and no turn ran under the goal — it needs steering.
+      if (exit === EXIT_CODES.ok && lateGoalRace) return EXIT_CODES.goalBlocked;
       return exit;
     } catch (e) {
+      // Settle any in-flight --goal set before this process exits: a set
+      // that lands after the CLI dies (the app-server outlives us via the
+      // broker) would leave an active goal continuing headless. Await the
+      // attempts, then brake. The follow-phase brakes may have already
+      // paused — set re-activates, so re-check AFTER the set settles;
+      // pausing twice is harmless.
+      if (goalSetup !== null) {
+        try {
+          await goalSetup;
+          if (goalSetupError === null) {
+            const { goal: lateGoal, ok } = await readThreadGoal(client, threadId);
+            if (lateGoal?.status === "active" || !ok) {
+              if (!(await pauseThreadGoal(client, threadId))) {
+                progress(`Warning: the goal may be continuing headless — pause failed. Stop it with: codex-collab kill ${shortId}`);
+              }
+            }
+          }
+        } catch (brakeErr) {
+          // Best-effort brake — the turn's own error stays the run's error.
+          console.error(`[codex] Warning: could not brake --goal on failure: ${brakeErr instanceof Error ? brakeErr.message : String(brakeErr)}`);
+        }
+      }
       e = wrapBrokerBusy(e);
       // A broker-busy error here is about to be retried by withClient over a
       // direct connection, re-creating this SAME record (sticky runId).

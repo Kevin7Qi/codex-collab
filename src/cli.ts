@@ -148,7 +148,7 @@ Commands:
   questions [id]          List pending questions in this workspace; with an
                           ID, show that question's full text
   next                    Block until something needs attention (question or
-                          approval), print one JSON event line, exit
+                          approval), print it in full with how to respond, exit
   approve <id>            Approve a pending request
   approve --guardian [id] Override a Guardian denial (no id: list pending
                           denials); takes effect on the thread's next run
@@ -182,6 +182,11 @@ Options:
   --ref <hash>            Commit ref for --mode commit
   --base <branch>         Base branch for PR review (default: auto-detected default branch)
   --template <name>       Prompt template (run command; checks ~/.codex-collab/templates/ first)
+  --goal <objective>      (run) Create the thread's goal before the first turn
+                          (replaces the objective on --resume); needs goals =
+                          true in ~/.codex/config.toml. With --template collab
+                          the objective also notes the ask channel
+  --budget <tokens>       (run) Token budget for --goal
   --limit <n>             Number of items shown (peek, threads commands)
   --full                  Include all item types (peek command)
   --content-only          Print only result text (no progress lines)
@@ -201,12 +206,13 @@ Exit codes (run, review):
                            7  goal ended blocked or usage/budget-limited —
                               Codex needs you (steer with --resume, or kill --clear)
 
-Goal mode: when Codex creates a goal (goals = true in ~/.codex/config.toml),
-a run follows the server's continuation turns until the goal completes, is
-paused, or gets blocked — the run IS the goal, not just its first turn.
+Goal mode: when a goal is active (goals = true in ~/.codex/config.toml) —
+created by Codex mid-turn or by you with run --goal — a run follows the
+server's continuation turns until the goal completes, is paused, or gets
+blocked: the run IS the goal, not just its first turn.
 
 Exit codes (next):
-  0  event delivered (JSON on stdout)   3  --timeout elapsed with no event
+  0  event delivered           3  --timeout elapsed with no event
   10 workspace idle — nothing running, nothing pending
 
 Examples:
@@ -246,6 +252,8 @@ const VALUE_FLAGS = new Set([
   "--base",
   "--resume",
   "--template",
+  "--goal",
+  "--budget",
 ]);
 
 // Boolean flags recognized by commands/shared.ts parseOptions. Combined with
@@ -262,7 +270,9 @@ const BOOLEAN_FLAGS = new Set([
   "--detach",
   "-w", "--watch",
   "--purge",
+  "--clear",
   "--last",
+  "--guardian",
   "--session",
 ]);
 

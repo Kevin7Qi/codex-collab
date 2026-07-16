@@ -125,7 +125,7 @@ codex-collab run "large refactor task" --detach --approval auto
 
 ### Watching for questions and approvals without polling (`next`)
 
-`codex-collab next` blocks until the first event that needs a response in the workspace — an ask-channel question (see The Ask Channel below) or a pending interactive approval — prints **one JSON event line**, and exits. Exit codes: `0` event delivered · `10` workspace idle (nothing running, nothing pending — the self-cleaning path, so a watcher never dangles after the run ends) · `3` only with an explicit `--timeout <sec>`.
+`codex-collab next` blocks until the first event that needs a response in the workspace — an ask-channel question (see The Ask Channel below) or a pending interactive approval — prints it **in full** (question body plus the answer command; no follow-up `questions <id>` needed), and exits. Exit codes: `0` event delivered · `10` workspace idle (nothing running, nothing pending — the self-cleaning path, so a watcher never dangles after the run ends) · `3` only with an explicit `--timeout <sec>`.
 
 **Arm it whenever a run can produce something answerable**: any run using the ask channel (`--template collab`), or an approval mode that can block (`on-request`, `on-failure`, `untrusted`). Under `--approval never` with no ask template, nothing can fire — a watcher there is waste (it will exit `10` when the run ends). Under `auto`, Guardian handles approvals autonomously, but questions still fire.
 
@@ -133,7 +133,11 @@ The pattern: launch the run and `next` as two background Bash commands in the sa
 
 ```bash
 codex-collab next -d /path/to/project   # in background Bash; its exit = something needs you
-# → {"type":"question","id":"q7f3a2c1","summary":"…","expiresAt":"…","answerWith":"codex-collab answer q7f3a2c1 \"<text>\""}
+# → Question q7f3a2c1  expires in 9m
+#
+#    <full question text>
+#
+#    Answer with: codex-collab answer q7f3a2c1 "<text>" -d '/path/to/project'
 ```
 
 **Respond and re-arm in the same message**: when `next` exits, issue the `answer` (or `approve`) and a fresh `next` as parallel tool calls — each event then costs exactly one wake-up plus one turn. Re-arm only *after* answering; `next` has no memory of delivered events, so re-arming while a question is still pending fires immediately with the same event. A parked `next` consumes zero context, and long runs can ask several times — keep the loop going until the run completes (its own exit notifies you) or `next` exits `10`.
@@ -227,7 +231,7 @@ codex-collab clean                      # Delete old logs, stale mappings, old q
 codex-collab approve <id> | decline <id> # Answer a pending approval
 codex-collab answer <id> "text"         # Answer a pending ask-channel question (see The Ask Channel)
 codex-collab questions [id]             # List pending questions (with an ID: show its full text)
-codex-collab next [--timeout <sec>]     # Block until a question/approval needs you; print one JSON event
+codex-collab next [--timeout <sec>]     # Block until a question/approval needs you; print it in full
                                         # (exit 0 = event, 10 = workspace idle, 3 = timeout)
 codex-collab ask "q" [--timeout <sec>]  # (invoked BY CODEX mid-turn, not by you) post a question, wait, fail open
 codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, reasoning, sandbox, approval, timeout, memory)
@@ -258,6 +262,8 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `--json` | JSON output (threads, peek commands) |
 | `--full` | Include all item types in peek output (default shows messages only) |
 | `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
+| `--goal <objective>` | (run) Create the thread's goal before the first turn (replaces the objective on `--resume`) — see Goal Mode |
+| `--budget <tokens>` | (run) Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k |
 | `--content-only` | Print only result text (no progress lines) |
 | `--last` | (output) Only the latest turn's output, not the whole thread history (implies `--content-only`) |
 | `--session` | (threads) Only threads the current session has run |
@@ -271,11 +277,19 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 
 ## Goal Mode
 
-If Codex creates a goal during a turn (its Goal mode, `goals = true` in the user's `~/.codex/config.toml`), the server keeps starting continuation turns on its own until the goal is done. `run` follows the whole goal: continuation turns stream into the same run record and log, `follow`/`output`/`threads` see them, and the run's exit code reflects the goal's end — completed (0), blocked/limited (7), timed out and paused (3). Practical implications:
+A goal makes the server keep starting continuation turns on its own until the objective is done (Codex's Goal mode, `goals = true` in the user's `~/.codex/config.toml`). Codex can create one mid-turn, or you set one explicitly — worth it for open-ended objectives that take an unknown number of turns (get CI green, migrate every call site); a bounded single task gains nothing from one:
+
+```bash
+codex-collab run "survey the call sites first" --goal "migrate all call sites to the v2 API, tests green" --budget 150000 --template collab --timeout 7200
+```
+
+`run` follows the whole goal: continuation turns stream into the same run record and log, `follow`/`output`/`threads` see them, and the run's exit code reflects the goal's end — completed (0), blocked/limited (7), timed out and paused (3). Practical implications:
 
 - Give goal runs a generous `--timeout` (hours, not minutes) — it bounds the whole goal, and expiry pauses the goal safely rather than leaving it running headless.
 - A paused goal resumes when a new turn runs on that thread (`run --resume <id> "..."`); `kill --clear` abandons it.
 - Mid-goal, the ask channel and approvals work normally — `next` sees questions from continuation turns too.
+- The server re-injects the objective into every continuation turn — the first prompt (and any template) rides only turn one. An objective too big to state in a sentence can point at a spec or plan file in the repo instead.
+- With `--template collab`, `--goal` appends a one-line ask-channel note to the objective, so channel awareness survives long goals.
 - `threads` shows the latest goal state per thread: `[goal active: 45k/100k tokens]`.
 
 ## Templates
