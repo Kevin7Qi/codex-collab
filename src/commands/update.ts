@@ -34,7 +34,8 @@ import { die, parseOptions } from "./shared";
 function requireConsent(yes: boolean, question: string, nonInteractiveHint: string): void {
   if (yes) return;
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    if (confirm(`${question} [y/N]`)) return;
+    // Bun's confirm() appends its own " [y/N] " — don't add one to the message.
+    if (confirm(question)) return;
     console.error("Aborted — nothing was changed.");
     process.exit(1);
   }
