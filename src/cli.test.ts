@@ -134,6 +134,28 @@ describe("CLI invalid inputs", () => {
     expect(stderr).toContain("Invalid sandbox mode");
   });
 
+  // review rejects flags that parse but cannot take effect (#22). The guard
+  // fires before any client connection, so these are hermetic. Even values
+  // matching the forced behavior are rejected: accepting `-s read-only`
+  // would teach that the flag does something.
+  it("review -s exits 1 explaining reviews are read-only", () => {
+    const { stderr, exitCode } = run("review", "-s", "read-only");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("review always runs read-only");
+  });
+
+  it("review --approval exits 1 explaining Codex forces never", () => {
+    const { stderr, exitCode } = run("review", "--approval", "auto");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain('locks review sub-agents to approval policy "never"');
+  });
+
+  it("review --resume rejects the same flags", () => {
+    const { stderr, exitCode } = run("review", "--resume", "abc123", "--approval", "never");
+    expect(exitCode).toBe(1);
+    expect(stderr).toContain("--approval");
+  });
+
   it("run without prompt exits with error message", () => {
     const { stderr, exitCode } = run("run");
     expect(exitCode).toBe(1);
