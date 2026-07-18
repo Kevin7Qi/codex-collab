@@ -171,7 +171,8 @@ Options:
   -m, --model <model>     Model name (default: auto — latest available)
   -r, --reasoning <lvl>   Reasoning: ${config.reasoningEfforts.join(", ")} (default: auto — highest up to ${config.autoEffortCeiling})
   -s, --sandbox <mode>    Sandbox: ${config.sandboxModes.join(", ")}
-                          (default: ${config.defaultSandbox})
+                          (default: ${config.defaultSandbox}; rejected by review,
+                          which always runs read-only)
   -d, --dir <path>        Working directory (default: cwd)
   --resume <id>           Resume existing thread
   --timeout <sec>         Turn timeout in seconds (default: ${config.defaultTimeout}).
@@ -180,6 +181,8 @@ Options:
   --approval <policy>     Approval: ${config.approvalModes.join(", ")} (default: ${config.defaultApprovalPolicy})
                           "auto": Codex's Guardian reviewer approves or denies
                           each request autonomously (never blocks on a human)
+                          (rejected by review — Codex locks review sub-agents
+                          to "never", so the flag could never take effect)
   --memory                Let Codex's memory feature learn from threads this
                           run creates (default: created threads are excluded)
   --detach                (run) Return once the turn is running; watch it with

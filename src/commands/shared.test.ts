@@ -11,6 +11,7 @@ import {
   startOrResumeThread,
   turnOverrides,
   resolveApproval,
+  sandboxModeLabel,
   formatDuration,
   isThreadProcessAlive,
   defaultOptions,
@@ -744,6 +745,27 @@ describe("resolveApproval", () => {
   });
 });
 
+describe("sandboxModeLabel", () => {
+  test("maps wire-shape objects back to kebab-case modes", () => {
+    expect(sandboxModeLabel({ type: "readOnly" })).toBe("read-only");
+    expect(sandboxModeLabel({ type: "workspaceWrite" })).toBe("workspace-write");
+    expect(sandboxModeLabel({ type: "dangerFullAccess" })).toBe("danger-full-access");
+  });
+
+  test("passes kebab-case string echoes through", () => {
+    expect(sandboxModeLabel("read-only")).toBe("read-only");
+  });
+
+  test("renders unknown shapes verbatim instead of guessing", () => {
+    // Protocol drift must show up in the progress line, not hide behind a
+    // familiar label — that invisibility is how #22 survived.
+    expect(sandboxModeLabel({ type: "futureMode" })).toBe("futureMode");
+    expect(sandboxModeLabel({ mode: "?" })).toBe('{"mode":"?"}');
+    expect(sandboxModeLabel(undefined)).toBe("unknown");
+    expect(sandboxModeLabel(null)).toBe("null");
+  });
+});
+
 describe("pickBestModel", () => {
   const m = (id: string, opts: { upgrade?: string; isDefault?: boolean } = {}): Model => ({
     id,
@@ -1258,8 +1280,10 @@ describe("startOrResumeThread", () => {
         ephemeral: true,
         model: "gpt-5",
         cwd: "/tmp/review-project",
-        approvalPolicy: "on-request",
-        approvalsReviewer: "user",
+        // No approvalPolicy even though --approval was explicit: Codex locks
+        // review sub-agents to "never", so forwarding it would only fake
+        // effect. handleReview rejects the flag before reaching here (#22);
+        // this asserts the fork path doesn't resurrect it.
         sandbox: "read-only",
         // review_model pin: Codex would otherwise prefer its own config.toml
         // review_model over the model we requested for this review.

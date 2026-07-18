@@ -31,6 +31,7 @@ import {
   setActiveTurnId,
   setActiveWsPaths,
   setActiveRunId,
+  sandboxModeLabel,
   VALID_REVIEW_MODES,
   type Options,
 } from "./shared";
@@ -66,6 +67,23 @@ function resolveReviewTarget(positional: string[], opts: Options, cwd: string): 
 
 export async function handleReview(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
+  // Both flags parse and validate but neither can take effect on a review:
+  // the review thread is forced read-only below (the documented safety
+  // property), and Codex hard-locks review sub-agents to approval policy
+  // "never", so no value sent from here survives. Fail loud instead of
+  // accepting a flag that looks like it worked (#22). Config-file defaults
+  // land in `configured`, not `explicit`, so they still pass — they are
+  // global defaults for `run`, not a per-invocation request.
+  if (options.explicit.has("sandbox")) {
+    die("review always runs read-only; -s/--sandbox cannot change that. Drop the flag.");
+  }
+  if (options.explicit.has("approval")) {
+    die('review cannot honor --approval: Codex locks review sub-agents to approval policy "never", so no approval request can ever fire during a review. Drop the flag.');
+  }
+  // Same class: only `run` reads these, so on review they'd vanish silently.
+  if (options.goal !== null || options.budget !== null) {
+    die("review cannot run a goal: --goal/--budget apply to run only (a review is a single turn on an ephemeral thread).");
+  }
   applyUserConfig(options);
 
   const target = resolveReviewTarget(positional, options, options.dir);
@@ -88,11 +106,14 @@ export async function handleReview(args: string[]): Promise<void> {
     if (options.contentOnly) {
       console.error(`[codex] Reviewing (thread ${shortId})...`);
     } else {
+      // Sandbox comes from the server's echo, not a hardcoded literal, so if
+      // the forced mode ever drifts the progress line shows it (#22).
+      const sandbox = sandboxModeLabel(effective.sandbox);
       if (options.resumeId) {
-        progress(`Forked thread ${shortId} for read-only review`);
+        progress(`Forked thread ${shortId} for ${sandbox} review`);
       } else {
         const effort = effective.reasoningEffort ? `, ${effective.reasoningEffort}` : "";
-        progress(`Thread ${shortId} started for review (${effective.model}${effort}, read-only)`);
+        progress(`Thread ${shortId} started for review (${effective.model}${effort}, ${sandbox})`);
       }
     }
 

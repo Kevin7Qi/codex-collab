@@ -946,7 +946,9 @@ export async function startOrResumeThread(
       };
       if (opts.explicit.has("model")) forkParams.model = opts.model;
       if (opts.explicit.has("dir")) forkParams.cwd = opts.dir;
-      if (opts.explicit.has("approval")) Object.assign(forkParams, resolveApproval(opts.approval));
+      // No approval forwarding: Codex hard-locks review sub-agents to
+      // approval policy "never" (nothing sent here survives), which is why
+      // handleReview rejects an explicit --approval up front (#22).
       // Codex resolves the review sub-agent's model from its own
       // `review_model` config key before falling back to the thread's model,
       // so a review_model in ~/.codex/config.toml would silently override the
@@ -1140,6 +1142,23 @@ export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
     case "workspace-write": return { type: "workspaceWrite" };
     case "danger-full-access": return { type: "dangerFullAccess" };
   }
+}
+
+/** Inverse of sandboxPolicyFor, for display: thread/start|fork echo the
+ *  sandbox as either the kebab-case string they were sent or the wire
+ *  object. Unrecognized shapes render verbatim rather than being guessed
+ *  at, so protocol drift shows up in the progress line instead of hiding
+ *  behind a familiar label. */
+export function sandboxModeLabel(sandbox: unknown): string {
+  if (typeof sandbox === "string") return sandbox;
+  const type = (sandbox as { type?: unknown } | null | undefined)?.type;
+  switch (type) {
+    case "readOnly": return "read-only";
+    case "workspaceWrite": return "workspace-write";
+    case "dangerFullAccess": return "danger-full-access";
+  }
+  if (typeof type === "string") return type;
+  return JSON.stringify(sandbox) ?? "unknown";
 }
 
 /** Per-turn parameter overrides: all values for new threads, explicit-only for resume. */

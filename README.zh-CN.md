@@ -152,9 +152,9 @@ codex-collab follow --watch
 | `-d, --dir <path>` | 工作目录 |
 | `-m, --model <model>` | 模型名称（默认: 自动选择最新可用模型） |
 | `-r, --reasoning <level>` | none, minimal, low, medium, high, xhigh, max, ultra（默认: 自动选择模型支持的最高级别，上限为 `xhigh`） |
-| `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access（默认: workspace-write；review 始终使用 read-only） |
+| `-s, --sandbox <mode>` | read-only, workspace-write, danger-full-access（默认: workspace-write）。`review` 不接受此参数：审查始终以 read-only 运行 |
 | `--resume <id>` | 恢复已有会话 |
-| `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted, auto（默认: never）。`auto`: Codex 的 Guardian 审查器自主批准或拒绝每个请求，绝不阻塞等待人工；决策以 Guardian 进度行的形式实时展示 |
+| `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted, auto（默认: never）。`auto`: Codex 的 Guardian 审查器自主批准或拒绝每个请求，绝不阻塞等待人工；决策以 Guardian 进度行的形式实时展示。`review` 不接受此参数：Codex 将审查子代理的审批策略锁定为 `never`，该参数不可能生效 |
 | `--memory` | 允许 Codex 的记忆功能学习本次运行创建的会话。默认: 创建的会话会执行 `thread/memoryMode/set mode=disabled`；恢复的会话永不改动（该标记按会话持久保存，你自己创建的会话应继续进入你的记忆）。只作用于 Codex 的*本地*记忆整合（`~/.codex/memories`）；`personality` 属于显式用户配置（非学习所得），不受影响。持久化设置: `config memory true` |
 | `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200，最大 2147483）。存在进行中的 goal 时，该时限约束整个 goal，超时会先暂停 goal 再退出。用于 `ask` 时为回答等待时限（默认 600）；用于 `next` 时为等待上限（默认无限期等待） |
 | `--` | 选项结束标记；其后的参数一律视为提示词文本 |
