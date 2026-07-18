@@ -1,6 +1,6 @@
 {
   "name": "codex-collab",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Claude + Codex collaboration via the Codex app server JSON-RPC protocol",
   "type": "module",
   "license": "MIT",
