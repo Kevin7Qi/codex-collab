@@ -80,6 +80,10 @@ export async function handleReview(args: string[]): Promise<void> {
   if (options.explicit.has("approval")) {
     die('review cannot honor --approval: Codex locks review sub-agents to approval policy "never", so no approval request can ever fire during a review. Drop the flag.');
   }
+  // Same class: only `run` reads these, so on review they'd vanish silently.
+  if (options.goal !== null || options.budget !== null) {
+    die("review cannot run a goal: --goal/--budget apply to run only (a review is a single turn on an ephemeral thread).");
+  }
   applyUserConfig(options);
 
   const target = resolveReviewTarget(positional, options, options.dir);

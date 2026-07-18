@@ -156,6 +156,16 @@ describe("CLI invalid inputs", () => {
     expect(stderr).toContain("--approval");
   });
 
+  it("review rejects --goal and --budget (only run reads them)", () => {
+    const goal = run("review", "--goal", "ship it");
+    expect(goal.exitCode).toBe(1);
+    expect(goal.stderr).toContain("apply to run only");
+
+    const budget = run("review", "--budget", "1000");
+    expect(budget.exitCode).toBe(1);
+    expect(budget.stderr).toContain("apply to run only");
+  });
+
   it("run without prompt exits with error message", () => {
     const { stderr, exitCode } = run("run");
     expect(exitCode).toBe(1);
