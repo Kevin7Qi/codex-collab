@@ -518,6 +518,10 @@ export interface TurnResult {
   filesChanged: FileChange[];
   commandsRun: CommandExec[];
   error?: string;
+  /** The server's typed classification of `error`, when it sent one. The
+   *  message alone is prose and varies; this says which failure it IS, so
+   *  the CLI can tell a transient overload from a spent quota. */
+  errorInfo?: CodexErrorInfo | null;
   durationMs: number;
 }
 

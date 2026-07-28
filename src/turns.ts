@@ -442,6 +442,7 @@ export async function runTurnWithGoalFollow(
 
       let lastTurnStatus: TurnResult["status"] = first.status;
       let lastTurnError: string | undefined = first.error;
+      let lastTurnErrorInfo: TurnResult["errorInfo"] = first.errorInfo ?? null;
       for (;;) {
         if (connectionDown !== null) throw connectionDown;
         if (goal === null || goal.status !== "active") break;
@@ -484,6 +485,7 @@ export async function runTurnWithGoalFollow(
           ]);
           lastTurnStatus = completed.turn.status as TurnResult["status"];
           lastTurnError = completed.turn.error?.message;
+          lastTurnErrorInfo = completed.turn.error?.codexErrorInfo ?? null;
         } catch (e) {
           if (e instanceof KillSignalError) {
             return await finishKilled(turnId);
@@ -521,6 +523,7 @@ export async function runTurnWithGoalFollow(
         filesChanged: opts.dispatcher.getFilesChanged(),
         commandsRun: opts.dispatcher.getCommandsRun(),
         error: lastTurnError,
+        errorInfo: lastTurnErrorInfo,
         durationMs: 0,
       });
     } finally {
@@ -885,6 +888,7 @@ async function executeTurn(
       filesChanged: opts.dispatcher.getFilesChanged(),
       commandsRun: opts.dispatcher.getCommandsRun(),
       error: completedTurn.turn.error?.message,
+      errorInfo: completedTurn.turn.error?.codexErrorInfo ?? null,
       durationMs: Date.now() - startTime,
     };
   } catch (e) {

@@ -18,6 +18,7 @@ import {
   recordTerminalRunState,
   recordRunFailure,
   resolveThreadIdAllowRaw,
+  explainErrorInfo,
   VALID_REVIEW_MODES,
   type WorkspacePaths,
   type Options,
@@ -2046,6 +2047,32 @@ describe("stdin prompt marker", () => {
   test("bare '-' is a positional, not an unknown option", () => {
     const { positional } = parseOptions(["-", "--content-only"]);
     expect(positional).toEqual(["-"]);
+  });
+});
+
+describe("explainErrorInfo", () => {
+  test("a capacity blip and a spent quota give opposite advice", () => {
+    // The whole point of reading the typed variant: these two read almost
+    // identically in prose but want opposite responses from the caller.
+    expect(explainErrorInfo("serverOverloaded")).toMatch(/retry/i);
+    expect(explainErrorInfo("usageLimitExceeded")).toMatch(/same limit/i);
+  });
+
+  test("context and auth failures name their own remedy", () => {
+    expect(explainErrorInfo("contextWindowExceeded")).toMatch(/fresh thread/i);
+    expect(explainErrorInfo("unauthorized")).toMatch(/codex login/i);
+  });
+
+  test("object variants and absent info explain nothing", () => {
+    // These already carry an HTTP status in the message; adding prose would
+    // just talk over it.
+    expect(explainErrorInfo({ httpConnectionFailed: { httpStatusCode: 503 } })).toBeNull();
+    expect(explainErrorInfo(null)).toBeNull();
+    expect(explainErrorInfo(undefined)).toBeNull();
+  });
+
+  test("an unknown string variant explains nothing rather than guessing", () => {
+    expect(explainErrorInfo("other")).toBeNull();
   });
 });
 

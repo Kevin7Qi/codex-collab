@@ -53,6 +53,7 @@ import type {
   TurnResult,
   RunRecord,
   ApprovalsReviewer,
+  CodexErrorInfo,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1217,26 @@ export function pluralize(n: number, word: string): string {
  *  blobs — e.g. the 400 for `-r minimal` on accounts whose built-in tools
  *  (image_gen, web_search) require a higher effort. Extract the human
  *  message; fall back to the raw string for anything unrecognized. */
+/** What the server's typed error classification means for the caller, and
+ *  whether trying again can help. The message text alone can't carry this:
+ *  a capacity blip and a spent quota read almost identically in prose but
+ *  want opposite responses. */
+export function explainErrorInfo(info: CodexErrorInfo | null | undefined): string | null {
+  if (typeof info !== "string") return null; // object variants carry HTTP detail already
+  switch (info) {
+    case "serverOverloaded":
+      return "The model is at capacity — this is transient. Retry, or pin a different model with -m (see `codex-collab models`).";
+    case "usageLimitExceeded":
+      return "Usage limit reached for this account — retrying will hit the same limit.";
+    case "contextWindowExceeded":
+      return "The thread outgrew the model's context window — start a fresh thread, or narrow the task.";
+    case "unauthorized":
+      return "Codex rejected the credentials — check `codex login` (or your API key) and retry.";
+    default:
+      return null;
+  }
+}
+
 export function humanizeTurnError(raw: string): string {
   const jsonStart = raw.indexOf("{");
   if (jsonStart === -1) return raw;
@@ -1248,6 +1269,8 @@ export function printResult(
   if (result.error) {
     const msg = humanizeTurnError(result.error);
     console.error(`\nError: ${msg}`);
+    const explained = explainErrorInfo(result.errorInfo);
+    if (explained) console.error(explained);
     if (/reasoning\.effort/i.test(msg)) {
       console.error("Tip: this account's built-in tools need a higher reasoning effort — retry with -r low or higher.");
     }
