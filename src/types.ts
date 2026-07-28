@@ -172,6 +172,21 @@ export interface TurnStartResponse {
   turn: Turn;
 }
 
+/** `account/read`. `type` is open-ended ("chatgpt", "apiKey", …) — treat an
+ *  unrecognized value as inconclusive rather than as logged out. */
+export interface CodexAccount {
+  type?: string | null;
+  email?: string | null;
+  planType?: string | null;
+}
+
+export interface AccountRead {
+  account?: CodexAccount | null;
+  /** False when the configured provider needs no OpenAI credentials at all
+   *  (third-party base URL) — such a setup is authenticated by definition. */
+  requiresOpenaiAuth?: boolean | null;
+}
+
 // --- Items ---
 
 /** Known item types with proper discriminants. */

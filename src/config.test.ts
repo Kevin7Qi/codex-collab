@@ -2,6 +2,7 @@ import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync, realpathSync } from "fs";
 import { join, basename, resolve, sep } from "path";
 import { createHash } from "crypto";
+import { describeAuth } from "./commands/config";
 import {
   config,
   validateId,
@@ -292,5 +293,57 @@ describe("interpolateTemplate", () => {
   test("replaces multiple occurrences of the same variable", () => {
     const result = interpolateTemplate("{{X}} and {{X}}", { X: "y" });
     expect(result).toBe("y and y");
+  });
+});
+
+describe("describeAuth (health account check)", () => {
+  test("ChatGPT login is ready and names the plan and email", () => {
+    const r = describeAuth({
+      account: { type: "chatgpt", email: "a@b.com", planType: "pro" },
+      requiresOpenaiAuth: true,
+    });
+    expect(r.ready).toBe(true);
+    expect(r.detail).toContain("pro");
+    expect(r.detail).toContain("a@b.com");
+  });
+
+  test("an API key counts as ready, but is reported as unverified", () => {
+    // Presence of a key is not proof it works — don't claim more than we know.
+    const r = describeAuth({ account: { type: "apiKey" }, requiresOpenaiAuth: true });
+    expect(r.ready).toBe(true);
+    expect(r.detail).toMatch(/not verified/i);
+  });
+
+  test("a provider needing no OpenAI auth is ready even with no account", () => {
+    // Third-party base URL / proxy setups: no OpenAI credentials exist by design.
+    const r = describeAuth({ account: null, requiresOpenaiAuth: false });
+    expect(r.ready).toBe(true);
+  });
+
+  test("an unrecognized account type fails open", () => {
+    const r = describeAuth({ account: { type: "somethingNew" }, requiresOpenaiAuth: true });
+    expect(r.ready).toBe(true);
+  });
+
+  test("an unavailable account/read fails open", () => {
+    // Older codex builds, a busy broker, a transient RPC error — none of these
+    // are evidence the user is logged out.
+    expect(describeAuth("unknown").ready).toBe(true);
+  });
+
+  test("no account plus requiresOpenaiAuth is the only failure", () => {
+    const r = describeAuth({ account: null, requiresOpenaiAuth: true });
+    expect(r.ready).toBe(false);
+    expect(r.detail).toMatch(/NOT AUTHENTICATED/);
+  });
+
+  test("no account and no stated auth requirement is inconclusive, not logged out", () => {
+    // requiresOpenaiAuth is optional and nullable. Absent or null says nothing
+    // about whether credentials exist, so reporting it as logged out would tell
+    // a working user to run `codex login`.
+    expect(describeAuth({ account: null }).ready).toBe(true);
+    expect(describeAuth({ account: null, requiresOpenaiAuth: null }).ready).toBe(true);
+    expect(describeAuth({}).ready).toBe(true);
+    expect(describeAuth({ account: null }).detail).not.toMatch(/NOT AUTHENTICATED/);
   });
 });
