@@ -45,9 +45,11 @@ cd codex-collab
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-安装完成后，**重新打开终端**以使 PATH 生效，然后运行 `codex-collab health` 验证安装。
+安装完成后，**重新打开终端**以使 PATH 生效，然后运行 `codex-collab health` 验证安装。若 `~/.local/bin` 已在 PATH 中，则无需重开终端；否则请添加安装脚本打印的 export 语句，或直接以完整路径验证：`~/.local/bin/codex-collab health`。
 
-安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并安装可执行文件（`install.ps1` 会将其加入 PATH；`install.sh` 会放置在 `~/.local/bin`，若该目录不在 PATH 中会打印提示）。完成后 Claude 即可自动发现该技能。
+也可以把安装交给智能体完成——在 Claude Code 之外运行（例如交给 Codex），下次启动 Claude 时技能即已就绪。过程中会请求写入仓库以外目录的权限。
+
+安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并安装可执行文件（`install.ps1` 会将其加入 PATH；`install.sh` 会放置在 `~/.local/bin`，若该目录不在 PATH 中会打印提示）。完成后 Claude 即可自动发现该技能，正在运行中的会话同样生效；唯一的例外是 `~/.claude/skills/` 此前并不存在——这种情况下需重启一次 Claude Code，新目录才会被监听。
 
 ### 升级
 
@@ -165,8 +167,8 @@ codex-collab follow --watch
 |------|------|
 | `--detach` | 在轮次真正开始运行后立即返回；用 `follow <id>` 观看。任务的生命周期与发起它的 shell 解耦 |
 | `--template <name>` | 提示词模板（优先使用 `~/.codex-collab/templates/`，然后使用内置模板） |
-| `--goal <objective>` | 在第一轮开始前为会话创建 goal（配合 `--resume` 时替换已有目标）；需要在 `~/.codex/config.toml` 中设置 `goals = true`。配合 `--template collab` 时，目标末尾会附加一行 ask 通道说明；由于目标文本会在每个后续轮次重新注入，这条说明在整个 goal 期间始终有效 |
-| `--budget <tokens>` | `--goal` 的 token 预算。请预留充足余量：用量按每轮的完整上下文计算，即使很小的一轮也可能消耗约 6 万 token |
+| `--goal <objective>` | 在第一轮开始前为会话创建 goal（配合 `--resume` 时替换已有目标）；需要在 `~/.codex/config.toml` 中设置 `goals = true`。仍须提供 prompt：prompt 是第一轮的指令，goal 则是贯穿全程的目标。配合 `--template collab` 时，目标末尾会附加一行 ask 通道说明；由于目标文本会在每个后续轮次重新注入，这条说明在整个 goal 期间始终有效。`review` 不接受此参数：审查是临时会话上的单轮任务 |
+| `--budget <tokens>` | `--goal` 的 token 预算。请预留充足余量：用量按每轮的完整上下文计算，即使很小的一轮也可能消耗约 6 万 token。`review` 不接受此参数 |
 | `-` | 从标准输入读取提示词 |
 
 **review**
@@ -228,7 +230,7 @@ codex-collab follow --watch
 <details>
 <summary>Goal 模式</summary>
 
-在 `~/.codex/config.toml` 中设置 `goals = true` 后，goal（由 Codex 在任务中途自行创建，或用 `run --goal "objective" [--budget <tokens>]` 显式设置）会让 app server 不断启动后续轮次，直到目标完成；`run` 会在同一份运行记录和日志中跟踪整个 goal，退出码反映 goal 的最终状态。目标文本会在每个后续轮次重新注入；内容较复杂的目标，可以改为指向仓库中的规格或计划文档。`threads` 会显示每个会话最新的 goal 状态（`[goal active: 45k/100k tokens]`）。
+在 `~/.codex/config.toml` 中设置 `goals = true` 后，goal（由 Codex 在任务中途自行创建，或用 `run "首轮指令" --goal "objective" [--budget <tokens>]` 显式设置）会让 app server 不断启动后续轮次，直到目标完成；`run` 会在同一份运行记录和日志中跟踪整个 goal，退出码反映 goal 的最终状态。目标文本会在每个后续轮次重新注入；内容较复杂的目标，可以改为指向仓库中的规格或计划文档。`threads` 会显示每个会话最新的 goal 状态（`[goal active: 45k/100k tokens]`）。
 
 </details>
 
@@ -258,6 +260,10 @@ codex-collab config --unset             # 取消所有设置
 
 欢迎贡献！开发环境搭建及贡献流程详见 [CONTRIBUTING.md](CONTRIBUTING.md)。本项目遵循 [Contributor Covenant](CODE_OF_CONDUCT.md) 行为准则。
 
-## 相关项目
+## 相关链接
 
 如果只需更轻量的交互，不妨试试官方的 [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk)。codex-collab 则专为 Claude Code skill 场景打造，内置代码审查、会话管理与实时进度推送。
+
+本项目 broker 的常驻 app-server 思路，受 OpenAI 官方 Claude Code 插件 [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) 启发。
+
+感谢 [LINUX DO](https://linux.do/) 社区的反馈与支持。

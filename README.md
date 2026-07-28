@@ -45,9 +45,11 @@ cd codex-collab
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-After installation, **reopen your terminal** so the updated PATH takes effect, then run `codex-collab health` to verify.
+After installation, **reopen your terminal** so the updated PATH takes effect, then run `codex-collab health` to verify. If `~/.local/bin` is already on your PATH, no reopen is needed. Otherwise add the export line the installer prints, or verify by full path: `~/.local/bin/codex-collab health`.
 
-The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and installs a binary shim (`install.ps1` adds it to your PATH; `install.sh` places it in `~/.local/bin` and prints instructions if that directory is not already on your PATH). Once installed, Claude discovers the skill automatically.
+You can also hand this to an agent — running it outside Claude Code (for example, from Codex) means the skill is ready the next time you start Claude. Expect a prompt to allow writes outside the repo.
+
+The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and installs a binary shim (`install.ps1` adds it to your PATH; `install.sh` places it in `~/.local/bin` and prints instructions if that directory is not already on your PATH). Once installed, Claude discovers the skill automatically, including in an already-running session — unless `~/.claude/skills/` did not exist beforehand, in which case restart Claude Code once so the new directory is watched.
 
 ### Upgrading
 
@@ -165,8 +167,8 @@ codex-collab follow --watch
 |------|-------------|
 | `--detach` | Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
 | `--template <name>` | Prompt template (user `~/.codex-collab/templates/` or built-in) |
-| `--goal <objective>` | Create the thread's goal before the first turn (replaces the objective on `--resume`); requires `goals = true` in `~/.codex/config.toml`. With `--template collab` the objective also gets a one-line ask-channel note — re-injected into every continuation turn, so channel awareness survives long goals |
-| `--budget <tokens>` | Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k |
+| `--goal <objective>` | Create the thread's goal before the first turn (replaces the objective on `--resume`); requires `goals = true` in `~/.codex/config.toml`. A prompt is still required — it is turn one, while the goal is the standing objective. With `--template collab` the objective also gets a one-line ask-channel note — re-injected into every continuation turn, so channel awareness survives long goals. `review` rejects this flag: a review is a single turn on an ephemeral thread |
+| `--budget <tokens>` | Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k. `review` rejects this flag |
 | `-` | Read the prompt from stdin |
 
 **review**
@@ -228,7 +230,7 @@ codex-collab follow --watch
 <details>
 <summary>Goal mode</summary>
 
-With `goals = true` in `~/.codex/config.toml`, a goal — created by Codex mid-turn, or explicitly with `run --goal "objective" [--budget <tokens>]` — makes the server keep starting continuation turns until the objective is done, and a `run` follows the whole goal in one run record and log; its exit code reflects the goal's end. The objective is re-injected into every continuation turn; one too big to state in a sentence can point at a spec or plan file in the repo. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
+With `goals = true` in `~/.codex/config.toml`, a goal — created by Codex mid-turn, or explicitly with `run "first-turn prompt" --goal "objective" [--budget <tokens>]` — makes the server keep starting continuation turns until the objective is done, and a `run` follows the whole goal in one run record and log; its exit code reflects the goal's end. The objective is re-injected into every continuation turn; one too big to state in a sentence can point at a spec or plan file in the repo. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
 
 </details>
 
@@ -274,3 +276,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. Thi
 ## See also
 
 For simpler interactions, you can also check out the official [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk). codex-collab is designed as a Claude Code skill, with built-in support for code review, thread management, and real-time progress streaming.
+
+codex-collab's shared app-server broker was inspired by OpenAI's [codex-plugin-cc](https://github.com/openai/codex-plugin-cc), the official Codex plugin for Claude Code.
+
+Thanks to the [LINUX DO](https://linux.do/) community for the feedback and support.
