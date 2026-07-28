@@ -254,6 +254,11 @@ export function resolveThreadIdOrDie(stateDir: string, id: string): string {
  *  Codex TUI or another workspace that were never discovered locally.
  *  Ambiguous prefixes and index corruption still die. Callers must
  *  validateIdOrDie(id) first. */
+/** Shape of a server thread ID: a hyphenated UUID, optionally `urn:uuid:`-
+ *  prefixed (the form the server's own parse error names). */
+const RAW_THREAD_ID_RE =
+  /^(?:urn:uuid:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 export function resolveThreadIdAllowRaw(
   stateDir: string,
   id: string,
@@ -264,6 +269,12 @@ export function resolveThreadIdAllowRaw(
   } catch (e) {
     die(e instanceof Error ? e.message : String(e));
   }
+  // Not in the local index. `validateId` only guarantees path-safety, so
+  // without a shape check a mistyped short ID is forwarded verbatim as a raw
+  // server thread ID: every RPC then fails with the server's "invalid thread
+  // id" parse error while the caller still reports success on a thread that
+  // never existed. Fail like the indexed lookup does instead.
+  if (!RAW_THREAD_ID_RE.test(id)) die(`Thread not found: "${id}"`);
   return { threadId: id, shortId: null };
 }
 

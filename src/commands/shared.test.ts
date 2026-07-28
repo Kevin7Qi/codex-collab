@@ -17,6 +17,7 @@ import {
   defaultOptions,
   recordTerminalRunState,
   recordRunFailure,
+  resolveThreadIdAllowRaw,
   VALID_REVIEW_MODES,
   type WorkspacePaths,
   type Options,
@@ -2045,5 +2046,50 @@ describe("stdin prompt marker", () => {
   test("bare '-' is a positional, not an unknown option", () => {
     const { positional } = parseOptions(["-", "--content-only"]);
     expect(positional).toEqual(["-"]);
+  });
+});
+
+describe("resolveThreadIdAllowRaw", () => {
+  test("passes an unindexed server thread UUID through as a raw ID", () => {
+    const uuid = "019f983b-07c3-7b91-aeba-e5edca9d20ab";
+    const { threadId, shortId } = resolveThreadIdAllowRaw(tmpRoot, uuid);
+    expect(threadId).toBe(uuid);
+    expect(shortId).toBeNull();
+  });
+
+  test("accepts the urn:uuid: prefixed form", () => {
+    const id = "urn:uuid:019f983b-07c3-7b91-aeba-e5edca9d20ab";
+    const { threadId, shortId } = resolveThreadIdAllowRaw(tmpRoot, id);
+    expect(threadId).toBe(id);
+    expect(shortId).toBeNull();
+  });
+
+  test("an unindexed non-UUID is 'Thread not found', not a raw server ID", () => {
+    // Without the shape check the string is forwarded verbatim as a thread ID:
+    // every RPC then fails with the server's "invalid thread id" parse error
+    // while `kill` still prints "Stopped thread <id>" and exits 0.
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { resolveThreadIdAllowRaw } from "./src/commands/shared";
+        resolveThreadIdAllowRaw(${JSON.stringify(tmpRoot)}, "nonexistent1");
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain('Thread not found: "nonexistent1"');
+  });
+
+  test("a truncated UUID is rejected too", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { resolveThreadIdAllowRaw } from "./src/commands/shared";
+        resolveThreadIdAllowRaw(${JSON.stringify(tmpRoot)}, "019f983b-07c3-7b91-aeba");
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("Thread not found");
   });
 });
