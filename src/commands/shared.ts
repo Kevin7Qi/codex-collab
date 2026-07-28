@@ -242,7 +242,10 @@ export function validateIdOrDie(id: string): string {
 export function resolveThreadIdOrDie(stateDir: string, id: string): string {
   try {
     const resolved = resolveThreadId(stateDir, id);
-    if (!resolved) die(`Thread not found: "${id}"`);
+    // Name the most likely cause: threads are indexed per workspace, so an ID
+    // copied from a run started elsewhere resolves nowhere here, and the bare
+    // "not found" reads as if the thread were gone rather than out of scope.
+    if (!resolved) die(`Thread not found: "${id}" in this workspace — threads are per-workspace, so run this from the project directory or pass -d <path>.`);
     return resolved.threadId;
   } catch (e) {
     die(e instanceof Error ? e.message : String(e));

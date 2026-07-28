@@ -2,13 +2,14 @@
 
 import { spawn as childSpawn, spawnSync } from "node:child_process";
 import { openSync, closeSync, readFileSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { updateThreadStatus, generateRunId, loadRun, updateRun, runLogRelPath } from "../threads";
 import { runTurnWithGoalFollow } from "../turns";
 import { goalNeedsAttention, setThreadGoal, readThreadGoal, pauseThreadGoal, isGoalFeatureUnavailable, GOAL_COLLAB_ASK_NOTE } from "../goals";
 import type { RunGoalState, ThreadGoal } from "../types";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
 import { wrapBrokerBusy, isBrokerBusyError } from "../broker";
+import { shellQuote } from "../approvals";
 import {
   die,
   parseOptions,
@@ -135,16 +136,21 @@ async function detachRun(
       // Record exists = thread/start succeeded. Now wait for the turn:
       // the child bumps phase past "starting" when turn/start responds.
       if (rec.status === "running" && rec.phase !== "starting") {
+        // Carry -d into every hint. These commands exist to be pasted into a
+        // SECOND terminal, and thread IDs resolve only within their own
+        // workspace — without it the pane that follows a detached run has to
+        // already be in the project directory. `next` does the same.
+        const d = ` -d ${shellQuote(resolve(options.dir))}`;
         progress(`Detached: thread ${rec.shortId} running${rec.model ? ` (${rec.model})` : ""}`);
-        progress(`  Follow:   codex-collab follow ${rec.shortId}`);
-        progress(`  Output:   codex-collab output ${rec.shortId}`);
-        progress(`  Kill:     codex-collab kill ${rec.shortId}`);
+        progress(`  Follow:   codex-collab follow ${rec.shortId}${d}`);
+        progress(`  Output:   codex-collab output ${rec.shortId}${d}`);
+        progress(`  Kill:     codex-collab kill ${rec.shortId}${d}`);
         process.exit(0);
       }
       if (rec.status === "completed") {
         // Turn finished before we even noticed it start — report done.
         progress(`Detached run already completed: thread ${rec.shortId}`);
-        progress(`  Output:   codex-collab output ${rec.shortId}`);
+        progress(`  Output:   codex-collab output ${rec.shortId} -d ${shellQuote(resolve(options.dir))}`);
         process.exit(0);
       }
       if (rec.status === "interrupted") {

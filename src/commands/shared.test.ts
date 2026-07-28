@@ -18,6 +18,7 @@ import {
   recordTerminalRunState,
   recordRunFailure,
   resolveThreadIdAllowRaw,
+  resolveThreadIdOrDie,
   explainErrorInfo,
   VALID_REVIEW_MODES,
   type WorkspacePaths,
@@ -2105,6 +2106,23 @@ describe("resolveThreadIdAllowRaw", () => {
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr.toString()).toContain('Thread not found: "nonexistent1"');
+  });
+
+  test("the not-found error names workspace scoping as the likely cause", () => {
+    // A thread ID copied from a run started in another project resolves
+    // nowhere here. A bare "not found" reads as if the thread were gone,
+    // sending people to look for a bug instead of passing -d.
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { resolveThreadIdOrDie } from "./src/commands/shared";
+        resolveThreadIdOrDie(${JSON.stringify(tmpRoot)}, "a1b2c3d4");
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("per-workspace");
+    expect(result.stderr.toString()).toContain("-d <path>");
   });
 
   test("a truncated UUID is rejected too", () => {
