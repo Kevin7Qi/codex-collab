@@ -310,6 +310,13 @@ process.stdin.on("data", (chunk) => {
         respond({ id: msg.id, result: { data: [], nextCursor: null } });
         break;
 
+      case "model/list":
+        respond({ id: msg.id, result: {
+          data: [{ id: "mock-model", description: "mock", supportedReasoningEfforts: [] }],
+          nextCursor: null,
+        }});
+        break;
+
       default:
         respond({ id: msg.id, error: { code: -32601, message: "Method not found: " + msg.method } });
     }
@@ -1069,6 +1076,42 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
           includeTurns: false,
         }) as { thread: { id: string } };
         expect(readResult.thread.id).toBe("thread-001");
+
+        await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("model/list allowed from different socket during active stream", async () => {
+      // `models` makes exactly one server call, and withClient's busy→direct
+      // fallback is streaming-only, so if model/list is not on the read-only
+      // allowlist it is the one read that hard-fails on a busy broker.
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = `unix:${sockPath}`;
+      const mockDir = createMockCodex(tempDir, {
+        sendTurnCompleted: false,
+      });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        const client2 = await TestClient.connectAndInit(sockPath);
+
+        await client1.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "hello" }],
+        });
+
+        await new Promise((r) => setTimeout(r, 100));
+
+        const result = await client2.request("model/list", {
+          includeHidden: true,
+        }) as { data: unknown[] };
+        expect(result.data.length).toBe(1);
 
         await client1.close();
         await client2.close();

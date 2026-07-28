@@ -602,7 +602,10 @@ async function main() {
       message.method === "turn/interrupt";
     const isReadOnly =
       typeof message.method === "string" &&
-      (message.method === "thread/read" || message.method === "thread/list");
+      (message.method === "thread/read" ||
+        message.method === "thread/list" ||
+        message.method === "model/list" ||
+        message.method === "account/read");
     const isGoalOp =
       typeof message.method === "string" &&
       (message.method === "thread/goal/get" ||
@@ -612,9 +615,12 @@ async function main() {
     // Allow interrupt, read-only, and goal requests through even when
     // another client owns the stream — but only when there's no pending
     // request. Read-only methods are needed by `kill` (reads thread to get
-    // turn ID) and `threads` (lists threads while a turn is running); goal
-    // ops are needed by `kill`/`kill --clear` to brake a goal whose
-    // following run owns the stream for the goal's whole lifetime.
+    // turn ID), `threads`/`peek` (read while a turn is running), and `models`
+    // (`model/list` is the only server call it makes, and withClient's
+    // busy→direct fallback is streaming-only, so without this it is the one
+    // read that hard-fails on a busy broker); goal ops are needed by
+    // `kill`/`kill --clear` to brake a goal whose following run owns the
+    // stream for the goal's whole lifetime.
     const allowDuringActiveStream =
       (isInterrupt || isReadOnly || isGoalOp) &&
       activeStreamSocket !== null &&
