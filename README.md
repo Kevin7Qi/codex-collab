@@ -11,7 +11,7 @@ Collaborate with [Codex](https://github.com/openai/codex) from [Claude Code](htt
 
 ![demo](.github/assets/demo.png)
 
-codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) that drives Codex through its app server JSON-RPC protocol. It manages threads, streams structured events, handles tool-call approvals, and lets you resume conversations — all without leaving your Claude session.
+codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-code/skills) that drives Codex through its app server JSON-RPC protocol. It manages threads, streams structured events, handles tool-call approvals, and lets you resume conversations.
 
 ## Why
 
@@ -45,9 +45,19 @@ cd codex-collab
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-After installation, **reopen your terminal** so the updated PATH takes effect, then run `codex-collab health` to verify.
+After installation, run `codex-collab health` to verify. If the command is not found, `~/.local/bin` is not on your PATH yet: reopen your terminal, add the export line the installer prints, or use the full path `~/.local/bin/codex-collab health`.
 
-The installer builds a self-contained bundle, deploys it to your home directory (`~/.claude/skills/codex-collab/` on Linux/macOS, `%USERPROFILE%\.claude\skills\codex-collab\` on Windows), and installs a binary shim (`install.ps1` adds it to your PATH; `install.sh` places it in `~/.local/bin` and prints instructions if that directory is not already on your PATH). Once installed, Claude discovers the skill automatically.
+> [!TIP]
+> You can hand the install to an agent. Running it outside Claude Code, for example from Codex, means the skill is ready the next time you start Claude. It will ask permission to write outside the repository.
+
+<details>
+<summary>Where things get installed</summary>
+
+The installer builds a self-contained bundle plus a binary shim. On Linux and macOS these go to `~/.claude/skills/codex-collab/` and `~/.local/bin`. On Windows they go to `%USERPROFILE%\.claude\skills\codex-collab\`, and `install.ps1` adds the shim to your PATH.
+
+Claude discovers the skill automatically, including in a session that is already running. The exception is your first skill: if `~/.claude/skills/` did not exist before, restart Claude Code once so the new directory is watched.
+
+</details>
 
 ### Upgrading
 
@@ -58,11 +68,9 @@ codex-collab update            # show the latest release and changelog, confirm,
 codex-collab update --check    # report only, install nothing
 ```
 
-`update` downloads the pinned release tag from GitHub, rebuilds locally, reinstalls the skill bundle and binary shim, and prints the SKILL.md diff it applied. Nothing is installed without consent: an interactive `y/N` prompt, or an explicit `--yes` in non-interactive sessions. `run`, `review`, and `health` print a one-line notice when a newer release exists (checked at most once a day, never installing anything on their own); `update --skip` mutes notices for a given release, and `CODEX_COLLAB_NO_UPDATE_CHECK=1` disables the release check entirely (the local skill-drift notice is offline and stays on).
+`update` fetches the latest release, rebuilds it locally, and reinstalls. Nothing is installed without your confirmation: an interactive `y/N` prompt, or an explicit `--yes` when there is no terminal to ask. `run`, `review`, and `health` print a one-line notice when a newer release exists, but never install anything themselves.
 
-Relatedly, if the installed SKILL.md drifts from the binary or your template set (e.g., after adding a custom template), `codex-collab skill sync` shows the pending diff and applies it on confirmation.
-
-Upgrading manually still works: pull the latest version in your clone and rerun the installer (dev installs — `install.sh --dev` — always update this way):
+Upgrading manually still works, and is the only way to update a dev install (`install.sh --dev`):
 
 ```bash
 git pull
@@ -70,9 +78,16 @@ git pull
 codex-collab health
 ```
 
-Either path replaces the installed skill bundle and binary shim. Existing configuration, templates, thread history, and run logs under `~/.codex-collab/` are preserved. Treat `~/.claude/skills/codex-collab/` as installer-managed: manual edits there may be overwritten on upgrade (`skill sync` surfaces them as a diff before overwriting).
+<details>
+<summary>More on upgrading</summary>
 
-When upgrading from older versions, codex-collab automatically migrates thread state to the per-workspace layout on first use. No manual state migration is required. The old `jobs` command remains available as a deprecated alias for `threads`.
+`update --skip` mutes notices for one release, and `CODEX_COLLAB_NO_UPDATE_CHECK=1` turns the release check off entirely. The local skill-drift check is offline and stays on regardless.
+
+If the installed SKILL.md falls out of step with the binary or your template set, `codex-collab skill sync` shows the pending diff and applies it once you confirm.
+
+Both upgrade paths replace the skill bundle and the binary shim. Everything under `~/.codex-collab/` is preserved: configuration, templates, thread history, and run logs. Treat `~/.claude/skills/codex-collab/` as installer-managed, since manual edits there can be overwritten on upgrade.
+
+</details>
 
 <details>
 <summary>Development mode</summary>
@@ -110,35 +125,51 @@ codex-collab follow --watch
 
 | Command | Description |
 |---------|-------------|
-| `run "prompt" [opts]` | Start thread, send prompt, wait, print output (`run -` reads the prompt from stdin — no shell-quoting hazards) |
-| `review [opts]` | Code review (PR, uncommitted, commit) |
-| `threads [--json] [--all]` | List threads (`--limit <n>` to cap, `--discover` to scan server, `--session` for only threads the current session has run) |
-| `kill <id> [--clear]` | Interrupt running thread. An active goal is paused first — interrupt alone would just respawn a continuation turn; `--clear` abandons the goal instead |
-| `follow [id]` | Live view of a running thread; exits with its status (replays the last run when already finished). Without an ID, attaches to the workspace's active run — or replays the most recent one. With `--watch`, stays open and follows each new run (every run shown once, in start order) |
-| `output <id> [--last]` | Full log for thread (`--last`: only the latest turn's output) |
-| `progress <id>` | Recent activity (tail of log) |
-| `peek <id>` | Show recent conversation slice from server |
-| `ask "question"` | (for Codex, mid-turn) Post a question to the collaborator and wait for the answer; `--timeout <sec>` sets the deadline (default 600). Fails open: on expiry it prints proceed-on-your-judgment guidance and exits 0 |
-| `answer <id> "text"` | Answer a pending question (`answer <id> -` reads the answer from stdin) |
-| `questions [id]` | List pending questions in this workspace; with an ID, show that question's full text |
-| `next` | Block until something needs attention (question or approval), print it in full with how to respond, exit |
-| `config [key] [value]` | Show or set persistent defaults |
-| `models` | List available models |
-| `templates` | List available prompt templates |
-| `skill sync [--yes]` | Regenerate the installed SKILL.md when it drifts from the binary or template set — prints the diff, applies only on confirmation |
-| `update` | Check GitHub for a newer release, show its changelog, and (with confirmation) download, build, and reinstall — see [Upgrading](#upgrading) |
-| `health` | Check dependencies |
-| `version` | Print version (also `-v`/`--version` before a command) |
+| `run "prompt" [opts]` | Start a thread, send a prompt, wait, print the output (`run -` reads the prompt from stdin) |
+| `review [opts]` | Code review (PR, uncommitted, or a specific commit) |
+| `threads [--json] [--all]` | List threads (`--discover` scans the server, `--session` limits to this session) |
+| `follow [id]` | Live view of a running thread in your own terminal pane. Without an ID it attaches to the active run; `--watch` keeps following each new run |
+| `output <id> [--last]` | Full log for a thread (`--last`: only the latest turn's output) |
+| `kill <id> [--clear]` | Stop a running thread. An active goal is paused first; `--clear` abandons it |
 
 <details>
-<summary>Thread management</summary>
+<summary>Questions and approvals</summary>
 
 | Command | Description |
 |---------|-------------|
-| `delete <id> [--purge]` | Archive thread (recoverable via `codex unarchive`) and delete local files; `--purge` permanently deletes it server-side instead |
-| `clean` | Delete old logs and stale mappings |
+| `ask "question"` | Invoked by Codex mid-turn to ask a question and wait for the answer. `--timeout <sec>` sets the deadline (default 600). Fails open: on expiry it tells Codex to proceed on its own judgment and exits 0 |
+| `answer <id> "text"` | Answer a pending question (`answer <id> -` reads from stdin) |
+| `questions [id]` | List pending questions in this workspace; with an ID, show the full text |
+| `next` | Block until something needs attention, print it in full with how to respond, then exit |
 | `approve <id>` | Approve a pending request |
 | `decline <id>` | Decline a pending request |
+
+</details>
+
+<details>
+<summary>Inspection and configuration</summary>
+
+| Command | Description |
+|---------|-------------|
+| `progress <id>` | Recent activity (tail of the log) |
+| `peek <id>` | Recent conversation slice from the server |
+| `config [key] [value]` | Show or set persistent defaults |
+| `models` | List available models |
+| `templates` | List available prompt templates |
+
+</details>
+
+<details>
+<summary>Maintenance</summary>
+
+| Command | Description |
+|---------|-------------|
+| `delete <id> [--purge]` | Archive a thread (recoverable via `codex unarchive`) and delete local files; `--purge` deletes it server-side instead |
+| `clean` | Delete old logs and stale mappings |
+| `skill sync [--yes]` | Regenerate the installed SKILL.md when it drifts from the binary or template set. Prints the diff, applies only on confirmation |
+| `update` | Check for a newer release and install it with confirmation. See [Upgrading](#upgrading) |
+| `health` | Check dependencies and authentication |
+| `version` | Print version (also `-v`/`--version` before a command) |
 
 </details>
 
@@ -165,8 +196,8 @@ codex-collab follow --watch
 |------|-------------|
 | `--detach` | Return once the turn is running; watch with `follow <id>`. Turn lifetime is decoupled from the invoking shell |
 | `--template <name>` | Prompt template (user `~/.codex-collab/templates/` or built-in) |
-| `--goal <objective>` | Create the thread's goal before the first turn (replaces the objective on `--resume`); requires `goals = true` in `~/.codex/config.toml`. With `--template collab` the objective also gets a one-line ask-channel note — re-injected into every continuation turn, so channel awareness survives long goals |
-| `--budget <tokens>` | Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k |
+| `--goal <objective>` | Create the thread's goal before the first turn (replaces the objective on `--resume`); requires `goals = true` in `~/.codex/config.toml`. A prompt is still required — it is turn one, while the goal is the standing objective. With `--template collab` the objective also gets a one-line ask-channel note — re-injected into every continuation turn, so channel awareness survives long goals. `review` rejects this flag: a review is a single turn on an ephemeral thread |
+| `--budget <tokens>` | Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k. `review` rejects this flag |
 | `-` | Read the prompt from stdin |
 
 **review**
@@ -228,7 +259,7 @@ codex-collab follow --watch
 <details>
 <summary>Goal mode</summary>
 
-With `goals = true` in `~/.codex/config.toml`, a goal — created by Codex mid-turn, or explicitly with `run --goal "objective" [--budget <tokens>]` — makes the server keep starting continuation turns until the objective is done, and a `run` follows the whole goal in one run record and log; its exit code reflects the goal's end. The objective is re-injected into every continuation turn; one too big to state in a sentence can point at a spec or plan file in the repo. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
+With `goals = true` in `~/.codex/config.toml`, a goal — created by Codex mid-turn, or explicitly with `run "first-turn prompt" --goal "objective" [--budget <tokens>]` — makes the server keep starting continuation turns until the objective is done, and a `run` follows the whole goal in one run record and log; its exit code reflects the goal's end. The objective is re-injected into every continuation turn; one too big to state in a sentence can point at a spec or plan file in the repo. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
 
 </details>
 
@@ -273,4 +304,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. Thi
 
 ## See also
 
-For simpler interactions, you can also check out the official [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk). codex-collab is designed as a Claude Code skill, with built-in support for code review, thread management, and real-time progress streaming.
+For simpler interactions, you can also check out the official [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk). OpenAI also ships an official [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc), built around slash commands you invoke yourself. codex-collab asks less of you. Tell Claude what you want in your own words and it handles the rest, running Codex in the background and coming back with what it found.
+
+Thanks to the [LINUX DO](https://linux.do/) community for the feedback and support.

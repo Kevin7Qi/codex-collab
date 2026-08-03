@@ -17,6 +17,9 @@ import {
   defaultOptions,
   recordTerminalRunState,
   recordRunFailure,
+  resolveThreadIdAllowRaw,
+  resolveThreadIdOrDie,
+  explainErrorInfo,
   VALID_REVIEW_MODES,
   type WorkspacePaths,
   type Options,
@@ -2045,5 +2048,93 @@ describe("stdin prompt marker", () => {
   test("bare '-' is a positional, not an unknown option", () => {
     const { positional } = parseOptions(["-", "--content-only"]);
     expect(positional).toEqual(["-"]);
+  });
+});
+
+describe("explainErrorInfo", () => {
+  test("a capacity blip and a spent quota give opposite advice", () => {
+    // The whole point of reading the typed variant: these two read almost
+    // identically in prose but want opposite responses from the caller.
+    expect(explainErrorInfo("serverOverloaded")).toMatch(/retry/i);
+    expect(explainErrorInfo("usageLimitExceeded")).toMatch(/same limit/i);
+  });
+
+  test("context and auth failures name their own remedy", () => {
+    expect(explainErrorInfo("contextWindowExceeded")).toMatch(/fresh thread/i);
+    expect(explainErrorInfo("unauthorized")).toMatch(/codex login/i);
+  });
+
+  test("object variants and absent info explain nothing", () => {
+    // These already carry an HTTP status in the message; adding prose would
+    // just talk over it.
+    expect(explainErrorInfo({ httpConnectionFailed: { httpStatusCode: 503 } })).toBeNull();
+    expect(explainErrorInfo(null)).toBeNull();
+    expect(explainErrorInfo(undefined)).toBeNull();
+  });
+
+  test("an unknown string variant explains nothing rather than guessing", () => {
+    expect(explainErrorInfo("other")).toBeNull();
+  });
+});
+
+describe("resolveThreadIdAllowRaw", () => {
+  test("passes an unindexed server thread UUID through as a raw ID", () => {
+    const uuid = "019f983b-07c3-7b91-aeba-e5edca9d20ab";
+    const { threadId, shortId } = resolveThreadIdAllowRaw(tmpRoot, uuid);
+    expect(threadId).toBe(uuid);
+    expect(shortId).toBeNull();
+  });
+
+  test("accepts the urn:uuid: prefixed form", () => {
+    const id = "urn:uuid:019f983b-07c3-7b91-aeba-e5edca9d20ab";
+    const { threadId, shortId } = resolveThreadIdAllowRaw(tmpRoot, id);
+    expect(threadId).toBe(id);
+    expect(shortId).toBeNull();
+  });
+
+  test("an unindexed non-UUID is 'Thread not found', not a raw server ID", () => {
+    // Without the shape check the string is forwarded verbatim as a thread ID:
+    // every RPC then fails with the server's "invalid thread id" parse error
+    // while `kill` still prints "Stopped thread <id>" and exits 0.
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { resolveThreadIdAllowRaw } from "./src/commands/shared";
+        resolveThreadIdAllowRaw(${JSON.stringify(tmpRoot)}, "nonexistent1");
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain('Thread not found: "nonexistent1"');
+  });
+
+  test("the not-found error names workspace scoping as the likely cause", () => {
+    // A thread ID copied from a run started in another project resolves
+    // nowhere here. A bare "not found" reads as if the thread were gone,
+    // sending people to look for a bug instead of passing -d.
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { resolveThreadIdOrDie } from "./src/commands/shared";
+        resolveThreadIdOrDie(${JSON.stringify(tmpRoot)}, "a1b2c3d4");
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("per-workspace");
+    expect(result.stderr.toString()).toContain("-d <path>");
+  });
+
+  test("a truncated UUID is rejected too", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "-e", `
+        import { resolveThreadIdAllowRaw } from "./src/commands/shared";
+        resolveThreadIdAllowRaw(${JSON.stringify(tmpRoot)}, "019f983b-07c3-7b91-aeba");
+      `],
+      cwd: process.cwd(),
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain("Thread not found");
   });
 });

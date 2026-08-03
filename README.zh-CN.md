@@ -45,9 +45,19 @@ cd codex-collab
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-安装完成后，**重新打开终端**以使 PATH 生效，然后运行 `codex-collab health` 验证安装。
+安装完成后运行 `codex-collab health` 验证。若提示找不到该命令，说明 `~/.local/bin` 尚未加入 PATH：可以重开终端、添加安装脚本打印的 export 语句，或直接使用完整路径 `~/.local/bin/codex-collab health`。
 
-安装脚本会自动构建独立 bundle，部署到主目录下（Linux/macOS 为 `~/.claude/skills/codex-collab/`，Windows 为 `%USERPROFILE%\.claude\skills\codex-collab\`），并安装可执行文件（`install.ps1` 会将其加入 PATH；`install.sh` 会放置在 `~/.local/bin`，若该目录不在 PATH 中会打印提示）。完成后 Claude 即可自动发现该技能。
+> [!TIP]
+> 安装也可以交给智能体完成。在 Claude Code 之外运行（例如交给 Codex），下次启动 Claude 时技能即已就绪。过程中它会请求写入仓库以外目录的权限。
+
+<details>
+<summary>安装位置</summary>
+
+安装脚本会构建一份独立 bundle 和一个可执行文件 shim。Linux 与 macOS 上分别放置于 `~/.claude/skills/codex-collab/` 和 `~/.local/bin`；Windows 上放置于 `%USERPROFILE%\.claude\skills\codex-collab\`，并由 `install.ps1` 将 shim 加入 PATH。
+
+完成后 Claude 会自动发现该技能，正在运行中的会话同样生效。唯一的例外是首次安装技能：若 `~/.claude/skills/` 此前并不存在，需重启一次 Claude Code，新目录才会被监听。
+
+</details>
 
 ### 升级
 
@@ -58,11 +68,9 @@ codex-collab update            # 显示最新版本及更新日志，确认后�
 codex-collab update --check    # 仅查看，不安装
 ```
 
-`update` 会从 GitHub 下载锁定到发布标签的源码包，在本地重新构建并重装 skill bundle 与可执行文件 shim，随后打印本次更新对 SKILL.md 的改动 diff。任何安装动作都必须先获得同意：交互式终端中为 `y/N` 确认，非交互式会话则需显式传入 `--yes`。存在新版本时，`run`、`review`、`health` 会在 stderr 打印一行提示（每天至多检查一次，绝不自行安装）；`update --skip` 可屏蔽针对某个版本的提示，设置 `CODEX_COLLAB_NO_UPDATE_CHECK=1` 则完全关闭该联网检查（本地的 SKILL.md 漂移提示无需联网，不受影响）。
+`update` 会拉取最新版本，在本地重新构建并重装。任何安装动作都必须先获得同意：交互式终端中为 `y/N` 确认，无终端可询问时则需显式传入 `--yes`。存在新版本时，`run`、`review`、`health` 只会打印一行提示，绝不自行安装。
 
-此外，当已安装的 SKILL.md 与当前可执行文件或模板集不一致时（例如新增自定义模板之后），`codex-collab skill sync` 会先展示待应用的 diff，确认后写入。
-
-手动升级依然可行：在克隆目录中拉取最新代码并重新运行安装脚本（开发模式安装 —— `install.sh --dev` —— 只能通过这种方式升级）：
+手动升级依然可行，也是开发模式安装（`install.sh --dev`）唯一的升级方式：
 
 ```bash
 git pull
@@ -70,9 +78,16 @@ git pull
 codex-collab health
 ```
 
-两种方式都会替换已安装的 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下已有的配置、模板、会话历史和运行日志都会保留。请将 `~/.claude/skills/codex-collab/` 视为安装脚本管理的目录：升级时其中的手动修改可能会被覆盖（`skill sync` 会在覆盖前以 diff 形式展示这些改动）。
+<details>
+<summary>升级的更多细节</summary>
 
-从旧版本升级时，codex-collab 会在首次使用时自动把会话状态迁移到按工作区划分的新布局，无需手动迁移状态。旧的 `jobs` 命令仍可作为 `threads` 的已弃用别名使用。
+`update --skip` 可屏蔽某个版本的提示，设置 `CODEX_COLLAB_NO_UPDATE_CHECK=1` 则完全关闭联网检查。本地的 SKILL.md 漂移检查无需联网，始终生效。
+
+当已安装的 SKILL.md 与当前可执行文件或模板集不一致时，`codex-collab skill sync` 会先展示待应用的 diff，确认后写入。
+
+两种升级方式都会替换 skill bundle 和可执行文件 shim。`~/.codex-collab/` 下的配置、模板、会话历史与运行日志均会保留。请将 `~/.claude/skills/codex-collab/` 视为安装脚本管理的目录，其中的手动修改可能在升级时被覆盖。
+
+</details>
 
 <details>
 <summary>开发模式</summary>
@@ -110,35 +125,51 @@ codex-collab follow --watch
 
 | 命令 | 说明 |
 |------|------|
-| `run "prompt" [opts]` | 新建会话、发送提示、等待完成并输出结果（`run -` 从标准输入读取提示词，不受 shell 引号转义困扰） |
-| `review [opts]` | 代码审查（PR、未提交更改、指定 commit） |
-| `threads [--json] [--all]` | 列出会话（`--limit <n>` 限制数量，`--discover` 扫描 app server，`--session` 只列当前会话期运行过的会话） |
-| `kill <id> [--clear]` | 中断运行中的会话。若会话存在进行中的 goal，会先暂停再中断，否则 app server 会立即启动新一轮继续执行；`--clear` 表示直接放弃该 goal |
-| `follow [id]` | 实时查看运行中的会话，结束时随其状态退出（已结束的会话则回放最近一次运行）。不带 ID 时自动附着到当前工作区的活跃运行；若无活跃运行，则回放最近一次。配合 `--watch` 保持打开并按启动顺序跟踪每一次新运行（每次运行只显示一次） |
+| `run "prompt" [opts]` | 新建会话、发送提示、等待完成并输出结果（`run -` 从标准输入读取提示词） |
+| `review [opts]` | 代码审查（PR、未提交更改或指定 commit） |
+| `threads [--json] [--all]` | 列出会话（`--discover` 扫描 app server，`--session` 只列当前会话期运行过的） |
+| `follow [id]` | 在你自己的终端分屏中实时查看运行中的会话。不带 ID 时自动附着到活跃运行；`--watch` 会持续跟踪每一次新运行 |
 | `output <id> [--last]` | 查看会话完整日志（`--last`: 只输出最近一轮的结果） |
-| `progress <id>` | 查看近期活动（日志尾部） |
-| `peek <id>` | 从 app server 查看最近的会话片段 |
-| `ask "question"` | （供 Codex 在任务中途调用）向协作者提问并等待回答；`--timeout <sec>` 设置等待时限（默认 600 秒）。超时不视为失败：提示 Codex 自行判断并继续，随后以 0 退出 |
-| `answer <id> "text"` | 回答待处理的问题（`answer <id> -` 从标准输入读取回答） |
-| `questions [id]` | 列出当前工作区待处理的问题；带 ID 时显示该问题的完整内容 |
-| `next` | 持续等待，直到出现需要处理的事件（问题或审批）；完整打印事件内容及响应方式后退出 |
-| `config [key] [value]` | 查看或设置持久化默认值 |
-| `models` | 列出可用模型 |
-| `templates` | 列出可用提示词模板 |
-| `skill sync [--yes]` | 当已安装的 SKILL.md 与可执行文件或模板集不一致时重新生成——先打印 diff，确认后才写入 |
-| `update` | 检查 GitHub 上是否有新版本并显示更新日志，经确认后下载、构建并重装——见[升级](#升级) |
-| `health` | 检查依赖项 |
-| `version` | 打印版本号（也可在命令前使用 `-v`/`--version`） |
+| `kill <id> [--clear]` | 中断运行中的会话。若存在进行中的 goal 会先暂停；`--clear` 表示直接放弃 |
 
 <details>
-<summary>会话管理</summary>
+<summary>提问与审批</summary>
 
 | 命令 | 说明 |
 |------|------|
-| `delete <id> [--purge]` | 归档会话（可用 `codex unarchive` 恢复）并删除本地文件；`--purge` 则在服务端永久删除，不可恢复 |
-| `clean` | 清理过期日志和失效映射 |
+| `ask "question"` | 由 Codex 在任务中途调用，向协作者提问并等待回答。`--timeout <sec>` 设置等待时限（默认 600 秒）。超时不视为失败：会提示 Codex 自行判断并继续，随后以 0 退出 |
+| `answer <id> "text"` | 回答待处理的问题（`answer <id> -` 从标准输入读取） |
+| `questions [id]` | 列出当前工作区待处理的问题；带 ID 时显示完整内容 |
+| `next` | 持续等待，直到出现需要处理的事件；完整打印内容及响应方式后退出 |
 | `approve <id>` | 批准待处理的请求 |
 | `decline <id>` | 拒绝待处理的请求 |
+
+</details>
+
+<details>
+<summary>查看与配置</summary>
+
+| 命令 | 说明 |
+|------|------|
+| `progress <id>` | 查看近期活动（日志尾部） |
+| `peek <id>` | 从 app server 查看最近的会话片段 |
+| `config [key] [value]` | 查看或设置持久化默认值 |
+| `models` | 列出可用模型 |
+| `templates` | 列出可用提示词模板 |
+
+</details>
+
+<details>
+<summary>维护</summary>
+
+| 命令 | 说明 |
+|------|------|
+| `delete <id> [--purge]` | 归档会话（可用 `codex unarchive` 恢复）并删除本地文件；`--purge` 则在服务端永久删除 |
+| `clean` | 清理过期日志和失效映射 |
+| `skill sync [--yes]` | 当已安装的 SKILL.md 与可执行文件或模板集不一致时重新生成。先打印 diff，确认后才写入 |
+| `update` | 检查是否有新版本，确认后下载安装。详见[升级](#升级) |
+| `health` | 检查依赖项与登录状态 |
+| `version` | 打印版本号（也可在命令前使用 `-v`/`--version`） |
 
 </details>
 
@@ -165,8 +196,8 @@ codex-collab follow --watch
 |------|------|
 | `--detach` | 在轮次真正开始运行后立即返回；用 `follow <id>` 观看。任务的生命周期与发起它的 shell 解耦 |
 | `--template <name>` | 提示词模板（优先使用 `~/.codex-collab/templates/`，然后使用内置模板） |
-| `--goal <objective>` | 在第一轮开始前为会话创建 goal（配合 `--resume` 时替换已有目标）；需要在 `~/.codex/config.toml` 中设置 `goals = true`。配合 `--template collab` 时，目标末尾会附加一行 ask 通道说明；由于目标文本会在每个后续轮次重新注入，这条说明在整个 goal 期间始终有效 |
-| `--budget <tokens>` | `--goal` 的 token 预算。请预留充足余量：用量按每轮的完整上下文计算，即使很小的一轮也可能消耗约 6 万 token |
+| `--goal <objective>` | 在第一轮开始前为会话创建 goal（配合 `--resume` 时替换已有目标）；需要在 `~/.codex/config.toml` 中设置 `goals = true`。仍须提供 prompt：prompt 是第一轮的指令，goal 则是贯穿全程的目标。配合 `--template collab` 时，目标末尾会附加一行 ask 通道说明；由于目标文本会在每个后续轮次重新注入，这条说明在整个 goal 期间始终有效。`review` 不接受此参数：审查是临时会话上的单轮任务 |
+| `--budget <tokens>` | `--goal` 的 token 预算。请预留充足余量：用量按每轮的完整上下文计算，即使很小的一轮也可能消耗约 6 万 token。`review` 不接受此参数 |
 | `-` | 从标准输入读取提示词 |
 
 **review**
@@ -228,7 +259,7 @@ codex-collab follow --watch
 <details>
 <summary>Goal 模式</summary>
 
-在 `~/.codex/config.toml` 中设置 `goals = true` 后，goal（由 Codex 在任务中途自行创建，或用 `run --goal "objective" [--budget <tokens>]` 显式设置）会让 app server 不断启动后续轮次，直到目标完成；`run` 会在同一份运行记录和日志中跟踪整个 goal，退出码反映 goal 的最终状态。目标文本会在每个后续轮次重新注入；内容较复杂的目标，可以改为指向仓库中的规格或计划文档。`threads` 会显示每个会话最新的 goal 状态（`[goal active: 45k/100k tokens]`）。
+在 `~/.codex/config.toml` 中设置 `goals = true` 后，goal（由 Codex 在任务中途自行创建，或用 `run "首轮指令" --goal "objective" [--budget <tokens>]` 显式设置）会让 app server 不断启动后续轮次，直到目标完成；`run` 会在同一份运行记录和日志中跟踪整个 goal，退出码反映 goal 的最终状态。目标文本会在每个后续轮次重新注入；内容较复杂的目标，可以改为指向仓库中的规格或计划文档。`threads` 会显示每个会话最新的 goal 状态（`[goal active: 45k/100k tokens]`）。
 
 </details>
 
@@ -258,6 +289,8 @@ codex-collab config --unset             # 取消所有设置
 
 欢迎贡献！开发环境搭建及贡献流程详见 [CONTRIBUTING.md](CONTRIBUTING.md)。本项目遵循 [Contributor Covenant](CODE_OF_CONDUCT.md) 行为准则。
 
-## 相关项目
+## 相关链接
 
-如果只需更轻量的交互，不妨试试官方的 [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk)。codex-collab 则专为 Claude Code skill 场景打造，内置代码审查、会话管理与实时进度推送。
+如果只需更轻量的交互，不妨试试官方的 [Codex MCP server](https://developers.openai.com/codex/guides/agents-sdk)。OpenAI 也提供了官方的 [Claude Code Codex 插件](https://github.com/openai/codex-plugin-cc)，以斜杠命令为主，需要你自行调用。codex-collab 要你做的更少：把需求用自己的话说给 Claude，它会在后台调用 Codex，再把结论带回给你。
+
+感谢 [LINUX DO](https://linux.do/) 社区的反馈与支持。

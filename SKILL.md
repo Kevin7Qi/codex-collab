@@ -248,11 +248,11 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 |------|-------------|
 | `-m, --model <model>` | Model name (default: auto — latest available) |
 | `-r, --reasoning <level>` | Reasoning effort: none, minimal, low, medium, high, xhigh, max, ultra (default: auto — highest the model supports, up to `xhigh`) |
-| `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write; review always uses read-only) |
+| `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write). **`review` rejects this flag** (exit 1) — reviews always run read-only, so don't pass it even to restate the default |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
 | `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes; increase for large reviews or complex tasks. When a goal is active the timeout scopes the WHOLE goal and expiry pauses it (see Goal Mode). (ask) Answer deadline, default 600. (next) Wait bound, default none — it waits until an event or workspace idle. |
-| `--approval <policy>` | never, on-request, on-failure, untrusted, auto (default: never) — see Approvals |
+| `--approval <policy>` | never, on-request, on-failure, untrusted, auto (default: never) — see Approvals. **`review` rejects this flag** (exit 1): Codex locks review sub-agents to `never`, so it could never take effect |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--detach` | (run) Return once the turn is running — see Detached Runs |
 | `-w, --watch` | (follow) Keep following each new run instead of exiting — see Detached Runs |
@@ -264,8 +264,8 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `--json` | JSON output (threads, peek commands) |
 | `--full` | Include all item types in peek output (default shows messages only) |
 | `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
-| `--goal <objective>` | (run) Create the thread's goal before the first turn (replaces the objective on `--resume`) — see Goal Mode |
-| `--budget <tokens>` | (run) Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k |
+| `--goal <objective>` | (run) Create the thread's goal before the first turn (replaces the objective on `--resume`) — see Goal Mode. Still needs a prompt: the prompt is turn one, the goal is the standing objective. **`review` rejects this flag** (exit 1) — a review is a single turn on an ephemeral thread |
+| `--budget <tokens>` | (run) Token budget for `--goal`. Size generously — usage counts each turn's full context, so a single small turn can consume ~60k. **`review` rejects this flag** (exit 1) |
 | `--content-only` | Print only result text (no progress lines) |
 | `--last` | (output) Only the latest turn's output, not the whole thread history (implies `--content-only`) |
 | `--session` | (threads) Only threads the current session has run |

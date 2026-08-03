@@ -53,6 +53,7 @@ import type {
   TurnResult,
   RunRecord,
   ApprovalsReviewer,
+  CodexErrorInfo,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -241,7 +242,10 @@ export function validateIdOrDie(id: string): string {
 export function resolveThreadIdOrDie(stateDir: string, id: string): string {
   try {
     const resolved = resolveThreadId(stateDir, id);
-    if (!resolved) die(`Thread not found: "${id}"`);
+    // Name the most likely cause: threads are indexed per workspace, so an ID
+    // copied from a run started elsewhere resolves nowhere here, and the bare
+    // "not found" reads as if the thread were gone rather than out of scope.
+    if (!resolved) die(`Thread not found: "${id}" in this workspace — threads are per-workspace, so run this from the project directory or pass -d <path>.`);
     return resolved.threadId;
   } catch (e) {
     die(e instanceof Error ? e.message : String(e));
@@ -254,6 +258,11 @@ export function resolveThreadIdOrDie(stateDir: string, id: string): string {
  *  Codex TUI or another workspace that were never discovered locally.
  *  Ambiguous prefixes and index corruption still die. Callers must
  *  validateIdOrDie(id) first. */
+/** Shape of a server thread ID: a hyphenated UUID, optionally `urn:uuid:`-
+ *  prefixed (the form the server's own parse error names). */
+const RAW_THREAD_ID_RE =
+  /^(?:urn:uuid:)?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 export function resolveThreadIdAllowRaw(
   stateDir: string,
   id: string,
@@ -264,6 +273,12 @@ export function resolveThreadIdAllowRaw(
   } catch (e) {
     die(e instanceof Error ? e.message : String(e));
   }
+  // Not in the local index. `validateId` only guarantees path-safety, so
+  // without a shape check a mistyped short ID is forwarded verbatim as a raw
+  // server thread ID: every RPC then fails with the server's "invalid thread
+  // id" parse error while the caller still reports success on a thread that
+  // never existed. Fail like the indexed lookup does instead.
+  if (!RAW_THREAD_ID_RE.test(id)) die(`Thread not found: "${id}"`);
   return { threadId: id, shortId: null };
 }
 
@@ -1205,6 +1220,26 @@ export function pluralize(n: number, word: string): string {
  *  blobs — e.g. the 400 for `-r minimal` on accounts whose built-in tools
  *  (image_gen, web_search) require a higher effort. Extract the human
  *  message; fall back to the raw string for anything unrecognized. */
+/** What the server's typed error classification means for the caller, and
+ *  whether trying again can help. The message text alone can't carry this:
+ *  a capacity blip and a spent quota read almost identically in prose but
+ *  want opposite responses. */
+export function explainErrorInfo(info: CodexErrorInfo | null | undefined): string | null {
+  if (typeof info !== "string") return null; // object variants carry HTTP detail already
+  switch (info) {
+    case "serverOverloaded":
+      return "The model is at capacity — this is transient. Retry, or pin a different model with -m (see `codex-collab models`).";
+    case "usageLimitExceeded":
+      return "Usage limit reached for this account — retrying will hit the same limit.";
+    case "contextWindowExceeded":
+      return "The thread outgrew the model's context window — start a fresh thread, or narrow the task.";
+    case "unauthorized":
+      return "Codex rejected the credentials — check `codex login` (or your API key) and retry.";
+    default:
+      return null;
+  }
+}
+
 export function humanizeTurnError(raw: string): string {
   const jsonStart = raw.indexOf("{");
   if (jsonStart === -1) return raw;
@@ -1237,6 +1272,8 @@ export function printResult(
   if (result.error) {
     const msg = humanizeTurnError(result.error);
     console.error(`\nError: ${msg}`);
+    const explained = explainErrorInfo(result.errorInfo);
+    if (explained) console.error(explained);
     if (/reasoning\.effort/i.test(msg)) {
       console.error("Tip: this account's built-in tools need a higher reasoning effort — retry with -r low or higher.");
     }
