@@ -366,7 +366,17 @@ export async function withStartupLock<T>(
     const env = { ...process.env, ...childEnv };
     const home = resolve(env.CODEX_HOME ?? join(env.HOME ?? homedir(), ".codex"));
     mkdirSync(home, { recursive: true, mode: 0o700 });
-    release = await acquireLockAsync(join(home, "app-server-startup.lock"));
+    // Bounds tuned to what this lock actually guards. A real initialization
+    // measures 260-860ms (fresh home to a 333MB one), so a holder older than
+    // ten seconds is dead or wedged, and breaking its lock is safe — a
+    // resulting collision is what the retry below exists for. Failing open
+    // after five seconds matters because release() runs in a finally, which
+    // process.exit() skips: a run killed mid-startup leaves the file behind,
+    // and at the defaults that cost every later invocation 30 seconds.
+    release = await acquireLockAsync(join(home, "app-server-startup.lock"), {
+      staleThresholdMs: 10_000,
+      maxAttempts: 100,
+    });
   } catch (e) {
     console.error(`[codex] Warning: could not serialize app-server startup (${e instanceof Error ? e.message : String(e)}); starting anyway.`);
   }
