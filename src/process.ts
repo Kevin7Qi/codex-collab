@@ -70,6 +70,30 @@ export async function waitForProcessTreeExit(
 }
 
 /**
+ * Best-effort identity token for a running PID — its start time.
+ *
+ * PIDs are recycled. A delayed SIGKILL that fires after its target already
+ * exited would otherwise land on whatever process inherited the number, and
+ * the wider the grace the likelier that is. One-second resolution, so a PID
+ * reused within the same second still matches; that is a far smaller window
+ * than the grace itself.
+ */
+function processStartToken(pid: number): string | null {
+  if (isWindows) return null;
+  try {
+    const r = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf-8",
+      timeout: 2000,
+    });
+    if (r.error || r.status !== 0) return null;
+    const t = (r.stdout ?? "").trim();
+    return t === "" ? null : t;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Best-effort check that `pid` names a Bun process (the broker server runs
  * under bun). Guards PID-recycling misclassification when deciding whether a
  * version-mismatched broker is still alive WITHOUT touching its socket (a
@@ -151,8 +175,14 @@ function terminateUnix(pid: number, graceMs = 500): void {
   }
 
   // If still alive after a short grace period, escalate to SIGKILL.
+  const identity = processStartToken(pid);
   if (isProcessAlive(pid)) {
     const timer = setTimeout(() => {
+      // Re-verify before escalating. The target usually exits during the
+      // grace, and killing a recycled PID would take out an unrelated
+      // process — a real risk once the grace is measured in seconds.
+      if (!isProcessAlive(pid)) return;
+      if (identity !== null && processStartToken(pid) !== identity) return;
       try {
         process.kill(-pid, "SIGKILL");
       } catch (e) {

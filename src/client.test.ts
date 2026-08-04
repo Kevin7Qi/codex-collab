@@ -998,3 +998,25 @@ describe("withStartupLock", () => {
     });
   }, 20000);
 });
+
+describe("startup lock follows the child's environment", () => {
+  test("an env override decides the lock, not the parent", async () => {
+    // connectDirect lets a caller point the child at a different CODEX_HOME.
+    // Locking on the parent's would put two processes that share a child
+    // state directory on different locks, serializing nothing.
+    const { mkdtempSync, existsSync, rmSync } = await import("fs");
+    const childHome = mkdtempSync(join(tmpdir(), "codex-child-home-"));
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "codex-parent-home-"));
+    try {
+      await withStartupLock(async () => {
+        expect(existsSync(join(childHome, "app-server-startup.lock"))).toBe(true);
+        expect(existsSync(join(process.env.CODEX_HOME!, "app-server-startup.lock"))).toBe(false);
+      }, { CODEX_HOME: childHome });
+    } finally {
+      rmSync(childHome, { recursive: true, force: true });
+      rmSync(process.env.CODEX_HOME!, { recursive: true, force: true });
+      if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+    }
+  }, 20000);
+});

@@ -115,6 +115,8 @@ async function main() {
 
   const { endpoint, cwd, idleTimeout } = parseArgs(argv);
   const listenTarget = parseEndpoint(endpoint);
+  /** Inode of the socket this process bound, for ownership checks at cleanup. */
+  let listenInode: number | null = null;
 
   // Guard the startup window BEFORE spawning anything. The full signal
   // handlers below need `server`, which does not exist yet — but this is
@@ -154,9 +156,6 @@ async function main() {
   const appClient = await connectDirectWithRetry({
     cwd,
     onSpawn: (pid) => { appServerPid = pid; },
-  }).finally(() => {
-    process.off("SIGTERM", startupGuard);
-    process.off("SIGINT", startupGuard);
   });
 
   // Signalled while the handshake was completing: the guard is already
@@ -509,6 +508,13 @@ async function main() {
 
   // ─── Shutdown ───────────────────────────────────────────────────────────
 
+  /** True iff the socket at our path is the one we bound. Anything else — a
+   *  replacement's socket, or nothing — is not ours to remove. */
+  function socketIsStillOurs(): boolean {
+    if (listenInode === null) return false;
+    try { return fs.statSync(listenTarget.path).ino === listenInode; } catch { return false; }
+  }
+
   async function shutdown(server: net.Server): Promise<void> {
     shutdownInitiated = true;
     if (idleTimer) clearTimeout(idleTimer);
@@ -556,7 +562,7 @@ async function main() {
         }, 2000);
       }),
     ]);
-    if (listenTarget.kind === "unix") {
+    if (listenTarget.kind === "unix" && socketIsStillOurs()) {
       try {
         fs.unlinkSync(listenTarget.path);
       } catch (e) {
@@ -970,6 +976,14 @@ async function main() {
 
   // ─── Signal handlers ──────────────────────────────────────────────────
 
+  // Only now is it safe to drop the startup guard: until this point a signal
+  // would hit the default disposition and orphan the detached app-server,
+  // which is the whole race the guard exists to close. Everything between the
+  // handshake and here is synchronous today, but that is an accident of
+  // layout, not a guarantee.
+  process.off("SIGTERM", startupGuard);
+  process.off("SIGINT", startupGuard);
+
   process.on("SIGTERM", async () => {
     await shutdown(server);
     process.exit(0);
@@ -999,6 +1013,14 @@ async function main() {
   // slow macOS CI runner).
   const prevUmask = listenTarget.kind === "unix" ? process.umask(0o077) : null;
   server.listen(listenTarget.path, () => {
+    // Remember which socket is ours. The path is fixed per workspace, so a
+    // replacement can bind it while we are still shutting down — the listener
+    // closes first, so our liveness probe fails and the next invocation
+    // spawns — and a blind unlink at the end of shutdown would then strand a
+    // live broker behind a path with no socket.
+    if (listenTarget.kind === "unix") {
+      try { listenInode = fs.statSync(listenTarget.path).ino; } catch { listenInode = null; }
+    }
     if (prevUmask !== null) process.umask(prevUmask);
     process.stderr.write(
       `[broker-server] Listening on ${endpoint} (idle timeout: ${idleTimeout}ms)\n`,

@@ -172,3 +172,20 @@ describe("isProcessAlive", () => {
     }
   });
 });
+
+describe("delayed SIGKILL identity check", () => {
+  test("a process that exits during the grace is not escalated against", async () => {
+    // The escalation timer outlives its target. Without an identity check it
+    // would SIGKILL whatever inherited the PID — a real hazard once the grace
+    // is seconds rather than milliseconds.
+    if (process.platform === "win32") return; // taskkill is immediate, no timer
+    const child = spawn("bash", ["-c", "exit 0"], { stdio: "ignore", detached: true });
+    const pid = child.pid!;
+    await new Promise<void>((r) => child.on("exit", () => r()));
+    // Schedule an escalation against an already-dead PID; it must not throw
+    // and must not signal anything when the timer fires.
+    expect(() => terminateProcessTree(pid, 150)).not.toThrow();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(isProcessAlive(process.pid)).toBe(true); // we are still here
+  }, 20000);
+});

@@ -353,10 +353,18 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
  * is worse than the race it removes. Third-party app-servers (the codex TUI,
  * an IDE) never take it either, so recovery is required regardless.
  */
-export async function withStartupLock<T>(fn: () => Promise<T>): Promise<T> {
+export async function withStartupLock<T>(
+  fn: () => Promise<T>,
+  childEnv?: Record<string, string>,
+): Promise<T> {
   let release: (() => void) | null = null;
   try {
-    const home = resolve(process.env.CODEX_HOME ?? join(homedir(), ".codex"));
+    // The CHILD's home, not ours. connectDirect lets a caller override
+    // CODEX_HOME (or HOME) for the spawned process, and locking on the parent
+    // environment would put two processes that share a child state directory
+    // on different locks — serializing nothing.
+    const env = { ...process.env, ...childEnv };
+    const home = resolve(env.CODEX_HOME ?? join(env.HOME ?? homedir(), ".codex"));
     mkdirSync(home, { recursive: true, mode: 0o700 });
     release = await acquireLockAsync(join(home, "app-server-startup.lock"));
   } catch (e) {
@@ -541,7 +549,7 @@ function isTransientStartupFailure(e: unknown): boolean {
  */
 export async function connectDirectWithRetry(opts?: ConnectOptions): Promise<AppServerClient> {
   try {
-    return await withStartupLock(() => connectDirect(opts));
+    return await withStartupLock(() => connectDirect(opts), opts?.env);
   } catch (e) {
     if (!isTransientStartupFailure(e)) throw e;
     const stderr = appServerStderrOf(e);
@@ -554,7 +562,7 @@ export async function connectDirectWithRetry(opts?: ConnectOptions): Promise<App
     try {
       // Re-acquired per attempt, not held across the delay — blocking every
       // other startup while we wait would make one collision everyone's.
-      return await withStartupLock(() => connectDirect(opts));
+      return await withStartupLock(() => connectDirect(opts), opts?.env);
     } catch (again) {
       // Record that a second spawn happened, so the failure can say so and
       // nothing else has to claim it on faith.
