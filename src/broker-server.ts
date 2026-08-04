@@ -20,10 +20,16 @@ import net from "node:net";
 import fs, { chmodSync } from "node:fs";
 import path from "node:path";
 import {
-  connectDirect,
+  connectDirectWithRetry,
   parseMessage,
   type AppServerClient,
 } from "./client";
+import { terminateProcessTree, waitForProcessTreeExit } from "./process";
+
+/** Awaiting this parks the caller forever. Used where an async handler is
+ *  already on its way to process.exit(): the point is to stop the main flow
+ *  advancing in the meantime, not to ever resume. */
+const untilProcessExits = (): Promise<never> => new Promise<never>(() => {});
 import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
 import { RpcError } from "./types";
 import { config } from "./config";
@@ -110,8 +116,53 @@ async function main() {
   const { endpoint, cwd, idleTimeout } = parseArgs(argv);
   const listenTarget = parseEndpoint(endpoint);
 
-  // Spawn the real app-server
-  const appClient = await connectDirect({ cwd });
+  // Guard the startup window BEFORE spawning anything. The full signal
+  // handlers below need `server`, which does not exist yet — but this is
+  // exactly the window that matters: a parent that gives up on us sends
+  // SIGTERM while this connect is still in flight, and with no handler
+  // installed it hits default disposition and kills the broker outright. The
+  // app-server is spawned detached, in its OWN process group, so it survives
+  // the group signal aimed at us and nothing is left alive to close it — it
+  // then holds codex's sqlite state lock indefinitely, which is precisely the
+  // contention the parent is about to retry into.
+  //
+  // Killing the PID directly (rather than awaiting the client) is deliberate:
+  // the handshake may never complete, since a wedged app-server is the usual
+  // reason the parent gave up in the first place.
+  let appServerPid: number | null = null;
+  let startupSignalled = false;
+  const startupGuard = (signal: NodeJS.Signals) => {
+    if (startupSignalled) return;
+    startupSignalled = true;
+    void (async () => {
+      process.stderr.write(`[broker-server] ${signal} while starting — stopping the app server before exit\n`);
+      if (appServerPid !== null) {
+        terminateProcessTree(appServerPid);
+        await waitForProcessTreeExit(appServerPid, config.appServerReapTimeout);
+      }
+      process.exit(0);
+    })();
+  };
+  process.on("SIGTERM", startupGuard);
+  process.on("SIGINT", startupGuard);
+
+  // Spawn the real app-server. Retrying: a broker is usually spawned because
+  // no connection existed yet, which is exactly when another app-server may
+  // be starting or dying alongside it and contending for codex's sqlite
+  // state. Losing that race here kills the broker before it ever binds, and
+  // the client sees only "broker did not become ready in time".
+  const appClient = await connectDirectWithRetry({
+    cwd,
+    onSpawn: (pid) => { appServerPid = pid; },
+  }).finally(() => {
+    process.off("SIGTERM", startupGuard);
+    process.off("SIGINT", startupGuard);
+  });
+
+  // Signalled while the handshake was completing: the guard is already
+  // stopping the app server and will end the process. Park rather than fall
+  // through and start serving traffic we are about to drop.
+  if (startupSignalled) await untilProcessExits();
 
   // If the app-server exits unexpectedly, shut down the broker immediately
   // so the next ensureConnection() spawns a fresh broker + app-server.
@@ -465,6 +516,19 @@ async function main() {
       clearTimeout(orphanWatchdog);
       orphanWatchdog = null;
     }
+    // Stop ACCEPTING now, before the app-server close below — that close can
+    // run for seconds, and a client connecting during it would pass the
+    // liveness probe, complete the broker-local initialize, then fail its
+    // first forwarded request with no fallback. Refusing the connection sends
+    // it down the direct path instead. The listener's own close completes
+    // once existing sockets drain, which is awaited at the end.
+    let listenerClosed: Promise<void>;
+    try {
+      listenerClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+    } catch {
+      listenerClosed = Promise.resolve(); // already closed (double shutdown)
+    }
+
     // Reject all pending forwarded requests before closing sockets
     for (const [reqId, entry] of pendingForwardedRequests) {
       clearTimeout(entry.timer);
@@ -483,16 +547,15 @@ async function main() {
     // (or a platform quirk that drops the close callback) must not wedge
     // shutdown — the signal/idle paths that call this expect to reach
     // process.exit(). Destroy stragglers once the grace period lapses.
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        for (const socket of sockets) socket.destroy();
-        resolve();
-      }, 2000);
-      server.close(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
+    await Promise.race([
+      listenerClosed,
+      new Promise<void>((resolve) => {
+        setTimeout(() => {
+          for (const socket of sockets) socket.destroy();
+          resolve();
+        }, 2000);
+      }),
+    ]);
     if (listenTarget.kind === "unix") {
       try {
         fs.unlinkSync(listenTarget.path);

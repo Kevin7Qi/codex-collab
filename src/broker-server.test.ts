@@ -11,7 +11,7 @@
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import net from "node:net";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Subprocess } from "bun";
@@ -1119,6 +1119,56 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         proc.kill();
       }
     }, 15_000);
+
+    test("a SIGTERM during startup reaps the app-server instead of orphaning it", async () => {
+      // The window between spawning the app-server and installing the main
+      // signal handlers. A parent that gives up on a slow broker SIGTERMs it
+      // here; the app-server is spawned detached, in its own process group, so
+      // the parent's group signal never reaches it. Without a guard the broker
+      // dies on default disposition and leaves it running — holding codex's
+      // sqlite state lock, which is exactly what the parent then retries into.
+      if (process.platform === "win32") return; // no process groups / signals
+
+      const pidFile = join(tempDir, "app-server.pid");
+      const mockDir = join(tempDir, "hang-mock");
+      mkdirSync(mockDir, { recursive: true });
+      // Never answers `initialize` — a wedged app-server is the usual reason
+      // the parent gave up, and it means the broker never gets a client.
+      writeFileSync(join(mockDir, "codex"), `#!/usr/bin/env bun
+require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+
+      const endpoint = `unix:${join(tempDir, "broker.sock")}`;
+      const proc = spawnBroker(endpoint, mockDir);
+
+      // Wait for the app-server to exist so there is something to orphan.
+      let appPid = 0;
+      for (let i = 0; i < 100 && !appPid; i++) {
+        if (existsSync(pidFile)) appPid = Number(readFileSync(pidFile, "utf-8").trim());
+        if (!appPid) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(appPid).toBeGreaterThan(0);
+
+      const alive = (pid: number) => {
+        try { process.kill(pid, 0); return true; } catch { return false; }
+      };
+      expect(alive(appPid)).toBe(true);
+
+      try {
+        proc.kill("SIGTERM");
+        let stillAlive = true;
+        for (let i = 0; i < 60 && stillAlive; i++) {
+          stillAlive = alive(appPid);
+          if (stillAlive) await new Promise((r) => setTimeout(r, 100));
+        }
+        expect(stillAlive).toBe(false);
+      } finally {
+        try { process.kill(appPid, "SIGKILL"); } catch {}
+        try { proc.kill("SIGKILL"); } catch {}
+      }
+    }, 20000);
 
     test("thread/list allowed from different socket during active stream", async () => {
 

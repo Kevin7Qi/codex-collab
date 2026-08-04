@@ -21,6 +21,55 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 /**
+ * Wait for a terminated process tree to actually be gone.
+ *
+ * `terminateProcessTree` only *sends* signals — it returns while the tree is
+ * still shutting down. That matters because codex's app-server holds an
+ * exclusive lock on the shared sqlite state under CODEX_HOME while it exits:
+ * spawning a replacement inside that window dies with a state-runtime error.
+ * Waiting first turns "terminate, immediately respawn" into a safe sequence.
+ *
+ * Polls the process GROUP on Unix — callers spawn detached, so the pid is the
+ * group leader and the app-server is a group member that can outlive it.
+ *
+ * On Windows it polls that ONE pid, which is weaker than the name suggests and
+ * adequate only because the tree cannot outlive it there: `connectDirect`
+ * detaches on Unix only, so the app-server is a plain child, and the matching
+ * `terminateProcessTree` is a synchronous `taskkill /T /F` that has already
+ * taken the whole tree down by the time this is called. If either of those
+ * changes, this needs a real tree walk on Windows.
+ *
+ * Best effort by design: returns false on timeout instead of throwing, because
+ * proceeding without the guarantee still beats failing outright.
+ */
+export async function waitForProcessTreeExit(
+  pid: number,
+  timeoutMs: number,
+  pollMs = 25,
+): Promise<boolean> {
+  const treeAlive = (): boolean => {
+    if (isWindows) return isProcessAlive(pid);
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (e) {
+      // EPERM: the group exists but is not ours to signal — treat as alive.
+      if ((e as NodeJS.ErrnoException).code === "EPERM") return true;
+      // ESRCH on the group only means `pid` leads no group; the process
+      // itself may still be running, so fall through to the direct check.
+    }
+    return isProcessAlive(pid);
+  };
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!treeAlive()) return true;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return !treeAlive();
+}
+
+/**
  * Best-effort check that `pid` names a Bun process (the broker server runs
  * under bun). Guards PID-recycling misclassification when deciding whether a
  * version-mismatched broker is still alive WITHOUT touching its socket (a
@@ -49,23 +98,35 @@ export function processLooksLikeBun(pid: number): boolean {
  * Kill a process and its children.
  *
  * - Unix: sends SIGTERM first; if the process is still alive, schedules
- *   SIGKILL after 500 ms (long enough for the app-server to flush stdout).
- *   The SIGKILL timer is unref'd so it never blocks process exit.
+ *   SIGKILL after `graceMs` (default 500 ms — long enough for the app-server
+ *   to flush stdout). The SIGKILL timer is unref'd so it never blocks
+ *   process exit.
  * - Windows: uses `taskkill /PID <pid> /T /F`.
+ *
+ * Pass a longer `graceMs` when the target's SIGTERM handler has real work to
+ * do before it can exit. The broker is the case that matters: its handler
+ * closes the app-server it spawned and waits for that process group to go
+ * away, so escalating at the default would kill the broker mid-shutdown and
+ * strand the very process the caller is waiting on.
+ *
+ * `graceMs` is Unix-only and ignored on Windows: `taskkill /F` terminates
+ * without running handlers, so there is no shutdown to protect. Nothing is
+ * stranded either — the app-server is a plain child there (connectDirect only
+ * detaches on Unix), so `/T` takes the whole tree down together.
  *
  * If the process is already dead (ESRCH), this is a no-op.
  */
-export function terminateProcessTree(pid: number): void {
+export function terminateProcessTree(pid: number, graceMs = 500): void {
   if (isWindows) {
     terminateWindows(pid);
   } else {
-    terminateUnix(pid);
+    terminateUnix(pid, graceMs);
   }
 }
 
 // ─── internal ──────────────────────────────────────────────────────────────
 
-function terminateUnix(pid: number): void {
+function terminateUnix(pid: number, graceMs = 500): void {
   // Try the process group first (negative pid), then the process itself.
   // ESRCH on the group kill does NOT mean the process is dead — it just
   // means the pid is not a process-group leader.
@@ -108,7 +169,7 @@ function terminateUnix(pid: number): void {
           }
         }
       }
-    }, 500);
+    }, graceMs);
     // Don't keep the event loop alive waiting for an escalation that may
     // never be needed — caller may exit before the timer fires.
     timer.unref?.();
