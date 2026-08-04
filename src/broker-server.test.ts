@@ -24,14 +24,40 @@ beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), "broker-server-test-"));
 });
 
+/**
+ * rm -rf, tolerating Windows' asynchronous handle release.
+ *
+ * Windows refuses to remove a directory while any process still holds a
+ * handle inside it, and releases those handles some time after exit. Unix
+ * does not care, which is why this only surfaced once the suite ran on
+ * Windows: every test in the file failed in teardown, whatever the test
+ * itself did.
+ */
+async function removeDirWithRetry(dir: string, attempts = 40): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "EBUSY" && code !== "ENOTEMPTY" && code !== "EPERM") throw e;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+  // Give up quietly. A leftover temp directory the OS will reap is not worth
+  // failing an otherwise-passing suite over.
+}
+
 afterEach(async () => {
   // Kill any broker processes we spawned
   for (const proc of spawnedProcesses) {
     try { proc.kill(); } catch {}
   }
+  // Wait for them to actually be gone before touching the directory they
+  // live in — see removeDirWithRetry. Killing only sends the signal.
+  await Promise.all(spawnedProcesses.map((p) => p.exited.catch(() => undefined)));
   spawnedProcesses.length = 0;
-  // Clean up temp dir
-  rmSync(tempDir, { recursive: true, force: true });
+  await removeDirWithRetry(tempDir);
 });
 
 const spawnedProcesses: Subprocess[] = [];
