@@ -1,7 +1,10 @@
 import { describe, expect, test, beforeAll, beforeEach, afterEach } from "bun:test";
-import { parseMessage, formatNotification, formatResponse, connectDirect as connect, connectDirectWithRetry as connectWithRetry, explainConnectionFailure, withStartupLock, type AppServerClient } from "./client";
+import { parseMessage, formatNotification, formatResponse, connectDirect as connect, connectDirectWithRetry as connectWithRetry, explainConnectionFailure, withStartupLock, startupLockPath, type AppServerClient } from "./client";
 import { join } from "path";
 import { tmpdir } from "os";
+import { mkdirSync } from "fs";
+import { config } from "./config";
+import { acquireLockAsync } from "./lock";
 
 // Test-local formatRequest helper with its own counter (not exported from client.ts
 // to avoid ID collisions with AppServerClient's internal counter).
@@ -943,7 +946,36 @@ setTimeout(() => {
 });
 
 
-describe("withStartupLock", () => {
+// The lock lives under ~/.codex-collab. A sandbox that denies writes there
+// makes withStartupLock fail open — correct behaviour, but it turns these
+// assertions into noise. Announce and skip, the same way the broker suite
+// handles a socket it cannot bind: a run that does not cover this should say
+// so rather than report a pass it did not earn.
+const LOCK_DIR_WRITABLE = await (async () => {
+  // Acquire a throwaway lock for real: mkdirSync on an existing directory is
+  // a no-op and succeeds even where writes are denied, so only taking a lock
+  // proves the capability.
+  try {
+    mkdirSync(join(config.dataDir, "locks"), { recursive: true, mode: 0o700 });
+    const release = await acquireLockAsync(
+      join(config.dataDir, "locks", `probe-${process.pid}.lock`),
+      { maxAttempts: 1 },
+    );
+    release();
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+if (!LOCK_DIR_WRITABLE) {
+  console.warn(
+    `\n⚠️  startup-lock tests SKIPPED — cannot write to ${join(config.dataDir, "locks")}.` +
+    `\n   This run does NOT cover app-server startup serialization.\n`,
+  );
+}
+
+describe.skipIf(!LOCK_DIR_WRITABLE)("withStartupLock", () => {
   const HOME = process.env.CODEX_HOME;
   let lockHome: string;
 
@@ -991,15 +1023,25 @@ describe("withStartupLock", () => {
     expect(ran).toBe(true);
   }, 20000);
 
-  test("creates the lock inside CODEX_HOME, not the workspace", async () => {
-    const { existsSync } = await import("fs");
+  test("keys the lock by CODEX_HOME but keeps the file in our own state dir", async () => {
+    // ~/.codex belongs to codex. Scattering files through another program's
+    // directory is a thing users are right to distrust, so the lock is keyed
+    // by that path rather than stored under it.
+    const { existsSync, readdirSync } = await import("fs");
     await withStartupLock(async () => {
-      expect(existsSync(join(lockHome, "app-server-startup.lock"))).toBe(true);
+      expect(existsSync(startupLockPath())).toBe(true);
+      expect(startupLockPath()).toContain(".codex-collab");
+      expect(readdirSync(lockHome)).toEqual([]); // nothing written into CODEX_HOME
     });
   }, 20000);
+
+  test("a different CODEX_HOME is a different lock", () => {
+    expect(startupLockPath({ CODEX_HOME: "/one" })).not.toBe(startupLockPath({ CODEX_HOME: "/two" }));
+    expect(startupLockPath({ CODEX_HOME: "/one" })).toBe(startupLockPath({ CODEX_HOME: "/one" }));
+  });
 });
 
-describe("startup lock follows the child's environment", () => {
+describe.skipIf(!LOCK_DIR_WRITABLE)("startup lock follows the child's environment", () => {
   test("an env override decides the lock, not the parent", async () => {
     // connectDirect lets a caller point the child at a different CODEX_HOME.
     // Locking on the parent's would put two processes that share a child
@@ -1010,8 +1052,8 @@ describe("startup lock follows the child's environment", () => {
     process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "codex-parent-home-"));
     try {
       await withStartupLock(async () => {
-        expect(existsSync(join(childHome, "app-server-startup.lock"))).toBe(true);
-        expect(existsSync(join(process.env.CODEX_HOME!, "app-server-startup.lock"))).toBe(false);
+        expect(existsSync(startupLockPath({ CODEX_HOME: childHome }))).toBe(true);
+        expect(existsSync(startupLockPath())).toBe(false); // not the parent's
       }, { CODEX_HOME: childHome });
     } finally {
       rmSync(childHome, { recursive: true, force: true });

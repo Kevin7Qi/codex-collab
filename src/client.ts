@@ -9,6 +9,7 @@ import { spawn as childSpawn, spawnSync } from "child_process";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import { acquireLockAsync } from "./lock";
 import type { InitializeParams, InitializeResponse, RequestId } from "./types";
 import { config } from "./config";
@@ -344,28 +345,43 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
  * app-servers coexist happily once up, which is why the lock is released as
  * soon as the handshake returns rather than held for the connection.
  *
- * The lock file lives IN CODEX_HOME, because that is the resource that
- * contends — a per-workspace lock would not see a collision between two
- * workspaces, which is the common case (an editor session plus a run).
+ * Keyed on CODEX_HOME, because that is the resource that contends — a
+ * per-workspace lock would not see a collision between two workspaces, which
+ * is the common case (an editor session plus a run). The file itself lives in
+ * our own state directory rather than codex's: we do not own ~/.codex, and a
+ * tool that scatters files through another program's directory is a tool
+ * people are right to distrust.
  *
  * FAILS OPEN. If the lock cannot be taken, start anyway and let the retry
  * absorb a collision: a coordination primitive that can wedge every startup
  * is worse than the race it removes. Third-party app-servers (the codex TUI,
  * an IDE) never take it either, so recovery is required regardless.
  */
+/**
+ * Where the startup lock for a given child environment lives.
+ *
+ * Derived, never configured. Uses the CHILD's home: connectDirect lets a
+ * caller override CODEX_HOME (or HOME) for the spawned process, and keying on
+ * the parent's would put two processes that share a child state directory on
+ * different locks — serializing nothing.
+ *
+ * Exported for tests.
+ */
+export function startupLockPath(childEnv?: Record<string, string>): string {
+  const env = { ...process.env, ...childEnv };
+  const home = resolve(env.CODEX_HOME ?? join(env.HOME ?? homedir(), ".codex"));
+  const key = createHash("sha256").update(home).digest("hex").slice(0, 16);
+  return join(config.dataDir, "locks", `app-server-${key}.lock`);
+}
+
 export async function withStartupLock<T>(
   fn: () => Promise<T>,
   childEnv?: Record<string, string>,
 ): Promise<T> {
   let release: (() => void) | null = null;
   try {
-    // The CHILD's home, not ours. connectDirect lets a caller override
-    // CODEX_HOME (or HOME) for the spawned process, and locking on the parent
-    // environment would put two processes that share a child state directory
-    // on different locks — serializing nothing.
-    const env = { ...process.env, ...childEnv };
-    const home = resolve(env.CODEX_HOME ?? join(env.HOME ?? homedir(), ".codex"));
-    mkdirSync(home, { recursive: true, mode: 0o700 });
+    const lockPath = startupLockPath(childEnv);
+    mkdirSync(join(config.dataDir, "locks"), { recursive: true, mode: 0o700 });
     // Bounds tuned to what this lock actually guards. A real initialization
     // measures 260-860ms (fresh home to a 333MB one), so a holder older than
     // ten seconds is dead or wedged, and breaking its lock is safe — a
@@ -373,7 +389,7 @@ export async function withStartupLock<T>(
     // after five seconds matters because release() runs in a finally, which
     // process.exit() skips: a run killed mid-startup leaves the file behind,
     // and at the defaults that cost every later invocation 30 seconds.
-    release = await acquireLockAsync(join(home, "app-server-startup.lock"), {
+    release = await acquireLockAsync(lockPath, {
       staleThresholdMs: 10_000,
       maxAttempts: 100,
     });
