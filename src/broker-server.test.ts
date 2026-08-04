@@ -12,7 +12,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import net from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Subprocess } from "bun";
 
@@ -44,6 +44,67 @@ const spawnedProcesses: Subprocess[] = [];
  * It also supports sending notifications (item/started, turn/completed) after
  * turn/start, and server-sent approval requests when MOCK_SEND_APPROVAL=1.
  */
+/**
+ * A connectable address for a broker under test.
+ *
+ * Unix gets a socket file inside the per-test temp dir. Windows gets a named
+ * pipe — the transport the broker already uses there (`createEndpoint`) — but
+ * the pipe namespace is GLOBAL and outlives any directory, so the name is
+ * derived from the per-test dir (mkdtempSync guarantees uniqueness) plus the
+ * pid, or a stale pipe from another test would be connected to instead.
+ */
+function testSocketPath(dir: string): string {
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\codex-collab-test-${process.pid}-${basename(dir)}`;
+  }
+  return join(dir, "broker.sock");
+}
+
+/** The `--endpoint` argument for a path from {@link testSocketPath}. */
+function endpointFor(socketPath: string): string {
+  return process.platform === "win32" ? `pipe:${socketPath}` : `unix:${socketPath}`;
+}
+
+/**
+ * Materialize a mock `codex` that the broker will find on PATH.
+ *
+ * Unix takes a shebang script named `codex`. Windows can run neither form — a
+ * shebang is not executable, and an extensionless file is not resolvable on
+ * PATH at all — so the body ships as a `.ts` beside a `codex.cmd` shim. That
+ * is the same shape npm installs, and the one `connectDirect` already expects
+ * (it wraps commands in `cmd.exe /c` on Windows for exactly this reason).
+ *
+ * `@echo off` is load-bearing: the mock's stdout IS the JSON-RPC channel, and
+ * an echoed command line would corrupt the stream before the handshake.
+ */
+function writeMockCodexScript(dir: string, script: string): void {
+  if (process.platform === "win32") {
+    writeFileSync(join(dir, "codex-mock.ts"), script);
+    writeFileSync(join(dir, "codex.cmd"), `@echo off\r\nbun run "%~dp0codex-mock.ts" %*\r\n`);
+    return;
+  }
+  writeFileSync(join(dir, "codex"), script, { mode: 0o755 });
+}
+
+/**
+ * `process.env` with `dir` prepended to PATH, using the platform separator.
+ *
+ * Windows env names are case-insensitive, but a spread of `process.env` is a
+ * plain object: an inherited `Path` would sit beside our `PATH` and either
+ * could win. Drop every casing before setting ours.
+ */
+function envWithPathPrefix(dir: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  let inherited = "";
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (k.toLowerCase() === "path") { inherited = v; continue; }
+    env[k] = v;
+  }
+  env.PATH = `${dir}${delimiter}${inherited}`;
+  return env;
+}
+
 function createMockCodex(dir: string, opts?: {
   /** Delay in ms before responding to turn/start */
   turnDelay?: number;
@@ -91,7 +152,6 @@ function createMockCodex(dir: string, opts?: {
   const goalFastFirstTurn = opts?.goalFastFirstTurn ?? false;
 
   const interruptLog = join(dir, "interrupts.log");
-  const scriptPath = join(dir, "codex");
   const script = `#!/usr/bin/env bun
 import { appendFileSync } from "node:fs";
 // Mock codex app-server for broker-server tests
@@ -327,7 +387,7 @@ process.stdin.on("end", () => process.exit(0));
 process.stdin.on("error", () => process.exit(1));
 `;
 
-  writeFileSync(scriptPath, script, { mode: 0o755 });
+  writeMockCodexScript(dir, script);
   return dir; // The dir to prepend to PATH
 }
 
@@ -351,10 +411,7 @@ function spawnBroker(
   }
 
   const proc = Bun.spawn(["bun", ...args], {
-    env: {
-      ...process.env,
-      PATH: `${mockCodexDir}:${process.env.PATH}`,
-    },
+    env: envWithPathPrefix(mockCodexDir),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -557,13 +614,14 @@ async function exitsWithin(proc: Subprocess, timeoutMs: number): Promise<boolean
 // ─── Socket support detection ────────────────────────────────────────────────
 
 // These integration tests spawn a real broker-server subprocess with a mock
-// codex script (bash shebang) and connect via Unix socket. They require:
-// 1. Unix platform (the mock script uses #!/usr/bin/env bun)
-// 2. Unix socket support (not restricted by sandbox)
+// codex on PATH and connect over the broker's own transport — a Unix socket,
+// or a named pipe on Windows, which broker-server already supports (every
+// Unix-only branch there is guarded by `listenTarget.kind === "unix"`). The
+// only requirement left is being able to bind one, which a sandbox can deny.
 const IS_UNIX = process.platform !== "win32";
-const SOCKETS_AVAILABLE = IS_UNIX && await (async () => {
+const SOCKETS_AVAILABLE = await (async () => {
   const checkDir = mkdtempSync(join(tmpdir(), "broker-sock-check-"));
-  const testSock = join(checkDir, "test.sock");
+  const testSock = testSocketPath(checkDir);
   try {
     const srv = net.createServer();
     await new Promise<void>((resolve, reject) => {
@@ -578,6 +636,17 @@ const SOCKETS_AVAILABLE = IS_UNIX && await (async () => {
   }
 })();
 
+// Say so out loud. This gate degrades on the ENVIRONMENT, not on a choice, so
+// a run under a sandbox that blocks socket bind reports "0 fail" and exit 0
+// while covering none of broker-server.ts. A skip count is not a signal
+// anyone reads; a warning is.
+if (!SOCKETS_AVAILABLE) {
+  console.warn(
+    `\n⚠️  broker-server suite SKIPPED — cannot bind ${IS_UNIX ? "a Unix socket" : "a named pipe"} here (sandbox or filesystem restriction).` +
+    `\n   This run does NOT cover src/broker-server.ts. Re-run outside the sandbox before trusting it.\n`,
+  );
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
@@ -587,8 +656,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
   describe("initialize handshake", () => {
     test("responds with userAgent locally, does not forward to app-server", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -609,8 +678,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
     }, 15_000);
 
     test("initialize returns busy=false when no stream is active", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -631,8 +700,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
     }, 15_000);
 
     test("initialize returns busy=true when a stream is active", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -664,8 +733,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
     }, 15_000);
 
     test("initialize returns busy=true while a streaming request is pending", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         turnDelay: 1000,
         sendTurnCompleted: false,
@@ -702,8 +771,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
     }, 15_000);
 
     test("non-streaming error from stream owner preserves stream ownership", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       // Long-running turn that won't auto-complete during the test.
       const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
 
@@ -752,8 +821,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       // activeRequestIsStreaming), the broker would report busy=true forever
       // and every subsequent streaming invocation would fall back to a direct
       // app-server until the broker restarted.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       // Force the race: the mock writes turn/completed *before* turn/start's
       // response, and `turnDelay > 0` makes the broker still be awaiting
       // appClient.request's resolution when it sees turn/completed.
@@ -788,8 +857,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
     test("swallows initialized notification without error", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -814,8 +883,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
   describe("request forwarding", () => {
     test("forwards thread/start to app-server and returns result", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -838,8 +907,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
     test("forwards thread/read and thread/list as read-only methods", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -865,8 +934,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
     test("returns JSON parse error for invalid JSON input", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -897,8 +966,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
     test("ignores client notifications (no id)", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -930,8 +999,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
   describe("concurrency control", () => {
     test("second client gets -32001 busy error during active stream", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       // Use a long turn delay so the stream stays active
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
@@ -975,8 +1044,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
     test("second client can proceed after first client's turn completes", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: true,
         turnCompletedDelay: 50,
@@ -1011,8 +1080,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
     test("turn/interrupt allowed from different socket during active stream", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -1049,8 +1118,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
 
     test("thread/read allowed from different socket during active stream", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -1088,8 +1157,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       // `models` makes exactly one server call, and withClient's busy→direct
       // fallback is streaming-only, so if model/list is not on the read-only
       // allowlist it is the one read that hard-fails on a busy broker.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -1120,27 +1189,31 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
-    test("a SIGTERM during startup reaps the app-server instead of orphaning it", async () => {
+    // Unix-only by nature, not by convenience. The orphan needs a detached
+    // app-server (connectDirect detaches on Unix only) AND a signal that runs
+    // a handler — Windows has neither: the app-server is a plain child, and
+    // `taskkill /T` takes the tree down together. The Windows guarantee is
+    // covered directly by process.test.ts's "terminating a parent takes its
+    // child with it".
+    test.skipIf(!IS_UNIX)("a SIGTERM during startup reaps the app-server instead of orphaning it", async () => {
       // The window between spawning the app-server and installing the main
       // signal handlers. A parent that gives up on a slow broker SIGTERMs it
       // here; the app-server is spawned detached, in its own process group, so
       // the parent's group signal never reaches it. Without a guard the broker
       // dies on default disposition and leaves it running — holding codex's
       // sqlite state lock, which is exactly what the parent then retries into.
-      if (process.platform === "win32") return; // no process groups / signals
-
       const pidFile = join(tempDir, "app-server.pid");
       const mockDir = join(tempDir, "hang-mock");
       mkdirSync(mockDir, { recursive: true });
       // Never answers `initialize` — a wedged app-server is the usual reason
       // the parent gave up, and it means the broker never gets a client.
-      writeFileSync(join(mockDir, "codex"), `#!/usr/bin/env bun
+      writeMockCodexScript(mockDir, `#!/usr/bin/env bun
 require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 process.stdin.resume();
 setInterval(() => {}, 1000);
-`, { mode: 0o755 });
+`);
 
-      const endpoint = `unix:${join(tempDir, "broker.sock")}`;
+      const endpoint = endpointFor(testSocketPath(tempDir));
       const proc = spawnBroker(endpoint, mockDir);
 
       // Wait for the app-server to exist so there is something to orphan.
@@ -1172,8 +1245,8 @@ setInterval(() => {}, 1000);
 
     test("thread/list allowed from different socket during active stream", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -1206,8 +1279,8 @@ setInterval(() => {}, 1000);
 
     test("non-streaming request from same socket is allowed", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -1245,8 +1318,8 @@ setInterval(() => {}, 1000);
   describe("notification routing", () => {
     test("turn/completed notification is forwarded to the stream-owning socket", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: true,
         turnCompletedDelay: 50,
@@ -1282,8 +1355,8 @@ setInterval(() => {}, 1000);
 
     test("notifications are not sent to non-owning sockets", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: true,
         turnCompletedDelay: 50,
@@ -1322,8 +1395,8 @@ setInterval(() => {}, 1000);
 
   describe("goal-mode stream retention", () => {
     test("continuation-turn notifications keep flowing to the owner while the goal is active, and ownership releases when it completes", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { goalContinuation: true });
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1373,8 +1446,8 @@ setInterval(() => {}, 1000);
       // thread/goal/updated ever fires. The goal-following CLI's pre-turn
       // thread/goal/get is the broker's only signal — pre-fix, ownership
       // released at turn 1's completion and the continuation was invisible.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { goalPreexisting: true });
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1408,8 +1481,8 @@ setInterval(() => {}, 1000);
       // turn/start response, so the normal claim is skipped — but the goal
       // is active and continuations are coming. Pre-fix, they had no owner
       // and the goal-following client waited blind until its timeout.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false, goalFastFirstTurn: true });
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1436,8 +1509,8 @@ setInterval(() => {}, 1000);
     test("goal ops are allowed through from another socket while a stream is owned", async () => {
       // kill/kill --clear must be able to read and brake a goal whose
       // following run owns the broker stream for the goal's whole lifetime.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1466,8 +1539,8 @@ setInterval(() => {}, 1000);
       // active. If the goal is paused BEFORE the continuation starts (the
       // kill/timeout brake), no turn/completed will ever arrive — pre-fix
       // the broker stayed busy until the 30-minute orphan watchdog.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { goalPausedInGap: true });
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1506,8 +1579,8 @@ setInterval(() => {}, 1000);
   describe("approval forwarding", () => {
     test("client receives forwarded approval request and responds — round-trip", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
         sendApproval: true,
@@ -1563,8 +1636,8 @@ setInterval(() => {}, 1000);
 
     test("malformed response (missing result and error) is rejected", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
         sendApproval: true,
@@ -1621,8 +1694,8 @@ setInterval(() => {}, 1000);
 
     test("socket disconnect during pending approval rejects only that socket's approvals", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
         sendApproval: true,
@@ -1673,10 +1746,11 @@ setInterval(() => {}, 1000);
   // ── Socket permissions ────────────────────────────────────────────────────
 
   describe("socket permissions", () => {
-    test("socket file has restrictive permissions (0o700)", async () => {
+    // A named pipe is not a filesystem object and carries no mode.
+    test.skipIf(!IS_UNIX)("socket file has restrictive permissions (0o700)", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1700,8 +1774,8 @@ setInterval(() => {}, 1000);
   describe("broker/shutdown", () => {
     test("broker exits cleanly after broker/shutdown request", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1729,8 +1803,8 @@ setInterval(() => {}, 1000);
   describe("idle timeout", () => {
     test("broker shuts down after idle timeout with no activity", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       // Use a very short idle timeout (1 second)
@@ -1749,8 +1823,8 @@ setInterval(() => {}, 1000);
 
     test("activity resets the idle timer", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       // Use a 2s idle timeout
@@ -1781,8 +1855,8 @@ setInterval(() => {}, 1000);
     }, 15_000);
 
     test("active stream prevents idle shutdown", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -1805,8 +1879,8 @@ setInterval(() => {}, 1000);
     }, 10_000);
 
     test("pending approval prevents idle shutdown", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendApproval: true,
         sendTurnCompleted: false,
@@ -1835,8 +1909,8 @@ setInterval(() => {}, 1000);
 
   describe("buffer overflow protection", () => {
     test("broker destroys socket when client sends >10MB without newlines", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir, { idleTimeout: 30000 });
@@ -1905,8 +1979,8 @@ setInterval(() => {}, 1000);
   describe("multiple clients", () => {
     test("multiple clients can connect and make sequential requests", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -1937,8 +2011,8 @@ setInterval(() => {}, 1000);
 
     test("client disconnect during stream preserves concurrency lock until turn completes", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -1985,8 +2059,8 @@ setInterval(() => {}, 1000);
     }, 15_000);
 
     test("client disconnect before turn/start response preserves request lock", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         turnDelay: 1000,
         sendTurnCompleted: false,
@@ -2034,8 +2108,8 @@ setInterval(() => {}, 1000);
       // while the previous one was mid-cancel. Reserve before the
       // interrupt and let the natural turn/completed (or the watchdog)
       // release.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       // Delay the turn/start response so the broker is awaiting
       // appClient.request when client1 disconnects — that is the only
       // condition that triggers the orphan branch on the post-response
@@ -2093,8 +2167,8 @@ setInterval(() => {}, 1000);
       // turn is already done, so there is nothing to unwind. Reserving would
       // pin the broker busy until the watchdog fires (ORPHAN_WATCHDOG_MS = idle
       // timeout), forcing every other client onto direct connections meanwhile.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       // completeBeforeResponse: the single turn/completed (turn-001) is written
       // before the turn/start response; turnDelay holds the response so the
       // client can disconnect after the completion but before the response
@@ -2150,8 +2224,8 @@ setInterval(() => {}, 1000);
       // turn/interrupt there, while the actual review turn runs on the
       // response's reviewThreadId. The interrupt missed, so the review kept
       // running and held the broker's stream slot until natural completion.
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
         reviewDelay: 200, // window for the client to disconnect mid-flight
@@ -2196,8 +2270,8 @@ setInterval(() => {}, 1000);
     }, 10_000);
 
     test("orphan watchdog interrupts with threadId and turnId", async () => {
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: false,
       });
@@ -2236,8 +2310,8 @@ setInterval(() => {}, 1000);
   describe("streaming methods", () => {
     test("review/start establishes stream ownership with reviewThreadId", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       // Use a long turn-completed delay so stream stays active during the test
       const mockDir = createMockCodex(tempDir, {
         sendTurnCompleted: true,
@@ -2284,8 +2358,8 @@ setInterval(() => {}, 1000);
   describe("error forwarding", () => {
     test("app-server error responses are forwarded to the client", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -2319,8 +2393,8 @@ setInterval(() => {}, 1000);
     // warning to stderr, but we don't capture subprocess stderr in assertions.
     test("response for unknown forwarded request is ignored", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       const proc = spawnBroker(endpoint, mockDir);
@@ -2347,10 +2421,11 @@ setInterval(() => {}, 1000);
   // ── Stale socket cleanup ──────────────────────────────────────────────────
 
   describe("stale socket cleanup", () => {
-    test("removes stale socket file before listening", async () => {
+    // Windows named pipes vanish with their owner; there is no stale file.
+    test.skipIf(!IS_UNIX)("removes stale socket file before listening", async () => {
 
-      const sockPath = join(tempDir, "broker.sock");
-      const endpoint = `unix:${sockPath}`;
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir);
 
       // Create a stale socket file

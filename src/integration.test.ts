@@ -162,6 +162,10 @@ const runIntegration =
   process.env.RUN_INTEGRATION === "1" &&
   Bun.spawnSync([process.platform === "win32" ? "where" : "which", "codex"]).exitCode === 0;
 
+if (!runIntegration) {
+  console.warn("\n⚠️  live integration suite SKIPPED — set RUN_INTEGRATION=1 (and have codex on PATH) to run it.\n");
+}
+
 describe.skipIf(!runIntegration)("live integration", () => {
   // Import connect lazily so the module isn't loaded when tests are skipped
   let connect: typeof import("./client").connectDirect;
