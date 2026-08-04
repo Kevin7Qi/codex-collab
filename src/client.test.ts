@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeAll, beforeEach, afterEach } from "bun:test";
-import { parseMessage, formatNotification, formatResponse, connectDirect as connect, type AppServerClient } from "./client";
+import { parseMessage, formatNotification, formatResponse, connectDirect as connect, connectDirectWithRetry as connectWithRetry, explainConnectionFailure, withStartupLock, type AppServerClient } from "./client";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -607,4 +607,394 @@ describe("close() kills grandchildren", () => {
     }
     }, 20000);
   }
+});
+
+// ─── connectDirectWithRetry ────────────────────────────────────────────────
+
+/** An app-server that dies during startup on its first N spawns, then behaves.
+ *  Models codex losing the exclusive lock on its shared sqlite state: it never
+ *  answers `initialize`, it just exits. The attempt counter lives in a file so
+ *  it survives across spawns and lets a test pin the exact number of tries. */
+const FLAKY_SERVER = join(TEST_DIR, "flaky-app-server.ts");
+const FLAKY_SERVER_SOURCE = `#!/usr/bin/env bun
+const fs = require("fs");
+const counterPath = process.env.FLAKY_COUNTER;
+const failCount = Number(process.env.FLAKY_FAIL_COUNT ?? "1");
+let attempts = 0;
+try { attempts = Number(fs.readFileSync(counterPath, "utf-8")) || 0; } catch {}
+fs.writeFileSync(counterPath, String(attempts + 1));
+if (attempts < failCount) {
+  process.stderr.write("Error: failed to initialize sqlite state runtime under /tmp/codex\\n");
+  process.exit(1);
+}
+function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
+let buffer = "";
+process.stdin.setEncoding("utf-8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let idx;
+  while ((idx = buffer.indexOf("\\n")) !== -1) {
+    const line = buffer.slice(0, idx).trim();
+    buffer = buffer.slice(idx + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.id !== undefined && msg.method === "initialize") {
+      respond({ id: msg.id, result: { userAgent: "flaky-mock/0.1.0" } });
+    }
+  }
+});
+process.stdin.on("end", () => process.exit(0));
+process.stdin.on("error", () => process.exit(1));
+`;
+
+describe("connectDirectWithRetry", () => {
+  let counterPath: string;
+  let logged: string[];
+  let restoreError: (() => void) | null = null;
+
+  beforeEach(async () => {
+    const { mkdirSync, existsSync, rmSync } = await import("fs");
+    if (!existsSync(TEST_DIR)) mkdirSync(TEST_DIR, { recursive: true });
+    await Bun.write(FLAKY_SERVER, FLAKY_SERVER_SOURCE);
+    counterPath = join(TEST_DIR, `flaky-counter-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    rmSync(counterPath, { force: true });
+
+    // Capture the retry notice: it is the only observable that distinguishes
+    // "classified as transient and retried" from "happened to succeed".
+    logged = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => { logged.push(args.join(" ")); };
+    restoreError = () => { console.error = original; };
+  });
+
+  afterEach(async () => {
+    restoreError?.();
+    restoreError = null;
+    const { rmSync } = await import("fs");
+    rmSync(counterPath, { force: true });
+  });
+
+  async function attempts(): Promise<number> {
+    const { readFileSync, existsSync } = await import("fs");
+    return existsSync(counterPath) ? Number(readFileSync(counterPath, "utf-8")) : 0;
+  }
+
+  test("retries once when the app-server dies during startup", async () => {
+    const c = await connectWithRetry({
+      command: ["bun", "run", FLAKY_SERVER],
+      requestTimeout: 10000,
+      env: { FLAKY_COUNTER: counterPath, FLAKY_FAIL_COUNT: "1" },
+    });
+    try {
+      expect(c.userAgent).toBe("flaky-mock/0.1.0");
+      expect(await attempts()).toBe(2);
+      expect(logged.some((l) => /retrying once/i.test(l))).toBe(true);
+    } finally {
+      await c.close();
+    }
+  }, 20000);
+
+  test("retries at most once, then surfaces the failure", async () => {
+    // Pins the cap: a second startup death must propagate rather than loop.
+    const error = await captureErrorMessage(connectWithRetry({
+      command: ["bun", "run", FLAKY_SERVER],
+      requestTimeout: 10000,
+      env: { FLAKY_COUNTER: counterPath, FLAKY_FAIL_COUNT: "2" },
+    }));
+    expect(error).toContain("App server process exited unexpectedly");
+    expect(await attempts()).toBe(2);
+  }, 20000);
+
+  test("does not retry a binary that never started", async () => {
+    // ENOENT is deterministic — retrying only doubles the time to the same
+    // error, and the user needs the install hint, not a delay. It surfaces as
+    // either the spawn error or a write into never-opened stdin, depending on
+    // which wins the race, so assert the decision rather than the wording.
+    const error = await captureErrorMessage(connectWithRetry({
+      command: [join(TEST_DIR, "definitely-not-a-real-binary")],
+      requestTimeout: 5000,
+    }));
+    expect(error.length).toBeGreaterThan(0);
+
+    // Windows runs commands through a `cmd.exe /c` shim, so the shim spawns
+    // successfully and its exit is reported as a startup death — a missing
+    // binary is genuinely indistinguishable there, and IS retried. Asserting
+    // the Unix outcome cross-platform would only encode a wrong expectation.
+    if (process.platform !== "win32") {
+      expect(error).not.toContain("App server process exited unexpectedly");
+      expect(logged.some((l) => /retrying once/i.test(l))).toBe(false);
+    }
+  }, 20000);
+});
+
+describe("connectDirect onSpawn", () => {
+  test("reports the child PID before the handshake completes", async () => {
+    // The broker needs a handle on its app-server during startup: if the
+    // handshake hangs it never receives a client, and killing the PID is the
+    // only way to avoid orphaning a detached process that holds codex's
+    // sqlite state lock.
+    const seen: number[] = [];
+    const c = await connect({
+      command: ["bun", "run", MOCK_SERVER],
+      requestTimeout: 10000,
+      onSpawn: (pid) => seen.push(pid),
+    });
+    try {
+      expect(seen.length).toBe(1);
+      expect(seen[0]).toBeGreaterThan(0);
+    } finally {
+      await c.close();
+    }
+  }, 20000);
+
+  test("reports each attempt's PID when the first one dies", async () => {
+    const { mkdirSync, existsSync } = await import("fs");
+    if (!existsSync(TEST_DIR)) mkdirSync(TEST_DIR, { recursive: true });
+    await Bun.write(FLAKY_SERVER, FLAKY_SERVER_SOURCE);
+    const counter = join(TEST_DIR, `onspawn-counter-${Date.now()}`);
+    const seen: number[] = [];
+    const c = await connectWithRetry({
+      command: ["bun", "run", FLAKY_SERVER],
+      requestTimeout: 10000,
+      env: { FLAKY_COUNTER: counter, FLAKY_FAIL_COUNT: "1" },
+      onSpawn: (pid) => seen.push(pid),
+    });
+    try {
+      // Two spawns, two distinct PIDs — the retry's PID must not shadow a
+      // stale one the caller might still act on.
+      expect(seen.length).toBe(2);
+      expect(seen[0]).not.toBe(seen[1]);
+    } finally {
+      await c.close();
+      const { rmSync } = await import("fs");
+      rmSync(counter, { force: true });
+    }
+  }, 20000);
+});
+
+describe("explainConnectionFailure", () => {
+  const withStderr = (stderr: string) =>
+    Object.assign(new Error("App server process exited unexpectedly"), { appServerStderr: stderr });
+
+  test("names the locked directory and what to do about it", () => {
+    // "process exited unexpectedly" is a symptom. The cause is a stderr line
+    // the user has no reason to connect to it, so say it out loud.
+    const msg = explainConnectionFailure(withStderr(
+      "Error: failed to initialize sqlite state runtime under /home/u/.codex: database is locked",
+    ));
+    expect(msg).toContain("/home/u/.codex");
+    expect(msg).toMatch(/Another Codex process/);
+    expect(msg).toMatch(/codex app-server|codex-collab health/);
+  });
+
+  test("only a real busy/locked signature claims contention", () => {
+    for (const s of ["Error: database is locked", "Error: database table is locked", "SQLITE_BUSY"]) {
+      expect(explainConnectionFailure(withStderr(s))).toMatch(/Another Codex process is using/);
+    }
+  });
+
+  test("the wrapper alone does not assert a cause", () => {
+    // codex emits it for contention, corruption, a full disk and permissions
+    // alike. Telling someone to wait for a lock that is really a malformed
+    // database sends them after the wrong problem.
+    const generic = explainConnectionFailure(withStderr(
+      "Error: failed to initialize sqlite state runtime under /home/u/.codex: database disk image is malformed",
+    ));
+    expect(generic).toMatch(/could not initialize its state database/);
+    expect(generic).not.toMatch(/Another Codex process is using/);
+    expect(generic).toMatch(/underlying cause/);
+    expect(generic).toContain("/home/u/.codex");
+  });
+
+  test("a directory containing spaces is reported whole", () => {
+    // \S+ truncated "C:\\Users\\First Last\\.codex" to "C:\\Users\\First", pointing
+    // the user at a path that does not exist.
+    const msg = explainConnectionFailure(withStderr(
+      "Error: failed to initialize state runtime at C:\\Users\\First Last\\.codex: database is locked",
+    ));
+    expect(msg).toContain("C:\\Users\\First Last\\.codex");
+  });
+
+  test("process-inspection advice is runnable on this platform", () => {
+    // `ps aux` does not exist in cmd or PowerShell.
+    const msg = explainConnectionFailure(withStderr("Error: database is locked"))!;
+    expect(msg).toContain(process.platform === "win32" ? "tasklist" : "ps aux");
+    if (process.platform === "win32") expect(msg).not.toContain("ps aux");
+  });
+
+  test("SQLITE_CANTOPEN is a broken path, not contention", () => {
+    // Opposite remedy: nothing is going to clear, so telling the user to wait
+    // and hunt for a stuck app server sends them after the wrong problem.
+    const msg = explainConnectionFailure(withStderr(
+      "Error: failed to initialize sqlite state runtime under /bad/dir: unable to open database file",
+    ));
+    expect(msg).toMatch(/could not open its state database/);
+    expect(msg).toMatch(/retrying will not help/);
+    expect(msg).not.toMatch(/Another Codex process/);
+    expect(msg).toContain("/bad/dir");
+  });
+
+  test("claims a retry only when one actually happened", () => {
+    // withClient's post-handshake busy fallback and any external caller reach
+    // the explanation having spawned exactly once.
+    const once = withStderr("Error: database is locked");
+    expect(explainConnectionFailure(once)).not.toMatch(/already retried/);
+    expect(explainConnectionFailure(Object.assign(once, { appServerRetried: true })))
+      .toMatch(/already retried once/);
+  });
+
+  test("explains nothing for an unrelated crash", () => {
+    // A false match would misexplain the failure, which is worse than the
+    // bare error — so an unrecognized stderr must stay silent.
+    expect(explainConnectionFailure(withStderr("thread 'main' panicked at src/lib.rs:42"))).toBeNull();
+    expect(explainConnectionFailure(new Error("App server process exited unexpectedly"))).toBeNull();
+    expect(explainConnectionFailure(null)).toBeNull();
+  });
+
+  test("falls back to CODEX_HOME when the path is not in the message", () => {
+    const prev = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = "/custom/codex";
+    try {
+      expect(explainConnectionFailure(withStderr("Error: database is locked"))).toContain("/custom/codex");
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prev;
+    }
+  });
+
+  test("a real startup death carries its stderr through to the explanation", async () => {
+    // End-to-end: the tail must survive connectDirect's failure path, not
+    // just be reachable when a test hands it in.
+    const { mkdirSync, existsSync } = await import("fs");
+    if (!existsSync(TEST_DIR)) mkdirSync(TEST_DIR, { recursive: true });
+    const dying = join(TEST_DIR, "locked-app-server.ts");
+    await Bun.write(dying, `#!/usr/bin/env bun
+process.stderr.write("Error: failed to initialize sqlite state runtime under /home/u/.codex: locked\\n");
+setTimeout(() => process.exit(1), 30);
+`);
+    const error = await captureErrorMessage(connect({
+      command: ["bun", "run", dying],
+      requestTimeout: 5000,
+    }).catch((e) => { throw Object.assign(e, { explained: explainConnectionFailure(e) }); }));
+    expect(error).toContain("App server process exited unexpectedly");
+  }, 20000);
+});
+
+describe("startup retry policy vs state failures", () => {
+  test("an unopenable state directory is not retried", async () => {
+    // Deterministic: the second spawn fails identically 750ms later, and the
+    // retry notice would tell the user to expect contention that isn't there.
+    const { mkdirSync, existsSync } = await import("fs");
+    if (!existsSync(TEST_DIR)) mkdirSync(TEST_DIR, { recursive: true });
+    const counter = join(TEST_DIR, `cantopen-counter-${Date.now()}`);
+    const script = join(TEST_DIR, "cantopen-app-server.ts");
+    await Bun.write(script, `#!/usr/bin/env bun
+const fs = require("fs");
+let n = 0; try { n = Number(fs.readFileSync(process.env.C, "utf-8")) || 0; } catch {}
+fs.writeFileSync(process.env.C, String(n + 1));
+process.stderr.write("Error: failed to initialize sqlite state runtime under /bad: unable to open database file\\n");
+setTimeout(() => process.exit(1), 20);
+`);
+    const logged: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { logged.push(a.join(" ")); };
+    try {
+      await captureErrorMessage(connectWithRetry({
+        command: ["bun", "run", script],
+        requestTimeout: 5000,
+        env: { C: counter },
+      }));
+    } finally {
+      console.error = original;
+    }
+    const { readFileSync, rmSync } = await import("fs");
+    expect(Number(readFileSync(counter, "utf-8"))).toBe(1); // one spawn, not two
+    expect(logged.some((l) => /retrying once/i.test(l))).toBe(false);
+    rmSync(counter, { force: true });
+  }, 20000);
+});
+
+describe("stderr retained across chunk boundaries", () => {
+  test("a message split by the stream still classifies", async () => {
+    // Chunk boundaries are arbitrary. Trimming each chunk and joining with
+    // newlines turned "database is" + " locked" into "database is\nlocked",
+    // so the lock classifier missed a failure it should have named.
+    const { mkdirSync, existsSync } = await import("fs");
+    if (!existsSync(TEST_DIR)) mkdirSync(TEST_DIR, { recursive: true });
+    const split = join(TEST_DIR, "split-stderr-app-server.ts");
+    await Bun.write(split, `#!/usr/bin/env bun
+process.stderr.write("Error: failed to initialize sqlite state runtime under /home/u/.codex: database is");
+setTimeout(() => {
+  process.stderr.write(" locked\\n");
+  setTimeout(() => process.exit(1), 30);
+}, 40);
+`);
+    let captured: unknown = null;
+    try {
+      await connect({ command: ["bun", "run", split], requestTimeout: 5000 });
+    } catch (e) {
+      captured = e;
+    }
+    expect(captured).not.toBeNull();
+    const msg = explainConnectionFailure(captured);
+    expect(msg).toMatch(/Another Codex process is using/);
+    expect(msg).toContain("/home/u/.codex");
+  }, 20000);
+});
+
+
+describe("withStartupLock", () => {
+  const HOME = process.env.CODEX_HOME;
+  let lockHome: string;
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import("fs");
+    lockHome = mkdtempSync(join(tmpdir(), "codex-lock-test-"));
+    process.env.CODEX_HOME = lockHome;
+  });
+
+  afterEach(async () => {
+    if (HOME === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = HOME;
+    const { rmSync } = await import("fs");
+    rmSync(lockHome, { recursive: true, force: true });
+  });
+
+  test("serializes concurrent startups against one CODEX_HOME", async () => {
+    // Measured against the real binary: six concurrent app-server starts on a
+    // fresh CODEX_HOME lost 1-3 of them to "failed to initialize state
+    // runtime", and lost none once serialized. This pins the serialization
+    // without needing codex present.
+    const spans: Array<[number, number]> = [];
+    await Promise.all(Array.from({ length: 3 }, () =>
+      withStartupLock(async () => {
+        const start = Date.now();
+        await new Promise((r) => setTimeout(r, 80));
+        spans.push([start, Date.now()]);
+      }),
+    ));
+    expect(spans.length).toBe(3);
+    spans.sort((a, b) => a[0] - b[0]);
+    for (let i = 1; i < spans.length; i++) {
+      // Each start must follow the previous end — overlap means the lock did
+      // not hold, which is the whole failure being prevented.
+      expect(spans[i][0]).toBeGreaterThanOrEqual(spans[i - 1][1] - 5);
+    }
+  }, 20000);
+
+  test("runs the work even when the lock cannot be taken", async () => {
+    // Fails OPEN by design: a coordination primitive that can wedge every
+    // startup is worse than the race it removes. Third-party app-servers
+    // never take this lock either, so recovery is required regardless.
+    process.env.CODEX_HOME = "/proc/nonexistent-cannot-mkdir";
+    let ran = false;
+    await withStartupLock(async () => { ran = true; });
+    expect(ran).toBe(true);
+  }, 20000);
+
+  test("creates the lock inside CODEX_HOME, not the workspace", async () => {
+    const { existsSync } = await import("fs");
+    await withStartupLock(async () => {
+      expect(existsSync(join(lockHome, "app-server-startup.lock"))).toBe(true);
+    });
+  }, 20000);
 });

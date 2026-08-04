@@ -440,9 +440,15 @@ async function main() {
   }
 }
 
-main().catch((e) => {
+main().catch(async (e) => {
   const msg = e instanceof Error ? e.message : String(e);
   console.error(`Fatal: ${msg}`);
+  // A failed connection reports the symptom ("process exited unexpectedly")
+  // while the cause sits in a stderr line the user has no reason to connect
+  // to it. Say what happened and what to do, when we can be specific.
+  const { explainConnectionFailure } = await import("./client");
+  const explained = explainConnectionFailure(e);
+  if (explained) console.error(explained);
   if (msg.includes("timed out")) {
     console.error("Tip: Resume with --resume <id> or increase --timeout");
   }

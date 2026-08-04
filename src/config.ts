@@ -80,6 +80,30 @@ export const config = {
     }
     return 30 * 60 * 1000; // 30 min in ms
   },
+  // How long a freshly spawned broker gets to bind its socket before the
+  // caller gives up and connects directly. Generous on purpose: falling back
+  // early saves the caller nothing, because a direct connection pays the same
+  // app-server startup cost — it only adds a SECOND concurrent startup, and
+  // concurrent startups are what collide on codex's shared sqlite state. The
+  // wait is cut short anyway when the broker process exits, so this deadline
+  // is only ever paid by a broker that is genuinely still coming up.
+  // Overridable via CODEX_COLLAB_BROKER_READY_TIMEOUT_MS for tests.
+  get brokerReadyTimeout(): number {
+    const raw = process.env.CODEX_COLLAB_BROKER_READY_TIMEOUT_MS;
+    if (raw !== undefined) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+    return 30_000; // 30s in ms
+  },
+
+  // Stages of connectDirect's close(). Named here rather than inlined so the
+  // shutdown path's cost is legible; nothing's correctness depends on them.
+  appServerStdinExitWait: 5_000,   // stdin EOF → SIGTERM
+  appServerTermExitWait: 3_000,    // SIGTERM → SIGKILL
+  /** Reap bound for the broker's startup guard, which kills the app-server
+   *  by PID rather than through close(). */
+  appServerReapTimeout: 3_000,
 
   // Limits
   maxRunsPerWorkspace: 50,
