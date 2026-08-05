@@ -173,6 +173,50 @@ describe("isProcessAlive", () => {
   });
 });
 
+describe("escalation reaches a group that outlived its leader", () => {
+  test("a descendant ignoring SIGTERM is still SIGKILLed after the grace", async () => {
+    // The app-server is a detached group LEADER whose tool subprocesses are
+    // members, so "leader exited, group did not" is the normal shape of a
+    // stuck tree — and gating escalation on the leader's own liveness strands
+    // exactly the descendant the escalation exists to reap.
+    if (process.platform === "win32") return; // no process groups
+    const pidFile = join(tmpdir(), `grouped-child-${process.pid}-${Date.now()}`);
+    // Leader backgrounds a TERM-ignoring child into its own group, records the
+    // child's pid, then exits — leaving the group alive without its leader.
+    const leader = spawn(
+      "bash",
+      ["-c", `bun -e 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)' & echo $! > "${pidFile}"; exit 0`],
+      { stdio: "ignore", detached: true },
+    );
+    const pgid = leader.pid!;
+    let childPid = 0;
+    try {
+      for (let i = 0; i < 100 && !childPid; i++) {
+        if (existsSync(pidFile)) childPid = Number(readFileSync(pidFile, "utf-8").trim());
+        if (!childPid) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(childPid).toBeGreaterThan(0);
+      // Let the leader exit and the child install its handler.
+      await new Promise((r) => setTimeout(r, 600));
+      expect(isProcessAlive(pgid)).toBe(false); // leader really is gone
+      expect(isProcessAlive(childPid)).toBe(true); // group really is not
+
+      terminateProcessTree(pgid, 300);
+
+      let alive = true;
+      for (let i = 0; i < 40 && alive; i++) {
+        alive = isProcessAlive(childPid);
+        if (alive) await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(alive).toBe(false);
+    } finally {
+      if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+      try { process.kill(-pgid, "SIGKILL"); } catch {}
+      rmSync(pidFile, { force: true });
+    }
+  }, 30000);
+});
+
 describe("delayed SIGKILL identity check", () => {
   test("a process that exits during the grace is not escalated against", async () => {
     // The escalation timer outlives its target. Without an identity check it

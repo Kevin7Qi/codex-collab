@@ -70,6 +70,26 @@ export async function waitForProcessTreeExit(
 }
 
 /**
+ * True when the process group led by `pid` still has a live member.
+ *
+ * The group outliving its leader is the normal case here, not an edge one: the
+ * app-server is spawned detached as a group leader and its tool subprocesses
+ * are members, so a leader that exits on SIGTERM can leave members behind.
+ * A pgid stays reserved while any member lives, so a live group is never a
+ * recycled id — which is why escalating against one needs no identity check.
+ */
+function groupAlive(pid: number): boolean {
+  if (isWindows) return false; // no process groups; taskkill /T covers the tree
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM: the group exists but is not ours to signal — treat as alive.
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
  * Best-effort identity token for a running PID — its start time.
  *
  * PIDs are recycled. A delayed SIGKILL that fires after its target already
@@ -174,8 +194,11 @@ function terminateUnix(pid: number, graceMs = 500): void {
     }
   }
 
-  // If still alive after a short grace period, escalate to SIGKILL.
-  if (isProcessAlive(pid)) {
+  // If anything survives the grace period, escalate to SIGKILL. What we are
+  // escalating against is the GROUP, so the leader's own liveness is not the
+  // question — a leader that exits while a descendant ignores SIGTERM leaves
+  // a group that still needs killing.
+  if (isProcessAlive(pid) || groupAlive(pid)) {
     // Inside the liveness check: this shells out to `ps` synchronously, and
     // a PID that is already gone needs no identity to compare against later.
     const identity = processStartToken(pid);
@@ -183,8 +206,17 @@ function terminateUnix(pid: number, graceMs = 500): void {
       // Re-verify before escalating. The target usually exits during the
       // grace, and killing a recycled PID would take out an unrelated
       // process — a real risk once the grace is measured in seconds.
-      if (!isProcessAlive(pid)) return;
-      if (identity !== null && processStartToken(pid) !== identity) return;
+      //
+      // Only a LIVE leader can be a recycled pid, so only it needs the
+      // identity check. If the leader is gone but its group is not, the pgid
+      // is still reserved by the surviving members and is safe to signal —
+      // suppressing there would strand exactly the descendants this escalation
+      // exists to reap.
+      if (isProcessAlive(pid)) {
+        if (identity !== null && processStartToken(pid) !== identity) return;
+      } else if (!groupAlive(pid)) {
+        return;
+      }
       try {
         process.kill(-pid, "SIGKILL");
       } catch (e) {
