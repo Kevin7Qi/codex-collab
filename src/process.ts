@@ -175,8 +175,10 @@ function terminateUnix(pid: number, graceMs = 500): void {
   }
 
   // If still alive after a short grace period, escalate to SIGKILL.
-  const identity = processStartToken(pid);
   if (isProcessAlive(pid)) {
+    // Inside the liveness check: this shells out to `ps` synchronously, and
+    // a PID that is already gone needs no identity to compare against later.
+    const identity = processStartToken(pid);
     const timer = setTimeout(() => {
       // Re-verify before escalating. The target usually exits during the
       // grace, and killing a recycled PID would take out an unrelated
