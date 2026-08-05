@@ -10,10 +10,18 @@ import path from "node:path";
 import { spawn as childSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { BrokerState, SessionState, ParsedEndpoint } from "./types";
-import { connectDirect, type AppServerClient } from "./client";
+import { connectDirectWithRetry, type AppServerClient } from "./client";
 import { config, resolveStateDir } from "./config";
 import { acquireLockAsync, LockTimeoutError } from "./lock";
 import { terminateProcessTree, isProcessAlive, processLooksLikeBun } from "./process";
+
+/** Grace a terminated broker gets before SIGKILL. Long enough for its own
+ *  shutdown to close the app-server it spawned rather than orphan it. Hygiene,
+ *  not correctness: startup is serialized on CODEX_HOME, so no replacement
+ *  depends on this broker being gone first. */
+const BROKER_SHUTDOWN_GRACE_MS = 10_000;
+
+
 
 /** JSON-RPC error code returned when the broker is busy with another request. */
 export const BROKER_BUSY_RPC_CODE = -32001;
@@ -268,9 +276,15 @@ export function clearBrokerArtifacts(stateDir: string, state: BrokerState): void
  * `clearBrokerArtifacts` instead.
  */
 export function teardownBroker(stateDir: string, state: BrokerState): void {
-  // Kill process if PID is alive
+  // Fire-and-forget. Waiting here was how a replacement used to avoid
+  // colliding with this broker's app-server, but it left the broker published
+  // while it died: a concurrent invocation could connect to a shutting-down
+  // broker, and the delayed artifact cleanup could delete a replacement's
+  // state. Startup is serialized on CODEX_HOME instead, which needs no window.
+  // The grace is hygiene — enough for the broker's own shutdown to close its
+  // app-server rather than orphan it.
   if (state.pid !== null && isProcessAlive(state.pid)) {
-    terminateProcessTree(state.pid);
+    terminateProcessTree(state.pid, BROKER_SHUTDOWN_GRACE_MS);
   }
   clearBrokerArtifacts(stateDir, state);
 }
@@ -373,29 +387,35 @@ function spawnBrokerServer(
   return { pid: proc.pid, exited };
 }
 
+/** Why a broker did not become usable. The two failures are not the same
+ *  event and must not be reported with the same words: "exited" means it
+ *  crashed and there is a reason in its log, "timeout" means it is alive but
+ *  slow and still holds an app-server that has to be reaped. */
+type BrokerReadiness = "ready" | "exited" | "timeout";
+
 /**
  * Wait for the broker to become alive by polling the socket.
- * Returns true if alive within the timeout, false otherwise.
  *
  * Aborts early if the spawned broker process exits before becoming ready —
- * polling the full timeout against a dead pid is wasted time.
+ * polling the full timeout against a dead pid is wasted time, and the caller
+ * needs to know it was a crash rather than slowness.
  */
 async function waitForBrokerReady(
   endpoint: string,
   spawned: SpawnedBroker | null = null,
-  timeoutMs = 10_000,
+  timeoutMs = config.brokerReadyTimeout,
   pollMs = 100,
-): Promise<boolean> {
+): Promise<BrokerReadiness> {
   let exitedEarly = false;
   spawned?.exited.then(() => { exitedEarly = true; }).catch(() => {});
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (exitedEarly) return false;
-    if (await isBrokerAlive(endpoint, 200)) return true;
+    if (exitedEarly) return "exited";
+    if (await isBrokerAlive(endpoint, 200)) return "ready";
     await new Promise((r) => setTimeout(r, pollMs));
   }
-  return false;
+  return exitedEarly ? "exited" : "timeout";
 }
 
 // ─── Main connection entry point ──────────────────────────────────────────
@@ -478,7 +498,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         `[broker] Existing broker was spawned by codex-collab ${state.version ?? "(pre-0.3)"}, this is ${config.clientVersion} — using a direct connection until it retires on idle.`,
       );
       saveSession();
-      return connectDirect({ cwd });
+      return connectDirectWithRetry({ cwd });
     }
     if (!(await isBrokerAlive(state.endpoint))) return null;
     try {
@@ -488,7 +508,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         await client.close();
         console.error("[broker] Broker is busy — using direct connection for this invocation.");
         saveSession();
-        return connectDirect({ cwd });
+        return connectDirectWithRetry({ cwd });
       }
       saveSession();
       return client;
@@ -516,7 +536,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
     // Could not acquire lock — another process may be spawning.
     // Fall back to direct connection.
     console.error("[broker] Warning: could not acquire spawn lock. Using direct connection.");
-    return connectDirect({ cwd });
+    return connectDirectWithRetry({ cwd });
   }
 
   try {
@@ -543,7 +563,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
       } catch (e) {
         console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
       }
-      return connectDirect({ cwd });
+      return connectDirectWithRetry({ cwd });
     };
 
     // 3. Spawn a new broker
@@ -556,14 +576,25 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
     }
 
     // 4. Wait for the broker to be ready (aborts early if it crashes)
-    const ready = await waitForBrokerReady(endpoint, spawned);
-    if (!ready) {
-      try {
-        terminateProcessTree(spawned.pid);
-      } catch (e) {
-        console.error(`[broker] Warning: could not terminate orphaned broker pid ${spawned.pid}: ${e instanceof Error ? e.message : String(e)}`);
+    const readiness = await waitForBrokerReady(endpoint, spawned);
+    if (readiness !== "ready") {
+      const brokerLog = path.join(stateDir, "broker.log");
+      // Only a broker that is still RUNNING needs stopping. One that already
+      // exited took its app-server down with it. No wait either way: startup
+      // is serialized on CODEX_HOME, so the direct connection below cannot
+      // collide with whatever this broker is still finishing.
+      if (readiness === "timeout") {
+        try {
+          terminateProcessTree(spawned.pid, BROKER_SHUTDOWN_GRACE_MS);
+        } catch (e) {
+          console.error(`[broker] Warning: could not stop the unresponsive broker (pid ${spawned.pid}): ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
-      return fallbackToDirect("broker did not become ready in time — see broker.log for the spawn failure reason");
+      return fallbackToDirect(
+        readiness === "exited"
+          ? `the background broker exited while starting — see ${brokerLog} for why`
+          : `the background broker did not start within ${config.brokerReadyTimeout / 1000}s — see ${brokerLog} for why`,
+      );
     }
 
     // 5. Connect to the new broker
@@ -583,7 +614,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
       console.error(
         `[broker] Warning: failed to connect to new broker: ${(e as Error).message}. Using direct connection.`,
       );
-      return connectDirect({ cwd });
+      return connectDirectWithRetry({ cwd });
     }
   } finally {
     release();

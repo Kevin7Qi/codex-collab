@@ -11,7 +11,7 @@ import {
   type ApprovalPolicy,
   type ApprovalMode,
 } from "../config";
-import { type AppServerClient, connectDirect } from "../client";
+import { type AppServerClient, connectDirectWithRetry } from "../client";
 import { ensureConnection, getCurrentSessionId, isBrokerBusyError } from "../broker";
 import {
   registerThread,
@@ -750,7 +750,10 @@ export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>,
       // sequence.
       console.error("[broker] Broker became busy after handshake — retrying with direct connection.");
       await safeCloseClient(client);
-      client = await connectDirect({ cwd: workingDir });
+      // Retrying variant: this spawns an app-server while the busy broker's
+      // is still live, which is exactly when they contend for codex's sqlite
+      // state — the one path that most needs the second attempt.
+      client = await connectDirectWithRetry({ cwd: workingDir });
       activeClient = client;
       return await fn(client);
     }

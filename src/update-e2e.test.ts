@@ -39,6 +39,10 @@ function sh(cmd: string[], opts: { cwd?: string; env?: Record<string, string | u
   return { status: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
 }
 
+if (!enabled) {
+  console.warn("\n⚠️  update E2E suite SKIPPED — set RUN_UPDATE_E2E=1 (non-Windows, codex on PATH) to run it.\n");
+}
+
 describe.skipIf(!enabled)("update E2E against a mock release host", () => {
   let stage: string;
   let home: string;

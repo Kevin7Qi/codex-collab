@@ -347,3 +347,31 @@ describe("describeAuth (health account check)", () => {
     expect(describeAuth({ account: null }).detail).not.toMatch(/NOT AUTHENTICATED/);
   });
 });
+
+describe("brokerReadyTimeout", () => {
+  const ENV = "CODEX_COLLAB_BROKER_READY_TIMEOUT_MS";
+  const original = process.env[ENV];
+  afterAll(() => {
+    if (original === undefined) delete process.env[ENV];
+    else process.env[ENV] = original;
+  });
+
+  test("defaults to a window wide enough for a cold app-server", () => {
+    delete process.env[ENV];
+    // Falling back early does not save the caller time — it only adds a
+    // second concurrent app-server startup, which is what collides.
+    expect(config.brokerReadyTimeout).toBe(30_000);
+  });
+
+  test("honors the env override so tests can shorten it", () => {
+    process.env[ENV] = "250";
+    expect(config.brokerReadyTimeout).toBe(250);
+  });
+
+  test("ignores a non-positive or unparseable override", () => {
+    for (const bad of ["0", "-1", "abc", ""]) {
+      process.env[ENV] = bad;
+      expect(config.brokerReadyTimeout).toBe(30_000);
+    }
+  });
+});
