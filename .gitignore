@@ -47,6 +47,8 @@ docs/
 # Bare git repo artifacts
 HEAD
 config
+config.lock
+config.worktree
 hooks
 objects
 refs
