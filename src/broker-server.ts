@@ -25,16 +25,16 @@ import {
   type AppServerClient,
 } from "./client";
 import { terminateProcessTree, waitForProcessTreeExit } from "./process";
-
-/** Awaiting this parks the caller forever. Used where an async handler is
- *  already on its way to process.exit(): the point is to stop the main flow
- *  advancing in the meantime, not to ever resume. */
-const untilProcessExits = (): Promise<never> => new Promise<never>(() => {});
 import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
 import { RpcError } from "./types";
 import { config } from "./config";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
+
+/** Awaiting this parks the caller forever. Used where an async handler is
+ *  already on its way to process.exit(): the point is to stop the main flow
+ *  advancing in the meantime, not to ever resume. */
+const untilProcessExits = (): Promise<never> => new Promise<never>(() => {});
 
 const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 
@@ -138,9 +138,17 @@ async function main() {
     startupSignalled = true;
     void (async () => {
       process.stderr.write(`[broker-server] ${signal} while starting — stopping the app server before exit\n`);
-      if (appServerPid !== null) {
-        terminateProcessTree(appServerPid);
-        await waitForProcessTreeExit(appServerPid, config.appServerReapTimeout);
+      // Loop rather than read `appServerPid` once: connectDirectWithRetry runs
+      // independently of this guard and can spawn a REPLACEMENT while we are
+      // waiting on the one we just terminated. Exiting then would orphan it —
+      // the very failure this guard exists to prevent. `reaped` bounds the
+      // loop to the attempts that actually happened.
+      const reaped = new Set<number>();
+      while (appServerPid !== null && !reaped.has(appServerPid)) {
+        const pid = appServerPid;
+        reaped.add(pid);
+        terminateProcessTree(pid);
+        await waitForProcessTreeExit(pid, config.appServerReapTimeout);
       }
       process.exit(0);
     })();
@@ -155,7 +163,14 @@ async function main() {
   // the client sees only "broker did not become ready in time".
   const appClient = await connectDirectWithRetry({
     cwd,
-    onSpawn: (pid) => { appServerPid = pid; },
+    onSpawn: (pid) => {
+      appServerPid = pid;
+      // Spawned behind a guard that is already unwinding — signal it now
+      // rather than leave it initializing (and holding codex's sqlite state)
+      // for however long the guard still spends reaping its predecessor.
+      // The guard's loop picks this pid up and waits for it to go.
+      if (startupSignalled) terminateProcessTree(pid);
+    },
   });
 
   // Signalled while the handshake was completing: the guard is already
