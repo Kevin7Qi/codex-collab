@@ -1021,12 +1021,19 @@ describe.skipIf(!LOCK_DIR_WRITABLE)("withStartupLock", () => {
     // Hold the lock for real rather than pointing CODEX_HOME at an
     // unwritable path: the file lives in OUR state dir and is only KEYED by
     // CODEX_HOME, so a bogus home still acquires cleanly and would assert
-    // nothing. A fresh mtime also keeps the holder off the stale path, so
-    // this exercises the timeout branch rather than a stale break.
-    const { mkdirSync, writeFileSync, rmSync } = await import("fs");
+    // nothing.
+    const { mkdirSync, writeFileSync, rmSync, utimesSync } = await import("fs");
     const heldLock = startupLockPath();
     mkdirSync(join(config.dataDir, "locks"), { recursive: true, mode: 0o700 });
     writeFileSync(heldLock, "", { flag: "wx" });
+    // Keep the holder looking alive for as long as acquisition spins. The
+    // spin is a fixed 100 attempts, not a fixed duration, so on a slow enough
+    // runner it would outlast the 10s stale threshold, get its lock broken,
+    // and acquire cleanly — passing `ran` while silently testing nothing.
+    // Refreshing mtime pins the timeout branch at any runner speed.
+    const keepFresh = setInterval(() => {
+      try { utimesSync(heldLock, new Date(), new Date()); } catch {}
+    }, 500);
 
     const warnings: string[] = [];
     const original = console.error;
@@ -1035,6 +1042,7 @@ describe.skipIf(!LOCK_DIR_WRITABLE)("withStartupLock", () => {
     try {
       await withStartupLock(async () => { ran = true; });
     } finally {
+      clearInterval(keepFresh);
       console.error = original;
       rmSync(heldLock, { force: true });
     }
