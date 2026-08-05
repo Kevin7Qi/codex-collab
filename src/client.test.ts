@@ -1017,11 +1017,33 @@ describe.skipIf(!LOCK_DIR_WRITABLE)("withStartupLock", () => {
     // Fails OPEN by design: a coordination primitive that can wedge every
     // startup is worse than the race it removes. Third-party app-servers
     // never take this lock either, so recovery is required regardless.
-    process.env.CODEX_HOME = "/proc/nonexistent-cannot-mkdir";
+    //
+    // Hold the lock for real rather than pointing CODEX_HOME at an
+    // unwritable path: the file lives in OUR state dir and is only KEYED by
+    // CODEX_HOME, so a bogus home still acquires cleanly and would assert
+    // nothing. A fresh mtime also keeps the holder off the stale path, so
+    // this exercises the timeout branch rather than a stale break.
+    const { mkdirSync, writeFileSync, rmSync } = await import("fs");
+    const heldLock = startupLockPath();
+    mkdirSync(join(config.dataDir, "locks"), { recursive: true, mode: 0o700 });
+    writeFileSync(heldLock, "", { flag: "wx" });
+
+    const warnings: string[] = [];
+    const original = console.error;
+    console.error = (...a: unknown[]) => { warnings.push(a.join(" ")); };
     let ran = false;
-    await withStartupLock(async () => { ran = true; });
+    try {
+      await withStartupLock(async () => { ran = true; });
+    } finally {
+      console.error = original;
+      rmSync(heldLock, { force: true });
+    }
+
     expect(ran).toBe(true);
-  }, 20000);
+    // Distinguishes failing open from quietly acquiring — without this the
+    // assertion above passes even with the catch removed.
+    expect(warnings.some((w) => /could not serialize app-server startup/.test(w))).toBe(true);
+  }, 30000);
 
   test("keys the lock by CODEX_HOME but keeps the file in our own state dir", async () => {
     // ~/.codex belongs to codex. Scattering files through another program's
