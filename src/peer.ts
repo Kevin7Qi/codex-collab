@@ -20,7 +20,7 @@
 // exactly as before.
 
 import net from "node:net";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -32,6 +32,7 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
+import { registerThread } from "./threads";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -55,11 +56,40 @@ export interface PeerHost {
 
 interface Conversation {
   threadId: string;
-  /** Reply socket path (the sender's own messaging socket). */
+  /** Short ID from the thread index — names the thread peer. */
+  shortId?: string;
+  /** Reply socket path (the sender's own messaging socket). Updated to the
+   *  most recent sender — the person actively talking is who consults and
+   *  replies go to. */
   replyPath: string;
   /** Sender's display name, for attribution inside Codex's context. */
   fromName: string;
+  /** Last inbound/outbound activity, for thread-peer retirement. */
+  lastActivity: number;
 }
+
+/** A per-thread peer: its own registry entry (backed by a holder process
+ *  whose only job is to be a live pid) and its own socket, so each Codex
+ *  conversation is independently addressable from ListAgents — the mirror
+ *  of how each Claude session is. The holder's stdin is a pipe from the
+ *  broker: a crashed broker closes the pipe, the holder exits, and the
+ *  registry entry invalidates itself — no cleanup code required. */
+interface ThreadPeer {
+  threadId: string;
+  name: string;
+  socketPath: string;
+  entryPath: string;
+  holder: ChildProcess;
+  server: net.Server;
+}
+
+/** Retire a thread peer after this much conversation inactivity. The
+ *  conversation itself survives (the front door continues it, and the
+ *  thread peer re-materializes on the next message). */
+export const THREAD_PEER_LINGER_MS = 30 * 60_000;
+
+/** ListAgents flooding guard: at most this many thread peers at once. */
+export const MAX_THREAD_PEERS = 8;
 
 interface PendingConsult {
   threadId: string;
@@ -272,6 +302,8 @@ export function createPeer(host: PeerHost): Peer {
   const conversations = new Map<string, Conversation>();
   /** threadId → conversation (reverse index for consult + reply routing). */
   const threadConversations = new Map<string, Conversation>();
+  /** threadId → its per-thread peer (registry entry + socket + holder). */
+  const threadPeers = new Map<string, ThreadPeer>();
   /** threadId → accumulated reply text for a peer-initiated turn. */
   const replyBuffers = new Map<string, string[]>();
   /** threadId → pending consult awaiting the sender's next message. */
@@ -282,6 +314,7 @@ export function createPeer(host: PeerHost): Peer {
   let server: net.Server | null = null;
   let active = false;
   let stopped = false;
+  let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── Persistence (best-effort; a lost map only means a fresh thread) ──
 
@@ -293,8 +326,10 @@ export function createPeer(host: PeerHost): Peer {
           if (typeof c?.threadId === "string" && typeof c?.replyPath === "string") {
             const conv: Conversation = {
               threadId: c.threadId,
+              shortId: typeof c.shortId === "string" ? c.shortId : undefined,
               replyPath: c.replyPath,
               fromName: typeof c.fromName === "string" ? c.fromName : "claude",
+              lastActivity: Date.now(),
             };
             conversations.set(conv.replyPath, conv);
             threadConversations.set(conv.threadId, conv);
@@ -324,8 +359,18 @@ export function createPeer(host: PeerHost): Peer {
 
   // ── Outbound ──
 
-  function deliverTo(replyPath: string, text: string): void {
-    const line = buildEnvelope({ text, ourSocketPath: socketPath, ourName: name });
+  /** The identity a conversation speaks as: its thread peer when one is
+   *  registered, else the front door. Replying to our messages therefore
+   *  naturally continues the SAME conversation — the reply address is the
+   *  thread binding. */
+  function identityFor(threadId: string | null): { sock: string; name: string } {
+    const tp = threadId ? threadPeers.get(threadId) : undefined;
+    return tp ? { sock: tp.socketPath, name: tp.name } : { sock: socketPath, name };
+  }
+
+  function deliverTo(replyPath: string, text: string, asThreadId: string | null = null): void {
+    const id = identityFor(asThreadId);
+    const line = buildEnvelope({ text, ourSocketPath: id.sock, ourName: id.name });
     const sock = net.connect({ path: replyPath }, () => {
       sock.write(line);
       sock.end();
@@ -333,6 +378,101 @@ export function createPeer(host: PeerHost): Peer {
     sock.on("error", (e) => {
       host.log(`peer: could not deliver to ${replyPath}: ${e.message}`);
     });
+  }
+
+  // ── Per-thread peers ──
+
+  /** Attach a line-parsing inbound handler to a peer socket. `boundThreadId`
+   *  pins messages to a specific conversation (thread-peer sockets); null
+   *  means front-door routing by sender. */
+  function attachSocketHandler(server: net.Server, boundThreadId: string | null): void {
+    server.on("connection", (sock) => {
+      sock.setEncoding("utf8");
+      let buffer = "";
+      sock.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (buffer.length > 1024 * 1024) { sock.destroy(); return; }
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          const msg = parseEnvelope(line);
+          if (!msg) continue;
+          handleInbound(msg, boundThreadId).catch((e) => {
+            host.log(`peer: inbound handling failed: ${e instanceof Error ? e.message : String(e)}`);
+          });
+        }
+      });
+      sock.on("error", () => { /* sender hangups are routine */ });
+    });
+  }
+
+  function createThreadPeer(threadId: string, shortId: string): void {
+    if (threadPeers.has(threadId)) return;
+    if (threadPeers.size >= MAX_THREAD_PEERS) {
+      host.log(`peer: thread-peer cap (${MAX_THREAD_PEERS}) reached — ${threadId} stays behind the front door`);
+      return;
+    }
+    try {
+      // The holder is a liveness token: registry entries bind filename pid ==
+      // content pid == a live process, one entry per pid, so every extra peer
+      // needs a real (tiny) process. Its stdin pipe ties its life to ours.
+      const holder = spawn("sh", ["-c", "read _ || true"], {
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      if (!holder.pid) throw new Error("holder spawn returned no pid");
+      const tpName = `codex-${shortId}`;
+      const tpSocketPath = join(host.stateDir, `peer-${shortId}.sock`);
+      const tpEntryPath = join(sessionsDir(), `${holder.pid}.json`);
+
+      try { unlinkSync(tpSocketPath); } catch { /* none */ }
+      const prevUmask = process.umask(0o077);
+      const server = net.createServer();
+      attachSocketHandler(server, threadId);
+      server.listen(tpSocketPath);
+      process.umask(prevUmask);
+
+      const entry = buildRegistryEntry({
+        pid: holder.pid,
+        cwd: host.cwd,
+        name: tpName,
+        socketPath: tpSocketPath,
+        version: sniffRegistryVersion(),
+        procStart: procStartOf(holder.pid),
+        sessionId: randomUUID(),
+      });
+      writeFileSync(tpEntryPath, JSON.stringify(entry), { mode: 0o644 });
+      holder.unref();
+
+      threadPeers.set(threadId, {
+        threadId, name: tpName, socketPath: tpSocketPath, entryPath: tpEntryPath, holder, server,
+      });
+      host.log(`peer: thread peer "${tpName}" registered for ${threadId}`);
+    } catch (e) {
+      host.log(`peer: could not create thread peer for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  function retireThreadPeer(threadId: string): void {
+    const tp = threadPeers.get(threadId);
+    if (!tp) return;
+    threadPeers.delete(threadId);
+    try { tp.server.close(); } catch { /* already down */ }
+    try { unlinkSync(tp.socketPath); } catch { /* none */ }
+    try { unlinkSync(tp.entryPath); } catch { /* none */ }
+    try { tp.holder.kill(); } catch { /* already dead */ }
+  }
+
+  /** Sweep idle thread peers. The conversation record survives — the next
+   *  front-door message re-materializes the thread peer. */
+  function sweepThreadPeers(): void {
+    const now = Date.now();
+    for (const [threadId] of threadPeers) {
+      const conv = threadConversations.get(threadId);
+      const idle = !conv || now - conv.lastActivity > THREAD_PEER_LINGER_MS;
+      if (idle && !host.threadHasTurn(threadId)) retireThreadPeer(threadId);
+    }
   }
 
   // ── Internal thread ownership ──
@@ -352,12 +492,13 @@ export function createPeer(host: PeerHost): Peer {
           updateStatus("idle");
           const conv = threadConversations.get(threadId);
           if (!conv) return;
+          conv.lastActivity = Date.now();
           const reply = (texts ?? []).join("\n\n").trim();
           if (reply) {
-            deliverTo(conv.replyPath, reply);
+            deliverTo(conv.replyPath, reply, threadId);
           } else if (method === "turn/failed") {
             const err = (params?.error as { message?: string } | undefined)?.message;
-            deliverTo(conv.replyPath, `[codex-collab] The turn failed before producing a reply${err ? `: ${err}` : "."}`);
+            deliverTo(conv.replyPath, `[codex-collab] The turn failed before producing a reply${err ? `: ${err}` : "."}`, threadId);
           }
         }
       },
@@ -366,7 +507,7 @@ export function createPeer(host: PeerHost): Peer {
 
   // ── Thread bootstrap ──
 
-  async function startThread(): Promise<string> {
+  async function startThread(fromName: string): Promise<{ threadId: string; shortId: string }> {
     const userConfig = readUserConfig();
     const params: Record<string, unknown> = {
       cwd: host.cwd,
@@ -378,14 +519,29 @@ export function createPeer(host: PeerHost): Peer {
       dynamicTools: PEER_DYNAMIC_TOOLS,
     };
     if (userConfig.model) params.model = userConfig.model;
-    const result = await host.request("thread/start", params) as { thread: { id: string } };
+    const result = await host.request("thread/start", params) as {
+      thread: { id: string };
+      model?: string;
+    };
     const threadId = result.thread.id;
+    // Peer conversations live in the same thread index the CLI uses, so
+    // `codex-collab threads` shows them and short IDs stay one namespace.
+    let shortId: string;
+    try {
+      shortId = registerThread(host.stateDir, threadId, {
+        model: result.model,
+        cwd: host.cwd,
+        preview: `peer conversation with ${fromName}`,
+      });
+    } catch {
+      shortId = threadId.replace(/-/g, "").slice(-8); // index unavailable — derive a stable suffix
+    }
     // Keep peer threads out of Codex's memory consolidation, like every
     // thread codex-collab creates. Non-fatal.
     try {
       await host.request("thread/memoryMode/set", { threadId, mode: "disabled" });
     } catch { /* older codex */ }
-    return threadId;
+    return { threadId, shortId };
   }
 
   /** Minimal user-defaults read (model/sandbox). commands/shared.ts owns the
@@ -417,23 +573,30 @@ export function createPeer(host: PeerHost): Peer {
 
   // ── Inbound ──
 
-  async function handleInbound(msg: InboundMessage): Promise<void> {
+  async function handleInbound(msg: InboundMessage, boundThreadId: string | null = null): Promise<void> {
     if (seenMsgIds.has(msg.msgId)) return;
     seenMsgIds.add(msg.msgId);
     if (seenMsgIds.size > 500) {
       for (const id of [...seenMsgIds].slice(0, 250)) seenMsgIds.delete(id);
     }
 
-    let conv = conversations.get(msg.replyPath);
+    // A thread-peer socket pins the conversation; the front door routes by
+    // sender. Either way the most recent sender becomes the conversation's
+    // counterpart — the person actively talking is who consults and replies
+    // go to.
+    let conv = boundThreadId
+      ? threadConversations.get(boundThreadId)
+      : conversations.get(msg.replyPath);
 
     // A pending consult on this conversation's thread consumes the message
     // as its answer — that is the whole correlation rule: the reply address
-    // binds the thread, and one consult per (thread, sender) is in flight.
+    // binds the thread, and one consult per thread is in flight.
     if (conv) {
       const pending = pendingConsults.get(conv.threadId);
-      if (pending && pending.senderKey === msg.replyPath) {
+      if (pending) {
         pendingConsults.delete(conv.threadId);
         clearTimeout(pending.timer);
+        conv.lastActivity = Date.now();
         pending.resolve(msg.text);
         return;
       }
@@ -441,15 +604,35 @@ export function createPeer(host: PeerHost): Peer {
 
     // Ensure a thread for this conversation.
     if (!conv) {
-      const threadId = await startThread();
-      conv = { threadId, replyPath: msg.replyPath, fromName: msg.fromName };
-      conversations.set(msg.replyPath, conv);
-      threadConversations.set(threadId, conv);
-      saveConversations();
-      host.log(`peer: new conversation with ${msg.fromName} → thread ${threadId}`);
-    } else if (msg.fromName && conv.fromName !== msg.fromName) {
-      conv.fromName = msg.fromName;
-      saveConversations();
+      if (boundThreadId) {
+        // Thread-peer socket for a conversation we no longer track (state
+        // loss) — rebind to the existing thread rather than starting fresh.
+        conv = { threadId: boundThreadId, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
+        conversations.set(msg.replyPath, conv);
+        threadConversations.set(boundThreadId, conv);
+        saveConversations();
+      } else {
+        const { threadId, shortId } = await startThread(msg.fromName);
+        conv = { threadId, shortId, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
+        conversations.set(msg.replyPath, conv);
+        threadConversations.set(threadId, conv);
+        createThreadPeer(threadId, shortId);
+        saveConversations();
+        host.log(`peer: new conversation with ${msg.fromName} → thread ${threadId}`);
+      }
+    } else {
+      conv.lastActivity = Date.now();
+      if (conv.replyPath !== msg.replyPath || (msg.fromName && conv.fromName !== msg.fromName)) {
+        conversations.delete(conv.replyPath);
+        conv.replyPath = msg.replyPath;
+        conv.fromName = msg.fromName || conv.fromName;
+        conversations.set(conv.replyPath, conv);
+        saveConversations();
+      }
+      // Re-materialize a retired (or never-created) thread peer on activity.
+      if (!threadPeers.has(conv.threadId)) {
+        createThreadPeer(conv.threadId, conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8));
+      }
     }
 
     // Deliver in native peer form, resuming an unloaded thread if needed.
@@ -468,9 +651,12 @@ export function createPeer(host: PeerHost): Peer {
         // Thread unrecoverable (deleted?) — start fresh and redeliver.
         host.log(`peer: thread ${conv.threadId} unrecoverable (${e instanceof Error ? e.message : String(e)}) — starting a new one`);
         threadConversations.delete(conv.threadId);
-        const threadId = await startThread();
+        retireThreadPeer(conv.threadId);
+        const { threadId, shortId } = await startThread(msg.fromName);
         conv.threadId = threadId;
+        conv.shortId = shortId;
         threadConversations.set(threadId, conv);
+        createThreadPeer(threadId, shortId);
         saveConversations();
         await injectPeerMessage(threadId, msg.fromName, msg.text);
       }
@@ -528,6 +714,7 @@ export function createPeer(host: PeerHost): Peer {
     deliverTo(
       conv.replyPath,
       `[consult] ${question}\n\n(Codex is waiting on your answer — reply to this peer to deliver it. If no answer arrives within ${Math.round(CONSULT_TIMEOUT_MS / 60000)} minutes, Codex proceeds on its own.)`,
+      threadId,
     );
 
     const answer = await new Promise<string | null>((resolve) => {
@@ -575,26 +762,8 @@ export function createPeer(host: PeerHost): Peer {
       // the socket must exist before anyone can read the advertisement.
       try { unlinkSync(socketPath); } catch { /* none */ }
       const prevUmask = process.umask(0o077);
-      server = net.createServer((sock) => {
-        sock.setEncoding("utf8");
-        let buffer = "";
-        sock.on("data", (chunk: string) => {
-          buffer += chunk;
-          if (buffer.length > 1024 * 1024) { sock.destroy(); return; }
-          let idx: number;
-          while ((idx = buffer.indexOf("\n")) !== -1) {
-            const line = buffer.slice(0, idx).trim();
-            buffer = buffer.slice(idx + 1);
-            if (!line) continue;
-            const msg = parseEnvelope(line);
-            if (!msg) continue;
-            handleInbound(msg).catch((e) => {
-              host.log(`peer: inbound handling failed: ${e instanceof Error ? e.message : String(e)}`);
-            });
-          }
-        });
-        sock.on("error", () => { /* sender hangups are routine */ });
-      });
+      server = net.createServer();
+      attachSocketHandler(server, null);
       server.listen(socketPath);
       process.umask(prevUmask);
 
@@ -613,6 +782,9 @@ export function createPeer(host: PeerHost): Peer {
         pid: process.pid, name, socketPath, startedAt: new Date().toISOString(),
       }, null, 2) + "\n", { mode: 0o600 });
 
+      sweepTimer = setInterval(sweepThreadPeers, 5 * 60_000);
+      sweepTimer.unref?.();
+
       active = true;
       host.log(`peer: registered as "${name}" (socket ${socketPath})`);
       return true;
@@ -627,11 +799,13 @@ export function createPeer(host: PeerHost): Peer {
     if (stopped) return;
     stopped = true;
     active = false;
+    if (sweepTimer) clearInterval(sweepTimer);
     for (const [threadId, pending] of pendingConsults) {
       clearTimeout(pending.timer);
       pending.resolve(null);
       pendingConsults.delete(threadId);
     }
+    for (const [threadId] of threadPeers) retireThreadPeer(threadId);
     try { server?.close(); } catch { /* already down */ }
     try { unlinkSync(socketPath); } catch { /* none */ }
     try { unlinkSync(entryPath); } catch { /* none */ }
