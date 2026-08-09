@@ -15,6 +15,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 
 ## 核心优势
 
+- **原生对等消息**：工作区 broker 会将 Codex 注册为 Claude Code 跨会话消息体系中的对等节点，Claude 会话可直接向 Codex 发送消息（`SendMessage`），Codex 也会以消息回复——任务中途还能通过 `collab.consult` 工具向 Claude 提问。热路径上不再经过 CLI。
 - **结构化通信**：与 Codex 之间通过 stdio JSON-RPC 通信，每个事件都有完整的类型定义，可解析、可追踪。
 - **实时进度反馈**：Codex 工作时实时推送进度，Claude 随时掌握运行状态。
 - **一键代码审查**：一条命令即可在只读沙箱中审查 PR、未提交更改或特定 commit。
@@ -121,6 +122,20 @@ codex-collab run "大规模重构" --detach --approval auto
 codex-collab follow --watch
 ```
 
+## 原生对等消息
+
+在 macOS/Linux 上，若所用 Claude Code 支持跨会话消息，工作区 broker 会把 Codex 注册进 Claude Code 的会话注册表：
+
+```bash
+codex-collab peer up      # 启动 broker 与对等节点；单独执行 `peer` 查看状态
+```
+
+此后，任意 Claude 会话的 `ListAgents` 中都会出现名为 `codex-<工作区>` 的对等节点——向它发送消息，Codex 即接手任务，完成后以对等消息回复。每个对话还会以独立的 `codex-<短ID>` 节点出现（回复即来自该地址，向其回信即延续该对话），并以相同短 ID 显示在 `codex-collab threads` 中。
+
+任务进行中，Codex 可通过 `collab.consult` 工具调用向 Claude 提问：问题以 `[consult]` 消息送达，该会话的下一条回复会直接送回 Codex 正在运行的回合。consult 采取超时放行策略：无人应答时超时后 Codex 自行判断并继续。
+
+该机制可平滑降级：在 Windows 上、无会话注册表时、或设置 `CODEX_COLLAB_PEER=off` 后，下述各项功能与从前完全一致。只要有 Claude 会话在运行，broker 就保持常驻；最后一个会话退出后按常规空闲超时退场。
+
 ## CLI 命令
 
 | 命令 | 说明 |
@@ -131,6 +146,7 @@ codex-collab follow --watch
 | `follow [id]` | 在你自己的终端分屏中实时查看运行中的会话。不带 ID 时自动附着到活跃运行；`--watch` 会持续跟踪每一次新运行 |
 | `output <id> [--last]` | 查看会话完整日志（`--last`: 只输出最近一轮的结果） |
 | `kill <id> [--clear]` | 中断运行中的会话。若存在进行中的 goal 会先暂停；`--clear` 表示直接放弃 |
+| `peer [up]` | 查看原生消息对等节点的状态；`peer up` 启动 broker（对等节点随之注册） |
 
 <details>
 <summary>提问与审批</summary>

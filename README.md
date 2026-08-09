@@ -15,6 +15,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Why
 
+- **Native peer messaging** — The workspace broker registers Codex as a peer in Claude Code's cross-session messaging, so Claude sessions message Codex directly (`SendMessage`) and Codex answers back — including asking Claude questions mid-task via a `collab.consult` tool. No CLI in the hot path.
 - **Structured communication** — Talks to Codex via JSON-RPC over stdio. Every event is typed and parseable.
 - **Event-driven progress** — Streams progress lines as Codex works, so Claude sees what's happening in real time.
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
@@ -121,6 +122,20 @@ codex-collab run "large refactor" --detach --approval auto
 codex-collab follow --watch
 ```
 
+## Native Peer Messaging
+
+On macOS/Linux with a messaging-capable Claude Code, the workspace broker registers Codex in Claude Code's session registry:
+
+```bash
+codex-collab peer up      # start the broker + peer; `peer` alone shows status
+```
+
+From then on, any Claude session's `ListAgents` shows a `codex-<workspace>` peer — message it and Codex picks up the task, replying as a peer message when done. Each conversation also appears as its own `codex-<shortid>` peer (replies come from that address; replying to it continues that conversation), and shows up in `codex-collab threads` under the same short ID.
+
+Mid-task, Codex can ask its Claude peer a question through a `collab.consult` tool call; the question arrives as a `[consult]` message, and the next reply from that session is delivered back into Codex's running turn. Consults are fail-open: unanswered questions time out and Codex proceeds on its own judgment.
+
+The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before. The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
+
 ## CLI Commands
 
 | Command | Description |
@@ -131,6 +146,7 @@ codex-collab follow --watch
 | `follow [id]` | Live view of a running thread in your own terminal pane. Without an ID it attaches to the active run; `--watch` keeps following each new run |
 | `output <id> [--last]` | Full log for a thread (`--last`: only the latest turn's output) |
 | `kill <id> [--clear]` | Stop a running thread. An active goal is paused first; `--clear` abandons it |
+| `peer [up]` | Show the native-messaging peer's status; `peer up` starts the broker (and with it the peer) |
 
 <details>
 <summary>Questions and approvals</summary>
