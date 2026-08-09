@@ -362,6 +362,7 @@ async function main() {
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
+    "peer",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -435,6 +436,8 @@ async function main() {
       return (await import("./commands/update")).handleUpdate(rest);
     case "peek":
       return (await import("./commands/peek")).handlePeek(rest);
+    case "peer":
+      return (await import("./commands/peer")).handlePeer(rest);
     case "version":
       return printVersion();
   }

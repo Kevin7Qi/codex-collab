@@ -437,7 +437,10 @@ function spawnBroker(
   }
 
   const proc = Bun.spawn(["bun", ...args], {
-    env: envWithPathPrefix(mockCodexDir),
+    // Peer off: these tests exercise routing, and an active peer would
+    // write into the developer's REAL Claude session registry and keep the
+    // broker resident past its idle timeout while any real session lives.
+    env: { ...envWithPathPrefix(mockCodexDir), CODEX_COLLAB_PEER: "off" },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

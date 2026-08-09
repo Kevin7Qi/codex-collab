@@ -29,6 +29,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from "./process";
 import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
 import { RpcError } from "./types";
 import { config } from "./config";
+import { createPeer, type InternalOwner, type Peer } from "./peer";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -177,11 +178,12 @@ async function main() {
    *  starting) on the thread; it is the unit of routing, contention, goal
    *  retention, and orphan recovery. */
   interface ThreadEntry {
-    /** Socket whose turn runs on this thread. null = orphan sentinel: the
-     *  owner disconnected but the turn is (or may be) still running, so the
-     *  entry must keep blocking same-thread starts until the turn ends or
-     *  the watchdog reaps it. */
-    socket: net.Socket | null;
+    /** Owner of this thread's turn: a client socket, or an internal owner
+     *  (the workspace peer running a turn of its own). null = orphan
+     *  sentinel: the owner disconnected but the turn is (or may be) still
+     *  running, so the entry must keep blocking same-thread starts until
+     *  the turn ends or the watchdog reaps it. */
+    socket: net.Socket | InternalOwner | null;
     /** Turn to interrupt for orphan recovery. null between the streaming
      *  request being forwarded and turn/started (or the response) naming it. */
     turnId: string | null;
@@ -234,10 +236,50 @@ async function main() {
    *  forever. */
   const ORPHAN_WATCHDOG_MS = idleTimeout;
 
+  // ─── Workspace peer ─────────────────────────────────────────────────────
+
+  // The front-door peer: registers this broker in Claude Code's session
+  // registry and serves the cross-session messaging protocol, so Claude
+  // sessions can message the workspace's Codex natively. Inactive (a no-op
+  // object) on Windows, without a registry, or with CODEX_COLLAB_PEER=off.
+  const stateDir = listenTarget.kind === "unix"
+    ? path.dirname(listenTarget.path)
+    : path.join(cwd, ".codex-collab-state"); // pipe endpoints never activate the peer
+  const peer: Peer = createPeer({
+    cwd,
+    stateDir,
+    request: (method, params) => appClient.request(method, params ?? {}),
+    claimThread: (threadId, owner: InternalOwner) => {
+      if (threads.has(threadId)) return false;
+      threads.set(threadId, {
+        socket: owner,
+        turnId: null,
+        requestPending: false,
+        awaitingContinuation: false,
+        watchdog: null,
+      });
+      return true;
+    },
+    threadHasTurn: (threadId) => threads.has(threadId),
+    log: (line) => process.stderr.write(`[broker-server] ${line}\n`),
+  });
+
+  // Dynamic tool calls (collab.consult) arrive as server-initiated requests
+  // on the shared connection; the peer owns their semantics.
+  appClient.onRequest("item/tool/call", (params) =>
+    peer.handleToolCall((params ?? {}) as Record<string, unknown>));
+
   function resetIdleTimer(): void {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
       if (threads.size > 0 || inflightRequests > 0 || pendingForwardedRequests.size > 0) {
+        resetIdleTimer();
+        return;
+      }
+      // A peer exists so Claude sessions can message Codex at any moment —
+      // stay resident while any live session might. The scan is one readdir
+      // per idle period; when the last session exits, the next fire ends us.
+      if (peer.active && peer.hasLiveSessions()) {
         resetIdleTimer();
         return;
       }
@@ -346,8 +388,10 @@ async function main() {
     if (threadId) {
       const entry = threads.get(threadId);
       if (entry) {
-        if (entry.socket && !entry.socket.destroyed) {
-          send(entry.socket, { method, params: notifParams });
+        if (entry.socket instanceof net.Socket) {
+          if (!entry.socket.destroyed) send(entry.socket, { method, params: notifParams });
+        } else if (entry.socket) {
+          entry.socket.onNotification(method, notifParams as Record<string, unknown> | undefined);
         }
         // Orphan sentinel (socket null): drop the payload, but fall through —
         // lifecycle tracking below must still see turn/completed.
@@ -399,10 +443,12 @@ async function main() {
     if (method === "turn/completed" && threadId) {
       const entry = threads.get(threadId);
       if (entry) {
+        // Internal owners live as long as the broker itself, so they count
+        // as connected for goal retention.
+        const ownerConnected = entry.socket !== null &&
+          (!(entry.socket instanceof net.Socket) || sockets.has(entry.socket));
         const goalContinues =
-          goalActiveThreads.has(threadId) &&
-          entry.socket !== null &&
-          sockets.has(entry.socket);
+          goalActiveThreads.has(threadId) && ownerConnected;
         if (goalContinues) {
           // Between turns now — if the goal is paused/cleared before the
           // continuation starts, onGoalInactive frees the entry.
@@ -427,7 +473,12 @@ async function main() {
       resetIdleTimer();
       const threadId = (reqParams as { threadId?: unknown } | undefined)?.threadId;
       const entry = typeof threadId === "string" ? threads.get(threadId) : undefined;
-      const target = entry?.socket && !entry.socket.destroyed ? entry.socket : null;
+      // Only client sockets can answer approvals interactively. Peer-owned
+      // threads run with approvalPolicy "never", so an approval arriving for
+      // one is unexpected — deny it (fail-closed: permission, not judgment).
+      const target = entry?.socket instanceof net.Socket && !entry.socket.destroyed
+        ? entry.socket
+        : null;
       if (!target) {
         throw new Error("No active client to forward approval request");
       }
@@ -464,6 +515,7 @@ async function main() {
   async function shutdown(server: net.Server): Promise<void> {
     shutdownInitiated = true;
     if (idleTimer) clearTimeout(idleTimer);
+    peer.stop();
     for (const [threadId] of threads) releaseThread(threadId);
     // Stop ACCEPTING now, before the app-server close below — that close can
     // run for seconds, and a client connecting during it would pass the
