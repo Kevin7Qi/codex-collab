@@ -84,8 +84,11 @@ export interface AppServerClient {
   close(): Promise<void>;
   /** The user-agent string from the initialize handshake. */
   userAgent: string;
-  /** True when the broker reported it is busy serving another client's turn.
-   *  Always false for direct connections. */
+  /** True when the broker reported it is busy at the initialize handshake.
+   *  Thread-scoped brokers are never globally busy (same-thread contention
+   *  is reported per request with -32001), so this is always false against
+   *  a current broker and for direct connections; it remains in the
+   *  handshake for compatibility with older brokers. */
   brokerBusy: boolean;
 }
 

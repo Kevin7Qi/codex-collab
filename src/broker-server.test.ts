@@ -725,7 +725,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
-    test("initialize returns busy=true when a stream is active", async () => {
+    test("initialize reports busy=false even while a turn is active — the broker as a whole is never busy", async () => {
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
@@ -742,14 +742,15 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         });
         await new Promise((r) => setTimeout(r, 100));
 
-        // Client 2 connects — initialize should report busy
+        // Client 2 connects — with thread-scoped routing, the broker is not
+        // globally busy; only thread-001 itself is contended.
         const client2 = await TestClient.connect(sockPath);
         const result = await client2.request("initialize", {
           clientInfo: { name: "test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: false },
         }) as { userAgent: string; busy: boolean };
 
-        expect(result.busy).toBe(true);
+        expect(result.busy).toBe(false);
 
         await client1.close();
         await client2.close();
@@ -758,7 +759,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
-    test("initialize returns busy=true while a streaming request is pending", async () => {
+    test("a second turn on a DIFFERENT thread runs while a streaming request is pending", async () => {
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
@@ -776,17 +777,17 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
           input: [{ type: "text", text: "hello" }],
         });
 
-        // The broker has accepted the streaming request, but turn/start has
-        // not returned yet, so stream ownership has not been established.
+        // The first streaming request is still pending — a second client on
+        // another thread must not be blocked by it.
         await new Promise((r) => setTimeout(r, 100));
 
-        const client2 = await TestClient.connect(sockPath);
-        const result = await client2.request("initialize", {
-          clientInfo: { name: "test", title: null, version: "0.0.1" },
-          capabilities: { experimentalApi: false },
-        }) as { userAgent: string; busy: boolean };
+        const client2 = await TestClient.connectAndInit(sockPath);
+        const result = await client2.request("turn/start", {
+          threadId: "thread-002",
+          input: [{ type: "text", text: "hello too" }],
+        }) as { turn: { id: string } };
 
-        expect(result.busy).toBe(true);
+        expect(result.turn.id).toBe("turn-001"); // mock's fixed turn id
 
         await pendingTurn;
         await client1.close();
@@ -813,8 +814,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         });
 
         // Same socket sends a non-streaming RPC the mock rejects with -32601.
-        // Before the fix, the broker's catch path cleared activeStreamSocket
-        // for non-streaming errors, letting a second client interleave.
+        // A failed unrelated request must not release the thread claim —
+        // the turn on thread-001 is still running.
         let errored = false;
         try {
           await client1.request("nonexistent/method", {});
@@ -823,14 +824,19 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         }
         expect(errored).toBe(true);
 
-        // Stream ownership must still be held — the turn is still running.
-        const client2 = await TestClient.connect(sockPath);
-        const result = await client2.request("initialize", {
-          clientInfo: { name: "test", title: null, version: "0.0.1" },
-          capabilities: { experimentalApi: false },
-        }) as { userAgent: string; busy: boolean };
-
-        expect(result.busy).toBe(true);
+        // Thread ownership must still be held — a second client's turn/start
+        // on the same thread bounces with -32001.
+        const client2 = await TestClient.connectAndInit(sockPath);
+        let busyCode: number | null = null;
+        try {
+          await client2.request("turn/start", {
+            threadId: "thread-001",
+            input: [{ type: "text", text: "interloper" }],
+          });
+        } catch (e) {
+          busyCode = (e as { code?: number }).code ?? null;
+        }
+        expect(busyCode).toBe(-32001);
 
         await client1.close();
         await client2.close();
@@ -1023,7 +1029,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
   // ── Concurrency control ───────────────────────────────────────────────────
 
   describe("concurrency control", () => {
-    test("second client gets -32001 busy error during active stream", async () => {
+    test("second client gets -32001 busy error for a turn on the SAME thread", async () => {
 
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
@@ -1057,7 +1063,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
           });
           throw new Error("Expected busy error");
         } catch (err: any) {
-          expect(err.message).toContain("Shared Codex broker is busy");
+          expect(err.message).toContain("A turn is already running on this thread");
           expect(err.code).toBe(-32001);
         }
 
@@ -1410,6 +1416,51 @@ setInterval(() => {}, 1000);
 
         // Client 2 should NOT have received the notification
         expect(notifications2.length).toBe(0);
+
+        await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("two threads stream concurrently, each client receiving only its own thread's notifications", async () => {
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
+      // Long enough completion delay that the two turns genuinely overlap.
+      const mockDir = createMockCodex(tempDir, { turnCompletedDelay: 200 });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        const client2 = await TestClient.connectAndInit(sockPath);
+        const notifs1 = collectNotifications(client1);
+        const notifs2 = collectNotifications(client2);
+
+        // Both turns in flight at once — neither blocks the other.
+        await Promise.all([
+          client1.request("turn/start", {
+            threadId: "thread-A",
+            input: [{ type: "text", text: "one" }],
+          }),
+          client2.request("turn/start", {
+            threadId: "thread-B",
+            input: [{ type: "text", text: "two" }],
+          }),
+        ]);
+
+        const completedFor = (notifs: Array<Record<string, unknown>>, threadId: string) =>
+          notifs.some((n) =>
+            n.method === "turn/completed" &&
+            (n.params as { threadId?: string } | undefined)?.threadId === threadId);
+
+        await waitFor(() => completedFor(notifs1, "thread-A") && completedFor(notifs2, "thread-B"));
+
+        // Strict partition: neither client saw the other thread's traffic.
+        expect(completedFor(notifs1, "thread-B")).toBe(false);
+        expect(completedFor(notifs2, "thread-A")).toBe(false);
 
         await client1.close();
         await client2.close();
@@ -2166,12 +2217,13 @@ setInterval(() => {}, 1000);
         await new Promise((r) => setTimeout(r, 500));
 
         // A second client must NOT be able to start a streaming RPC on
-        // the same app-server while the orphan is still unwinding.
+        // the SAME thread while the orphan is still unwinding — the
+        // reservation survives the successful interrupt RPC.
         const client2 = await TestClient.connectAndInit(sockPath);
         let gotBusy = false;
         try {
           await client2.request("turn/start", {
-            threadId: "thread-orphan-2",
+            threadId: "thread-orphan",
             input: [{ type: "text", text: "no" }],
           });
         } catch (err) {
@@ -2180,6 +2232,13 @@ setInterval(() => {}, 1000);
           expect((err as { code?: number }).code).toBe(-32001);
         }
         expect(gotBusy).toBe(true);
+
+        // A DIFFERENT thread is unaffected by the unwinding orphan.
+        const other = await client2.request("turn/start", {
+          threadId: "thread-orphan-2",
+          input: [{ type: "text", text: "fine" }],
+        }) as { turn: { id: string } };
+        expect(other.turn.id).toBe("turn-001");
         await client2.close();
       } finally {
         proc.kill();

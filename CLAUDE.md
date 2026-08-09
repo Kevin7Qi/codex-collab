@@ -45,7 +45,7 @@ codex-collab health
 - Communicates with Codex via `codex app-server` JSON-RPC protocol over stdio
 - Per-workspace state under `~/.codex-collab/workspaces/{slug}-{hash}/` (threads, logs, runs, approvals, kill signals, PIDs)
 - User defaults stored in `~/.codex-collab/config.json` (model, reasoning, sandbox, approval, timeout)
-- Broker manages a shared app-server per workspace via Unix socket / named pipe; falls back to direct connection when broker is busy (parallel execution) or unavailable
+- Broker manages a shared app-server per workspace via Unix socket / named pipe with thread-scoped routing: parallel runs on different threads multiplex over the one app-server; only same-thread contention (or an unavailable broker) falls back to a direct connection
 - Short IDs are 8-char hex, support prefix resolution
 - Run ledger tracks per-invocation state (status, timing, output) under `runs/`
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running
