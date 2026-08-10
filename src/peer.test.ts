@@ -26,6 +26,13 @@ import {
   type PeerHost,
 } from "./peer";
 
+/** The peer never activates on Windows — peerCapability gates win32 before
+ *  anything else runs — so the socket/registry integration behavior under
+ *  test does not exist there: procStartOf shells out to POSIX `ps`, sockets
+ *  bind Unix paths, and capability's registry scan is unreachable. Skipping
+ *  mirrors production's own gate. */
+const onWindows = process.platform === "win32";
+
 /** Register a fake-but-valid sender in an isolated registry so the peer's
  *  registered-sender gate admits its messages. Uses OUR pid (alive, with a
  *  matching procStart) — the same liveness rules the real registry uses. */
@@ -277,7 +284,7 @@ describe("buildRegistryEntry", () => {
   });
 });
 
-describe("claim release on turn-start failure", () => {
+describe.skipIf(onWindows)("claim release on turn-start failure", () => {
   test("a failed turn/start releases the thread claim instead of leaking it", async () => {
     // Isolated registry + state dir: the peer must never touch the real one.
     const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
@@ -335,7 +342,7 @@ describe("claim release on turn-start failure", () => {
   }, 15_000);
 });
 
-describe("inbound serialization", () => {
+describe.skipIf(onWindows)("inbound serialization", () => {
   test("two back-to-back messages from a new sender create ONE thread, not two", async () => {
     const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
     const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
@@ -395,7 +402,7 @@ describe("inbound serialization", () => {
   }, 15_000);
 });
 
-describe("topic routing", () => {
+describe.skipIf(onWindows)("topic routing", () => {
   test("a topic starts a SECOND conversation for the same sender, and reusing it continues that one", async () => {
     const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
     const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
@@ -459,7 +466,7 @@ describe("topic routing", () => {
   }, 20_000);
 });
 
-describe("delivery honesty", () => {
+describe.skipIf(onWindows)("delivery honesty", () => {
   /** Bind a listening socket at `path` collecting delivered envelope lines. */
   function listenForDeliveries(path: string): { lines: string[]; close: () => void } {
     const lines: string[] = [];
@@ -657,7 +664,7 @@ describe("delivery honesty", () => {
   }, 15_000);
 });
 
-describe("peerCapability fallback gating", () => {
+describe.skipIf(onWindows)("peerCapability fallback gating", () => {
   /** Run `fn` against an isolated registry containing `entries`. */
   function withRegistry(entries: Array<Record<string, unknown>>, fn: () => void): void {
     const dir = mkdtempSync(join(tmpdir(), "peer-cap-"));
