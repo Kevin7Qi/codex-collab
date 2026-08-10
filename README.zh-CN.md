@@ -130,7 +130,7 @@ codex-collab follow --watch
 codex-collab peer up      # 启动 broker 与对等节点；单独执行 `peer` 查看状态
 ```
 
-此后，任意 Claude 会话的 `ListAgents` 中都会出现名为 `codex-<工作区>` 的对等节点——向它发送消息，Codex 即接手任务，完成后以对等消息回复。每个对话还会以独立节点出现，名称取自对话的第一条消息（例如 `codex-investigate-the-flaky-a1b2`）：回复即来自该地址，向其回信即延续该对话，名称末尾的后缀与 `codex-collab threads` 中的短 ID 一致。
+此后，任意 Claude 会话的 `ListAgents` 中都会出现名为 `codex-<工作区>` 的对等节点——向它发送消息，Codex 即接手任务，完成后以对等消息回复。每个对话还会以独立节点出现。消息首行的 `topic:` 用于选择对话：`topic: auth refactor` 会接续名为 `codex-auth-refactor` 的对话，若不存在则新建——因此多个对话可并行进行，按 topic 自由切换（该行会在送达 Codex 前剥离）。未写 topic 时则接续最近一次交谈的对话；未命名的对话由消息文本加线程短 ID 派生名称。回复来自该对话的地址，向其回信即延续该对话。
 
 任务进行中，Codex 可通过 `collab.consult` 工具调用向 Claude 提问：问题以 `[consult]` 消息送达，该会话的下一条回复会直接送回 Codex 正在运行的回合。consult 采取超时放行策略：无人应答时超时后 Codex 自行判断并继续。
 

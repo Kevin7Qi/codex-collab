@@ -166,6 +166,27 @@ export function peerNameFor(cwd: string): string {
  *  message) falls back to the bare suffix. The name is fixed at creation —
  *  renaming a live peer would break reply addressing, which resolves by
  *  name. */
+/** A sender can NAME its conversation with a `topic:` (or `subject:`)
+ *  first line — the skill teaches this — because nothing else on the wire
+ *  carries intent: SendMessage's summary field does not travel (verified
+ *  against the live envelope). The topic line is addressing metadata, so
+ *  it is stripped from what Codex sees; a topic-only message keeps the
+ *  topic as its body. */
+export function extractTopic(text: string): { topic: string | null; body: string } {
+  const nl = text.indexOf("\n");
+  const first = (nl === -1 ? text : text.slice(0, nl)).trim();
+  const m = /^(?:topic|subject):\s*(.{1,60})$/i.exec(first);
+  if (!m) return { topic: null, body: text };
+  const body = nl === -1 ? "" : text.slice(nl + 1).trim();
+  return { topic: m[1].trim(), body: body || m[1].trim() };
+}
+
+/** Peer name for a sender-chosen topic: codex-<topic-slug>. */
+export function topicPeerLabel(topic: string): string {
+  const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+  return slug ? `codex-${slug}` : "";
+}
+
 export function threadPeerLabel(firstMessage: string, shortId: string): string {
   const words = firstMessage.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   let slug = "";
@@ -256,15 +277,43 @@ export function parseEnvelope(line: string): InboundMessage | null {
   };
 }
 
+/** Permission-mode class a sender attests in `from-mode`. Receivers gate
+ *  delivery on it (see {@link buildEnvelope}). */
+export type PeerMode = "prompting" | "bypass";
+
+/** Our attested mode class, from how the peer's Codex threads actually run:
+ *  an unsandboxed thread is the analogue of Claude's bypassPermissions;
+ *  anything sandboxed prompts-or-restricts, so it is "prompting". */
+export function peerModeFor(sandbox: string | undefined): PeerMode {
+  return sandbox === "danger-full-access" ? "bypass" : "prompting";
+}
+
 /** Build an outbound envelope line. The SENDER performs the
- *  cross-session-message wrapping (that is the protocol's convention). */
+ *  cross-session-message wrapping (that is the protocol's convention).
+ *
+ *  `from-mode` is a DELIVERY GATE, not decoration. The receiver computes
+ *  its own mode class (bypassPermissions → "bypass", else "prompting") and:
+ *    asserted && matches   → accept
+ *    asserted && differs   → hold ("mode-mismatch")
+ *    not asserted, bypass  → hold ("no-mode-asserted")
+ *    not asserted, prompting → accept
+ *  A held message is never delivered — it waits behind an approve/deny
+ *  dialog, which a Remote Control session does not surface, so it simply
+ *  never appears. Omitting the attribute therefore made us invisible to
+ *  every bypass-mode session.
+ *
+ *  Attribute ORDER is load-bearing: the receiver re-serializes what it
+ *  parsed and rejects the message unless it matches byte-for-byte. The
+ *  canonical order is from, from-session, hop-chain, from-name, from-mode. */
 export function buildEnvelope(opts: {
   text: string;
   ourSocketPath: string;
   ourName: string;
+  mode?: PeerMode;
 }): string {
+  const modeAttr = opts.mode ? ` from-mode="${opts.mode}"` : "";
   const wrapped =
-    `<cross-session-message from="uds:${opts.ourSocketPath}" from-name="${opts.ourName}">\n` +
+    `<cross-session-message from="uds:${opts.ourSocketPath}" from-name="${opts.ourName}"${modeAttr}>\n` +
     `${opts.text}\n</cross-session-message>`;
   return JSON.stringify({
     msgV: 1,
@@ -340,8 +389,12 @@ export function createPeer(host: PeerHost): Peer {
   const conversationsPath = join(host.stateDir, "peer-conversations.json");
   const stateFile = join(host.stateDir, "peer-state.json");
 
-  /** senderKey (reply socket path) → conversation. */
+  /** senderKey (reply socket path) → that sender's MOST RECENT conversation,
+   *  used when a message names no topic. */
   const conversations = new Map<string, Conversation>();
+  /** peer name → conversation, so a `topic:` line reopens the conversation
+   *  it names instead of starting a duplicate. */
+  const byLabel = new Map<string, Conversation>();
   /** threadId → conversation (reverse index for consult + reply routing). */
   const threadConversations = new Map<string, Conversation>();
   /** threadId → its per-thread peer (registry entry + socket + holder). */
@@ -376,6 +429,7 @@ export function createPeer(host: PeerHost): Peer {
             };
             conversations.set(conv.replyPath, conv);
             threadConversations.set(conv.threadId, conv);
+            if (conv.label) byLabel.set(conv.label, conv);
           }
         }
       }
@@ -413,7 +467,12 @@ export function createPeer(host: PeerHost): Peer {
 
   function deliverTo(replyPath: string, text: string, asThreadId: string | null = null): void {
     const id = identityFor(asThreadId);
-    const line = buildEnvelope({ text, ourSocketPath: id.sock, ourName: id.name });
+    const line = buildEnvelope({
+      text,
+      ourSocketPath: id.sock,
+      ourName: id.name,
+      mode: peerModeFor(readUserConfig().sandbox),
+    });
     const sock = net.connect({ path: replyPath }, () => {
       sock.write(line);
       sock.end();
@@ -468,7 +527,13 @@ export function createPeer(host: PeerHost): Peer {
         stdio: ["pipe", "ignore", "ignore"],
       });
       if (!holder.pid) throw new Error("holder spawn returned no pid");
-      const tpName = label ?? `codex-${shortId}`;
+      // Uniqueness: the name IS the address. A topic label can collide with
+      // a live sibling (same topic twice, or the front door's name) — the
+      // short-id suffix disambiguates only when needed, keeping the common
+      // case clean.
+      let tpName = label ?? `codex-${shortId}`;
+      const taken = tpName === name || [...threadPeers.values()].some((tp) => tp.name === tpName);
+      if (taken) tpName = `${tpName}-${shortId.slice(0, 4)}`;
       const tpSocketPath = join(host.stateDir, `peer-${shortId}.sock`);
       const tpEntryPath = join(sessionsDir(), `${holder.pid}.json`);
 
@@ -719,13 +784,32 @@ export function createPeer(host: PeerHost): Peer {
       return;
     }
 
+    /** What actually gets delivered to Codex — the message minus its topic
+     *  line, which is addressing metadata rather than content. */
+    let deliveryText = msg.text;
+    /** A `topic:` line SELECTS a conversation: it continues the one with
+     *  that name, or starts a new one. Without it, a sender continues
+     *  whichever conversation it spoke to last — so one session can hold
+     *  several parallel conversations, switching between them by topic. */
+    let topic: string | null = null;
+    if (!boundThreadId) {
+      const parsed = extractTopic(msg.text);
+      if (parsed.topic) {
+        topic = parsed.topic;
+        deliveryText = parsed.body;
+      }
+    }
+
     // A thread-peer socket pins the conversation; the front door routes by
-    // sender. Either way the most recent sender becomes the conversation's
-    // counterpart — the person actively talking is who consults and replies
-    // go to.
+    // topic when given, else by sender. Either way the most recent sender
+    // becomes the conversation's counterpart — the person actively talking
+    // is who consults and replies go to.
+    const topicLabel = topic ? topicPeerLabel(topic) : "";
     let conv = boundThreadId
       ? threadConversations.get(boundThreadId)
-      : conversations.get(msg.replyPath);
+      : topic
+        ? (topicLabel ? byLabel.get(topicLabel) : undefined)
+        : conversations.get(msg.replyPath);
 
     // A pending consult on this conversation's thread consumes the message
     // as its answer — that is the whole correlation rule: the reply address
@@ -752,19 +836,22 @@ export function createPeer(host: PeerHost): Peer {
         threadConversations.set(boundThreadId, conv);
         saveConversations();
       } else {
-        const { threadId, shortId } = await startThread(msg.fromName, msg.text);
-        const label = threadPeerLabel(msg.text, shortId);
+        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText);
+        const label = topicLabel || threadPeerLabel(deliveryText, shortId);
         conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
-        conversations.set(msg.replyPath, conv);
+        conversations.set(msg.replyPath, conv); // newest becomes this sender's default
         threadConversations.set(threadId, conv);
+        if (label) byLabel.set(label, conv);
         createThreadPeer(threadId, shortId, label);
         saveConversations();
-        host.log(`peer: new conversation with ${msg.fromName} → thread ${threadId}`);
+        host.log(`peer: new conversation "${label}" with ${msg.fromName} → thread ${threadId}`);
       }
     } else {
       conv.lastActivity = Date.now();
       if (conv.replyPath !== msg.replyPath || (msg.fromName && conv.fromName !== msg.fromName)) {
-        conversations.delete(conv.replyPath);
+        // Only clear the old sender slot if it still points at THIS
+        // conversation — a sender can now hold several.
+        if (conversations.get(conv.replyPath) === conv) conversations.delete(conv.replyPath);
         conv.replyPath = msg.replyPath;
         conv.fromName = msg.fromName || conv.fromName;
         conversations.set(conv.replyPath, conv);
@@ -784,27 +871,30 @@ export function createPeer(host: PeerHost): Peer {
     // A resumed thread has lost its dynamic tools (thread/resume cannot
     // re-declare them) — re-send instructions that say so.
     try {
-      await injectPeerMessage(conv.threadId, msg.fromName, msg.text);
+      await injectPeerMessage(conv.threadId, msg.fromName, deliveryText);
     } catch {
       try {
         await host.request("thread/resume", {
           threadId: conv.threadId,
           developerInstructions: PEER_RESUME_INSTRUCTIONS,
         });
-        await injectPeerMessage(conv.threadId, msg.fromName, msg.text);
+        await injectPeerMessage(conv.threadId, msg.fromName, deliveryText);
       } catch (e) {
         // Thread unrecoverable (deleted?) — start fresh and redeliver.
         host.log(`peer: thread ${conv.threadId} unrecoverable (${e instanceof Error ? e.message : String(e)}) — starting a new one`);
         threadConversations.delete(conv.threadId);
         retireThreadPeer(conv.threadId);
-        const { threadId, shortId } = await startThread(msg.fromName, msg.text);
+        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText);
         conv.threadId = threadId;
         conv.shortId = shortId;
-        conv.label = threadPeerLabel(msg.text, shortId);
+        // Keep the conversation's name across a thread restart: its name is
+        // its ADDRESS, and a recreated thread is still the same conversation.
+        if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId);
         threadConversations.set(threadId, conv);
+        if (conv.label) byLabel.set(conv.label, conv);
         createThreadPeer(threadId, shortId, conv.label);
         saveConversations();
-        await injectPeerMessage(threadId, msg.fromName, msg.text);
+        await injectPeerMessage(threadId, msg.fromName, deliveryText);
       }
     }
 

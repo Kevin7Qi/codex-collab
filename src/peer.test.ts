@@ -14,10 +14,13 @@ import {
   createPeer,
   parseEnvelope,
   peerCapability,
+  peerModeFor,
   peerNameFor,
   procStartOf,
   sessionsDir,
+  extractTopic,
   threadPeerLabel,
+  topicPeerLabel,
   type PeerHost,
 } from "./peer";
 
@@ -102,6 +105,36 @@ describe("buildEnvelope", () => {
     expect(parsed!.fromName).toBe("codex-proj");
     expect(parsed!.replyPath).toBe("/state/peer.sock");
   });
+
+  test("emits from-mode LAST — the receiver re-serializes and compares byte-for-byte", () => {
+    const content = JSON.parse(buildEnvelope({
+      text: "body",
+      ourSocketPath: "/state/peer.sock",
+      ourName: "codex-proj",
+      mode: "prompting",
+    })).message.content as string;
+    // Canonical order: from, from-session, hop-chain, from-name, from-mode.
+    expect(content).toStartWith(
+      '<cross-session-message from="uds:/state/peer.sock" from-name="codex-proj" from-mode="prompting">\n',
+    );
+    expect(content).toEndWith("\n</cross-session-message>");
+  });
+
+  test("mode is omitted when not supplied", () => {
+    const content = JSON.parse(buildEnvelope({
+      text: "body", ourSocketPath: "/s.sock", ourName: "n",
+    })).message.content as string;
+    expect(content).not.toContain("from-mode");
+  });
+});
+
+describe("peerModeFor", () => {
+  test("only an unsandboxed peer attests bypass", () => {
+    expect(peerModeFor("danger-full-access")).toBe("bypass");
+    expect(peerModeFor("workspace-write")).toBe("prompting");
+    expect(peerModeFor("read-only")).toBe("prompting");
+    expect(peerModeFor(undefined)).toBe("prompting");
+  });
 });
 
 describe("peerNameFor", () => {
@@ -118,6 +151,35 @@ describe("peerNameFor", () => {
   test("never produces an empty suffix", () => {
     expect(peerNameFor("/")).toBe("codex-workspace");
     expect(peerNameFor("/Users/x/codex")).toBe("codex-workspace");
+  });
+});
+
+describe("extractTopic / topicPeerLabel", () => {
+  test("a topic first line names the conversation and is stripped from the body", () => {
+    const { topic, body } = extractTopic("topic: auth refactor\nPlease review the login flow.");
+    expect(topic).toBe("auth refactor");
+    expect(body).toBe("Please review the login flow.");
+    expect(topicPeerLabel("auth refactor")).toBe("codex-auth-refactor");
+  });
+
+  test("subject: works too, case-insensitive", () => {
+    expect(extractTopic("Subject: Fix CI\nbody").topic).toBe("Fix CI");
+  });
+
+  test("a topic-only message keeps the topic as its body", () => {
+    const { topic, body } = extractTopic("topic: quick sanity check");
+    expect(topic).toBe("quick sanity check");
+    expect(body).toBe("quick sanity check");
+  });
+
+  test("ordinary messages pass through untouched", () => {
+    const { topic, body } = extractTopic("Just do the thing.\ntopic: not a header here");
+    expect(topic).toBeNull();
+    expect(body).toBe("Just do the thing.\ntopic: not a header here");
+  });
+
+  test("unsluggable topics produce no label (falls back to text slug)", () => {
+    expect(topicPeerLabel("！！！")).toBe("");
   });
 });
 
@@ -275,6 +337,70 @@ describe("inbound serialization", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 15_000);
+});
+
+describe("topic routing", () => {
+  test("a topic starts a SECOND conversation for the same sender, and reusing it continues that one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    registerTestSender(join(dir, "sessions"), join(dir, "sender.sock"));
+
+    const started: string[] = [];
+    const injected: string[] = [];
+    let n = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") { started.push("x"); return { thread: { id: `thread-${++n}` } }; }
+        if (method === "thread/inject_items") {
+          const items = params!.items as Array<{ content: Array<{ text: string }> }>;
+          injected.push(`${params!.threadId}:${items[0].content[0].text}`);
+        }
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => true, // stay mid-turn: no turn/start, just injection
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    const send = async (text: string) => {
+      const line = buildEnvelope({ text, ourSocketPath: join(dir, "sender.sock"), ourName: "test-sender" });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+        sock.on("error", reject);
+      });
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    try {
+      await send("topic: alpha work\nfirst");
+      await send("topic: beta work\nsecond");
+      await send("topic: alpha work\nthird");
+      await send("fourth");
+
+      // Two topics → two threads (the fourth message names none, so it
+      // continues the sender's most recent conversation: beta).
+      expect(started.length).toBe(2);
+      // The topic line never reaches Codex.
+      expect(injected.some((i) => i.includes("topic:"))).toBe(false);
+      expect(injected).toEqual([
+        "thread-1:[test-sender] first",
+        "thread-2:[test-sender] second",
+        "thread-1:[test-sender] third",   // reopened alpha
+        "thread-2:[test-sender] fourth",  // no topic → most recent (beta)
+      ]);
+    } finally {
+      peer.stop();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe("peerCapability", () => {

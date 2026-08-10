@@ -12,7 +12,8 @@ codex-collab is a bridge between Claude and Codex. It communicates with Codex vi
 When `ListAgents` shows a `codex-*` peer for this workspace, Codex is directly messageable — no CLI in the loop:
 
 - **`codex-<workspace>`** is the front door: `SendMessage` to it starts (or continues) a conversation; Codex works the task and its reply arrives back as a peer message.
-- Each conversation also appears as its **own peer**, named from its opening message plus a short-id suffix (e.g. `codex-investigate-the-flaky-a1b2`). Replies come from these addresses — reply to a message's `from` address to continue that specific conversation. The suffix matches the thread's short ID in `codex-collab threads`.
+- **`topic:` picks the conversation.** A `topic: auth refactor` first line continues the conversation named `codex-auth-refactor`, or starts it if it's new — so you can run several conversations in parallel and switch between them by topic. The line is stripped before Codex sees the message. With no topic line you continue whichever conversation you spoke to last; an unnamed one takes its name from the message text plus the thread's short ID.
+- Each conversation appears as its **own peer** under that name. Replies come from these addresses — reply to a message's `from` address to continue that specific conversation.
 - Codex may send you a **`[consult]`** message mid-task — it is waiting on your judgment. Reply to that peer to answer; if you don't, Codex proceeds on its own after a timeout.
 - No peer listed? Run `codex-collab peer up` (foreground, seconds) — or fall back to the CLI commands below, which always work. Peers require the messaging-capable Claude Code (macOS/Linux).
 
