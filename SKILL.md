@@ -13,7 +13,7 @@ codex-collab is a bridge between Claude and Codex. It communicates with Codex vi
 
 ## Native Peer Messaging
 
-`SendMessage` to `codex-<workspace>` starts or continues a conversation. The first message may include a header block of `key: value` lines at the very start, one per line, stripped before Codex sees the text. Recognized keys: `topic:` names or selects the conversation (a `topic:` on a later message selects an existing conversation or starts a new one); `model:`, `effort:`, `sandbox:` override `codex-collab config` defaults; `approval:` accepts only `auto` (Codex Guardian), because interactive approval prompts route to CLI clients and cannot work over messaging. Parsing stops at the first line that is not a recognized key, so ordinary prose is never consumed as a header.
+`SendMessage` to `codex-<workspace>` starts or continues a conversation. Any message may include a header block of `key: value` lines at the very start, one per line, stripped before Codex sees the text. Recognized keys: `topic:` names or selects the conversation (a `topic:` on a later message selects an existing conversation or starts a new one); `model:` and `effort:` set the conversation's model and reasoning effort — on a later message they change it from the next turn; `sandbox:` and `approval:` are fixed when the conversation starts (`approval:` accepts only `auto`, Codex Guardian, because interactive approval prompts route to CLI clients and cannot work over messaging). Parsing stops at the first line that is not a recognized key, so ordinary prose is never consumed as a header.
 
 ```
 topic: auth refactor

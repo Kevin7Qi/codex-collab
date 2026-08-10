@@ -225,6 +225,13 @@ describe("parseHeaders", () => {
     expect(parseHeaders("approval: on-request\nx").headers.approval).toBeUndefined();
   });
 
+  test("model values must be slug-shaped — prose is never eaten as a model", () => {
+    expect(parseHeaders("model: gpt-5.6-luna\nx").headers.model).toBe("gpt-5.6-luna");
+    const prose = "model: the new one is broken\nplease investigate";
+    expect(parseHeaders(prose).headers.model).toBeUndefined();
+    expect(parseHeaders(prose).body).toBe(prose);
+  });
+
   test("a header-only message keeps its topic as the body", () => {
     const { headers, body } = parseHeaders("topic: quick check\nmodel: gpt-5.5");
     expect(headers.topic).toBe("quick check");
@@ -450,6 +457,204 @@ describe("topic routing", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+});
+
+describe("delivery honesty", () => {
+  /** Bind a listening socket at `path` collecting delivered envelope lines. */
+  function listenForDeliveries(path: string): { lines: string[]; close: () => void } {
+    const lines: string[] = [];
+    const server = net.createServer((sock) => {
+      sock.setEncoding("utf8");
+      let buf = "";
+      sock.on("data", (c: string) => {
+        buf += c;
+        let i: number;
+        while ((i = buf.indexOf("\n")) !== -1) {
+          const l = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (l) lines.push(l);
+        }
+      });
+    });
+    server.listen(path);
+    return { lines, close: () => server.close() };
+  }
+
+  async function until(cond: () => boolean, ms = 5000): Promise<void> {
+    const start = Date.now();
+    while (!cond()) {
+      if (Date.now() - start > ms) throw new Error("condition not met in time");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  test("an interrupted turn's partial text carries a note, and from-mode reflects the conversation's sandbox", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const inbox = listenForDeliveries(senderSock);
+
+    const owners = new Map<string, { onNotification(m: string, p?: Record<string, unknown>): void }>();
+    const requests: string[] = [];
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        requests.push(method);
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
+      releaseThread: () => {},
+      threadHasTurn: () => false, // idle → the peer starts (and owns) a turn
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    try {
+      const line = buildEnvelope({
+        text: "sandbox: danger-full-access\nplease do the thing",
+        ourSocketPath: senderSock,
+        ourName: "test-sender",
+      });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+        sock.on("error", reject);
+      });
+      await until(() => owners.has("thread-X"));
+      const owner = owners.get("thread-X")!;
+      owner.onNotification("item/completed", {
+        threadId: "thread-X",
+        item: { type: "agentMessage", text: "partial thoughts" },
+      });
+      owner.onNotification("turn/completed", {
+        threadId: "thread-X",
+        turn: { status: "interrupted", error: null },
+      });
+      await until(() => inbox.lines.length > 0);
+      const delivered = parseEnvelope(inbox.lines[0])!;
+      // The partial text arrives — but never disguised as a finished reply.
+      expect(delivered.text).toContain("partial thoughts");
+      expect(delivered.text).toContain("the turn interrupted");
+      // The conversation runs danger-full-access (header override), so its
+      // outbound messages attest "bypass" — not the workspace default's mode.
+      const content = (JSON.parse(inbox.lines[0]) as { message: { content: string } }).message.content;
+      expect(content).toContain('from-mode="bypass"');
+    } finally {
+      peer.stop();
+      inbox.close();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("a continuation's model:/effort: headers apply from the next turn; sandbox: draws a notice", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const inbox = listenForDeliveries(senderSock);
+
+    const turnStarts: Array<Record<string, unknown>> = [];
+    let threadsStarted = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") { threadsStarted++; return { thread: { id: "thread-X" } }; }
+        if (method === "turn/start") turnStarts.push(params!);
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    const send = async (text: string) => {
+      const line = buildEnvelope({ text, ourSocketPath: senderSock, ourName: "test-sender" });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+        sock.on("error", reject);
+      });
+    };
+
+    try {
+      await send("topic: t\nmodel: gpt-5.6-luna\ndo it");
+      await until(() => turnStarts.length === 1);
+      expect(turnStarts[0].model).toBe("gpt-5.6-luna");
+
+      // The recovery path: a later message corrects the model.
+      await send("topic: t\nmodel: gpt-5.4-mini\neffort: low\ncontinue");
+      await until(() => turnStarts.length === 2);
+      expect(threadsStarted).toBe(1); // same conversation, not a new thread
+      expect(turnStarts[1].model).toBe("gpt-5.4-mini");
+      expect(turnStarts[1].effort).toBe("low");
+
+      // sandbox on a continuation cannot apply — the sender must hear that.
+      await send("topic: t\nsandbox: read-only\nand this");
+      await until(() => inbox.lines.some((l) => parseEnvelope(l)?.text.includes("fixed when a conversation starts")));
+    } finally {
+      peer.stop();
+      inbox.close();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test("a processing failure notifies the sender instead of silently dropping the message", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const inbox = listenForDeliveries(senderSock);
+
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") throw new Error("model rejected: no-such-model");
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    try {
+      const line = buildEnvelope({
+        text: "model: no-such-model\ndo the thing",
+        ourSocketPath: senderSock,
+        ourName: "test-sender",
+      });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+        sock.on("error", reject);
+      });
+      await until(() => inbox.lines.length > 0);
+      const delivered = parseEnvelope(inbox.lines[0])!;
+      expect(delivered.text).toContain("could not be processed");
+      expect(delivered.text).toContain("no-such-model");
+    } finally {
+      peer.stop();
+      inbox.close();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 describe("peerCapability fallback gating", () => {

@@ -431,10 +431,10 @@ export async function handleProgress(args: string[]): Promise<void> {
   const { shortId } = resolveLogTarget(positional, "Usage: codex-collab progress <id>", ws);
   const content = readThreadLog(ws.stateDir, ws.logsDir, shortId);
   if (content === null) {
-    // A conversation held over peer messaging has no local log: its turns run
-    // inside the broker, which writes no run record. Saying "no activity"
-    // would be a lie about a thread that may be mid-turn right now — point at
-    // the view that reads the server instead of a local mirror.
+    // No local log AND no local runs: the thread's history lives on the
+    // server (a thread discovered from it, or pruned runs). Saying "no
+    // activity" would be a lie about a thread that may be mid-turn right
+    // now — point at the view that reads the server, not a local mirror.
     console.log(
       hasNoLocalRuns(ws.stateDir, shortId)
         ? `No local activity log for ${shortId}. This thread has no runs from this machine — read its server-side history with: codex-collab peek ${shortId}`

@@ -83,6 +83,18 @@ interface Conversation {
   replyPath: string;
   /** Sender's display name, for attribution inside Codex's context. */
   fromName: string;
+  /** The sandbox this conversation's thread actually runs under — the basis
+   *  of the `from-mode` we assert on its outbound messages. Header overrides
+   *  make this per-conversation: a `sandbox: danger-full-access` conversation
+   *  attests "bypass" even when the workspace default would not. */
+  sandbox?: string;
+  /** Model/effort the conversation runs with, passed on every turn the peer
+   *  starts. Unlike sandbox these are per-TURN settings (turn/start accepts
+   *  both), so a later message's `model:`/`effort:` header updates them —
+   *  without this, a conversation started with a bad model would be
+   *  poisoned forever, every turn failing with no way to correct it. */
+  model?: string;
+  effort?: string;
   /** Last inbound/outbound activity, for thread-peer retirement. */
   lastActivity: number;
 }
@@ -197,11 +209,16 @@ export interface MessageHeaders {
  *  sockets, and a messaging sender is not one, so anything else would hang
  *  the turn until it timed out. Guardian (`auto`) needs no human answerer. */
 const HEADER_KEYS: Record<string, readonly string[] | null> = {
-  model: null, // free-form; the server rejects unknown models
+  model: null, // any slug-shaped value; the server rejects unknown models
   effort: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
   sandbox: ["read-only", "workspace-write", "danger-full-access"],
   approval: ["auto"],
 };
+
+/** Model names are slugs. Requiring the shape keeps prose out of the header
+ *  block: without it, a message opening "model: the new one is broken" would
+ *  swallow that line as a (doomed) model override instead of content. */
+const MODEL_SLUG_RE = /^[A-Za-z0-9._/-]{1,64}$/;
 
 /** Parse the leading `key: value` header block. Recognized keys are consumed;
  *  the first line that is not a recognized header ends the block, so ordinary
@@ -228,6 +245,7 @@ export function parseHeaders(text: string): { headers: MessageHeaders; body: str
       const bag = headers as unknown as Record<string, unknown>;
       if (bag[key] !== undefined) break;
       if (allowed && !allowed.includes(value)) break;
+      if (key === "model" && !MODEL_SLUG_RE.test(value)) break;
       bag[key] = value;
     } else {
       break;
@@ -527,6 +545,9 @@ export function createPeer(host: PeerHost): Peer {
               label: typeof c.label === "string" ? c.label : undefined,
               replyPath: c.replyPath,
               fromName: typeof c.fromName === "string" ? c.fromName : "claude",
+              sandbox: typeof c.sandbox === "string" ? c.sandbox : undefined,
+              model: typeof c.model === "string" ? c.model : undefined,
+              effort: typeof c.effort === "string" ? c.effort : undefined,
               lastActivity: Date.now(),
             };
             conversations.set(conv.replyPath, conv);
@@ -569,11 +590,15 @@ export function createPeer(host: PeerHost): Peer {
 
   function deliverTo(replyPath: string, text: string, asThreadId: string | null = null): void {
     const id = identityFor(asThreadId);
+    // Attest the mode of the conversation doing the talking, falling back to
+    // the workspace default for messages with no thread (front-door errors).
+    const sandbox = (asThreadId ? threadConversations.get(asThreadId)?.sandbox : undefined)
+      ?? readUserConfig().sandbox;
     const line = buildEnvelope({
       text,
       ourSocketPath: id.sock,
       ourName: id.name,
-      mode: peerModeFor(readUserConfig().sandbox),
+      mode: peerModeFor(sandbox),
     });
     const sock = net.connect({ path: replyPath }, () => {
       sock.write(line);
@@ -846,11 +871,20 @@ export function createPeer(host: PeerHost): Peer {
           const turn = params?.turn as { status?: string; error?: { message?: string } | null } | undefined;
           const reply = texts.join("\n\n").trim();
           finishRun(threadId, turn?.status ?? "completed", reply, turn?.error?.message ?? null);
+          const died = turn?.status === "failed" || turn?.status === "interrupted";
           if (reply) {
-            deliverTo(conv.replyPath, reply, threadId);
-          } else if (turn?.status === "failed" || turn?.status === "interrupted") {
-            const err = turn.error?.message;
-            deliverTo(conv.replyPath, `[codex-collab] The turn ${turn.status} before producing a reply${err ? `: ${err}` : "."}`, threadId);
+            // A turn that died mid-way may still have buffered text (its
+            // opening message, typically). Delivering that alone reads as
+            // Codex still working — or worse, as the finished answer. Say
+            // what happened. (Live-observed: `kill` on a peer turn delivered
+            // only "I'll run the two-minute wait…" with no hint of the kill.)
+            const note = died
+              ? `\n\n[codex-collab] Note: the turn ${turn!.status} after this text was written — it is not a complete reply${turn?.error?.message ? ` (${turn.error.message})` : ""}.`
+              : "";
+            deliverTo(conv.replyPath, reply + note, threadId);
+          } else if (died) {
+            const err = turn?.error?.message;
+            deliverTo(conv.replyPath, `[codex-collab] The turn ${turn?.status} before producing a reply${err ? `: ${err}` : "."}`, threadId);
           } else {
             // A silent success reads as a lost message to the sender.
             deliverTo(conv.replyPath, "[codex-collab] Codex finished the turn without a closing message.", threadId);
@@ -866,7 +900,7 @@ export function createPeer(host: PeerHost): Peer {
     fromName: string,
     firstMessage: string,
     headers: MessageHeaders = { topic: null },
-  ): Promise<{ threadId: string; shortId: string }> {
+  ): Promise<{ threadId: string; shortId: string; sandbox: string; model?: string; effort?: string }> {
     const userConfig = readUserConfig();
     // Header settings override the workspace defaults for this conversation
     // only. `auto` maps to Guardian, the one approval policy that resolves
@@ -875,10 +909,11 @@ export function createPeer(host: PeerHost): Peer {
     const approval = headers.approval === "auto"
       ? { approvalPolicy: "on-request", approvalsReviewer: "auto_review" }
       : { approvalPolicy: "never", approvalsReviewer: "user" };
+    const sandbox = headers.sandbox ?? userConfig.sandbox ?? "workspace-write";
     const params: Record<string, unknown> = {
       cwd: host.cwd,
       ...approval,
-      sandbox: headers.sandbox ?? userConfig.sandbox ?? "workspace-write",
+      sandbox,
       experimentalRawEvents: false,
       persistExtendedHistory: false,
       developerInstructions: PEER_DEVELOPER_INSTRUCTIONS,
@@ -919,7 +954,7 @@ export function createPeer(host: PeerHost): Peer {
     try {
       await host.request("thread/memoryMode/set", { threadId, mode: "disabled" });
     } catch { /* older codex */ }
-    return { threadId, shortId };
+    return { threadId, shortId, sandbox, model, effort };
   }
 
   /** Minimal user-defaults read (model/sandbox). commands/shared.ts owns the
@@ -968,7 +1003,13 @@ export function createPeer(host: PeerHost): Peer {
     const next = prev
       .then(() => handleInbound(msg, boundThreadId))
       .catch((e) => {
-        host.log(`peer: inbound handling failed: ${e instanceof Error ? e.message : String(e)}`);
+        const detail = e instanceof Error ? e.message : String(e);
+        host.log(`peer: inbound handling failed: ${detail}`);
+        // Tell the sender: without this, a processing failure (a rejected
+        // thread/start — say, an invalid `model:` header — or an
+        // unrecoverable thread) reads as Codex silently thinking forever.
+        // The message stays unmarked in the dedupe set, so a retry retries.
+        deliverTo(msg.replyPath, `[codex-collab] Your message could not be processed: ${detail}`, boundThreadId);
       });
     inboundQueues.set(key, next);
     void next.finally(() => {
@@ -1019,21 +1060,20 @@ export function createPeer(host: PeerHost): Peer {
       return;
     }
 
-    /** What actually gets delivered to Codex — the message minus its topic
-     *  line, which is addressing metadata rather than content. */
-    let deliveryText = msg.text;
+    /** Headers are parsed on EVERY message — a bound (thread-peer) socket
+     *  pins the conversation, so its `topic:` is inert, but `model:` and
+     *  `effort:` adjustments must work however the sender addressed us:
+     *  replying to the conversation's own peer is the natural way to send
+     *  them. What reaches Codex is the message minus the header block —
+     *  addressing and settings metadata, not content. */
+    const parsed = parseHeaders(msg.text);
+    const headers = parsed.headers;
+    const deliveryText = parsed.body !== msg.text ? parsed.body : msg.text;
     /** A `topic:` line SELECTS a conversation: it continues the one with
      *  that name, or starts a new one. Without it, a sender continues
      *  whichever conversation it spoke to last — so one session can hold
      *  several parallel conversations, switching between them by topic. */
-    let topic: string | null = null;
-    let headers: MessageHeaders = { topic: null };
-    if (!boundThreadId) {
-      const parsed = parseHeaders(msg.text);
-      headers = parsed.headers;
-      topic = parsed.headers.topic;
-      if (parsed.body !== msg.text) deliveryText = parsed.body;
-    }
+    const topic = boundThreadId ? null : headers.topic;
 
     // A thread-peer socket pins the conversation; the front door routes by
     // topic when given, else by sender. Either way the most recent sender
@@ -1062,6 +1102,7 @@ export function createPeer(host: PeerHost): Peer {
     }
 
     // Ensure a thread for this conversation.
+    let freshThread = false;
     if (!conv) {
       if (boundThreadId) {
         // Thread-peer socket for a conversation we no longer track (state
@@ -1071,15 +1112,16 @@ export function createPeer(host: PeerHost): Peer {
         threadConversations.set(boundThreadId, conv);
         saveConversations();
       } else {
-        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText, headers);
+        const { threadId, shortId, sandbox, model, effort } = await startThread(msg.fromName, topic ?? deliveryText, headers);
         const label = topicLabel || threadPeerLabel(deliveryText, shortId);
-        conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
+        conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, lastActivity: Date.now() };
         conversations.set(msg.replyPath, conv); // newest becomes this sender's default
         threadConversations.set(threadId, conv);
         if (label) byLabel.set(label, conv);
         createThreadPeer(threadId, shortId, label);
         saveConversations();
         host.log(`peer: new conversation "${label}" with ${msg.fromName} → thread ${threadId}`);
+        freshThread = true;
       }
     } else {
       conv.lastActivity = Date.now();
@@ -1102,6 +1144,31 @@ export function createPeer(host: PeerHost): Peer {
       }
     }
 
+    // Settings carried on a CONTINUATION message. model/effort are per-turn
+    // settings (turn/start accepts both), so an update takes effect from the
+    // next turn the peer starts — the recovery path for a conversation whose
+    // model turned out to be wrong. sandbox/approval bind at thread creation
+    // and cannot change mid-conversation: say so rather than silently
+    // dropping the request (the header block already stripped it from what
+    // Codex sees, so nobody else will).
+    if (!freshThread) {
+      const settingsChanged =
+        (headers.model !== undefined && headers.model !== conv.model) ||
+        (headers.effort !== undefined && headers.effort !== conv.effort);
+      if (settingsChanged) {
+        if (headers.model !== undefined) conv.model = headers.model;
+        if (headers.effort !== undefined) conv.effort = headers.effort;
+        saveConversations();
+      }
+      if (headers.sandbox !== undefined || headers.approval !== undefined) {
+        deliverTo(
+          conv.replyPath,
+          "[codex-collab] Note: sandbox: and approval: are fixed when a conversation starts — this conversation keeps its original settings (model:/effort: updates do apply, from the next turn). Start a new topic: to use a different sandbox or approval mode.",
+          conv.threadId,
+        );
+      }
+    }
+
     // Deliver in native peer form, resuming an unloaded thread if needed.
     // A resumed thread has lost its dynamic tools (thread/resume cannot
     // re-declare them) — re-send instructions that say so.
@@ -1119,9 +1186,12 @@ export function createPeer(host: PeerHost): Peer {
         host.log(`peer: thread ${conv.threadId} unrecoverable (${e instanceof Error ? e.message : String(e)}) — starting a new one`);
         threadConversations.delete(conv.threadId);
         retireThreadPeer(conv.threadId);
-        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText, headers);
+        const { threadId, shortId, sandbox, model, effort } = await startThread(msg.fromName, topic ?? deliveryText, headers);
         conv.threadId = threadId;
         conv.shortId = shortId;
+        conv.sandbox = sandbox;
+        conv.model = model;
+        conv.effort = effort;
         // Keep the conversation's name across a thread restart: its name is
         // its ADDRESS, and a recreated thread is still the same conversation.
         if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId);
@@ -1148,11 +1218,17 @@ export function createPeer(host: PeerHost): Peer {
       conv.threadId,
       conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8),
       deliveryText,
+      conv.model,
     );
     updateStatus("busy");
     try {
+      // Every peer-started turn restates the conversation's model/effort:
+      // turn/start accepts both, which is what makes a continuation
+      // message's `model:`/`effort:` update actually take effect.
       await host.request("turn/start", {
         threadId: conv.threadId,
+        ...(conv.model ? { model: conv.model } : {}),
+        ...(conv.effort ? { effort: conv.effort } : {}),
         input: [{
           type: "text",
           text: "(A peer message was just delivered to this conversation as an agent_message from /root/claude. Read it and respond or act accordingly.)",
