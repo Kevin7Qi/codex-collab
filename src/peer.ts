@@ -33,6 +33,7 @@ import {
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { registerThread } from "./threads";
+import { config } from "./config";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -49,6 +50,10 @@ export interface PeerHost {
   request(method: string, params?: Record<string, unknown>): Promise<unknown>;
   /** Claim a thread for an internal owner; false when a turn already runs. */
   claimThread(threadId: string, owner: InternalOwner): boolean;
+  /** Release a claim made with claimThread (e.g. the turn failed to start).
+   *  An internal owner never "disconnects", so nothing else frees a claim
+   *  whose turn will never produce a turn/completed. */
+  releaseThread(threadId: string): void;
   /** True when a turn is running (or starting) on the thread. */
   threadHasTurn(threadId: string): boolean;
   log(line: string): void;
@@ -93,7 +98,6 @@ export const MAX_THREAD_PEERS = 8;
 
 interface PendingConsult {
   threadId: string;
-  senderKey: string;
   resolve: (answer: string | null) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -206,8 +210,13 @@ export function parseEnvelope(line: string): InboundMessage | null {
   const content = typeof message?.content === "string" ? message.content : "";
   const m = CROSS_SESSION_RE.exec(content);
   // Attribute order in the opening tag is the sender's choice — pull
-  // from-name out of the attribute blob, not by position.
-  const fromName = (m && /\bfrom-name="([^"]*)"/.exec(m[1])?.[1]) || "claude";
+  // from-name out of the attribute blob, not by position. The name flows
+  // into logs and Codex's context, so strip control characters and bound
+  // its length; the message text itself is passed through (multiline is
+  // legitimate content).
+  const rawName = (m && /\bfrom-name="([^"]*)"/.exec(m[1])?.[1]) || "claude";
+  // eslint-disable-next-line no-control-regex
+  const fromName = rawName.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 80) || "claude";
   const text = (m ? m[2] : content).trim();
   if (!text) return null;
   return {
@@ -399,9 +408,7 @@ export function createPeer(host: PeerHost): Peer {
           if (!line) continue;
           const msg = parseEnvelope(line);
           if (!msg) continue;
-          handleInbound(msg, boundThreadId).catch((e) => {
-            host.log(`peer: inbound handling failed: ${e instanceof Error ? e.message : String(e)}`);
-          });
+          enqueueInbound(msg, boundThreadId);
         }
       });
       sock.on("error", () => { /* sender hangups are routine */ });
@@ -430,6 +437,14 @@ export function createPeer(host: PeerHost): Peer {
       const prevUmask = process.umask(0o077);
       const server = net.createServer();
       attachSocketHandler(server, threadId);
+      // A listen failure is asynchronous; without a handler it is an
+      // uncaught exception that kills the whole broker. Retire just this
+      // thread peer instead — the conversation stays reachable via the
+      // front door.
+      server.on("error", (e) => {
+        host.log(`peer: thread-peer socket error for ${threadId}: ${e.message} — retiring it`);
+        retireThreadPeer(threadId);
+      });
       server.listen(tpSocketPath);
       process.umask(prevUmask);
 
@@ -486,19 +501,29 @@ export function createPeer(host: PeerHost): Peer {
           if (item?.type === "agentMessage" && typeof item.text === "string") {
             replyBuffers.get(threadId)?.push(item.text);
           }
-        } else if (method === "turn/completed" || method === "turn/failed") {
+        } else if (method === "turn/completed") {
+          // There is no turn/failed notification — failure and interruption
+          // arrive as turn/completed with turn.status set accordingly.
           const texts = replyBuffers.get(threadId);
           replyBuffers.delete(threadId);
           updateStatus("idle");
           const conv = threadConversations.get(threadId);
           if (!conv) return;
           conv.lastActivity = Date.now();
-          const reply = (texts ?? []).join("\n\n").trim();
+          // Buffer already consumed (or never armed): this is a goal-mode
+          // continuation turn completing after the reply was delivered —
+          // stay silent rather than spam the sender per continuation.
+          if (!texts) return;
+          const turn = params?.turn as { status?: string; error?: { message?: string } | null } | undefined;
+          const reply = texts.join("\n\n").trim();
           if (reply) {
             deliverTo(conv.replyPath, reply, threadId);
-          } else if (method === "turn/failed") {
-            const err = (params?.error as { message?: string } | undefined)?.message;
-            deliverTo(conv.replyPath, `[codex-collab] The turn failed before producing a reply${err ? `: ${err}` : "."}`, threadId);
+          } else if (turn?.status === "failed" || turn?.status === "interrupted") {
+            const err = turn.error?.message;
+            deliverTo(conv.replyPath, `[codex-collab] The turn ${turn.status} before producing a reply${err ? `: ${err}` : "."}`, threadId);
+          } else {
+            // A silent success reads as a lost message to the sender.
+            deliverTo(conv.replyPath, "[codex-collab] Codex finished the turn without a closing message.", threadId);
           }
         }
       },
@@ -549,7 +574,7 @@ export function createPeer(host: PeerHost): Peer {
    *  and a broken config file must degrade, not die, in a daemon. */
   function readUserConfig(): { model?: string; sandbox?: string } {
     try {
-      const parsed = JSON.parse(readFileSync(join(homedir(), ".codex-collab", "config.json"), "utf-8"));
+      const parsed = JSON.parse(readFileSync(config.configFile, "utf-8"));
       return {
         model: typeof parsed?.model === "string" ? parsed.model : undefined,
         sandbox: typeof parsed?.sandbox === "string" ? parsed.sandbox : undefined,
@@ -572,6 +597,30 @@ export function createPeer(host: PeerHost): Peer {
   }
 
   // ── Inbound ──
+
+  /** Per-conversation FIFO for inbound messages. Two messages from the same
+   *  new sender arriving back-to-back would otherwise BOTH miss the
+   *  conversation map — the first handler's `await startThread()` is a
+   *  suspension point — and each would create its own thread. Claude Code
+   *  queues sends and drains them in bursts, so this race is a matter of
+   *  when, not if. Keyed by the thread for thread-peer sockets and by the
+   *  sender for the front door: the same key a message would resolve its
+   *  conversation under. */
+  const inboundQueues = new Map<string, Promise<void>>();
+
+  function enqueueInbound(msg: InboundMessage, boundThreadId: string | null): void {
+    const key = boundThreadId ?? msg.replyPath;
+    const prev = inboundQueues.get(key) ?? Promise.resolve();
+    const next = prev
+      .then(() => handleInbound(msg, boundThreadId))
+      .catch((e) => {
+        host.log(`peer: inbound handling failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    inboundQueues.set(key, next);
+    void next.finally(() => {
+      if (inboundQueues.get(key) === next) inboundQueues.delete(key);
+    });
+  }
 
   async function handleInbound(msg: InboundMessage, boundThreadId: string | null = null): Promise<void> {
     if (seenMsgIds.has(msg.msgId)) return;
@@ -679,10 +728,15 @@ export function createPeer(host: PeerHost): Peer {
         }],
       });
     } catch (e) {
+      // The claim MUST be released here: no turn started, so no
+      // turn/completed will ever free it, and an internal owner never
+      // disconnects — a leaked claim blocks the thread (and idle shutdown)
+      // for the broker's whole life.
+      host.releaseThread(conv.threadId);
       replyBuffers.delete(conv.threadId);
       updateStatus("idle");
       host.log(`peer: turn/start failed for ${conv.threadId}: ${e instanceof Error ? e.message : String(e)}`);
-      deliverTo(conv.replyPath, `[codex-collab] Could not start a turn: ${e instanceof Error ? e.message : String(e)}`);
+      deliverTo(conv.replyPath, `[codex-collab] Could not start a turn: ${e instanceof Error ? e.message : String(e)}`, conv.threadId);
     }
   }
 
@@ -723,7 +777,7 @@ export function createPeer(host: PeerHost): Peer {
         resolve(null);
       }, CONSULT_TIMEOUT_MS);
       timer.unref?.();
-      pendingConsults.set(threadId, { threadId, senderKey: conv.replyPath, resolve, timer });
+      pendingConsults.set(threadId, { threadId, resolve, timer });
     });
 
     return answer === null
@@ -734,11 +788,18 @@ export function createPeer(host: PeerHost): Peer {
   // ── Liveness scan ──
 
   function hasLiveSessions(): boolean {
+    // Entries WE wrote must not count: the front door is our own pid, and
+    // thread-peer entries are backed by our holder processes — counting
+    // them would keep the broker resident because of its own bookkeeping.
+    const ours = new Set<number>([process.pid]);
+    for (const tp of threadPeers.values()) {
+      if (tp.holder.pid) ours.add(tp.holder.pid);
+    }
     try {
       for (const file of readdirSync(sessionsDir())) {
-        if (!file.endsWith(".json") || file === `${process.pid}.json`) continue;
+        if (!file.endsWith(".json")) continue;
         const pid = Number(file.slice(0, -".json".length));
-        if (!Number.isInteger(pid) || pid <= 0) continue;
+        if (!Number.isInteger(pid) || pid <= 0 || ours.has(pid)) continue;
         try {
           process.kill(pid, 0);
           return true;
@@ -764,6 +825,12 @@ export function createPeer(host: PeerHost): Peer {
       const prevUmask = process.umask(0o077);
       server = net.createServer();
       attachSocketHandler(server, null);
+      // Async listen failures must not crash the broker — a peer that
+      // cannot bind simply deactivates; everything else keeps working.
+      server.on("error", (e) => {
+        host.log(`peer: front-door socket error: ${e.message} — deactivating peer`);
+        stop();
+      });
       server.listen(socketPath);
       process.umask(prevUmask);
 

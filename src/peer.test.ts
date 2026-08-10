@@ -3,13 +3,19 @@
 // behavior is exercised end to end by the contract tests, not here.
 
 import { describe, expect, test } from "bun:test";
+import net from "node:net";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   buildEnvelope,
   buildRegistryEntry,
+  createPeer,
   parseEnvelope,
   peerCapability,
   peerNameFor,
   sessionsDir,
+  type PeerHost,
 } from "./peer";
 
 describe("parseEnvelope", () => {
@@ -104,6 +110,122 @@ describe("buildRegistryEntry", () => {
     expect(entry.peerProtocol).toBe(1);
     expect(entry.nameSource).toBe("explicit");
   });
+});
+
+describe("claim release on turn-start failure", () => {
+  test("a failed turn/start releases the thread claim instead of leaking it", async () => {
+    // Isolated registry + state dir: the peer must never touch the real one.
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true }); // capability gate requires it
+
+    const released: string[] = [];
+    const claimed = new Set<string>();
+    const requests: string[] = [];
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        requests.push(method);
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        if (method === "turn/start") throw new Error("simulated turn/start failure");
+        return {};
+      },
+      claimThread: (threadId) => { claimed.add(threadId); return true; },
+      releaseThread: (threadId) => { released.push(threadId); },
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    try {
+      expect(peer.active).toBe(true);
+      // Deliver a message through the real front-door socket.
+      const line = buildEnvelope({
+        text: "hello",
+        ourSocketPath: join(dir, "sender.sock"),
+        ourName: "test-sender",
+      });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => {
+          sock.write(line);
+          sock.end();
+          resolve();
+        });
+        sock.on("error", reject);
+      });
+      // The failed turn/start must have released the claim it took.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(requests).toContain("turn/start");
+      expect(claimed.has("thread-X")).toBe(true);
+      expect(released).toContain("thread-X");
+    } finally {
+      peer.stop();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
+
+describe("inbound serialization", () => {
+  test("two back-to-back messages from a new sender create ONE thread, not two", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+
+    const requests: string[] = [];
+    let started = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        requests.push(method);
+        if (method === "thread/start") {
+          // A real thread/start takes a moment — the suspension window in
+          // which the second message used to sneak past the map lookup.
+          await new Promise((r) => setTimeout(r, 50));
+          return { thread: { id: `thread-${++started}` } };
+        }
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    try {
+      expect(peer.active).toBe(true);
+      const envelope = (n: number) => buildEnvelope({
+        text: `message ${n}`,
+        ourSocketPath: join(dir, "sender.sock"),
+        ourName: "test-sender",
+      });
+      // Both lines in ONE write: the exact burst shape Claude Code produces
+      // when draining queued sends.
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => {
+          sock.write(envelope(1) + envelope(2));
+          sock.end();
+          resolve();
+        });
+        sock.on("error", reject);
+      });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(requests.filter((m) => m === "thread/start").length).toBe(1);
+      // Both messages were delivered to the one thread.
+      expect(requests.filter((m) => m === "thread/inject_items").length).toBe(2);
+    } finally {
+      peer.stop();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
 
 describe("peerCapability", () => {

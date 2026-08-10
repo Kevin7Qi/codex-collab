@@ -260,6 +260,12 @@ async function main() {
       });
       return true;
     },
+    releaseThread: (threadId) => {
+      // Only entries the peer itself owns — a client socket's claim is not
+      // the peer's to free.
+      const entry = threads.get(threadId);
+      if (entry && !(entry.socket instanceof net.Socket)) releaseThread(threadId);
+    },
     threadHasTurn: (threadId) => threads.has(threadId),
     log: (line) => process.stderr.write(`[broker-server] ${line}\n`),
   });
@@ -651,7 +657,11 @@ async function main() {
     }
 
     entry.requestPending = false;
-    if (entry.turnId === null && turnId) entry.turnId = turnId;
+    // For review/start the turn runs on the SUBTHREAD — the parent entry
+    // must keep turnId null so the close handler releases it instantly
+    // instead of arming a watchdog and firing a bogus interrupt at a
+    // thread that never ran the turn.
+    if (!reviewThreadId && entry.turnId === null && turnId) entry.turnId = turnId;
 
     let reviewEntry: ThreadEntry | null = null;
     if (reviewThreadId && !threads.has(reviewThreadId)) {
@@ -672,7 +682,9 @@ async function main() {
     // guarantee the turn is fully torn down.
     if (entry.socket === null) {
       const interruptThreadId = reviewThreadId ?? parentThreadId;
-      const interruptTurnId = entry.turnId;
+      // The response's turn id is authoritative for the turn this request
+      // started; the parent entry's turnId is deliberately null for reviews.
+      const interruptTurnId = turnId ?? entry.turnId;
       armOrphanWatchdog(parentThreadId!, entry);
       if (reviewEntry) armOrphanWatchdog(reviewThreadId!, reviewEntry);
       if (interruptThreadId && interruptTurnId) {
