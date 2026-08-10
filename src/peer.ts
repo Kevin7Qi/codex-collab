@@ -32,7 +32,18 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import { registerThread, findShortId, loadThreadIndex } from "./threads";
+import {
+  registerThread,
+  findShortId,
+  loadThreadIndex,
+  createRun,
+  updateRun,
+  generateRunId,
+  runLogRelPath,
+  updateThreadStatus,
+  pruneRuns,
+} from "./threads";
+import { EventDispatcher } from "./events";
 import { config } from "./config";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -486,6 +497,12 @@ export function createPeer(host: PeerHost): Peer {
   const threadPeers = new Map<string, ThreadPeer>();
   /** threadId → accumulated reply text for a peer-initiated turn. */
   const replyBuffers = new Map<string, string[]>();
+  /** threadId → the run record and log this peer turn is writing, so
+   *  `progress`, `output`, `follow` and thread status work on a messaged
+   *  conversation exactly as they do on a CLI run. Without it the only
+   *  answerable question about a running turn is "has it replied yet",
+   *  which is useless when what you need to know is whether it is stuck. */
+  const activeRuns = new Map<string, { runId: string; dispatcher: EventDispatcher; startedAt: number }>();
   /** threadId → pending consult awaiting the sender's next message. */
   const pendingConsults = new Map<string, PendingConsult>();
   /** Bounded msg_id dedupe (Claude Code retries identical sends). */
@@ -709,12 +726,105 @@ export function createPeer(host: PeerHost): Peer {
     timer.unref?.();
   }
 
+  // ── Run records for peer turns ──
+
+  /** Open a run record and progress log for a turn the peer is about to
+   *  start, mirroring what the CLI writes so `progress`, `output`, `follow`
+   *  and `threads` status answer the same questions for a messaged
+   *  conversation. Best-effort: a ledger failure must never stop the turn. */
+  function beginRun(threadId: string, shortId: string, prompt: string, model?: string): void {
+    try {
+      const runId = generateRunId();
+      const logFile = runLogRelPath(shortId, runId);
+      const dispatcher = new EventDispatcher(
+        join(host.stateDir, logFile),
+        () => {}, // no terminal to print to — the log IS the progress surface
+      );
+      createRun(host.stateDir, {
+        runId,
+        threadId,
+        shortId,
+        kind: "task",
+        phase: "running",
+        status: "running",
+        pid: process.pid,
+        sessionId: null,
+        logFile,
+        logOffset: 0,
+        prompt,
+        model: model ?? null,
+        startedAt: new Date().toISOString(),
+        completedAt: null,
+        elapsed: null,
+        output: null,
+        filesChanged: null,
+        commandsRun: null,
+        error: null,
+      });
+      activeRuns.set(threadId, { runId, dispatcher, startedAt: Date.now() });
+      updateThreadStatus(host.stateDir, threadId, "running");
+      pruneRuns(host.stateDir);
+    } catch (e) {
+      host.log(`peer: could not open a run record for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /** Close the run record for a finished peer turn. `status` comes from
+   *  turn.status, so an interrupted or failed turn is recorded as such
+   *  rather than silently reading as success. */
+  function finishRun(threadId: string, status: string, output: string, error: string | null): void {
+    const run = activeRuns.get(threadId);
+    if (!run) return;
+    activeRuns.delete(threadId);
+    try {
+      run.dispatcher.flushOutput();
+      run.dispatcher.flush();
+      const normalized = status === "completed" || status === "failed" || status === "interrupted"
+        ? status
+        : "completed";
+      updateRun(host.stateDir, run.runId, {
+        status: normalized as "completed" | "failed" | "interrupted",
+        phase: "finalizing",
+        completedAt: new Date().toISOString(),
+        elapsed: `${Math.round((Date.now() - run.startedAt) / 1000)}s`,
+        output: output || null,
+        filesChanged: run.dispatcher.getFilesChanged(),
+        commandsRun: run.dispatcher.getCommandsRun(),
+        error,
+        pendingApproval: null,
+        pendingQuestion: null,
+      });
+      updateThreadStatus(host.stateDir, threadId, normalized as "completed" | "failed" | "interrupted");
+    } catch (e) {
+      host.log(`peer: could not close the run record for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   // ── Internal thread ownership ──
 
   function ownerFor(threadId: string): InternalOwner {
     return {
       kind: "peer",
       onNotification(method, params) {
+        // Feed the same dispatcher the CLI uses, so a messaged conversation
+        // produces the same progress log and run record a `run` does.
+        const run = activeRuns.get(threadId);
+        if (run) {
+          try {
+            if (method === "item/started") {
+              run.dispatcher.handleItemStarted(params as never);
+            } else if (method === "item/completed") {
+              run.dispatcher.handleItemCompleted(params as never);
+            } else if (method.endsWith("/delta") || method.endsWith("Delta")) {
+              run.dispatcher.handleDelta(method, params as never);
+            } else if (method === "error") {
+              run.dispatcher.handleError(params as never);
+            }
+          } catch (e) {
+            // Progress logging must never break delivery.
+            host.log(`peer: progress logging failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
         if (method === "item/completed") {
           const item = params?.item as { type?: string; text?: string } | undefined;
           if (item?.type === "agentMessage" && typeof item.text === "string") {
@@ -735,6 +845,7 @@ export function createPeer(host: PeerHost): Peer {
           if (!texts) return;
           const turn = params?.turn as { status?: string; error?: { message?: string } | null } | undefined;
           const reply = texts.join("\n\n").trim();
+          finishRun(threadId, turn?.status ?? "completed", reply, turn?.error?.message ?? null);
           if (reply) {
             deliverTo(conv.replyPath, reply, threadId);
           } else if (turn?.status === "failed" || turn?.status === "interrupted") {
@@ -1033,6 +1144,11 @@ export function createPeer(host: PeerHost): Peer {
     // losing it just means the message waits for that turn's next sampling.
     if (!host.claimThread(conv.threadId, ownerFor(conv.threadId))) return;
     replyBuffers.set(conv.threadId, []);
+    beginRun(
+      conv.threadId,
+      conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8),
+      deliveryText,
+    );
     updateStatus("busy");
     try {
       await host.request("turn/start", {
@@ -1049,6 +1165,7 @@ export function createPeer(host: PeerHost): Peer {
       // for the broker's whole life.
       host.releaseThread(conv.threadId);
       replyBuffers.delete(conv.threadId);
+      finishRun(conv.threadId, "failed", "", e instanceof Error ? e.message : String(e));
       updateStatus("idle");
       host.log(`peer: turn/start failed for ${conv.threadId}: ${e instanceof Error ? e.message : String(e)}`);
       deliverTo(conv.replyPath, `[codex-collab] Could not start a turn: ${e instanceof Error ? e.message : String(e)}`, conv.threadId);

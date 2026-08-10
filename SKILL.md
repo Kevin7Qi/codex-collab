@@ -23,7 +23,7 @@ sandbox: read-only
 Review the login flow and tell me what you would change.
 ```
 
-Each conversation appears as its own entry in `ListAgents` under its name. Reply to a message's `from` address to continue that specific conversation. Codex may send a `[consult]` message mid-task when it needs your judgment — reply to that address to answer; if you don't, Codex proceeds on its own after a timeout.
+Each conversation appears as its own entry in `ListAgents` under its name. Reply to a message's `from` address to continue that specific conversation. Messaged conversations write the same run records as CLI runs, so `codex-collab progress <id>`, `output`, and `follow` work on them — use `progress` when a reply is slow and you need to see whether Codex is working or stuck. Codex may send a `[consult]` message mid-task when it needs your judgment — reply to that address to answer; if you don't, Codex proceeds on its own after a timeout.
 
 If no `codex-*` entry appears in `ListAgents`, the CLI handles everything. Messaging requires a messaging-capable Claude Code on macOS or Linux; run `codex-collab peer up` to start it.
 

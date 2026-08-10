@@ -350,10 +350,11 @@ export type LastOutput =
   | { kind: "output"; text: string; note: string | null }
   | { kind: "none"; reason: string; running: boolean };
 
-/** True when a thread has no local run records — the shape of a conversation
- *  held over peer messaging, whose turns run inside the broker rather than a
- *  CLI invocation. Its history lives server-side, so `peek` is the honest
- *  answer rather than a claim that nothing happened. */
+/** True when a thread has no local run records at all — a thread discovered
+ *  from the server, or one whose runs have been pruned. Peer conversations
+ *  write run records like CLI runs do, so they no longer land here; when a
+ *  thread genuinely has no local history, `peek` is the honest answer rather
+ *  than a claim that nothing happened. */
 function hasNoLocalRuns(stateDir: string, shortId: string): boolean {
   try {
     return listRunsForThread(stateDir, shortId).length === 0;
@@ -399,7 +400,7 @@ export async function handleOutput(args: string[]): Promise<void> {
       const hint = res.running
         ? `Watch it: codex-collab follow ${shortId}`
         : hasNoLocalRuns(ws.stateDir, shortId)
-          ? `This conversation is held over peer messaging — read it with: codex-collab peek ${shortId}`
+          ? `This thread has no runs from this machine — read its server-side history with: codex-collab peek ${shortId}`
           : `Full history: codex-collab output ${shortId}`;
       die(`${res.reason}\n${hint}`);
     }
@@ -409,7 +410,7 @@ export async function handleOutput(args: string[]): Promise<void> {
   }
   if (content === null) {
     die(hasNoLocalRuns(ws.stateDir, shortId)
-      ? `No local log for ${shortId}. Conversations held over peer messaging keep their history server-side — read it with: codex-collab peek ${shortId}`
+      ? `No local log for ${shortId}. This thread has no runs from this machine — read its server-side history with: codex-collab peek ${shortId}`
       : `No log file for thread`);
   }
   if (options.contentOnly) {
@@ -436,7 +437,7 @@ export async function handleProgress(args: string[]): Promise<void> {
     // the view that reads the server instead of a local mirror.
     console.log(
       hasNoLocalRuns(ws.stateDir, shortId)
-        ? `No local activity log for ${shortId}. Conversations held over peer messaging keep their history server-side — read it with: codex-collab peek ${shortId}`
+        ? `No local activity log for ${shortId}. This thread has no runs from this machine — read its server-side history with: codex-collab peek ${shortId}`
         : "No activity yet.",
     );
     return;
