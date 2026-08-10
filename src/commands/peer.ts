@@ -9,14 +9,14 @@ import { resolveStateDir } from "../config";
 import { peerCapability, peerNameFor, sessionsDir } from "../peer";
 import { ensureConnection } from "../broker";
 
-interface PeerState {
+export interface PeerState {
   pid: number;
   name: string;
   socketPath: string;
   startedAt: string;
 }
 
-function readPeerState(stateDir: string): PeerState | null {
+export function readPeerState(stateDir: string): PeerState | null {
   try {
     const parsed = JSON.parse(readFileSync(join(stateDir, "peer-state.json"), "utf-8"));
     if (typeof parsed?.pid === "number" && typeof parsed?.socketPath === "string") {
@@ -26,7 +26,7 @@ function readPeerState(stateDir: string): PeerState | null {
   return null;
 }
 
-function isAlive(pid: number): boolean {
+export function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

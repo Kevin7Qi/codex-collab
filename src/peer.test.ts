@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from "bun:test";
 import net from "node:net";
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -401,6 +402,55 @@ describe("topic routing", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+});
+
+describe("peerCapability fallback gating", () => {
+  /** Run `fn` against an isolated registry containing `entries`. */
+  function withRegistry(entries: Array<Record<string, unknown>>, fn: () => void): void {
+    const dir = mkdtempSync(join(tmpdir(), "peer-cap-"));
+    const prev = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = dir;
+    try {
+      entries.forEach((e, i) => writeFileSync(join(dir, `s${i}.json`), JSON.stringify(e)));
+      fn();
+    } finally {
+      if (prev === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("an older Claude Code — live sessions, none binding a messaging socket — is unsupported", () => {
+    const child = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    try {
+      expect(child.pid).toBeGreaterThan(0);
+      withRegistry([{ pid: child.pid, name: "old-session" }], () => {
+        const cap = peerCapability();
+        expect(cap.ok).toBe(false);
+        expect(cap.reason).toContain("no messaging sockets");
+      });
+    } finally {
+      child.kill();
+    }
+  });
+
+  test("a messaging-capable session enables the peer", () => {
+    const child = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    try {
+      withRegistry(
+        [{ pid: child.pid, name: "new-session", messagingSocketPath: "/tmp/cc-socks/x.sock" }],
+        () => expect(peerCapability().ok).toBe(true),
+      );
+    } finally {
+      child.kill();
+    }
+  });
+
+  test("no live sessions is inconclusive, not negative — one may start later", () => {
+    withRegistry([{ pid: 4900777, name: "dead-session" }], () => {
+      expect(peerCapability().ok).toBe(true);
+    });
+  });
 });
 
 describe("peerCapability", () => {

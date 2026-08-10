@@ -378,6 +378,31 @@ export function peerCapability(): { ok: boolean; reason: string } {
   if (process.platform === "win32") return { ok: false, reason: "windows (messaging unsupported)" };
   if (process.env.CODEX_COLLAB_PEER === "off") return { ok: false, reason: "CODEX_COLLAB_PEER=off" };
   if (!existsSync(sessionsDir())) return { ok: false, reason: "no Claude session registry" };
+
+  // A Claude Code too old for peer messaging still keeps a session registry —
+  // it just binds no messaging socket. Registering against it would advertise
+  // a peer nobody can reach, so treat "live sessions exist and NONE advertises
+  // a socket" as unsupported. No live sessions at all is inconclusive, not
+  // negative: a session may start later, and the peer costs nothing until one
+  // does. Our own entries do not skew this — the broker probes before it
+  // registers, and a crashed broker's holders die with it.
+  let live = 0;
+  let reachable = 0;
+  try {
+    for (const file of readdirSync(sessionsDir())) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
+        if (typeof entry?.pid !== "number" || entry.pid === process.pid) continue;
+        process.kill(entry.pid, 0);
+        live++;
+        if (typeof entry.messagingSocketPath === "string") reachable++;
+      } catch { /* dead or unreadable — not a live session */ }
+    }
+  } catch { /* unreadable registry */ }
+  if (live > 0 && reachable === 0) {
+    return { ok: false, reason: "this Claude Code binds no messaging sockets (needs a newer version)" };
+  }
   return { ok: true, reason: "" };
 }
 

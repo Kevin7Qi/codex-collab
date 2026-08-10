@@ -1,6 +1,10 @@
 // src/commands/config.ts — config, models, health command handlers
 
-import { config, listTemplates } from "../config";
+import { config, listTemplates, resolveStateDir } from "../config";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { peerCapability, sessionsDir } from "../peer";
+import { readPeerState, isAlive, type PeerState } from "./peer";
 import type { Model, AccountRead } from "../types";
 import {
   die,
@@ -149,6 +153,30 @@ export function describeAuth(read: AccountRead | "unknown"): { ready: boolean; d
   return { ready: true, detail: "not reported (no account and no auth requirement given)" };
 }
 
+/** One-line native-peer verdict for `health`.
+ *
+ *  Never fatal: peer messaging is an enhancement, and every CLI path works
+ *  without it. The point is to make the fallback VISIBLE — on Windows, on an
+ *  older Claude Code, or with the peer switched off, the user should be able
+ *  to see that codex-collab is running in its degraded-but-complete mode
+ *  rather than wonder why `ListAgents` shows nothing. */
+export function describePeer(dir: string): string {
+  const capability = peerCapability();
+  if (!capability.ok) return `unavailable — ${capability.reason} (CLI paths unaffected)`;
+  let state: PeerState | null = null;
+  try {
+    state = readPeerState(resolveStateDir(dir));
+  } catch {
+    return "available (state unreadable)";
+  }
+  if (!state) return "available, not running (start it with 'codex-collab peer up')";
+  if (!isAlive(state.pid)) return "available, not running (stale state — 'codex-collab peer up')";
+  const registered = existsSync(join(sessionsDir(), `${state.pid}.json`));
+  return registered
+    ? `registered as "${state.name}" (broker pid ${state.pid})`
+    : `broker running (pid ${state.pid}) but its registry entry is missing — 'codex-collab peer up'`;
+}
+
 export async function handleHealth(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
   const findCmd = process.platform === "win32" ? "where" : "which";
@@ -182,6 +210,7 @@ export async function handleHealth(args: string[]): Promise<void> {
 
   const auth = describeAuth(account);
   console.log(`  account: ${auth.detail}`);
+  console.log(`  peer: ${describePeer(options.dir)}`);
 
   // Missing auth is reported, never fatal. This command's exit code answers
   // "is the installation sound?" — install.sh runs it as its own final check,
