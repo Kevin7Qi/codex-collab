@@ -7,7 +7,20 @@ description: Use when the user asks to invoke, delegate to, or collaborate with 
 
 codex-collab is a bridge between Claude and Codex. It communicates with Codex via the `codex app-server` JSON-RPC protocol, giving you structured, event-driven access to Codex's capabilities — prompting, code review, tool use, and file editing. Requires bun and the codex CLI on PATH (`codex-collab health` to verify).
 
-## Native Peer Messaging (Preferred for Conversation)
+## Choosing a path
+
+There are two ways to reach Codex. Decide with this table, not by preference:
+
+| What you're doing | Use |
+|---|---|
+| A question, a second opinion, discussing a plan, following up on an answer | **Message the peer** — `SendMessage` to the `codex-*` agent in `ListAgents` |
+| Work that needs flags (`-s`, `-m`, `-r`, `--timeout`), parseable output (`--content-only`), a run record, `follow`, or `--detach` | **`run`** |
+| Reviewing a PR, uncommitted changes, or a commit | **`review`** |
+| No `codex-*` peer in `ListAgents` | **CLI** — everything below works unchanged |
+
+The difference is instrumentation, not capability: messaging takes no flags and produces no run record — it uses workspace defaults and replies when done, and Codex can ask you questions mid-task. The CLI is the instrumented path, so anything long, unattended, or needing specific settings belongs there.
+
+## Native Peer Messaging
 
 When `ListAgents` shows a `codex-*` peer for this workspace, Codex is directly messageable — no CLI in the loop:
 
@@ -17,9 +30,7 @@ When `ListAgents` shows a `codex-*` peer for this workspace, Codex is directly m
 - Codex may send you a **`[consult]`** message mid-task — it is waiting on your judgment. Reply to that peer to answer; if you don't, Codex proceeds on its own after a timeout.
 - No peer listed? Run `codex-collab peer up` (foreground, seconds) — or fall back to the CLI commands below, which always work. Peers require the messaging-capable Claude Code (macOS/Linux).
 
-Use messaging for conversation and collaboration; use the CLI (`run`, `review`) below when you need structured output, sandbox/model flags, run records, or `--detach` semantics.
-
-## Run Command (Recommended for Prompted Tasks)
+## Run Command
 
 The `run` command handles prompted tasks in one call: starts a thread, sends the prompt, waits for the turn to complete, and prints output.
 
