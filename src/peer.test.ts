@@ -20,6 +20,7 @@ import {
   procStartOf,
   sessionsDir,
   extractTopic,
+  parseHeaders,
   threadPeerLabel,
   topicPeerLabel,
   type PeerHost,
@@ -181,6 +182,53 @@ describe("extractTopic / topicPeerLabel", () => {
 
   test("unsluggable topics produce no label (falls back to text slug)", () => {
     expect(topicPeerLabel("！！！")).toBe("");
+  });
+});
+
+describe("parseHeaders", () => {
+  test("reads a full header block and strips it from the body", () => {
+    const { headers, body } = parseHeaders(
+      "topic: auth refactor\nmodel: gpt-5.6-sol\neffort: xhigh\nsandbox: read-only\napproval: auto\n\nReview the login flow.",
+    );
+    expect(headers).toEqual({
+      topic: "auth refactor",
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
+      sandbox: "read-only",
+      approval: "auto",
+    });
+    expect(body).toBe("Review the login flow.");
+  });
+
+  test("stops at the first line that is not a recognized header", () => {
+    const { headers, body } = parseHeaders("topic: x\nNote: this is prose, not a header\nmore");
+    expect(headers.topic).toBe("x");
+    expect(body).toBe("Note: this is prose, not a header\nmore");
+  });
+
+  test("prose containing a colon is never eaten", () => {
+    const text = "Fix this: the parser drops values\nsecond line";
+    expect(parseHeaders(text).body).toBe(text);
+    expect(parseHeaders(text).headers.topic).toBeNull();
+  });
+
+  test("an invalid value ends the block instead of vanishing", () => {
+    // "ludicrous" is not a valid effort — the line must survive as text so a
+    // typo is visible to Codex rather than silently ignored.
+    const { headers, body } = parseHeaders("effort: ludicrous\ndo the thing");
+    expect(headers.effort).toBeUndefined();
+    expect(body).toContain("effort: ludicrous");
+  });
+
+  test("only `auto` is accepted for approval", () => {
+    expect(parseHeaders("approval: auto\nx").headers.approval).toBe("auto");
+    expect(parseHeaders("approval: on-request\nx").headers.approval).toBeUndefined();
+  });
+
+  test("a header-only message keeps its topic as the body", () => {
+    const { headers, body } = parseHeaders("topic: quick check\nmodel: gpt-5.5");
+    expect(headers.topic).toBe("quick check");
+    expect(body).toBe("quick check");
   });
 });
 

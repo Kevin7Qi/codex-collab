@@ -32,7 +32,7 @@ import {
 } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
-import { registerThread } from "./threads";
+import { registerThread, findShortId, loadThreadIndex } from "./threads";
 import { config } from "./config";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -172,13 +172,68 @@ export function peerNameFor(cwd: string): string {
  *  against the live envelope). The topic line is addressing metadata, so
  *  it is stripped from what Codex sees; a topic-only message keeps the
  *  topic as its body. */
+/** Per-conversation settings a sender may declare in the header block. */
+export interface MessageHeaders {
+  topic: string | null;
+  model?: string;
+  effort?: string;
+  sandbox?: string;
+  approval?: string;
+}
+
+/** Settings the header block accepts, with the values each allows. `approval`
+ *  takes only `auto`: interactive policies route their prompts to CLI client
+ *  sockets, and a messaging sender is not one, so anything else would hang
+ *  the turn until it timed out. Guardian (`auto`) needs no human answerer. */
+const HEADER_KEYS: Record<string, readonly string[] | null> = {
+  model: null, // free-form; the server rejects unknown models
+  effort: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+  sandbox: ["read-only", "workspace-write", "danger-full-access"],
+  approval: ["auto"],
+};
+
+/** Parse the leading `key: value` header block. Recognized keys are consumed;
+ *  the first line that is not a recognized header ends the block, so ordinary
+ *  prose that happens to contain a colon is never eaten. Unknown or invalid
+ *  values are left in the body rather than silently dropped — a misspelled
+ *  setting should reach Codex as text, not vanish. */
+export function parseHeaders(text: string): { headers: MessageHeaders; body: string } {
+  const lines = text.split("\n");
+  const headers: MessageHeaders = { topic: null };
+  let consumed = 0;
+  for (const line of lines) {
+    const m = /^\s*([a-zA-Z]+):\s*(.{1,60})\s*$/.exec(line);
+    if (!m) break;
+    const key = m[1].toLowerCase();
+    const value = m[2].trim();
+    if (key === "topic" || key === "subject") {
+      if (headers.topic !== null) break;
+      headers.topic = value;
+    } else if (key === "reasoning" || key === "effort") {
+      if (headers.effort !== undefined || !HEADER_KEYS.effort!.includes(value)) break;
+      headers.effort = value;
+    } else if (key in HEADER_KEYS) {
+      const allowed = HEADER_KEYS[key];
+      const bag = headers as unknown as Record<string, unknown>;
+      if (bag[key] !== undefined) break;
+      if (allowed && !allowed.includes(value)) break;
+      bag[key] = value;
+    } else {
+      break;
+    }
+    consumed++;
+  }
+  if (consumed === 0) return { headers, body: text };
+  const body = lines.slice(consumed).join("\n").trim();
+  // A header-only message keeps its topic as the body, so the conversation
+  // still has something to act on.
+  return { headers, body: body || headers.topic || text };
+}
+
+/** Back-compat shim for the topic-only callers and their tests. */
 export function extractTopic(text: string): { topic: string | null; body: string } {
-  const nl = text.indexOf("\n");
-  const first = (nl === -1 ? text : text.slice(0, nl)).trim();
-  const m = /^(?:topic|subject):\s*(.{1,60})$/i.exec(first);
-  if (!m) return { topic: null, body: text };
-  const body = nl === -1 ? "" : text.slice(nl + 1).trim();
-  return { topic: m[1].trim(), body: body || m[1].trim() };
+  const { headers, body } = parseHeaders(text);
+  return { topic: headers.topic, body };
 }
 
 /** Peer name for a sender-chosen topic: codex-<topic-slug>. */
@@ -366,6 +421,11 @@ export interface Peer {
    *  tools were declared by the peer, so their calls belong to it no matter
    *  who runs the current turn. */
   ownsThread(threadId: string): boolean;
+  /** Give a thread a peer address after a CLI client created or resumed it.
+   *  Without this, starting work with `run` would foreclose ever talking to
+   *  that conversation — the two entry points would produce different, and
+   *  irreversibly different, kinds of thread. */
+  adoptThread(threadId: string): void;
   /** Handle a dynamic tool call routed from the broker. */
   handleToolCall(params: Record<string, unknown>): Promise<Record<string, unknown>>;
   /** True when any OTHER live Claude session is registered — the broker's
@@ -627,6 +687,28 @@ export function createPeer(host: PeerHost): Peer {
     }
   }
 
+  /** Adopt a thread a CLI client just created or resumed, so it can be
+   *  messaged later. The CLI registers the thread in the shared index
+   *  immediately after `thread/start` returns, but the broker sees the
+   *  response FIRST — so look the name up on a short delay rather than
+   *  racing it, and fall back to a derived suffix if the index has nothing
+   *  (an external thread, or an index write that failed). */
+  function adoptThread(threadId: string): void {
+    if (!active || stopped || threadPeers.has(threadId)) return;
+    const timer = setTimeout(() => {
+      if (!active || stopped || threadPeers.has(threadId)) return;
+      let shortId: string | null = null;
+      let preview = "";
+      try {
+        shortId = findShortId(host.stateDir, threadId);
+        if (shortId) preview = loadThreadIndex(host.stateDir)[shortId]?.preview ?? "";
+      } catch { /* index unreadable — derive below */ }
+      const id = shortId ?? threadId.replace(/-/g, "").slice(-8);
+      createThreadPeer(threadId, id, threadPeerLabel(preview, id));
+    }, 2000);
+    timer.unref?.();
+  }
+
   // ── Internal thread ownership ──
 
   function ownerFor(threadId: string): InternalOwner {
@@ -669,18 +751,34 @@ export function createPeer(host: PeerHost): Peer {
 
   // ── Thread bootstrap ──
 
-  async function startThread(fromName: string, firstMessage: string): Promise<{ threadId: string; shortId: string }> {
+  async function startThread(
+    fromName: string,
+    firstMessage: string,
+    headers: MessageHeaders = { topic: null },
+  ): Promise<{ threadId: string; shortId: string }> {
     const userConfig = readUserConfig();
+    // Header settings override the workspace defaults for this conversation
+    // only. `auto` maps to Guardian, the one approval policy that resolves
+    // without a human at a terminal; everything else stays `never`, because
+    // approval prompts route to CLI client sockets and would hang here.
+    const approval = headers.approval === "auto"
+      ? { approvalPolicy: "on-request", approvalsReviewer: "auto_review" }
+      : { approvalPolicy: "never", approvalsReviewer: "user" };
     const params: Record<string, unknown> = {
       cwd: host.cwd,
-      approvalPolicy: "never",
-      sandbox: userConfig.sandbox ?? "workspace-write",
+      ...approval,
+      sandbox: headers.sandbox ?? userConfig.sandbox ?? "workspace-write",
       experimentalRawEvents: false,
       persistExtendedHistory: false,
       developerInstructions: PEER_DEVELOPER_INSTRUCTIONS,
       dynamicTools: PEER_DYNAMIC_TOOLS,
     };
-    if (userConfig.model) params.model = userConfig.model;
+    const model = headers.model ?? userConfig.model;
+    if (model) params.model = model;
+    // Reasoning effort reaches a thread only through `config`, which the peer
+    // used to drop entirely — a workspace default that silently did nothing.
+    const effort = headers.effort ?? userConfig.reasoning;
+    if (effort) params.config = { model_reasoning_effort: effort };
     const result = await host.request("thread/start", params) as {
       thread: { id: string };
       model?: string;
@@ -716,12 +814,13 @@ export function createPeer(host: PeerHost): Peer {
   /** Minimal user-defaults read (model/sandbox). commands/shared.ts owns the
    *  full loader, but the broker process should not import the CLI layer —
    *  and a broken config file must degrade, not die, in a daemon. */
-  function readUserConfig(): { model?: string; sandbox?: string } {
+  function readUserConfig(): { model?: string; sandbox?: string; reasoning?: string } {
     try {
       const parsed = JSON.parse(readFileSync(config.configFile, "utf-8"));
       return {
         model: typeof parsed?.model === "string" ? parsed.model : undefined,
         sandbox: typeof parsed?.sandbox === "string" ? parsed.sandbox : undefined,
+        reasoning: typeof parsed?.reasoning === "string" ? parsed.reasoning : undefined,
       };
     } catch {
       return {};
@@ -817,12 +916,12 @@ export function createPeer(host: PeerHost): Peer {
      *  whichever conversation it spoke to last — so one session can hold
      *  several parallel conversations, switching between them by topic. */
     let topic: string | null = null;
+    let headers: MessageHeaders = { topic: null };
     if (!boundThreadId) {
-      const parsed = extractTopic(msg.text);
-      if (parsed.topic) {
-        topic = parsed.topic;
-        deliveryText = parsed.body;
-      }
+      const parsed = parseHeaders(msg.text);
+      headers = parsed.headers;
+      topic = parsed.headers.topic;
+      if (parsed.body !== msg.text) deliveryText = parsed.body;
     }
 
     // A thread-peer socket pins the conversation; the front door routes by
@@ -861,7 +960,7 @@ export function createPeer(host: PeerHost): Peer {
         threadConversations.set(boundThreadId, conv);
         saveConversations();
       } else {
-        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText);
+        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText, headers);
         const label = topicLabel || threadPeerLabel(deliveryText, shortId);
         conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
         conversations.set(msg.replyPath, conv); // newest becomes this sender's default
@@ -909,7 +1008,7 @@ export function createPeer(host: PeerHost): Peer {
         host.log(`peer: thread ${conv.threadId} unrecoverable (${e instanceof Error ? e.message : String(e)}) — starting a new one`);
         threadConversations.delete(conv.threadId);
         retireThreadPeer(conv.threadId);
-        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText);
+        const { threadId, shortId } = await startThread(msg.fromName, topic ?? deliveryText, headers);
         conv.threadId = threadId;
         conv.shortId = shortId;
         // Keep the conversation's name across a thread restart: its name is
@@ -1107,6 +1206,7 @@ export function createPeer(host: PeerHost): Peer {
   return {
     get active() { return active; },
     ownsThread: (threadId: string) => threadConversations.has(threadId),
+    adoptThread,
     handleToolCall,
     hasLiveSessions,
     stop,

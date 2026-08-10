@@ -879,6 +879,16 @@ async function main() {
       const result = await appClient.request(method, params ?? {});
       learnGoalFromTraffic(method, params, result);
 
+      // A CLI client just created or resumed a thread: give it a peer
+      // address too, so `run` does not foreclose ever messaging that
+      // conversation. Peer-created threads bypass this path entirely
+      // (the peer calls the app-server directly), so there is no double
+      // registration.
+      if (method === "thread/start" || method === "thread/resume") {
+        const thread = (result as { thread?: { id?: unknown } } | undefined)?.thread;
+        if (typeof thread?.id === "string") peer.adoptThread(thread.id);
+      }
+
       if (isStreaming) {
         await settleStreamingRequest(socket, method, params, result as Record<string, unknown>, claimed);
       }

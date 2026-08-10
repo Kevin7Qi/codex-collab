@@ -9,26 +9,23 @@ codex-collab is a bridge between Claude and Codex. It communicates with Codex vi
 
 ## Choosing a path
 
-There are two ways to reach Codex. Decide with this table, not by preference:
-
-| What you're doing | Use |
-|---|---|
-| A question, a second opinion, discussing a plan, following up on an answer | **Message the peer** — `SendMessage` to the `codex-*` agent in `ListAgents` |
-| Work that needs flags (`-s`, `-m`, `-r`, `--timeout`), parseable output (`--content-only`), a run record, `follow`, or `--detach` | **`run`** |
-| Reviewing a PR, uncommitted changes, or a commit | **`review`** |
-| No `codex-*` peer in `ListAgents` | **CLI** — everything below works unchanged |
-
-The difference is instrumentation, not capability: messaging takes no flags and produces no run record — it uses workspace defaults and replies when done, and Codex can ask you questions mid-task. The CLI is the instrumented path, so anything long, unattended, or needing specific settings belongs there.
+`ListAgents` shows Codex as `codex-<workspace>` (the workspace front door) plus one entry per ongoing conversation. `SendMessage` to any of them is the normal way to talk to Codex. Use the CLI (`run`, `review`) when you need a detached run you can `follow`, or structured output you will parse. Both paths produce the same threads: a CLI-started thread can be messaged afterwards, and a messaged conversation appears in `codex-collab threads`.
 
 ## Native Peer Messaging
 
-When `ListAgents` shows a `codex-*` peer for this workspace, Codex is directly messageable — no CLI in the loop:
+`SendMessage` to `codex-<workspace>` starts or continues a conversation. The first message may include a header block of `key: value` lines at the very start, one per line, stripped before Codex sees the text. Recognized keys: `topic:` names or selects the conversation (a `topic:` on a later message selects an existing conversation or starts a new one); `model:`, `effort:`, `sandbox:` override `codex-collab config` defaults; `approval:` accepts only `auto` (Codex Guardian), because interactive approval prompts route to CLI clients and cannot work over messaging. Parsing stops at the first line that is not a recognized key, so ordinary prose is never consumed as a header.
 
-- **`codex-<workspace>`** is the front door: `SendMessage` to it starts (or continues) a conversation; Codex works the task and its reply arrives back as a peer message.
-- **`topic:` picks the conversation.** A `topic: auth refactor` first line continues the conversation named `codex-auth-refactor`, or starts it if it's new — so you can run several conversations in parallel and switch between them by topic. The line is stripped before Codex sees the message. With no topic line you continue whichever conversation you spoke to last; an unnamed one takes its name from the message text plus the thread's short ID.
-- Each conversation appears as its **own peer** under that name. Replies come from these addresses — reply to a message's `from` address to continue that specific conversation.
-- Codex may send you a **`[consult]`** message mid-task — it is waiting on your judgment. Reply to that peer to answer; if you don't, Codex proceeds on its own after a timeout.
-- No peer listed? Run `codex-collab peer up` (foreground, seconds) — or fall back to the CLI commands below, which always work. Peers require the messaging-capable Claude Code (macOS/Linux).
+```
+topic: auth refactor
+effort: xhigh
+sandbox: read-only
+
+Review the login flow and tell me what you would change.
+```
+
+Each conversation appears as its own entry in `ListAgents` under its name. Reply to a message's `from` address to continue that specific conversation. Codex may send a `[consult]` message mid-task when it needs your judgment — reply to that address to answer; if you don't, Codex proceeds on its own after a timeout.
+
+If no `codex-*` entry appears in `ListAgents`, the CLI handles everything. Messaging requires a messaging-capable Claude Code on macOS or Linux; run `codex-collab peer up` to start it.
 
 ## Run Command
 
@@ -176,6 +173,8 @@ codex-collab run "large refactor task…" --template collab --timeout 3600
 ```
 
 Mid-turn, Codex runs `codex-collab ask "…"`, which waits up to 10 minutes and then resolves one of two ways, both printed into Codex's own context: your answer (steering), or a graceful no-answer notice (fail-open; the run continues, and the unanswered question lands in the run record). Questions are *judgment*, not permission — unlike approvals they never block the run terminally. The template declares the channel and its costs but deliberately prescribes no rules: whether and when to ask is Codex's own call.
+
+In a **peer conversation** this same need is served by Codex's `collab.consult` tool — the question reaches you as a `[consult]` peer message, with the same fail-open deadline. The mailbox below is what CLI-started threads use, and what everything falls back to when no peer is available.
 
 **Restate the channel when you resume a long collab thread.** The channel instructions ride the first prompt, and long threads compact oldest-first — so include one line in your own words in the resume prompt (e.g. "the collaboration channel is still open — `codex-collab ask` reaches me"). Codex only needs the gist; the mechanics are rediscoverable from `codex-collab --help`.
 
