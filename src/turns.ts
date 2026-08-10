@@ -54,6 +54,21 @@ export async function tryInterruptTurn(
     if (e instanceof Error
         && !e.message.includes("not found")
         && !e.message.includes("already")) {
+      // The recorded turn id can go stale mid-turn: long turns rotate ids
+      // (context compaction spawns a new turn), and interrupting with the
+      // original id fails with a mismatch — leaving the turn running as an
+      // orphan (observed: a 20-minute review outliving its CLI timeout).
+      // Re-read the thread and interrupt the turn actually in progress.
+      try {
+        const { thread } = await client.request<{
+          thread: { turns?: Array<{ id: string; status: string }> };
+        }>("thread/read", { threadId, includeTurns: true });
+        const active = thread.turns?.find((t) => t.status === "inProgress");
+        if (active && active.id !== turnId) {
+          await client.request("turn/interrupt", { threadId, turnId: active.id });
+          return;
+        }
+      } catch { /* fall through to the warning */ }
       const prefix = context ? `could not interrupt turn ${context}` : "could not interrupt turn";
       console.error(`[codex] Warning: ${prefix}: ${e.message}`);
     }
