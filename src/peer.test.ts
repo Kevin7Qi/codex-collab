@@ -7,6 +7,7 @@ import net from "node:net";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import {
   buildEnvelope,
   buildRegistryEntry,
@@ -14,9 +15,29 @@ import {
   parseEnvelope,
   peerCapability,
   peerNameFor,
+  procStartOf,
   sessionsDir,
   type PeerHost,
 } from "./peer";
+
+/** Register a fake-but-valid sender in an isolated registry so the peer's
+ *  registered-sender gate admits its messages. Uses OUR pid (alive, with a
+ *  matching procStart) — the same liveness rules the real registry uses. */
+function registerTestSender(sessionsDirPath: string, senderSocket: string): void {
+  const entry = buildRegistryEntry({
+    pid: process.pid,
+    cwd: "/tmp",
+    name: "test-sender",
+    socketPath: senderSocket,
+    version: "2.1.226",
+    procStart: procStartOf(process.pid),
+    sessionId: "00000000-0000-4000-8000-000000000009",
+  });
+  // NOT `${process.pid}.json` — the peer under test writes its own front
+  // door there (same process) and would clobber this registration. The
+  // sender gate reads every *.json and checks content, not filenames.
+  writeFileSync(join(sessionsDirPath, "test-sender.json"), JSON.stringify(entry));
+}
 
 describe("parseEnvelope", () => {
   const wrap = (text: string, fromName = "codex-collab-bf") =>
@@ -119,6 +140,7 @@ describe("claim release on turn-start failure", () => {
     const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
     process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
     mkdirSync(join(dir, "sessions"), { recursive: true }); // capability gate requires it
+    registerTestSender(join(dir, "sessions"), join(dir, "sender.sock"));
 
     const released: string[] = [];
     const claimed = new Set<string>();
@@ -175,6 +197,7 @@ describe("inbound serialization", () => {
     const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
     process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
     mkdirSync(join(dir, "sessions"), { recursive: true });
+    registerTestSender(join(dir, "sessions"), join(dir, "sender.sock"));
 
     const requests: string[] = [];
     let started = 0;

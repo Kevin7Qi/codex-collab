@@ -220,7 +220,10 @@ export function parseEnvelope(line: string): InboundMessage | null {
   const text = (m ? m[2] : content).trim();
   if (!text) return null;
   return {
-    msgId: typeof parsed.msg_id === "string" ? parsed.msg_id : randomUUID(),
+    // Cap the id we retain: the dedupe set stores these, and an oversized
+    // id (real ones are 36-char UUIDs) would let a hostile sender park
+    // megabytes in memory 500 entries at a time.
+    msgId: typeof parsed.msg_id === "string" ? parsed.msg_id.slice(0, 128) : randomUUID(),
     replyPath,
     fromName,
     text,
@@ -284,6 +287,10 @@ export const PEER_DYNAMIC_TOOLS = [{
 export interface Peer {
   /** Started successfully (capability present, registry written). */
   active: boolean;
+  /** True when the thread is one of the peer's conversations — its dynamic
+   *  tools were declared by the peer, so their calls belong to it no matter
+   *  who runs the current turn. */
+  ownsThread(threadId: string): boolean;
   /** Handle a dynamic tool call routed from the broker. */
   handleToolCall(params: Record<string, unknown>): Promise<Record<string, unknown>>;
   /** True when any OTHER live Claude session is registered — the broker's
@@ -421,11 +428,16 @@ export function createPeer(host: PeerHost): Peer {
       host.log(`peer: thread-peer cap (${MAX_THREAD_PEERS}) reached — ${threadId} stays behind the front door`);
       return;
     }
+    // Track partially-created resources so a failure anywhere below cleans
+    // up completely — an untracked holder or listener would outlive every
+    // sweep and stop() because nothing else knows about it.
+    let holder: ChildProcess | null = null;
+    let server: net.Server | null = null;
     try {
       // The holder is a liveness token: registry entries bind filename pid ==
       // content pid == a live process, one entry per pid, so every extra peer
       // needs a real (tiny) process. Its stdin pipe ties its life to ours.
-      const holder = spawn("sh", ["-c", "read _ || true"], {
+      holder = spawn("sh", ["-c", "read _ || true"], {
         stdio: ["pipe", "ignore", "ignore"],
       });
       if (!holder.pid) throw new Error("holder spawn returned no pid");
@@ -435,7 +447,7 @@ export function createPeer(host: PeerHost): Peer {
 
       try { unlinkSync(tpSocketPath); } catch { /* none */ }
       const prevUmask = process.umask(0o077);
-      const server = net.createServer();
+      server = net.createServer();
       attachSocketHandler(server, threadId);
       // A listen failure is asynchronous; without a handler it is an
       // uncaught exception that kills the whole broker. Retire just this
@@ -466,6 +478,14 @@ export function createPeer(host: PeerHost): Peer {
       host.log(`peer: thread peer "${tpName}" registered for ${threadId}`);
     } catch (e) {
       host.log(`peer: could not create thread peer for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+      // Failure after partial setup (e.g. procStartOf or the registry write
+      // threw): reap what exists, or it leaks past every sweep and stop().
+      try { server?.close(); } catch { /* not listening */ }
+      try { holder?.kill(); } catch { /* not spawned */ }
+      if (holder?.pid) {
+        try { unlinkSync(join(sessionsDir(), `${holder.pid}.json`)); } catch { /* not written */ }
+      }
+      try { unlinkSync(join(host.stateDir, `peer-${shortId}.sock`)); } catch { /* not bound */ }
     }
   }
 
@@ -622,11 +642,47 @@ export function createPeer(host: PeerHost): Peer {
     });
   }
 
-  async function handleInbound(msg: InboundMessage, boundThreadId: string | null = null): Promise<void> {
-    if (seenMsgIds.has(msg.msgId)) return;
-    seenMsgIds.add(msg.msgId);
+  /** Record a message id as handled. Called on SUCCESS paths only: marking
+   *  before delivery would turn any transient failure into a permanently
+   *  lost message, because the sender's retry (same id) would be dropped
+   *  as a duplicate. */
+  function markSeen(msgId: string): void {
+    seenMsgIds.add(msgId);
     if (seenMsgIds.size > 500) {
       for (const id of [...seenMsgIds].slice(0, 250)) seenMsgIds.delete(id);
+    }
+  }
+
+  /** True iff the reply path belongs to a live REGISTERED session: some
+   *  registry entry advertises it as messagingSocketPath and its process is
+   *  alive. This is the trust gate on inbound messages. It matters beyond
+   *  hostile-neighbor hygiene: Codex's own sandboxed exec commands run
+   *  same-uid and could otherwise connect to our sockets and answer their
+   *  OWN pending consult — a self-approval loop. Registration is something
+   *  only a real Claude Code session (or the user) produces. */
+  function senderIsRegistered(replyPath: string): boolean {
+    try {
+      for (const file of readdirSync(sessionsDir())) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
+          if (entry?.messagingSocketPath !== replyPath) continue;
+          if (typeof entry?.pid !== "number") continue;
+          process.kill(entry.pid, 0);
+          return true;
+        } catch { /* unreadable entry or dead pid — keep scanning */ }
+      }
+    } catch { /* registry gone */ }
+    return false;
+  }
+
+  async function handleInbound(msg: InboundMessage, boundThreadId: string | null = null): Promise<void> {
+    if (seenMsgIds.has(msg.msgId)) return;
+
+    if (!senderIsRegistered(msg.replyPath)) {
+      markSeen(msg.msgId); // rejection is final — no point re-processing retries
+      host.log(`peer: dropping message from unregistered sender ${msg.replyPath}`);
+      return;
     }
 
     // A thread-peer socket pins the conversation; the front door routes by
@@ -647,6 +703,7 @@ export function createPeer(host: PeerHost): Peer {
         clearTimeout(pending.timer);
         conv.lastActivity = Date.now();
         pending.resolve(msg.text);
+        markSeen(msg.msgId);
         return;
       }
     }
@@ -710,6 +767,10 @@ export function createPeer(host: PeerHost): Peer {
         await injectPeerMessage(threadId, msg.fromName, msg.text);
       }
     }
+
+    // The message is in the thread — delivery has happened; everything
+    // after is a best-effort wake-up. Only now is a retry a duplicate.
+    markSeen(msg.msgId);
 
     // Mid-turn: the injection is read at the next sampling point — done.
     if (host.threadHasTurn(conv.threadId)) return;
@@ -800,10 +861,17 @@ export function createPeer(host: PeerHost): Peer {
         if (!file.endsWith(".json")) continue;
         const pid = Number(file.slice(0, -".json".length));
         if (!Number.isInteger(pid) || pid <= 0 || ours.has(pid)) continue;
+        // Validate content, not just filename liveness: a recycled pid (or
+        // a junk file) would otherwise keep the broker and its app-server
+        // resident indefinitely. This scan runs once per idle period, so
+        // the per-entry ps call is cheap where it matters.
         try {
+          const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
+          if (entry?.pid !== pid) continue;
           process.kill(pid, 0);
+          if (typeof entry?.procStart === "string" && entry.procStart !== procStartOf(pid)) continue;
           return true;
-        } catch { /* dead */ }
+        } catch { /* dead, unreadable, or ps failed — not a live session */ }
       }
     } catch { /* registry gone */ }
     return false;
@@ -883,6 +951,7 @@ export function createPeer(host: PeerHost): Peer {
 
   return {
     get active() { return active; },
+    ownsThread: (threadId: string) => threadConversations.has(threadId),
     handleToolCall,
     hasLiveSessions,
     stop,

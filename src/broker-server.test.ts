@@ -2396,7 +2396,7 @@ setInterval(() => {}, 1000);
   // ── Streaming methods ─────────────────────────────────────────────────────
 
   describe("streaming methods", () => {
-    test("review/start establishes stream ownership with reviewThreadId", async () => {
+    test("review/start claims the review SUBTHREAD and frees the parent", async () => {
 
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
@@ -2420,11 +2420,11 @@ setInterval(() => {}, 1000);
         }) as { turn: { id: string }; reviewThreadId: string };
         expect(reviewResult.reviewThreadId).toBe("review-thread-001");
 
-        // Immediately try client 2 — review stream is still active (5s delay)
+        // The review turn runs on the subthread — that is what's claimed.
         let gotBusy = false;
         try {
           await client2.request("turn/start", {
-            threadId: "thread-001",
+            threadId: "review-thread-001",
             input: [{ type: "text", text: "hello" }],
           });
         } catch (err: any) {
@@ -2432,6 +2432,14 @@ setInterval(() => {}, 1000);
           expect(err.code).toBe(-32001);
         }
         expect(gotBusy).toBe(true);
+
+        // The PARENT thread carries no turn and stays free for other work —
+        // holding it for the connection's whole life was the old bug.
+        const parentTurn = await client2.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "parent is free" }],
+        }) as { turn: { id: string } };
+        expect(parentTurn.turn.id).toBe("turn-001");
 
         await client1.close();
         await client2.close();

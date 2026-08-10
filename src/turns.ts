@@ -58,17 +58,19 @@ export async function tryInterruptTurn(
       // (context compaction spawns a new turn), and interrupting with the
       // original id fails with a mismatch — leaving the turn running as an
       // orphan (observed: a 20-minute review outliving its CLI timeout).
-      // Re-read the thread and interrupt the turn actually in progress.
-      try {
-        const { thread } = await client.request<{
-          thread: { turns?: Array<{ id: string; status: string }> };
-        }>("thread/read", { threadId, includeTurns: true });
-        const active = thread.turns?.find((t) => t.status === "inProgress");
-        if (active && active.id !== turnId) {
-          await client.request("turn/interrupt", { threadId, turnId: active.id });
+      // The rejection names the turn that was active AT THAT MOMENT —
+      // interrupt that exact id. (Re-reading the thread instead would race:
+      // if the original turn ended and another client started a fresh one
+      // before the read, we would interrupt the new client's turn. With
+      // the server-named id, a turn that has since ended just fails
+      // "not found", which is safe.)
+      const found = /expected active turn id \S+ but found (\S+)/.exec(e.message)?.[1];
+      if (found && found !== turnId) {
+        try {
+          await client.request("turn/interrupt", { threadId, turnId: found });
           return;
-        }
-      } catch { /* fall through to the warning */ }
+        } catch { /* fall through to the warning */ }
+      }
       const prefix = context ? `could not interrupt turn ${context}` : "could not interrupt turn";
       console.error(`[codex] Warning: ${prefix}: ${e.message}`);
     }

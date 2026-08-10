@@ -211,11 +211,28 @@ async function main() {
    *  only ever sees turn 1. While the goal is active and the owner is still
    *  connected, ownership spans the turns. */
   const goalActiveThreads = new Set<string>();
-  /** Sockets with a review/start response pending. The review subthread's
-   *  ID is only learned from the response, so notifications for it that
-   *  arrive first have no owner yet — route them to the most recent of
-   *  these. */
-  const pendingReviewSockets: net.Socket[] = [];
+  /** Count of review/start responses pending. The review subthread's ID is
+   *  only learned from the response, so notifications for it that arrive
+   *  first have no owner yet — they are BUFFERED per thread (not routed to
+   *  a guess: with two concurrent reviews, guessing leaks one review's
+   *  output to the other's socket) and flushed to the owner the moment its
+   *  response names the subthread. */
+  let pendingReviewCount = 0;
+  /** threadId → notifications that arrived before any owner existed. */
+  const unclaimedNotifications = new Map<string, Array<{ method: string; params: unknown }>>();
+  const MAX_UNCLAIMED_BUFFER = 500;
+
+  function bufferUnclaimed(threadId: string, method: string, params: unknown): void {
+    let list = unclaimedNotifications.get(threadId);
+    if (!list) {
+      list = [];
+      unclaimedNotifications.set(threadId, list);
+    }
+    let total = 0;
+    for (const l of unclaimedNotifications.values()) total += l.length;
+    if (total >= MAX_UNCLAIMED_BUFFER) return; // cap: drop, matching pre-buffer behavior
+    list.push({ method, params });
+  }
   /** In-flight requests forwarded to the app-server (any kind). Idle
    *  shutdown must not fire while one is pending. */
   let inflightRequests = 0;
@@ -270,10 +287,23 @@ async function main() {
     log: (line) => process.stderr.write(`[broker-server] ${line}\n`),
   });
 
-  // Dynamic tool calls (collab.consult) arrive as server-initiated requests
-  // on the shared connection; the peer owns their semantics.
-  appClient.onRequest("item/tool/call", (params) =>
-    peer.handleToolCall((params ?? {}) as Record<string, unknown>));
+  // Dynamic tool calls arrive as server-initiated requests on the shared
+  // connection. Route by ownership: the peer answers for its conversations
+  // (whoever runs the current turn — a CLI-driven turn on a peer thread
+  // still consults through the peer, which declared the tool); any other
+  // thread's calls forward to the client socket that owns it, since that
+  // client declared whatever tools the thread has. Unknown threads fall
+  // back to the peer's fail-open answer.
+  appClient.onRequest("item/tool/call", (params) => {
+    const p = (params ?? {}) as Record<string, unknown>;
+    const threadId = typeof p.threadId === "string" ? p.threadId : "";
+    if (peer.ownsThread(threadId)) return peer.handleToolCall(p);
+    const entry = threads.get(threadId);
+    if (entry?.socket instanceof net.Socket && !entry.socket.destroyed) {
+      return forwardRequestToSocket(entry.socket, "item/tool/call", p);
+    }
+    return peer.handleToolCall(p);
+  });
 
   function resetIdleTimer(): void {
     if (idleTimer) clearTimeout(idleTimer);
@@ -351,6 +381,17 @@ async function main() {
         if (threads.get(threadId) !== entry || entry.socket !== null) return;
         if (entry.turnId) {
           process.stderr.write(`[broker-server] Orphan-turn watchdog firing — interrupting ${threadId}\n`);
+          // Goal first, interrupt second (same order as `kill`): with an
+          // active goal, interrupt alone just makes the server start a
+          // fresh continuation turn — headless, with no owner to route to.
+          // Pausing keeps the goal resumable by a later turn.
+          if (goalActiveThreads.has(threadId)) {
+            try {
+              await appClient.request("thread/goal/set", { threadId, status: "paused" });
+            } catch (e) {
+              process.stderr.write(`[broker-server] Warning: could not pause orphaned goal on ${threadId}: ${e instanceof Error ? e.message : String(e)}\n`);
+            }
+          }
           try {
             await appClient.request("turn/interrupt", { threadId, turnId: entry.turnId });
           } catch (e) {
@@ -401,11 +442,13 @@ async function main() {
         }
         // Orphan sentinel (socket null): drop the payload, but fall through —
         // lifecycle tracking below must still see turn/completed.
-      } else if (pendingReviewSockets.length > 0) {
+      } else if (pendingReviewCount > 0) {
         // Unowned thread while a review/start response is pending: this is
-        // the review subthread announcing itself before the response names
-        // it. Route to the most recent pending reviewer.
-        send(pendingReviewSockets[pendingReviewSockets.length - 1], { method, params: notifParams });
+        // (most likely) the review subthread announcing itself before the
+        // response names it. Buffer until the response claims the thread —
+        // guessing a recipient would leak one review's output into another
+        // review's socket when two run concurrently.
+        bufferUnclaimed(threadId, method, notifParams);
       }
     } else {
       for (const socket of sockets) {
@@ -467,6 +510,26 @@ async function main() {
     }
   });
 
+  /** Forward a server-initiated request to a client socket and await its
+   *  response via the main data handler (which checks
+   *  pendingForwardedRequests). The 1-hour timeout matches the client-side
+   *  approval timeout — interactive decisions need human time. */
+  function forwardRequestToSocket(
+    target: net.Socket,
+    method: string,
+    reqParams: unknown,
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const reqId = `broker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const timer = setTimeout(() => {
+        pendingForwardedRequests.delete(reqId);
+        reject(new Error("Request forwarding timed out"));
+      }, 3_600_000);
+      pendingForwardedRequests.set(reqId, { resolve, reject, timer, target });
+      send(target, { id: reqId, method, params: reqParams });
+    });
+  }
+
   // Also forward server-sent requests (like approval requests). These carry
   // threadId, so they route to the owner of the thread that asked.
   const SERVER_REQUEST_METHODS = [
@@ -488,24 +551,7 @@ async function main() {
       if (!target) {
         throw new Error("No active client to forward approval request");
       }
-
-      // Forward the request to the client socket and wait for the response
-      // via the main data handler (which checks pendingForwardedRequests).
-      return new Promise((resolve, reject) => {
-        const reqId = `broker-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-        // Match client-side approval timeout (1 hour) — interactive approvals
-        // require human action and 60s is too short.
-        const timer = setTimeout(() => {
-          pendingForwardedRequests.delete(reqId);
-          reject(new Error("Approval request forwarding timed out"));
-        }, 3_600_000);
-
-        pendingForwardedRequests.set(reqId, { resolve, reject, timer, target });
-
-        // Send the request to the client socket
-        send(target, { id: reqId, method, params: reqParams });
-      });
+      return forwardRequestToSocket(target, method, reqParams);
     });
   }
 
@@ -622,15 +668,25 @@ async function main() {
    *  the response knows (turnId, review subthread), and run orphan recovery
    *  if the initiator disconnected while the request was in flight — this
    *  path, not the close handler, owns that window because only it learns
-   *  the turnId to interrupt. */
+   *  the turnId to interrupt.
+   *
+   *  `claimed` is the entry THIS request created. Every mutation is guarded
+   *  by an identity check against the live map: after a fast turn releases
+   *  the claim, another client can claim the same thread before this
+   *  response settles, and touching the map's current entry would corrupt
+   *  the new owner's state (clear its requestPending, install our turnId,
+   *  or release its live claim). */
   async function settleStreamingRequest(
     socket: net.Socket,
     method: string,
     params: Record<string, unknown> | undefined,
     result: Record<string, unknown> | null,
+    claimed: ThreadEntry | null,
   ): Promise<void> {
     const parentThreadId = typeof params?.threadId === "string" ? params.threadId : null;
-    const entry = parentThreadId ? threads.get(parentThreadId) : undefined;
+    const entry = parentThreadId && claimed && threads.get(parentThreadId) === claimed
+      ? claimed
+      : undefined;
 
     if (result === null) {
       // Request failed — no turn started. Release the claim if it is still
@@ -642,37 +698,61 @@ async function main() {
     const turn = result?.turn as Record<string, unknown> | undefined;
     const turnId = typeof turn?.id === "string" ? turn.id : null;
     // review/start runs the turn on a distinct review subthread that only
-    // the response names; interrupting the parent is a no-op. Claim it under
-    // the same owner so its notifications route and orphan recovery can
-    // target it.
+    // the response names; interrupting the parent is a no-op.
     const reviewThreadId = method === "review/start" && typeof result?.reviewThreadId === "string"
       ? (result.reviewThreadId as string)
       : null;
 
     if (!entry) {
       // Fast turn: turn/completed already landed and released the claim
-      // while the response was in flight. Nothing is running — do not
-      // re-claim, or nothing would ever release it.
-      return;
+      // while the response was in flight (or another client has since
+      // claimed the thread — not ours to touch). For a review, the
+      // subthread may still need claiming below.
+      if (!reviewThreadId) return;
+    } else {
+      entry.requestPending = false;
+      if (!reviewThreadId && entry.turnId === null && turnId) entry.turnId = turnId;
     }
 
-    entry.requestPending = false;
-    // For review/start the turn runs on the SUBTHREAD — the parent entry
-    // must keep turnId null so the close handler releases it instantly
-    // instead of arming a watchdog and firing a bogus interrupt at a
-    // thread that never ran the turn.
-    if (!reviewThreadId && entry.turnId === null && turnId) entry.turnId = turnId;
-
     let reviewEntry: ThreadEntry | null = null;
-    if (reviewThreadId && !threads.has(reviewThreadId)) {
-      reviewEntry = {
-        socket: entry.socket,
-        turnId,
-        requestPending: false,
-        awaitingContinuation: false,
-        watchdog: null,
-      };
-      threads.set(reviewThreadId, reviewEntry);
+    if (reviewThreadId) {
+      // The turn runs on the subthread; the parent carried no turn at all.
+      // Release the parent claim NOW rather than at socket close — holding
+      // it would block same-thread turns for the connection's whole life.
+      if (entry) releaseThread(parentThreadId!);
+
+      if (!threads.has(reviewThreadId)) {
+        reviewEntry = {
+          socket: entry ? entry.socket : socket.destroyed ? null : socket,
+          turnId,
+          requestPending: false,
+          awaitingContinuation: false,
+          watchdog: null,
+        };
+        threads.set(reviewThreadId, reviewEntry);
+      }
+
+      // Flush notifications that arrived before this response named the
+      // subthread, in order, to the owner — then apply the lifecycle they
+      // carry: a buffered turn/completed means the review already finished
+      // and the fresh claim must be released immediately, or nothing ever
+      // would release it.
+      const buffered = unclaimedNotifications.get(reviewThreadId);
+      unclaimedNotifications.delete(reviewThreadId);
+      if (buffered && reviewEntry) {
+        const owner = reviewEntry.socket;
+        let completed = false;
+        for (const n of buffered) {
+          if (owner instanceof net.Socket && !owner.destroyed) {
+            send(owner, { method: n.method, params: n.params });
+          }
+          if (n.method === "turn/completed") completed = true;
+        }
+        if (completed) {
+          releaseThread(reviewThreadId);
+          reviewEntry = null;
+        }
+      }
     }
 
     // Initiator gone: the turn started with nobody listening. Interrupt it
@@ -680,16 +760,16 @@ async function main() {
     // turn/completed (or the watchdog, on a stuck turn) release it. A
     // successful interrupt RPC only acknowledges receipt — it does not
     // guarantee the turn is fully torn down.
-    if (entry.socket === null) {
-      const interruptThreadId = reviewThreadId ?? parentThreadId;
+    const orphanEntry = reviewThreadId ? reviewEntry : entry;
+    const orphanThreadId = reviewThreadId ?? parentThreadId;
+    if (orphanEntry && orphanEntry.socket === null && orphanThreadId) {
       // The response's turn id is authoritative for the turn this request
-      // started; the parent entry's turnId is deliberately null for reviews.
-      const interruptTurnId = turnId ?? entry.turnId;
-      armOrphanWatchdog(parentThreadId!, entry);
-      if (reviewEntry) armOrphanWatchdog(reviewThreadId!, reviewEntry);
-      if (interruptThreadId && interruptTurnId) {
+      // started.
+      const interruptTurnId = turnId ?? orphanEntry.turnId;
+      armOrphanWatchdog(orphanThreadId, orphanEntry);
+      if (interruptTurnId) {
         try {
-          await appClient.request("turn/interrupt", { threadId: interruptThreadId, turnId: interruptTurnId });
+          await appClient.request("turn/interrupt", { threadId: orphanThreadId, turnId: interruptTurnId });
         } catch (e) {
           process.stderr.write(
             `[broker-server] Warning: failed to interrupt orphaned turn ${interruptTurnId}: ${e instanceof Error ? e.message : String(e)}\n`,
@@ -789,7 +869,7 @@ async function main() {
       threads.set(streamThreadId, claimed);
     }
     if (isStreaming && method === "review/start") {
-      pendingReviewSockets.push(socket);
+      pendingReviewCount++;
     }
 
     // ─── Request forwarding (concurrent — no global lock) ─────
@@ -800,13 +880,13 @@ async function main() {
       learnGoalFromTraffic(method, params, result);
 
       if (isStreaming) {
-        await settleStreamingRequest(socket, method, params, result as Record<string, unknown>);
+        await settleStreamingRequest(socket, method, params, result as Record<string, unknown>, claimed);
       }
 
       send(socket, { id: message.id, result });
     } catch (error) {
       if (isStreaming) {
-        await settleStreamingRequest(socket, method, params, null);
+        await settleStreamingRequest(socket, method, params, null, claimed);
       }
       send(socket, {
         id: message.id,
@@ -817,8 +897,10 @@ async function main() {
       });
     } finally {
       if (method === "review/start") {
-        const idx = pendingReviewSockets.lastIndexOf(socket);
-        if (idx !== -1) pendingReviewSockets.splice(idx, 1);
+        pendingReviewCount--;
+        // No review pending → any leftover buffer belongs to a review that
+        // errored before naming its subthread. Drop it.
+        if (pendingReviewCount === 0) unclaimedNotifications.clear();
       }
       inflightRequests--;
       resetIdleTimer();
