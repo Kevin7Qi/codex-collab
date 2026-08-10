@@ -61,8 +61,11 @@ export interface PeerHost {
 
 interface Conversation {
   threadId: string;
-  /** Short ID from the thread index — names the thread peer. */
+  /** Short ID from the thread index — suffixes the thread peer's name. */
   shortId?: string;
+  /** Display name of this conversation's thread peer, derived from the
+   *  first message. Persisted so re-materialization keeps the name. */
+  label?: string;
   /** Reply socket path (the sender's own messaging socket). Updated to the
    *  most recent sender — the person actively talking is who consults and
    *  replies go to. */
@@ -144,10 +147,33 @@ export function sniffRegistryVersion(): string {
   return "2.1.226";
 }
 
-/** Peer display name for a workspace: codex-<dir>, sanitized. */
+/** Peer display name for a workspace: codex-<dir>, sanitized. A directory
+ *  that already leads with "codex" would stutter ("codex-codex-collab"), so
+ *  that token is dropped from the suffix. */
 export function peerNameFor(cwd: string): string {
-  const dir = basename(cwd).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  const dir = basename(cwd)
+    .replace(/[^a-zA-Z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/^codex[-_]?/i, "");
   return `codex-${dir || "workspace"}`.slice(0, 40);
+}
+
+/** Display name for a per-thread peer, derived from the conversation's
+ *  FIRST message so the address book reads as topics, not plumbing:
+ *  "Investigate the flaky broker test" → codex-investigate-the-flaky-a1b2.
+ *  The shortId suffix keeps names unique and ties the peer to the same id
+ *  `codex-collab threads` shows. Non-ASCII text (e.g. a Chinese opening
+ *  message) falls back to the bare suffix. The name is fixed at creation —
+ *  renaming a live peer would break reply addressing, which resolves by
+ *  name. */
+export function threadPeerLabel(firstMessage: string, shortId: string): string {
+  const words = firstMessage.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  let slug = "";
+  for (const w of words) {
+    if (slug.length + w.length + 1 > 24) break;
+    slug += (slug ? "-" : "") + w;
+  }
+  return `codex-${slug ? `${slug}-` : ""}${shortId.slice(0, 4)}`;
 }
 
 export function buildRegistryEntry(opts: {
@@ -343,6 +369,7 @@ export function createPeer(host: PeerHost): Peer {
             const conv: Conversation = {
               threadId: c.threadId,
               shortId: typeof c.shortId === "string" ? c.shortId : undefined,
+              label: typeof c.label === "string" ? c.label : undefined,
               replyPath: c.replyPath,
               fromName: typeof c.fromName === "string" ? c.fromName : "claude",
               lastActivity: Date.now(),
@@ -422,7 +449,7 @@ export function createPeer(host: PeerHost): Peer {
     });
   }
 
-  function createThreadPeer(threadId: string, shortId: string): void {
+  function createThreadPeer(threadId: string, shortId: string, label?: string): void {
     if (threadPeers.has(threadId)) return;
     if (threadPeers.size >= MAX_THREAD_PEERS) {
       host.log(`peer: thread-peer cap (${MAX_THREAD_PEERS}) reached — ${threadId} stays behind the front door`);
@@ -441,7 +468,7 @@ export function createPeer(host: PeerHost): Peer {
         stdio: ["pipe", "ignore", "ignore"],
       });
       if (!holder.pid) throw new Error("holder spawn returned no pid");
-      const tpName = `codex-${shortId}`;
+      const tpName = label ?? `codex-${shortId}`;
       const tpSocketPath = join(host.stateDir, `peer-${shortId}.sock`);
       const tpEntryPath = join(sessionsDir(), `${holder.pid}.json`);
 
@@ -552,7 +579,7 @@ export function createPeer(host: PeerHost): Peer {
 
   // ── Thread bootstrap ──
 
-  async function startThread(fromName: string): Promise<{ threadId: string; shortId: string }> {
+  async function startThread(fromName: string, firstMessage: string): Promise<{ threadId: string; shortId: string }> {
     const userConfig = readUserConfig();
     const params: Record<string, unknown> = {
       cwd: host.cwd,
@@ -571,16 +598,23 @@ export function createPeer(host: PeerHost): Peer {
     const threadId = result.thread.id;
     // Peer conversations live in the same thread index the CLI uses, so
     // `codex-collab threads` shows them and short IDs stay one namespace.
+    // Preview and server-side name both carry the conversation's opening
+    // message — the same convention `run` uses with its prompt — so
+    // listings read as topics.
+    const preview = firstMessage.split("\n", 1)[0].slice(0, 100) || `peer conversation with ${fromName}`;
     let shortId: string;
     try {
       shortId = registerThread(host.stateDir, threadId, {
         model: result.model,
         cwd: host.cwd,
-        preview: `peer conversation with ${fromName}`,
+        preview,
       });
     } catch {
       shortId = threadId.replace(/-/g, "").slice(-8); // index unavailable — derive a stable suffix
     }
+    try {
+      await host.request("thread/name/set", { threadId, name: preview });
+    } catch { /* non-fatal, like run's naming */ }
     // Keep peer threads out of Codex's memory consolidation, like every
     // thread codex-collab creates. Non-fatal.
     try {
@@ -718,11 +752,12 @@ export function createPeer(host: PeerHost): Peer {
         threadConversations.set(boundThreadId, conv);
         saveConversations();
       } else {
-        const { threadId, shortId } = await startThread(msg.fromName);
-        conv = { threadId, shortId, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
+        const { threadId, shortId } = await startThread(msg.fromName, msg.text);
+        const label = threadPeerLabel(msg.text, shortId);
+        conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
         conversations.set(msg.replyPath, conv);
         threadConversations.set(threadId, conv);
-        createThreadPeer(threadId, shortId);
+        createThreadPeer(threadId, shortId, label);
         saveConversations();
         host.log(`peer: new conversation with ${msg.fromName} → thread ${threadId}`);
       }
@@ -737,7 +772,11 @@ export function createPeer(host: PeerHost): Peer {
       }
       // Re-materialize a retired (or never-created) thread peer on activity.
       if (!threadPeers.has(conv.threadId)) {
-        createThreadPeer(conv.threadId, conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8));
+        createThreadPeer(
+          conv.threadId,
+          conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8),
+          conv.label,
+        );
       }
     }
 
@@ -758,11 +797,12 @@ export function createPeer(host: PeerHost): Peer {
         host.log(`peer: thread ${conv.threadId} unrecoverable (${e instanceof Error ? e.message : String(e)}) — starting a new one`);
         threadConversations.delete(conv.threadId);
         retireThreadPeer(conv.threadId);
-        const { threadId, shortId } = await startThread(msg.fromName);
+        const { threadId, shortId } = await startThread(msg.fromName, msg.text);
         conv.threadId = threadId;
         conv.shortId = shortId;
+        conv.label = threadPeerLabel(msg.text, shortId);
         threadConversations.set(threadId, conv);
-        createThreadPeer(threadId, shortId);
+        createThreadPeer(threadId, shortId, conv.label);
         saveConversations();
         await injectPeerMessage(threadId, msg.fromName, msg.text);
       }

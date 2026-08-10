@@ -130,7 +130,7 @@ On macOS/Linux with a messaging-capable Claude Code, the workspace broker regist
 codex-collab peer up      # start the broker + peer; `peer` alone shows status
 ```
 
-From then on, any Claude session's `ListAgents` shows a `codex-<workspace>` peer — message it and Codex picks up the task, replying as a peer message when done. Each conversation also appears as its own `codex-<shortid>` peer (replies come from that address; replying to it continues that conversation), and shows up in `codex-collab threads` under the same short ID.
+From then on, any Claude session's `ListAgents` shows a `codex-<workspace>` peer — message it and Codex picks up the task, replying as a peer message when done. Each conversation also appears as its own peer, named after its opening message (e.g. `codex-investigate-the-flaky-a1b2`); replies come from that address, replying to it continues that conversation, and the suffix matches the thread's short ID in `codex-collab threads`.
 
 Mid-task, Codex can ask its Claude peer a question through a `collab.consult` tool call; the question arrives as a `[consult]` message, and the next reply from that session is delivered back into Codex's running turn. Consults are fail-open: unanswered questions time out and Codex proceeds on its own judgment.
 

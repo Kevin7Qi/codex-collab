@@ -17,6 +17,7 @@ import {
   peerNameFor,
   procStartOf,
   sessionsDir,
+  threadPeerLabel,
   type PeerHost,
 } from "./peer";
 
@@ -109,8 +110,33 @@ describe("peerNameFor", () => {
     expect(peerNameFor("/Users/x/visa_book")).toBe("codex-visa_book");
   });
 
+  test("a directory already leading with codex does not stutter", () => {
+    expect(peerNameFor("/Users/x/codex-collab")).toBe("codex-collab");
+    expect(peerNameFor("/Users/x/codex_tools")).toBe("codex-tools");
+  });
+
   test("never produces an empty suffix", () => {
     expect(peerNameFor("/")).toBe("codex-workspace");
+    expect(peerNameFor("/Users/x/codex")).toBe("codex-workspace");
+  });
+});
+
+describe("threadPeerLabel", () => {
+  test("derives a topic slug from the first message plus a short-id suffix", () => {
+    expect(threadPeerLabel("Investigate the flaky broker test", "a1b2c3d4"))
+      .toBe("codex-investigate-the-flaky-a1b2");
+    expect(threadPeerLabel("Fix bug", "a1b2c3d4")).toBe("codex-fix-bug-a1b2");
+  });
+
+  test("bounds the slug and survives punctuation", () => {
+    const label = threadPeerLabel("Re: [urgent!!] please, PLEASE review the enormous refactoring branch", "deadbeef");
+    expect(label.length).toBeLessThanOrEqual(40);
+    expect(label.startsWith("codex-re-urgent-please-")).toBe(true);
+    expect(label.endsWith("-dead")).toBe(true);
+  });
+
+  test("non-ASCII text falls back to the bare suffix", () => {
+    expect(threadPeerLabel("调查一下这个测试为什么不稳定", "a1b2c3d4")).toBe("codex-a1b2");
   });
 });
 
