@@ -221,6 +221,38 @@ async function main() {
   /** threadId → notifications that arrived before any owner existed. */
   const unclaimedNotifications = new Map<string, Array<{ method: string; params: unknown }>>();
   const MAX_UNCLAIMED_BUFFER = 500;
+  /** Turns already settled — completed once, or interrupted by the orphan
+   *  watchdog. A `turn/interrupt` RPC only acknowledges receipt, so the
+   *  turn's own turn/completed can still arrive afterwards, by which time
+   *  another turn may own the thread; acting on it would consume the new
+   *  turn's output and release its claim, leaving it running unowned.
+   *  Bounded — this only needs to cover the window around a handover. */
+  /** Kept PER THREAD, most recent last. A turn id is only meaningful within
+   *  its thread, and per-thread history cannot be evicted by traffic on
+   *  other threads — a single global list can, and the entry it drops is
+   *  exactly the one a quiet thread still needs when its orphan's late
+   *  completion finally lands. */
+  const endedTurns = new Map<string, string[]>();
+  // Deep enough that a late completion is still recognized after several
+  // more turns have come and gone on the thread. It cannot be unbounded, so
+  // a replay older than this many turns — arriving while a fresh claim has
+  // not yet learned its own turn id — remains theoretically possible.
+  const ENDED_TURNS_PER_THREAD = 16;
+  const MAX_ENDED_TURN_THREADS = 200;
+  function markTurnEnded(threadId: string, turnId: string): void {
+    const list = endedTurns.get(threadId) ?? [];
+    if (!list.includes(turnId)) list.push(turnId);
+    while (list.length > ENDED_TURNS_PER_THREAD) list.shift();
+    endedTurns.delete(threadId);
+    endedTurns.set(threadId, list); // re-insert so Map order tracks recency
+    if (endedTurns.size > MAX_ENDED_TURN_THREADS) {
+      const oldest = endedTurns.keys().next();
+      if (!oldest.done) endedTurns.delete(oldest.value);
+    }
+  }
+  function turnAlreadyEnded(threadId: string, turnId: string): boolean {
+    return endedTurns.get(threadId)?.includes(turnId) ?? false;
+  }
 
   function bufferUnclaimed(threadId: string, method: string, params: unknown): void {
     let list = unclaimedNotifications.get(threadId);
@@ -324,12 +356,37 @@ async function main() {
     }, idleTimeout);
   }
 
-  /** Release a thread entry: clear its watchdog and forget it. */
+  /** Release a thread entry: clear its watchdog and forget it. Every release
+   *  (except shutdown's sweep) tells the peer the thread's turn is over, so
+   *  a message injected mid-turn that the departed turn never sampled gets a
+   *  turn of its own — this is the ONE choke point, deliberately: releases
+   *  also happen on failed streaming requests, review-parent handoff, goal
+   *  deactivation between turns, and watchdog reaps, and a wake skipped on
+   *  any of them would strand the message as silent context forever. */
   function releaseThread(threadId: string): void {
     const entry = threads.get(threadId);
     if (!entry) return;
     if (entry.watchdog) clearTimeout(entry.watchdog);
     threads.delete(threadId);
+    notifyTurnEnded(threadId);
+  }
+
+  /** Tell the peer a thread's turn is over, on the NEXT tick. Deferring is
+   *  the point: the hook can claim the thread and start a replacement turn,
+   *  and every releaseThread caller — including the peer's own turn-start
+   *  failure path — must finish unwinding before that happens. Running it
+   *  inline re-enters the peer mid-cleanup, and the cleanup then tears down
+   *  the replacement's state. */
+  function notifyTurnEnded(threadId: string): void {
+    if (shutdownInitiated) return;
+    setImmediate(() => {
+      if (shutdownInitiated) return;
+      try {
+        peer.onThreadTurnEnded(threadId);
+      } catch (e) {
+        process.stderr.write(`[broker-server] peer turn-ended hook failed: ${e instanceof Error ? e.message : String(e)}\n`);
+      }
+    });
   }
 
   /** The goal on `threadId` left `active`. If the entry was retained across
@@ -392,6 +449,11 @@ async function main() {
               process.stderr.write(`[broker-server] Warning: could not pause orphaned goal on ${threadId}: ${e instanceof Error ? e.message : String(e)}\n`);
             }
           }
+          // Settled from here on: the interrupt is only an acknowledgement,
+          // so this turn's completion may still arrive — after the thread
+          // has been released and possibly re-claimed. Recording it now is
+          // what lets that late completion be recognized as stale.
+          markTurnEnded(threadId, entry.turnId);
           try {
             await appClient.request("turn/interrupt", { threadId, turnId: entry.turnId });
           } catch (e) {
@@ -431,6 +493,18 @@ async function main() {
     resetIdleTimer();
     const params = notifParams as Record<string, unknown> | undefined;
     const threadId = typeof params?.threadId === "string" ? params.threadId : null;
+
+    // Drop a completion that belongs to an already-settled turn before it
+    // can be routed or acted on: the thread may have changed hands since.
+    if (method === "turn/completed" && threadId) {
+      const endedId = (params?.turn as { id?: unknown } | undefined)?.id;
+      if (typeof endedId === "string") {
+        if (turnAlreadyEnded(threadId, endedId)) return;
+        const current = threads.get(threadId)?.turnId;
+        if (current && current !== endedId) return; // an earlier turn's completion
+        markTurnEnded(threadId, endedId);
+      }
+    }
 
     if (threadId) {
       const entry = threads.get(threadId);
@@ -506,6 +580,10 @@ async function main() {
         } else {
           releaseThread(threadId);
         }
+      } else {
+        // No entry (e.g. a peer-claimed turn whose claim was already
+        // released): still settle any pending mid-turn message.
+        notifyTurnEnded(threadId);
       }
     }
   });

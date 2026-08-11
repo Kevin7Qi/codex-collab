@@ -165,6 +165,11 @@ function createMockCodex(dir: string, opts?: {
    *  response, then a continuation turn starts. The broker must claim
    *  ownership despite the already-completed first turn. */
   goalFastFirstTurn?: boolean;
+  /** If true, each turn gets its own id, and the SECOND turn is followed by
+   *  a replay of the FIRST turn's completion — the late-arriving completion
+   *  of a turn that was already settled (a watchdog-interrupted orphan, or
+   *  a duplicate). The second turn itself never completes. */
+  staleCompletionReplay?: boolean;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
@@ -176,6 +181,7 @@ function createMockCodex(dir: string, opts?: {
   const goalPausedInGap = opts?.goalPausedInGap ?? false;
   const goalPreexisting = opts?.goalPreexisting ?? false;
   const goalFastFirstTurn = opts?.goalFastFirstTurn ?? false;
+  const staleCompletionReplay = opts?.staleCompletionReplay ?? false;
 
   const interruptLog = join(dir, "interrupts.log");
   const script = `#!/usr/bin/env bun
@@ -191,6 +197,7 @@ function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 
 let buffer = "";
 let approvalIdCounter = 1;
+let turnCounter = 0;
 process.stdin.setEncoding("utf-8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -239,6 +246,24 @@ process.stdin.on("data", (chunk) => {
 
       case "turn/start": {
         const threadId = msg.params?.threadId || "thread-001";
+        ${staleCompletionReplay ? `
+        turnCounter++;
+        const thisTurnId = "turn-" + String(turnCounter).padStart(3, "0");
+        respond({ id: msg.id, result: { turn: { id: thisTurnId, items: [], status: "inProgress", error: null } } });
+        respond({ method: "turn/started", params: { threadId: threadId, turn: { id: thisTurnId, items: [], status: "inProgress", error: null } } });
+        if (turnCounter === 1) {
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, 30);
+        } else {
+          // Turn 2 is running. Replay turn 1's completion: already settled,
+          // and the thread has changed hands since.
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, 60);
+        }
+        break;
+        ` : ""}
         ${goalFastFirstTurn ? `
         // Fast-turn race on a goal thread: goal becomes active and the turn
         // completes BEFORE the turn/start response reaches the broker.
@@ -1382,6 +1407,50 @@ setInterval(() => {}, 1000);
         expect(turnCompleted).toBeDefined();
         expect((turnCompleted!.params as any).threadId).toBe("thread-001");
 
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a late completion from an already-settled turn does not free the thread", async () => {
+      // A turn/interrupt is only an acknowledgement, so an orphan reaped by
+      // the watchdog can still emit turn/completed afterwards — by which
+      // time another turn may own the thread. Acting on it would release
+      // that turn's claim and leave it running with nobody listening.
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { staleCompletionReplay: true });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        // Turn 1 runs and completes — the thread is free.
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "one" }] });
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed"), 3000);
+
+        // Turn 2 claims the thread; turn 1's completion is replayed while it runs.
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "two" }] });
+        await new Promise((r) => setTimeout(r, 300));
+
+        // The thread must still be owned: a competing start is refused.
+        const other = await TestClient.connectAndInit(sockPath);
+        let refused = false;
+        try {
+          await other.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "three" }] });
+        } catch (e) {
+          refused = (e as Error).message.includes("already running");
+        }
+        expect(refused).toBe(true);
+
+        // And the stale completion was not forwarded a second time.
+        expect(notifications.filter((n) => n.method === "turn/completed").length).toBe(1);
+
+        await other.close();
         await client.close();
       } finally {
         proc.kill();
