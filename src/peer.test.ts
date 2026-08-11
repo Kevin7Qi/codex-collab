@@ -5,7 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import net from "node:net";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { writeFileSync } from "node:fs";
@@ -36,11 +36,11 @@ const onWindows = process.platform === "win32";
 /** Register a fake-but-valid sender in an isolated registry so the peer's
  *  registered-sender gate admits its messages. Uses OUR pid (alive, with a
  *  matching procStart) — the same liveness rules the real registry uses. */
-function registerTestSender(sessionsDirPath: string, senderSocket: string): void {
+function registerTestSender(sessionsDirPath: string, senderSocket: string, who = "test-sender"): void {
   const entry = buildRegistryEntry({
     pid: process.pid,
     cwd: "/tmp",
-    name: "test-sender",
+    name: who,
     socketPath: senderSocket,
     version: "2.1.226",
     procStart: procStartOf(process.pid),
@@ -49,7 +49,8 @@ function registerTestSender(sessionsDirPath: string, senderSocket: string): void
   // NOT `${process.pid}.json` — the peer under test writes its own front
   // door there (same process) and would clobber this registration. The
   // sender gate reads every *.json and checks content, not filenames.
-  writeFileSync(join(sessionsDirPath, "test-sender.json"), JSON.stringify(entry));
+  // One file per sender, so registering several does not overwrite them.
+  writeFileSync(join(sessionsDirPath, `${who}.json`), JSON.stringify(entry));
 }
 
 describe("parseEnvelope", () => {
@@ -447,7 +448,8 @@ describe.skipIf(onWindows)("topic routing", () => {
       await send("fourth");
 
       // Two topics → two threads (the fourth message names none, so it
-      // continues the sender's most recent conversation: beta).
+      // continues whichever conversation the sender spoke to LAST — alpha,
+      // reopened by the third message).
       expect(started.length).toBe(2);
       // The topic line never reaches Codex.
       expect(injected.some((i) => i.includes("topic:"))).toBe(false);
@@ -455,7 +457,7 @@ describe.skipIf(onWindows)("topic routing", () => {
         "thread-1:[test-sender] first",
         "thread-2:[test-sender] second",
         "thread-1:[test-sender] third",   // reopened alpha
-        "thread-2:[test-sender] fourth",  // no topic → most recent (beta)
+        "thread-1:[test-sender] fourth",  // no topic → alpha (spoken to last)
       ]);
     } finally {
       peer.stop();
@@ -660,6 +662,766 @@ describe.skipIf(onWindows)("delivery honesty", () => {
       if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
       else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
       rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
+
+describe.skipIf(onWindows)("conversation resilience", () => {
+  function harness() {
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const send = async (text: string) => {
+      const line = buildEnvelope({ text, ourSocketPath: senderSock, ourName: "test-sender" });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+        sock.on("error", reject);
+      });
+      await new Promise((r) => setTimeout(r, 250));
+    };
+    const cleanup = () => {
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    };
+    return { dir, send, cleanup };
+  }
+
+  test("an unrecoverable thread is recreated with the conversation's own settings, not this message's", async () => {
+    const { dir, send, cleanup } = harness();
+    const threadStarts: Array<Record<string, unknown>> = [];
+    const injectFailFor = new Set<string>();
+    let n = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") { threadStarts.push(params!); return { thread: { id: `thread-${++n}` } }; }
+        if (method === "thread/inject_items" && injectFailFor.has(params!.threadId as string)) {
+          throw new Error("thread not found");
+        }
+        if (method === "thread/resume") throw new Error("thread not found");
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => true, // injection only — turns are not the subject here
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: t\nsandbox: read-only\napproval: auto\nmodel: gpt-5.4-mini\nhi");
+      expect(threadStarts.length).toBe(1);
+      expect(threadStarts[0].sandbox).toBe("read-only");
+
+      injectFailFor.add("thread-1"); // thread dies; resume fails too → recovery
+      await send("continue"); // a plain continuation: NO headers
+      expect(threadStarts.length).toBe(2);
+      // The recreated thread keeps what the conversation was created with —
+      // sandbox must not escalate to the workspace default, and the Guardian
+      // approval and model must survive.
+      expect(threadStarts[1].sandbox).toBe("read-only");
+      expect(threadStarts[1].approvalsReviewer).toBe("auto_review");
+      expect(threadStarts[1].model).toBe("gpt-5.4-mini");
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("a message the running turn never sampled wakes the thread when the turn ends", async () => {
+    const { dir, send, cleanup } = harness();
+    const turnStarts: Array<Record<string, unknown>> = [];
+    const owners = new Map<string, { onNotification(m: string, p?: Record<string, unknown>): void }>();
+    let hasTurn = false;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        if (method === "turn/start") turnStarts.push(params!);
+        return {};
+      },
+      claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
+      releaseThread: () => {},
+      threadHasTurn: () => hasTurn,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: w\nfirst");
+      expect(turnStarts.length).toBe(1);
+
+      hasTurn = true; // a turn is running: the follow-up is injected only
+      await send("second");
+      expect(turnStarts.length).toBe(1);
+
+      // A command starting late is NOT proof the model sampled after the
+      // injection — it may have been chosen by an earlier sample.
+      owners.get("thread-X")!.onNotification("item/started", { threadId: "thread-X", item: { type: "commandExecution" } });
+
+      hasTurn = false; // the turn ended without ever sampling the injection
+      peer.onThreadTurnEnded("thread-X");
+      await new Promise((r) => setTimeout(r, 250));
+      expect(turnStarts.length).toBe(2);
+      const input = turnStarts[1].input as Array<{ text: string }>;
+      expect(input[0].text).toContain("while the previous turn was running");
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("items produced after the injection are NOT taken as proof the turn read it", async () => {
+    const { dir, send, cleanup } = harness();
+    const turnStarts: Array<Record<string, unknown>> = [];
+    const owners = new Map<string, { onNotification(m: string, p?: Record<string, unknown>): void }>();
+    let hasTurn = false;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        if (method === "turn/start") turnStarts.push(params!);
+        return {};
+      },
+      claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
+      releaseThread: () => {},
+      threadHasTurn: () => hasTurn,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: w\nfirst");
+      hasTurn = true;
+      await send("second");
+      // Even reasoning/agentMessage can come from a request whose context
+      // was fixed BEFORE the injection, so none of it proves the message was
+      // read. The wake happens regardless — a redundant confirmation turn is
+      // the acceptable cost; a dropped message is not.
+      const owner = owners.get("thread-X")!;
+      owner.onNotification("item/started", { threadId: "thread-X", item: { type: "reasoning" } });
+      owner.onNotification("item/started", { threadId: "thread-X", item: { type: "agentMessage" } });
+      hasTurn = false;
+      peer.onThreadTurnEnded("thread-X");
+      await new Promise((r) => setTimeout(r, 250));
+      expect(turnStarts.length).toBe(2);
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("a wake waits for a turn that is still running instead of dropping the debt", async () => {
+    const { dir, send, cleanup } = harness();
+    const turnStarts: Array<Record<string, unknown>> = [];
+    let hasTurn = false;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        if (method === "turn/start") turnStarts.push(params!);
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => hasTurn,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: w\nfirst");
+      hasTurn = true;
+      await send("second");
+
+      // A turn is STILL running when this fires (a CLI run claimed the
+      // thread in the gap). Its reply goes to its own client, so the debt
+      // must survive rather than be marked settled.
+      peer.onThreadTurnEnded("thread-X");
+      await new Promise((r) => setTimeout(r, 150));
+      expect(turnStarts.length).toBe(1);
+
+      hasTurn = false;
+      peer.onThreadTurnEnded("thread-X"); // now it really is over
+      await new Promise((r) => setTimeout(r, 250));
+      expect(turnStarts.length).toBe(2);
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("a failed turn/start does not tear down the replacement turn it triggers", async () => {
+    const { dir, send, cleanup } = harness();
+    const senderSock = join(dir, "sender.sock");
+    const inboxLines: string[] = [];
+    const inboxServer = net.createServer((sock) => {
+      sock.setEncoding("utf8");
+      let buf = "";
+      sock.on("data", (c: string) => {
+        buf += c;
+        let i: number;
+        while ((i = buf.indexOf("\n")) !== -1) {
+          const l = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (l) inboxLines.push(l);
+        }
+      });
+    });
+    inboxServer.listen(senderSock);
+
+    const turnStarts: string[] = [];
+    const owners: Array<{ onNotification(m: string, p?: Record<string, unknown>): void }> = [];
+    let claimed = false;
+    let failNext = true;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        if (method === "turn/start") {
+          if (failNext) {
+            failNext = false;
+            turnStarts.push("failing");
+            // Stay in flight long enough for a second message to arrive and
+            // record a wake debt — the precondition for the re-entrancy.
+            await new Promise((r) => setTimeout(r, 400));
+            throw new Error("simulated turn/start failure");
+          }
+          turnStarts.push("replacement");
+        }
+        return {};
+      },
+      claimThread: (_t, owner) => { if (claimed) return false; claimed = true; owners.push(owner); return true; },
+      // The worst case for the peer's failure path: the broker releases and
+      // re-enters the peer synchronously, from inside that path's own call.
+      releaseThread: (threadId) => { claimed = false; peer.onThreadTurnEnded(threadId); },
+      threadHasTurn: () => claimed,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      const first = send("topic: r\nkick it off"); // claims, turn/start in flight
+      await new Promise((r) => setTimeout(r, 200));
+      // Second message arrives on the conversation's OWN socket — a
+      // different inbound queue, so it interleaves with the first.
+      const tpSock = readdirSync(dir).find((f) => f.startsWith("peer-") && f.endsWith(".sock"));
+      expect(tpSock).toBeDefined();
+      const line = buildEnvelope({ text: "and also this", ourSocketPath: senderSock, ourName: "test-sender" });
+      await new Promise<void>((resolve, reject) => {
+        const s = net.connect({ path: join(dir, tpSock!) }, () => { s.write(line); s.end(); resolve(); });
+        s.on("error", reject);
+      });
+      await first;
+      await new Promise((r) => setTimeout(r, 400));
+
+      // The failure released the claim, the wake started a replacement.
+      expect(turnStarts).toEqual(["failing", "replacement"]);
+      // The replacement's reply buffer must have survived the failure path's
+      // cleanup — completing it now must deliver its output to the sender.
+      owners[owners.length - 1].onNotification("item/completed", {
+        threadId: "thread-X", item: { type: "agentMessage", text: "replacement answer" },
+      });
+      owners[owners.length - 1].onNotification("turn/completed", {
+        threadId: "thread-X", turn: { status: "completed", error: null },
+      });
+      await new Promise((r) => setTimeout(r, 250));
+      expect(inboxLines.some((l) => parseEnvelope(l)?.text.includes("replacement answer"))).toBe(true);
+    } finally {
+      peer.stop();
+      inboxServer.close();
+      cleanup();
+    }
+  }, 20_000);
+
+  test("the sender's default follows the conversations still addressed to them", async () => {
+    const { dir, send, cleanup } = harness();
+    const injected: string[] = [];
+    let n = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: `thread-${++n}` } };
+        if (method === "thread/inject_items") injected.push(params!.threadId as string);
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => true,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: alpha\none");
+      await send("topic: beta\ntwo");
+
+      // The default is whichever was spoken to last — beta.
+      await send("no topic here");
+      expect(injected[injected.length - 1]).toBe("thread-2");
+
+      // Reopening the older topic makes IT the default again, and a turn
+      // completing on beta afterwards must not steal the default back:
+      // completion is activity, not the sender speaking.
+      await send("topic: alpha\nback to alpha");
+      await send("no topic again");
+      expect(injected[injected.length - 1]).toBe("thread-1");
+      expect(n).toBe(2); // never started a third thread
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("no participant in a shared conversation is left without an answer", async () => {
+    const { dir, cleanup } = harness();
+    // Two registered senders, each with its own inbox.
+    const inboxes = new Map<string, string[]>();
+    const servers: net.Server[] = [];
+    for (const who of ["a", "b"]) {
+      const sock = join(dir, `${who}.sock`);
+      const lines: string[] = [];
+      inboxes.set(who, lines);
+      const srv = net.createServer((c) => {
+        c.setEncoding("utf8");
+        let buf = "";
+        c.on("data", (chunk: string) => {
+          buf += chunk;
+          let i: number;
+          while ((i = buf.indexOf("\n")) !== -1) {
+            const l = buf.slice(0, i).trim();
+            buf = buf.slice(i + 1);
+            if (l) lines.push(l);
+          }
+        });
+      });
+      srv.listen(sock);
+      servers.push(srv);
+      registerTestSender(join(dir, "sessions"), sock, `session-${who}`);
+    }
+    const sendAs = async (who: string, text: string, target = join(dir, "peer.sock")) => {
+      const line = buildEnvelope({ text, ourSocketPath: join(dir, `${who}.sock`), ourName: `session-${who}` });
+      await new Promise<void>((resolve, reject) => {
+        const s = net.connect({ path: target }, () => { s.write(line); s.end(); resolve(); });
+        s.on("error", reject);
+      });
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    const owners: Array<{ onNotification(m: string, p?: Record<string, unknown>): void }> = [];
+    let hasTurn = false;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
+      releaseThread: () => { hasTurn = false; },
+      threadHasTurn: () => hasTurn,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await sendAs("a", "topic: shared\nA's question");   // A's turn starts
+      const tpSock = readdirSync(dir).find((f) => f.startsWith("peer-") && f.endsWith(".sock"));
+      await sendAs("b", "B butting in", join(dir, tpSock!)); // B joins mid-turn
+
+      // A's turn finishes. Its answer belongs to A alone.
+      owners[0].onNotification("item/completed", {
+        threadId: "thread-X", item: { type: "agentMessage", text: "answer for A" },
+      });
+      hasTurn = false;
+      owners[0].onNotification("turn/completed", { threadId: "thread-X", turn: { status: "completed", error: null } });
+      await new Promise((r) => setTimeout(r, 250));
+
+      const aTexts = inboxes.get("a")!.map((l) => parseEnvelope(l)!.text);
+      const bTexts = inboxes.get("b")!.map((l) => parseEnvelope(l)!.text);
+      // A asked, so A must get the answer — the bug guarded against here is
+      // A getting nothing because B spoke last. B joined before the turn
+      // ended, so the turn is answering B as well and B receives it too:
+      // the conversation is shared, not stolen.
+      expect(aTexts.some((t) => t.includes("answer for A"))).toBe(true);
+      expect(bTexts.some((t) => t.includes("answer for A"))).toBe(true);
+
+      // B is not forgotten either: B's message earned a wake, and that
+      // turn's answer goes to B.
+      peer.onThreadTurnEnded("thread-X");
+      await new Promise((r) => setTimeout(r, 250));
+      expect(owners.length).toBe(2);
+      owners[1].onNotification("item/completed", {
+        threadId: "thread-X", item: { type: "agentMessage", text: "answer for B" },
+      });
+      owners[1].onNotification("turn/completed", { threadId: "thread-X", turn: { status: "completed", error: null } });
+      await new Promise((r) => setTimeout(r, 250));
+      expect(inboxes.get("b")!.map((l) => parseEnvelope(l)!.text).some((t) => t.includes("answer for B"))).toBe(true);
+
+      // And the conversation is still in A's history despite B's message.
+      await sendAs("a", "no topic from A");
+      expect(readdirSync(dir).filter((f) => f.startsWith("peer-") && f.endsWith(".sock")).length).toBe(1);
+    } finally {
+      peer.stop();
+      for (const s of servers) s.close();
+      cleanup();
+    }
+  }, 20_000);
+
+  test("a late turn-ended hook does not disturb the turn that replaced it", async () => {
+    const { dir, cleanup } = harness();
+    const inboxes = new Map<string, string[]>();
+    const servers: net.Server[] = [];
+    for (const who of ["a", "b"]) {
+      const sock = join(dir, `${who}.sock`);
+      const lines: string[] = [];
+      inboxes.set(who, lines);
+      const srv = net.createServer((c) => {
+        c.setEncoding("utf8");
+        let buf = "";
+        c.on("data", (chunk: string) => {
+          buf += chunk;
+          let i: number;
+          while ((i = buf.indexOf("\n")) !== -1) {
+            const l = buf.slice(0, i).trim();
+            buf = buf.slice(i + 1);
+            if (l) lines.push(l);
+          }
+        });
+      });
+      srv.listen(sock);
+      servers.push(srv);
+      registerTestSender(join(dir, "sessions"), sock, `session-${who}`);
+    }
+    const sendAs = async (who: string, text: string, target = join(dir, "peer.sock")) => {
+      const line = buildEnvelope({ text, ourSocketPath: join(dir, `${who}.sock`), ourName: `session-${who}` });
+      await new Promise<void>((resolve, reject) => {
+        const c = net.connect({ path: target }, () => { c.write(line); c.end(); resolve(); });
+        c.on("error", reject);
+      });
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    const owners: Array<{ onNotification(m: string, p?: Record<string, unknown>): void }> = [];
+    let hasTurn = false;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
+      releaseThread: () => { hasTurn = false; },
+      threadHasTurn: () => hasTurn,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await sendAs("a", "topic: gap\nfirst");                 // turn 1, audience {A}
+      hasTurn = false;
+      owners[0].onNotification("turn/completed", { threadId: "thread-X", turn: { status: "completed", error: null } });
+      await sendAs("a", "second");                            // turn 2 claims, audience {A}
+      // Turn 1's hook was deferred and only lands now — after turn 2 owns
+      // the thread. It must not touch turn 2's state.
+      peer.onThreadTurnEnded("thread-X");
+      await new Promise((r) => setTimeout(r, 100));
+      await sendAs("b", "me too");                            // B joins turn 2
+
+      owners[owners.length - 1].onNotification("item/completed", {
+        threadId: "thread-X", item: { type: "agentMessage", text: "answer for both" },
+      });
+      hasTurn = false;
+      owners[owners.length - 1].onNotification("turn/completed", { threadId: "thread-X", turn: { status: "completed", error: null } });
+      await new Promise((r) => setTimeout(r, 250));
+
+      // A asked for turn 2 — a wiped audience would have delivered only to
+      // B, the most recent speaker, and left A with nothing.
+      expect(inboxes.get("a")!.map((l) => parseEnvelope(l)!.text).some((t) => t.includes("answer for both"))).toBe(true);
+    } finally {
+      peer.stop();
+      for (const s of servers) s.close();
+      cleanup();
+    }
+  }, 20_000);
+
+  test("a completed conversation leaves no per-thread state behind", async () => {
+    const { dir, send, cleanup } = harness();
+    let hasTurn = false;
+    const owners: Array<{ onNotification(m: string, p?: Record<string, unknown>): void }> = [];
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
+      releaseThread: () => { hasTurn = false; },
+      threadHasTurn: () => hasTurn,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: tidy\ndo it");
+      owners[0].onNotification("item/completed", { threadId: "thread-X", item: { type: "agentMessage", text: "done" } });
+      hasTurn = false;
+      owners[0].onNotification("turn/completed", { threadId: "thread-X", turn: { status: "completed", error: null } });
+      // The ordinary release: no message was injected mid-turn, so there is
+      // no pending wake — the path that used to skip the only cleanup.
+      peer.onThreadTurnEnded("thread-X");
+      await new Promise((r) => setTimeout(r, 150));
+      expect(peer.debugState().turnRecipients).toBe(0);
+      expect(peer.debugState().pendingWakes).toBe(0);
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("a conversation remembers only its most recent senders", async () => {
+    const { dir, cleanup } = harness();
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => true, // injection only
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      // Each Claude session brings a new socket path; without a bound the
+      // map grows forever and every message re-serializes all of it.
+      for (let i = 0; i < 12; i++) {
+        const sock = join(dir, `s${i}.sock`);
+        registerTestSender(join(dir, "sessions"), sock, `session-${i}`);
+        const line = buildEnvelope({ text: "topic: shared\nhello", ourSocketPath: sock, ourName: `session-${i}` });
+        await new Promise<void>((resolve, reject) => {
+          const c = net.connect({ path: join(dir, "peer.sock") }, () => { c.write(line); c.end(); resolve(); });
+          c.on("error", reject);
+        });
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      const saved = JSON.parse(readFileSync(join(dir, "peer-conversations.json"), "utf-8")) as
+        Array<{ lastInboundBy: Record<string, number> }>;
+      expect(saved.length).toBe(1);
+      expect(Object.keys(saved[0].lastInboundBy).length).toBeLessThanOrEqual(8);
+      // The most recent sender is always among those kept.
+      expect(Object.keys(saved[0].lastInboundBy)).toContain(join(dir, "s11.sock"));
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 25_000);
+
+  test("conversation addresses come back after a broker restart", async () => {
+    const { dir, send, cleanup } = harness();
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => true,
+      log: () => {},
+    };
+    const first = createPeer(host);
+    await send("topic: durable\nhello");
+    const socketName = readdirSync(dir).find((f) => f.startsWith("peer-") && f.endsWith(".sock"));
+    expect(socketName).toBeDefined();
+    first.stop();
+    expect(readdirSync(dir).some((f) => f === socketName)).toBe(false); // torn down with the broker
+
+    const second = createPeer(host);
+    try {
+      // The same address is listening again — a session holding it from
+      // before the restart is not left talking to a dead socket.
+      expect(readdirSync(dir).some((f) => f === socketName)).toBe(true);
+    } finally {
+      second.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("shutdown tells senders their in-flight turn is not coming back", async () => {
+    const { dir, send, cleanup } = harness();
+    const senderSock = join(dir, "sender.sock");
+    const inboxLines: string[] = [];
+    const inboxServer = net.createServer((sock) => {
+      sock.setEncoding("utf8");
+      let buf = "";
+      sock.on("data", (c: string) => {
+        buf += c;
+        let i: number;
+        while ((i = buf.indexOf("\n")) !== -1) {
+          const l = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (l) inboxLines.push(l);
+        }
+      });
+    });
+    inboxServer.listen(senderSock);
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: s\nwork on this"); // a turn is now in flight
+      peer.stop();                          // broker goes away mid-turn
+      await new Promise((r) => setTimeout(r, 250));
+      expect(inboxLines.some((l) => parseEnvelope(l)?.text.includes("broker shut down"))).toBe(true);
+      // The run record must not stay "running" forever either.
+      const runs = readdirSync(join(dir, "runs")).map((f) =>
+        JSON.parse(readFileSync(join(dir, "runs", f), "utf-8")) as { status: string });
+      expect(runs.every((r) => r.status !== "running")).toBe(true);
+    } finally {
+      peer.stop();
+      inboxServer.close();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("a message read mid-goal-continuation still gets its answer delivered", async () => {
+    const { dir, send, cleanup } = harness();
+    const senderSock = join(dir, "sender.sock");
+    const inboxLines: string[] = [];
+    const inboxServer = net.createServer((sock) => {
+      sock.setEncoding("utf8");
+      let buf = "";
+      sock.on("data", (c: string) => {
+        buf += c;
+        let i: number;
+        while ((i = buf.indexOf("\n")) !== -1) {
+          const l = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (l) inboxLines.push(l);
+        }
+      });
+    });
+    inboxServer.listen(senderSock);
+
+    const owners = new Map<string, { onNotification(m: string, p?: Record<string, unknown>): void }>();
+    let hasTurn = false;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" } };
+        return {};
+      },
+      claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
+      releaseThread: () => {},
+      threadHasTurn: () => hasTurn,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("topic: g\nstart the work");
+      const owner = owners.get("thread-X")!;
+      owner.onNotification("item/completed", { threadId: "thread-X", item: { type: "agentMessage", text: "first reply" } });
+      owner.onNotification("turn/completed", { threadId: "thread-X", turn: { status: "completed", error: null } });
+      await new Promise((r) => setTimeout(r, 200));
+      expect(inboxLines.length).toBe(1); // reply 1 delivered; buffer consumed
+
+      // Goal mode: ownership persists, a continuation turn is running with
+      // NO reply buffer. A message arriving now must not vanish into it.
+      hasTurn = true;
+      await send("are you still on track?");
+      owner.onNotification("item/started", { threadId: "thread-X", item: { type: "reasoning" } });
+      owner.onNotification("item/completed", { threadId: "thread-X", item: { type: "agentMessage", text: "continuation answer" } });
+      owner.onNotification("turn/completed", { threadId: "thread-X", turn: { status: "completed", error: null } });
+      await new Promise((r) => setTimeout(r, 200));
+      // The re-armed buffer delivered the continuation's output as the reply.
+      expect(inboxLines.length).toBe(2);
+      expect(parseEnvelope(inboxLines[1])!.text).toContain("continuation answer");
+    } finally {
+      peer.stop();
+      inboxServer.close();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("a conversation created on the server default pins the model the server reports", async () => {
+    const { dir, send, cleanup } = harness();
+    const turnStarts: Array<Record<string, unknown>> = [];
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: "thread-X" }, model: "srv-default" };
+        if (method === "turn/start") turnStarts.push(params!);
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await send("no model header here"); // nothing explicit, nothing configured
+      expect(turnStarts.length).toBe(1);
+      // The conversation runs on what the server actually selected, pinned.
+      expect(turnStarts[0].model).toBe("srv-default");
+    } finally {
+      peer.stop();
+      cleanup();
+    }
+  }, 15_000);
+
+  test("every topic conversation survives a broker restart, not just each sender's latest", async () => {
+    const { dir, send, cleanup } = harness();
+    const injected: string[] = [];
+    let n = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: `thread-${++n}` } };
+        if (method === "thread/inject_items") injected.push(params!.threadId as string);
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => true, // injection only
+      log: () => {},
+    };
+    const first = createPeer(host);
+    await send("topic: alpha work\none");
+    await send("topic: beta work\ntwo");
+    expect(n).toBe(2);
+    first.stop();
+
+    const second = createPeer(host);
+    try {
+      // Selecting the OLDER topic must continue its thread, not start a new
+      // one — the restart must not have forgotten it.
+      await send("topic: alpha work\nthree");
+      expect(n).toBe(2);
+      expect(injected[injected.length - 1]).toBe("thread-1");
+    } finally {
+      second.stop();
+      cleanup();
     }
   }, 15_000);
 });

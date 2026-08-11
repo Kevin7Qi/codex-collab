@@ -77,9 +77,10 @@ interface Conversation {
   /** Display name of this conversation's thread peer, derived from the
    *  first message. Persisted so re-materialization keeps the name. */
   label?: string;
-  /** Reply socket path (the sender's own messaging socket). Updated to the
-   *  most recent sender — the person actively talking is who consults and
-   *  replies go to. */
+  /** Reply socket path of the CURRENT counterpart — whoever spoke most
+   *  recently. Out-of-band notices go here. A turn's own reply does NOT:
+   *  it goes to the sender whose message caused that turn, so a second
+   *  session joining mid-turn cannot intercept the first one's answer. */
   replyPath: string;
   /** Sender's display name, for attribution inside Codex's context. */
   fromName: string;
@@ -95,8 +96,19 @@ interface Conversation {
    *  poisoned forever, every turn failing with no way to correct it. */
   model?: string;
   effort?: string;
+  /** "auto" when the conversation runs under Guardian review. Stored so a
+   *  recreated thread (unrecoverable-thread recovery) keeps the setting. */
+  approval?: string;
   /** Last inbound/outbound activity, for thread-peer retirement. */
   lastActivity: number;
+  /** reply path → when THAT sender last spoke to this conversation. The
+   *  no-topic default is per sender ("your most recent conversation"), so a
+   *  conversation two sessions both use stays in both of their histories —
+   *  a single counterpart pointer cannot express that, and using one meant
+   *  a second session's message erased the conversation from the first
+   *  session's reach. Distinct from lastActivity, which also moves on
+   *  outbound traffic: a turn completing is not the sender speaking. */
+  lastInboundBy: Record<string, number>;
 }
 
 /** A per-thread peer: its own registry entry (backed by a holder process
@@ -124,6 +136,11 @@ export const MAX_THREAD_PEERS = 8;
 
 interface PendingConsult {
   threadId: string;
+  /** The sessions the question was actually sent to. Only they can answer
+   *  it: any session can message a conversation, and without this the next
+   *  message from an unrelated one is swallowed as the answer — the asker's
+   *  real answer then arrives too late to be recognized as one. */
+  asked: Set<string>;
   resolve: (answer: string | null) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -457,6 +474,13 @@ export interface Peer {
   adoptThread(threadId: string): void;
   /** Handle a dynamic tool call routed from the broker. */
   handleToolCall(params: Record<string, unknown>): Promise<Record<string, unknown>>;
+  /** A turn ended on the thread (broker lifecycle tracking). Lets the peer
+   *  wake a thread whose mid-turn message the departed turn never read. */
+  onThreadTurnEnded(threadId: string): void;
+  /** Counts of the per-thread bookkeeping, for tests. These maps are keyed
+   *  by thread and cleaned on release; a count that grows across completed
+   *  conversations is a leak, which is otherwise invisible from outside. */
+  debugState(): { turnRecipients: number; pendingWakes: number; replyBuffers: number; activeRuns: number };
   /** True when any OTHER live Claude session is registered — the broker's
    *  idle shutdown defers while someone might still message the peer. */
   hasLiveSessions(): boolean;
@@ -503,9 +527,6 @@ export function createPeer(host: PeerHost): Peer {
   const conversationsPath = join(host.stateDir, "peer-conversations.json");
   const stateFile = join(host.stateDir, "peer-state.json");
 
-  /** senderKey (reply socket path) → that sender's MOST RECENT conversation,
-   *  used when a message names no topic. */
-  const conversations = new Map<string, Conversation>();
   /** peer name → conversation, so a `topic:` line reopens the conversation
    *  it names instead of starting a duplicate. */
   const byLabel = new Map<string, Conversation>();
@@ -523,6 +544,30 @@ export function createPeer(host: PeerHost): Peer {
   const activeRuns = new Map<string, { runId: string; dispatcher: EventDispatcher; startedAt: number }>();
   /** threadId → pending consult awaiting the sender's next message. */
   const pendingConsults = new Map<string, PendingConsult>();
+  /** threadId → sender → the message they sent while a turn was already
+   *  running on the thread. Kept per sender: two sessions can both be
+   *  waiting, and a single slot per thread silently drops one of them. Usually the running turn reads it at its next sampling point —
+   *  but a turn past its LAST sampling point completes without ever seeing
+   *  it, and a CLI-owned turn answers its own client, not the sender. When
+   *  the turn ends (onThreadTurnEnded), the peer starts a turn of its own.
+   *
+   *  It always does, deliberately: nothing observable proves the departed
+   *  turn actually sampled the message. An item starting afterwards may
+   *  belong to a request whose context was fixed before the injection, so
+   *  treating it as proof would silently drop real messages. Waking
+   *  unconditionally costs at most one short confirmation turn per turn
+   *  boundary ("already handled" — the nudge invites exactly that); the
+   *  alternative costs a message, which is the failure this whole path
+   *  exists to prevent. */
+  const pendingWakes = new Map<string, Map<string, string>>();
+  /** threadId → every sender a running peer turn is answering: whoever
+   *  asked for it, plus anyone who spoke to the conversation while it ran.
+   *  Any session can see a conversation in ListAgents and message it, so a
+   *  turn can legitimately be addressing more than one; delivering only to
+   *  the current counterpart hands one session's answer to another and
+   *  leaves the rest in silence. Retained across goal continuations (the
+   *  same turn's work), cleared when the thread is released. */
+  const turnAudience = new Map<string, Set<string>>();
   /** Bounded msg_id dedupe (Claude Code retries identical sends). */
   const seenMsgIds = new Set<string>();
 
@@ -536,32 +581,96 @@ export function createPeer(host: PeerHost): Peer {
   function loadConversations(): void {
     try {
       const parsed = JSON.parse(readFileSync(conversationsPath, "utf-8"));
-      if (Array.isArray(parsed)) {
-        for (const c of parsed) {
-          if (typeof c?.threadId === "string" && typeof c?.replyPath === "string") {
-            const conv: Conversation = {
-              threadId: c.threadId,
-              shortId: typeof c.shortId === "string" ? c.shortId : undefined,
-              label: typeof c.label === "string" ? c.label : undefined,
-              replyPath: c.replyPath,
-              fromName: typeof c.fromName === "string" ? c.fromName : "claude",
-              sandbox: typeof c.sandbox === "string" ? c.sandbox : undefined,
-              model: typeof c.model === "string" ? c.model : undefined,
-              effort: typeof c.effort === "string" ? c.effort : undefined,
-              lastActivity: Date.now(),
-            };
-            conversations.set(conv.replyPath, conv);
-            threadConversations.set(conv.threadId, conv);
-            if (conv.label) byLabel.set(conv.label, conv);
-          }
+      if (!Array.isArray(parsed)) return;
+      const loaded: Conversation[] = [];
+      for (const c of parsed) {
+        if (typeof c?.threadId === "string" && typeof c?.replyPath === "string") {
+          loaded.push({
+            threadId: c.threadId,
+            shortId: typeof c.shortId === "string" ? c.shortId : undefined,
+            label: typeof c.label === "string" ? c.label : undefined,
+            replyPath: c.replyPath,
+            fromName: typeof c.fromName === "string" ? c.fromName : "claude",
+            sandbox: typeof c.sandbox === "string" ? c.sandbox : undefined,
+            model: typeof c.model === "string" ? c.model : undefined,
+            effort: typeof c.effort === "string" ? c.effort : undefined,
+            approval: typeof c.approval === "string" ? c.approval : undefined,
+            lastActivity: typeof c.lastActivity === "number" ? c.lastActivity : Date.now(),
+            // Older files carry a single timestamp (or none): credit it to
+            // the counterpart they recorded, so a restart onto this build
+            // keeps every conversation reachable by its sender.
+            lastInboundBy: c.lastInboundBy && typeof c.lastInboundBy === "object"
+              ? Object.fromEntries(
+                  Object.entries(c.lastInboundBy as Record<string, unknown>)
+                    .filter(([, v]) => typeof v === "number") as Array<[string, number]>)
+              : { [c.replyPath]: typeof c.lastInbound === "number"
+                    ? c.lastInbound
+                    : (typeof c.lastActivity === "number" ? c.lastActivity : Date.now()) },
+          });
         }
+      }
+      for (const conv of loaded) {
+        threadConversations.set(conv.threadId, conv);
+        if (conv.label) byLabel.set(conv.label, conv);
       }
     } catch { /* none yet */ }
   }
 
+  /** The conversation a no-topic message from `replyPath` continues: the one
+   *  that sender spoke to most recently.
+   *
+   *  Derived on demand rather than tracked in a map. A stored "default"
+   *  pointer has to be rebuilt from exactly this data after a restart, and
+   *  the two can then disagree — a conversation whose reply path moved to
+   *  another sender leaves the first sender with no pointer at runtime but
+   *  a reconstructed one after a restart. Deriving it makes the documented
+   *  rule true by construction, in both lives. */
+  /** Senders remembered per conversation. Each Claude session has its own
+   *  socket path, so without a bound this grows for the life of the
+   *  conversation and every message re-serializes all of it. */
+  const MAX_SENDERS_REMEMBERED = 8;
+
+  /** Senders one turn will answer, and messages one turn may accumulate.
+   *  A goal chain holds its audience across continuations, so without a
+   *  bound a long-lived goal collects every session that ever spoke to it —
+   *  including exited ones — and every later answer fans out connection
+   *  attempts to all of them. A sender kept out of a full audience is not
+   *  silenced: its own queued message still earns it a wake. */
+  const MAX_AUDIENCE = 8;
+  const MAX_QUEUED_SENDERS = 32;
+
+  /** Record that `replyPath` just spoke to `conv`, keeping the map bounded. */
+  function noteInbound(conv: Conversation, replyPath: string): void {
+    conv.lastInboundBy[replyPath] = Date.now();
+    // Rank the OTHERS and keep this sender unconditionally: sorting by
+    // timestamp alone lets a same-millisecond tie evict the very sender
+    // that just spoke, whose next no-topic message would then fail to find
+    // this conversation and start a duplicate.
+    const others = Object.keys(conv.lastInboundBy).filter((p) => p !== replyPath);
+    if (others.length > MAX_SENDERS_REMEMBERED - 1) {
+      others.sort((a, b) => conv.lastInboundBy[b] - conv.lastInboundBy[a]);
+      for (const stale of others.slice(MAX_SENDERS_REMEMBERED - 1)) delete conv.lastInboundBy[stale];
+    }
+  }
+
+  function defaultConversationFor(replyPath: string): Conversation | undefined {
+    let best: Conversation | undefined;
+    let bestAt = -1;
+    for (const conv of threadConversations.values()) {
+      const at = conv.lastInboundBy[replyPath];
+      if (at === undefined) continue; // this sender has never spoken here
+      if (at > bestAt) { best = conv; bestAt = at; }
+    }
+    return best;
+  }
+
   function saveConversations(): void {
     try {
-      writeFileSync(conversationsPath, JSON.stringify([...conversations.values()], null, 2), { mode: 0o600 });
+      // The thread-indexed map holds EVERY conversation. Persisting a
+      // per-sender map instead (keyed by reply path, one entry per sender)
+      // would drop every older topic across a broker restart: selecting one
+      // again would start a fresh thread instead of continuing it.
+      writeFileSync(conversationsPath, JSON.stringify([...threadConversations.values()], null, 2), { mode: 0o600 });
     } catch (e) {
       host.log(`peer: could not persist conversations: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -757,7 +866,7 @@ export function createPeer(host: PeerHost): Peer {
    *  start, mirroring what the CLI writes so `progress`, `output`, `follow`
    *  and `threads` status answer the same questions for a messaged
    *  conversation. Best-effort: a ledger failure must never stop the turn. */
-  function beginRun(threadId: string, shortId: string, prompt: string, model?: string): void {
+  function beginRun(threadId: string, shortId: string, prompt: string, model?: string): string | null {
     try {
       const runId = generateRunId();
       const logFile = runLogRelPath(shortId, runId);
@@ -789,17 +898,24 @@ export function createPeer(host: PeerHost): Peer {
       activeRuns.set(threadId, { runId, dispatcher, startedAt: Date.now() });
       updateThreadStatus(host.stateDir, threadId, "running");
       pruneRuns(host.stateDir);
+      return runId;
     } catch (e) {
       host.log(`peer: could not open a run record for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+      return null;
     }
   }
 
   /** Close the run record for a finished peer turn. `status` comes from
    *  turn.status, so an interrupted or failed turn is recorded as such
-   *  rather than silently reading as success. */
-  function finishRun(threadId: string, status: string, output: string, error: string | null): void {
+   *  rather than silently reading as success.
+   *
+   *  `expectRunId` pins the call to the run the caller opened: a failure
+   *  path that runs after a replacement turn has already begun must not
+   *  close the replacement's record instead of its own. */
+  function finishRun(threadId: string, status: string, output: string, error: string | null, expectRunId?: string | null): void {
     const run = activeRuns.get(threadId);
     if (!run) return;
+    if (expectRunId && run.runId !== expectRunId) return;
     activeRuns.delete(threadId);
     try {
       run.dispatcher.flushOutput();
@@ -864,6 +980,12 @@ export function createPeer(host: PeerHost): Peer {
           const conv = threadConversations.get(threadId);
           if (!conv) return;
           conv.lastActivity = Date.now();
+          saveConversations(); // startup revival reads this timestamp
+          // The asker, not whoever spoke most recently.
+          const audience = turnAudience.get(threadId) ?? new Set([conv.replyPath]);
+          const deliverAll = (text: string) => {
+            for (const to of audience) deliverTo(to, text, threadId);
+          };
           // Buffer already consumed (or never armed): this is a goal-mode
           // continuation turn completing after the reply was delivered —
           // stay silent rather than spam the sender per continuation.
@@ -881,13 +1003,15 @@ export function createPeer(host: PeerHost): Peer {
             const note = died
               ? `\n\n[codex-collab] Note: the turn ${turn!.status} after this text was written — it is not a complete reply${turn?.error?.message ? ` (${turn.error.message})` : ""}.`
               : "";
-            deliverTo(conv.replyPath, reply + note, threadId);
+            deliverAll(reply + note);
           } else if (died) {
             const err = turn?.error?.message;
-            deliverTo(conv.replyPath, `[codex-collab] The turn ${turn?.status} before producing a reply${err ? `: ${err}` : "."}`, threadId);
-          } else {
-            // A silent success reads as a lost message to the sender.
-            deliverTo(conv.replyPath, "[codex-collab] Codex finished the turn without a closing message.", threadId);
+            deliverAll(`[codex-collab] The turn ${turn?.status} before producing a reply${err ? `: ${err}` : "."}`);
+          } else if (!pendingWakes.has(threadId)) {
+            // A silent success reads as a lost message to the sender — except
+            // when a mid-turn message is still pending: the wake that follows
+            // will produce the actual answer, so say nothing here.
+            deliverAll("[codex-collab] Codex finished the turn without a closing message.");
           }
         }
       },
@@ -900,7 +1024,7 @@ export function createPeer(host: PeerHost): Peer {
     fromName: string,
     firstMessage: string,
     headers: MessageHeaders = { topic: null },
-  ): Promise<{ threadId: string; shortId: string; sandbox: string; model?: string; effort?: string }> {
+  ): Promise<{ threadId: string; shortId: string; sandbox: string; model?: string; effort?: string; approval?: string }> {
     const userConfig = readUserConfig();
     // Header settings override the workspace defaults for this conversation
     // only. `auto` maps to Guardian, the one approval policy that resolves
@@ -954,7 +1078,17 @@ export function createPeer(host: PeerHost): Peer {
     try {
       await host.request("thread/memoryMode/set", { threadId, mode: "disabled" });
     } catch { /* older codex */ }
-    return { threadId, shortId, sandbox, model, effort };
+    return {
+      threadId,
+      shortId,
+      sandbox,
+      // Prefer the model the server actually selected: with no explicit or
+      // configured model this pins the conversation to the default it was
+      // CREATED under, so recreation after a default change stays faithful.
+      model: typeof result.model === "string" ? result.model : model,
+      effort,
+      approval: headers.approval === "auto" ? "auto" : undefined,
+    };
   }
 
   /** Minimal user-defaults read (model/sandbox). commands/shared.ts owns the
@@ -1084,17 +1218,21 @@ export function createPeer(host: PeerHost): Peer {
       ? threadConversations.get(boundThreadId)
       : topic
         ? (topicLabel ? byLabel.get(topicLabel) : undefined)
-        : conversations.get(msg.replyPath);
+        : defaultConversationFor(msg.replyPath);
 
     // A pending consult on this conversation's thread consumes the message
     // as its answer — that is the whole correlation rule: the reply address
     // binds the thread, and one consult per thread is in flight.
     if (conv) {
       const pending = pendingConsults.get(conv.threadId);
-      if (pending) {
+      if (pending && pending.asked.has(msg.replyPath)) {
         pendingConsults.delete(conv.threadId);
         clearTimeout(pending.timer);
         conv.lastActivity = Date.now();
+        noteInbound(conv, msg.replyPath);
+        conv.replyPath = msg.replyPath;
+        conv.fromName = msg.fromName || conv.fromName;
+        saveConversations();
         pending.resolve(msg.text);
         markSeen(msg.msgId);
         return;
@@ -1107,15 +1245,13 @@ export function createPeer(host: PeerHost): Peer {
       if (boundThreadId) {
         // Thread-peer socket for a conversation we no longer track (state
         // loss) — rebind to the existing thread rather than starting fresh.
-        conv = { threadId: boundThreadId, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now() };
-        conversations.set(msg.replyPath, conv);
+        conv = { threadId: boundThreadId, replyPath: msg.replyPath, fromName: msg.fromName, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
         threadConversations.set(boundThreadId, conv);
         saveConversations();
       } else {
-        const { threadId, shortId, sandbox, model, effort } = await startThread(msg.fromName, topic ?? deliveryText, headers);
+        const { threadId, shortId, sandbox, model, effort, approval } = await startThread(msg.fromName, topic ?? deliveryText, headers);
         const label = topicLabel || threadPeerLabel(deliveryText, shortId);
-        conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, lastActivity: Date.now() };
-        conversations.set(msg.replyPath, conv); // newest becomes this sender's default
+        conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, approval, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
         threadConversations.set(threadId, conv);
         if (label) byLabel.set(label, conv);
         createThreadPeer(threadId, shortId, label);
@@ -1125,15 +1261,14 @@ export function createPeer(host: PeerHost): Peer {
       }
     } else {
       conv.lastActivity = Date.now();
-      if (conv.replyPath !== msg.replyPath || (msg.fromName && conv.fromName !== msg.fromName)) {
-        // Only clear the old sender slot if it still points at THIS
-        // conversation — a sender can now hold several.
-        if (conversations.get(conv.replyPath) === conv) conversations.delete(conv.replyPath);
-        conv.replyPath = msg.replyPath;
-        conv.fromName = msg.fromName || conv.fromName;
-        conversations.set(conv.replyPath, conv);
-        saveConversations();
-      }
+      // Speaking to a conversation makes it this sender's no-topic default
+      // (the rule is "continue whichever you spoke to last", so reopening an
+      // older topic must refresh it too). Persisted, because the default is
+      // derived from these timestamps after a restart as well as during it.
+      noteInbound(conv, msg.replyPath);
+      conv.replyPath = msg.replyPath;
+      conv.fromName = msg.fromName || conv.fromName;
+      saveConversations();
       // Re-materialize a retired (or never-created) thread peer on activity.
       if (!threadPeers.has(conv.threadId)) {
         createThreadPeer(
@@ -1186,12 +1321,25 @@ export function createPeer(host: PeerHost): Peer {
         host.log(`peer: thread ${conv.threadId} unrecoverable (${e instanceof Error ? e.message : String(e)}) — starting a new one`);
         threadConversations.delete(conv.threadId);
         retireThreadPeer(conv.threadId);
-        const { threadId, shortId, sandbox, model, effort } = await startThread(msg.fromName, topic ?? deliveryText, headers);
+        // Recreate from the CONVERSATION's settings, not this message's
+        // headers: a plain continuation carries none, and defaulting would
+        // silently escalate a read-only conversation to the workspace
+        // sandbox and drop its Guardian approval. The per-turn keys still
+        // honor the current message when it does carry them.
+        const recreate: MessageHeaders = {
+          topic: headers.topic,
+          model: headers.model ?? conv.model,
+          effort: headers.effort ?? conv.effort,
+          sandbox: conv.sandbox,
+          approval: conv.approval,
+        };
+        const { threadId, shortId, sandbox, model, effort, approval } = await startThread(msg.fromName, topic ?? deliveryText, recreate);
         conv.threadId = threadId;
         conv.shortId = shortId;
         conv.sandbox = sandbox;
         conv.model = model;
         conv.effort = effort;
+        conv.approval = approval;
         // Keep the conversation's name across a thread restart: its name is
         // its ADDRESS, and a recreated thread is still the same conversation.
         if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId);
@@ -1207,17 +1355,69 @@ export function createPeer(host: PeerHost): Peer {
     // after is a best-effort wake-up. Only now is a retry a duplicate.
     markSeen(msg.msgId);
 
-    // Mid-turn: the injection is read at the next sampling point — done.
-    if (host.threadHasTurn(conv.threadId)) return;
+    // Mid-turn: the injection is read at the next sampling point — usually.
+    // Record the debt: if the turn never samples again (past its last
+    // sampling point, or CLI-owned with its reply going to its own client),
+    // onThreadTurnEnded wakes the thread when the turn ends.
+    if (host.threadHasTurn(conv.threadId)) {
+      queueWake(conv.threadId, msg.replyPath, deliveryText);
+      // Whatever the turn says from here on answers this sender too: the
+      // message arrived before it ended, and it may well have read it.
+      const running = turnAudience.get(conv.threadId);
+      if (running && running.size < MAX_AUDIENCE) running.add(msg.replyPath);
+      // Arm the reply buffer if the running turn has none — a goal-mode
+      // continuation turn runs with its buffer already consumed ("stay
+      // silent per continuation"), and without re-arming, a message it
+      // reads mid-continuation would be consumed yet never answered: its
+      // output is discarded and the consumed flag suppresses the wake.
+      // Armed, whatever the turn says from here on is delivered as the
+      // reply. (For a CLI-owned turn this entry sits unused — its
+      // notifications never reach ownerFor — and the wake path resets it.)
+      if (!replyBuffers.has(conv.threadId)) replyBuffers.set(conv.threadId, []);
+      return;
+    }
 
     // Idle: wake the thread. The claim can race a CLI run's turn/start;
-    // losing it just means the message waits for that turn's next sampling.
-    if (!host.claimThread(conv.threadId, ownerFor(conv.threadId))) return;
+    // losing it leaves the message to that turn — which samples AFTER the
+    // injection, but answers its own client, so record the debt here too.
+    if (!await startPeerTurn(conv, deliveryText, [msg.replyPath])) {
+      queueWake(conv.threadId, msg.replyPath, deliveryText);
+    }
+  }
+
+  /** Claim the thread and start a peer-owned turn for a delivered message.
+   *  Returns false when the claim was lost to a concurrent turn/start.
+   *  `nudge` overrides the standard wake-up prompt. */
+  /** Remember that `replyPath` is owed an answer on `threadId`. */
+  function queueWake(threadId: string, replyPath: string, prompt: string): void {
+    const perSender = pendingWakes.get(threadId) ?? new Map<string, string>();
+    perSender.delete(replyPath); // re-insert so the newest sender is last
+    perSender.set(replyPath, prompt);
+    while (perSender.size > MAX_QUEUED_SENDERS) {
+      const oldest = perSender.keys().next();
+      if (oldest.done) break;
+      host.log(`peer: wake queue full on ${threadId} — dropping ${oldest.value}`);
+      perSender.delete(oldest.value);
+    }
+    pendingWakes.set(threadId, perSender);
+  }
+
+  async function startPeerTurn(conv: Conversation, runPrompt: string, recipients: string[], nudge?: string): Promise<boolean> {
+    if (!host.claimThread(conv.threadId, ownerFor(conv.threadId))) return false;
+    // This turn samples everything delivered so far, so it inherits the
+    // debts: anyone already waiting is owed an answer, and its context
+    // contains their messages. Clearing the queue without adopting them
+    // into the audience is how a sender loses both its wake and its reply.
+    const carried = pendingWakes.get(conv.threadId);
+    pendingWakes.delete(conv.threadId);
+    const audience = new Set(recipients);
+    for (const waiting of carried?.keys() ?? []) audience.add(waiting);
+    turnAudience.set(conv.threadId, audience);
     replyBuffers.set(conv.threadId, []);
-    beginRun(
+    const runId = beginRun(
       conv.threadId,
       conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8),
-      deliveryText,
+      runPrompt,
       conv.model,
     );
     updateStatus("busy");
@@ -1231,21 +1431,70 @@ export function createPeer(host: PeerHost): Peer {
         ...(conv.effort ? { effort: conv.effort } : {}),
         input: [{
           type: "text",
-          text: "(A peer message was just delivered to this conversation as an agent_message from /root/claude. Read it and respond or act accordingly.)",
+          text: nudge ?? "(A peer message was just delivered to this conversation as an agent_message from /root/claude. Read it and respond or act accordingly.)",
         }],
       });
     } catch (e) {
-      // The claim MUST be released here: no turn started, so no
-      // turn/completed will ever free it, and an internal owner never
-      // disconnects — a leaked claim blocks the thread (and idle shutdown)
-      // for the broker's whole life.
-      host.releaseThread(conv.threadId);
+      const detail = e instanceof Error ? e.message : String(e);
+      // Tear down THIS turn's state BEFORE releasing the claim. Releasing
+      // re-enters the peer through the broker's turn-ended hook, which may
+      // start a replacement turn for a message still owed an answer — and
+      // that turn's fresh reply buffer and run record must not be destroyed
+      // by this failure path. (The hook is also deferred a tick on the
+      // broker side; this ordering holds even if that ever changes.)
       replyBuffers.delete(conv.threadId);
-      finishRun(conv.threadId, "failed", "", e instanceof Error ? e.message : String(e));
+      turnAudience.delete(conv.threadId);
+      finishRun(conv.threadId, "failed", "", detail, runId);
       updateStatus("idle");
-      host.log(`peer: turn/start failed for ${conv.threadId}: ${e instanceof Error ? e.message : String(e)}`);
-      deliverTo(conv.replyPath, `[codex-collab] Could not start a turn: ${e instanceof Error ? e.message : String(e)}`, conv.threadId);
+      // The claim MUST be released: no turn started, so no turn/completed
+      // will ever free it, and an internal owner never disconnects — a
+      // leaked claim blocks the thread (and idle shutdown) for the broker's
+      // whole life.
+      host.releaseThread(conv.threadId);
+      host.log(`peer: turn/start failed for ${conv.threadId}: ${detail}`);
+      for (const to of recipients) {
+        deliverTo(to, `[codex-collab] Could not start a turn: ${detail}`, conv.threadId);
+      }
     }
+    return true;
+  }
+
+  /** A turn on `threadId` ended (the broker's lifecycle tracking calls this
+   *  after releasing the thread). Settle any pending wake: if the departed
+   *  turn never sampled after the injection — or was CLI-owned, whose reply
+   *  went to its own client — start a peer turn so the sender gets an
+   *  answer. */
+  function onThreadTurnEnded(threadId: string): void {
+    if (stopped) return;
+    // This hook is deferred a tick, so a replacement turn may already have
+    // claimed the thread and installed ITS audience and buffers. Touch
+    // nothing in that case — deleting here wipes the live turn's audience,
+    // and its answer then falls back to whoever spoke most recently while
+    // the sender who asked gets nothing. Its own release will clean up.
+    // Any pending wake also stays: that turn answers its own client, so
+    // the debt is still owed and settles when it ends.
+    if (host.threadHasTurn(threadId)) return;
+    // Nothing owns the thread: this chain really is over, so its audience
+    // is stale. Doing it here rather than after the pending-wake check
+    // matters — most releases carry no wake, and skipping those leaked an
+    // entry per completed conversation for the broker's whole life.
+    turnAudience.delete(threadId);
+    const pending = pendingWakes.get(threadId);
+    if (!pending) return;
+    const conv = threadConversations.get(threadId);
+    if (!conv) {
+      pendingWakes.delete(threadId);
+      return;
+    }
+    pendingWakes.delete(threadId);
+    void startPeerTurn(
+      conv,
+      [...pending.values()].join("\n\n"),
+      [...pending.keys()],
+      "(A peer message was delivered to this conversation while the previous turn was running, and it may not have been read or answered. Check the latest peer messages from /root/claude; respond to or act on anything unaddressed. If everything was already handled, reply briefly to the peer to say so.)",
+    ).catch((e) => {
+      host.log(`peer: pending wake failed for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+    });
   }
 
   // ── Consult bridge ──
@@ -1273,8 +1522,9 @@ export function createPeer(host: PeerHost): Peer {
       return failOpen("A previous consult is still awaiting an answer — proceed on your own best judgment, or retry later.");
     }
 
-    deliverTo(
-      conv.replyPath,
+    const asked = new Set(turnAudience.get(threadId) ?? [conv.replyPath]);
+    for (const to of asked) deliverTo(
+      to,
       `[consult] ${question}\n\n(Codex is waiting on your answer — reply to this peer to deliver it. If no answer arrives within ${Math.round(CONSULT_TIMEOUT_MS / 60000)} minutes, Codex proceeds on its own.)`,
       threadId,
     );
@@ -1285,7 +1535,7 @@ export function createPeer(host: PeerHost): Peer {
         resolve(null);
       }, CONSULT_TIMEOUT_MS);
       timer.unref?.();
-      pendingConsults.set(threadId, { threadId, resolve, timer });
+      pendingConsults.set(threadId, { threadId, asked, resolve, timer });
     });
 
     return answer === null
@@ -1364,6 +1614,25 @@ export function createPeer(host: PeerHost): Peer {
         pid: process.pid, name, socketPath, startedAt: new Date().toISOString(),
       }, null, 2) + "\n", { mode: 0o600 });
 
+      // Re-materialize the peers of recently active conversations. Their
+      // sockets and registry entries died with the previous broker, so a
+      // session still holding one of those addresses would hit ENOENT, and
+      // the conversations would be missing from ListAgents until someone
+      // revived them through the front door. Bounded and recency-ordered,
+      // like the sweep that retires them; anything older than the linger
+      // window stays dormant until spoken to.
+      const revivable = [...threadConversations.values()]
+        .filter((c) => Date.now() - c.lastActivity < THREAD_PEER_LINGER_MS)
+        .sort((a, b) => b.lastActivity - a.lastActivity)
+        .slice(0, MAX_THREAD_PEERS);
+      for (const conv of revivable) {
+        createThreadPeer(
+          conv.threadId,
+          conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8),
+          conv.label,
+        );
+      }
+
       sweepTimer = setInterval(sweepThreadPeers, 5 * 60_000);
       sweepTimer.unref?.();
 
@@ -1379,9 +1648,39 @@ export function createPeer(host: PeerHost): Peer {
 
   function stop(): void {
     if (stopped) return;
+    // Before anything is torn down: every conversation with a turn in flight
+    // or a message still owed an answer is about to lose it — no turn
+    // survives the broker, and pending wakes are in-memory only. Silence
+    // here is indistinguishable from Codex still thinking, so say so and
+    // close the run records rather than leaving them "running" forever.
+    // Best-effort: the sockets are still open, and the broker's shutdown
+    // does async work after this, which gives the writes time to flush.
+    // (A SIGKILL is beyond reach — nothing runs.)
+    for (const threadId of new Set([...activeRuns.keys(), ...pendingWakes.keys()])) {
+      try {
+        finishRun(threadId, "interrupted", "", "broker shut down before the turn finished");
+        const conv = threadConversations.get(threadId);
+        // Everyone actually owed something: the asker of the running turn
+        // and anyone whose message was still queued for a wake — not
+        // whoever merely spoke most recently.
+        const owed = new Set<string>();
+        for (const to of turnAudience.get(threadId) ?? []) owed.add(to);
+        for (const to of pendingWakes.get(threadId)?.keys() ?? []) owed.add(to);
+        if (conv && owed.size === 0) owed.add(conv.replyPath);
+        for (const replyPath of conv ? owed : []) {
+          deliverTo(
+            replyPath,
+            "[codex-collab] The Codex broker shut down before this conversation's turn finished — your last message may be unanswered. Send it again to continue; the conversation and its history are intact.",
+            threadId,
+          );
+        }
+      } catch { /* shutting down anyway */ }
+    }
     stopped = true;
     active = false;
     if (sweepTimer) clearInterval(sweepTimer);
+    pendingWakes.clear();
+    turnAudience.clear();
     for (const [threadId, pending] of pendingConsults) {
       clearTimeout(pending.timer);
       pending.resolve(null);
@@ -1401,6 +1700,13 @@ export function createPeer(host: PeerHost): Peer {
     ownsThread: (threadId: string) => threadConversations.has(threadId),
     adoptThread,
     handleToolCall,
+    onThreadTurnEnded,
+    debugState: () => ({
+      turnRecipients: turnAudience.size,
+      pendingWakes: pendingWakes.size,
+      replyBuffers: replyBuffers.size,
+      activeRuns: activeRuns.size,
+    }),
     hasLiveSessions,
     stop,
   };
