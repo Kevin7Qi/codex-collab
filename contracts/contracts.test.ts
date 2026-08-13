@@ -12,8 +12,8 @@
 //          thread/inject_items accepts peer-authored agent_message items;
 //          one connection runs turns on two threads CONCURRENTLY;
 //          item/tool/call delivers plaintext arguments and returns results.
-//   claude: registry entries bind filename pid == content pid == live
-//          process with exact procStart; socket path is NOT validated.
+//   claude: a registry entry lists only while its pid names a live process
+//          whose procStart matches exactly; socket path is NOT validated.
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
@@ -146,51 +146,59 @@ describe.skipIf(!ENABLED)("claude session-registry contracts", () => {
     return rows.map((r) => r.name ?? "");
   }
 
-  test("entries bind filename pid == content pid == live process; socket path is not validated", async () => {
-    // One holder process backs the valid entry; its pid also seeds the two
-    // invalid variants that must NOT list.
+  // Deliberately NOT pinned: whether the filename pid must equal the content
+  // pid. 2.1.226 rejected a filename that borrowed a different *live* pid;
+  // 2.1.229 lists it — the validator checks the two pids independently rather
+  // than binding them. Nothing here rides on that binding: our entries are
+  // always written under their own holder's pid, which satisfies the strict
+  // rule and the relaxed one alike. Asserting it either way would only break
+  // this file the next time upstream moves without touching the peer.
+  test("a live pid with an exact procStart lists; a dead pid or a wrong procStart does not; socket path is not validated", async () => {
+    // Two holders: one backs the entry that must list, the other an entry
+    // that is live and well-named but carries the wrong procStart.
     const holder = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
-    if (!holder.pid) throw new Error("holder spawn failed");
+    const impostor = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    if (!holder.pid || !impostor.pid) throw new Error("holder spawn failed");
     const cleanup: string[] = [];
     try {
       await new Promise((r) => setTimeout(r, 300));
       const procStart = procStartOf(holder.pid);
-      const mkEntry = (pid: number, name: string) => buildRegistryEntry({
+      const mkEntry = (pid: number, name: string, ps: typeof procStart) => buildRegistryEntry({
         pid,
         cwd: process.cwd(),
         name,
         socketPath: `/tmp/does-not-exist-${pid}.sock`, // never validated
-        version: "2.1.226",
-        procStart,
+        version: "2.1.229",
+        procStart: ps,
         sessionId: "00000000-0000-4000-8000-000000000001",
       });
+      const put = (file: string, entry: unknown) => {
+        const p = join(registry, file);
+        writeFileSync(p, JSON.stringify(entry));
+        cleanup.push(p);
+      };
 
-      const valid = join(registry, `${holder.pid}.json`);
-      writeFileSync(valid, JSON.stringify(mkEntry(holder.pid, "contract-valid")));
-      cleanup.push(valid);
+      // Lists: live pid, exact procStart — and a socket path that does not
+      // exist, which is what lets one process serve many holder-backed peers.
+      put(`${holder.pid}.json`, mkEntry(holder.pid, "contract-valid", procStart));
 
-      const fakeName = join(registry, `4900801.json`);
-      writeFileSync(fakeName, JSON.stringify(mkEntry(holder.pid, "contract-fakename")));
-      cleanup.push(fakeName);
+      // Rejected: the filename names a pid that is not running. This is what
+      // de-lists a peer automatically when its holder dies.
+      put(`4900801.json`, mkEntry(4900801, "contract-deadpid", procStart));
 
-      // Filename borrowing OUR live pid but content naming the holder: must
-      // not list. Only written when our own pid has no real entry (running
-      // outside a session) — skipped silently otherwise.
-      const ourEntry = join(registry, `${process.pid}.json`);
-      let crossWritten = false;
-      try {
-        writeFileSync(ourEntry, JSON.stringify(mkEntry(holder.pid, "contract-crosspid")), { flag: "wx" });
-        cleanup.push(ourEntry);
-        crossWritten = true;
-      } catch { /* our pid already registered (running inside a session) — skip variant */ }
+      // Rejected: live pid, but procStart does not match it. Pins the exact
+      // `ps -o lstart=` string comparison our own procStartOf reproduces —
+      // a recycled pid must not resurrect a dead session's entry.
+      put(`${impostor.pid}.json`, mkEntry(impostor.pid, "contract-badprocstart", "Sat Aug  8 10:47:21 2026"));
 
       const names = listedNames();
       expect(names).toContain("contract-valid");
-      expect(names).not.toContain("contract-fakename");
-      if (crossWritten) expect(names).not.toContain("contract-crosspid");
+      expect(names).not.toContain("contract-deadpid");
+      expect(names).not.toContain("contract-badprocstart");
     } finally {
       for (const f of cleanup) { try { unlinkSync(f); } catch { /* gone */ } }
       holder.kill();
+      impostor.kill();
     }
   }, 30_000);
 });
