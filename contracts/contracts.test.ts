@@ -17,11 +17,11 @@
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { connectDirect } from "../src/client";
-import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS, procStartOf, buildRegistryEntry } from "../src/peer";
+import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS, procStartOf, buildRegistryEntry, sniffRegistryVersion } from "../src/peer";
 
 const ENABLED = process.env.CODEX_COLLAB_CONTRACTS === "1";
 
@@ -136,9 +136,43 @@ describe.skipIf(!ENABLED)("codex app-server contracts", () => {
   }, 180_000);
 });
 
-describe.skipIf(!ENABLED)("claude session-registry contracts", () => {
-  const registry = join(homedir(), ".claude", "sessions");
+const registry = join(homedir(), ".claude", "sessions");
 
+/**
+ * Why the machine cannot run the registry probe at all, or null if it can.
+ *
+ * This gates on being ABLE to probe — deliberately not on `peerCapability()`.
+ * That function reports whether messaging sockets are bound, which these
+ * contracts exist to prove is irrelevant to listing; and it answers
+ * "inconclusive → supported" when no sibling session is live, which is the
+ * normal state for an isolated run. Gating on it would skip for the wrong
+ * reason and pass for the wrong reason.
+ *
+ * The split that matters: an environment that cannot run `claude agents
+ * --json` skips, but anything that RAN and parsed is a contract result and
+ * must fail loudly. Upstream removing a guarantee has to stay noisy — that
+ * is the whole point of this file.
+ *
+ * Called only when ENABLED (the `||` below short-circuits), so a default
+ * `bun test` never spawns `claude`.
+ */
+function registryProbeBlocker(): string | null {
+  // procStartOf shells out to POSIX `ps`; peer.test.ts skips win32 for the
+  // same reason, mirroring peerCapability's own gate.
+  if (process.platform === "win32") return "windows (procStart reads POSIX ps)";
+  if (!existsSync(registry)) return "no Claude session registry";
+  try {
+    execFileSync("claude", ["agents", "--json"], { stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return "`claude agents --json` unavailable (binary missing or too old)";
+  }
+  return null;
+}
+
+const registryBlocked = ENABLED ? registryProbeBlocker() : null;
+if (registryBlocked) console.log(`skipping claude session-registry contracts: ${registryBlocked}`);
+
+describe.skipIf(!ENABLED || registryBlocked !== null)("claude session-registry contracts", () => {
   function listedNames(): string[] {
     const out = execFileSync("claude", ["agents", "--json"]).toString();
     const parsed = JSON.parse(out);
@@ -168,7 +202,13 @@ describe.skipIf(!ENABLED)("claude session-registry contracts", () => {
         cwd: process.cwd(),
         name,
         socketPath: `/tmp/does-not-exist-${pid}.sock`, // never validated
-        version: "2.1.229",
+        // Also never validated — probed 2026-08-13, an entry declaring
+        // "0.0.1", "9.9.9" or "not-a-version" lists exactly the same. The
+        // version floor is enforced by an older Claude Code declining to bind
+        // a messaging socket for its OWN session, not by the registry scan
+        // filtering on this field. Sniffed rather than written literal so
+        // nothing here reads as a claim about the version under test.
+        version: sniffRegistryVersion(),
         procStart: ps,
         sessionId: "00000000-0000-4000-8000-000000000001",
       });
