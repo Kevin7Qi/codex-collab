@@ -25,6 +25,7 @@ import {
   parseHeaders,
   threadPeerLabel,
   topicPeerLabel,
+  topicKey,
   type PeerHost,
 } from "./peer";
 
@@ -229,6 +230,29 @@ describe("extractTopic / topicPeerLabel", () => {
     expect(topicPeerLabel("auth refactor")).toBe("codex(auth-refactor)");
   });
 
+  test("a non-ASCII topic gets a readable address, not an empty one", () => {
+    expect(topicPeerLabel("登录重构")).toBe("codex(登录重构)");
+    expect(topicPeerLabel("登录 refactor v2")).toBe("codex(登录-refactor-v2)");
+  });
+
+  test("an address never carries a character that collides with addressing", () => {
+    for (const t of ["登录重构", "a/b", "x@y", "p[q]", 'say "hi"', "a b c"]) {
+      expect(topicPeerLabel(t)).not.toMatch(/[\[\]@\/\s<>&"]/);
+    }
+  });
+
+  // Routing must not depend on the display slug: a topic whose characters
+  // all get dropped still names one conversation.
+  test("topicKey survives text that leaves no displayable slug", () => {
+    expect(topicPeerLabel("🎉🎉")).toBe("");        // nothing to display
+    expect(topicKey("🎉🎉")).toBe("🎉🎉");           // but it still routes
+  });
+
+  test("topicKey normalizes case, surrounding and internal whitespace", () => {
+    expect(topicKey(" Auth  Refactor ")).toBe(topicKey("auth refactor"));
+    expect(topicKey("登录重构")).toBe("登录重构");
+  });
+
   test("subject: works too, case-insensitive", () => {
     expect(extractTopic("Subject: Fix CI\nbody").topic).toBe("Fix CI");
   });
@@ -318,8 +342,8 @@ describe("threadPeerLabel", () => {
     expect(label.endsWith("-dead)")).toBe(true);
   });
 
-  test("non-ASCII text falls back to the bare suffix", () => {
-    expect(threadPeerLabel("调查一下这个测试为什么不稳定", "a1b2c3d4")).toBe("codex(a1b2)");
+  test("non-ASCII text is kept, not discarded", () => {
+    expect(threadPeerLabel("调查一下这个测试为什么不稳定", "a1b2c3d4")).toBe("codex(调查一下这个测试为什么不稳定-a1b2)");
   });
 });
 
@@ -578,6 +602,65 @@ describe.skipIf(onWindows)("topic routing", () => {
         "thread-1:[test-sender] third",   // reopened alpha
         "thread-1:[test-sender] fourth",  // no topic → alpha (spoken to last)
       ]);
+    } finally {
+      peer.stop();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  // A topic written in a script with no ASCII must route like any other.
+  // It used to produce an empty display slug, and routing keyed on that
+  // slug — so every message re-created the thread and the conversation was
+  // unreachable by the topic that named it.
+  test("a Chinese topic continues its conversation instead of starting a new one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-test-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    registerTestSender(join(dir, "sessions"), join(dir, "sender.sock"));
+
+    const injected: string[] = [];
+    let n = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: `thread-${++n}` } };
+        if (method === "thread/inject_items") {
+          const items = params!.items as Array<{ content: Array<{ text: string }> }>;
+          injected.push(`${params!.threadId}:${items[0].content[0].text}`);
+        }
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => true,
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    const send = async (text: string) => {
+      const line = buildEnvelope({ text, ourSocketPath: join(dir, "sender.sock"), ourName: "test-sender" });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+        sock.on("error", reject);
+      });
+      await new Promise((r) => setTimeout(r, 250));
+    };
+
+    try {
+      await send("topic: 登录重构\n第一条");
+      await send("topic: 数据迁移\nsecond topic");
+      await send("topic: 登录重构\n第二条");
+
+      expect(injected).toEqual([
+        "thread-1:[test-sender] 第一条",
+        "thread-2:[test-sender] second topic",
+        "thread-1:[test-sender] 第二条",   // same topic → same thread
+      ]);
+      expect(n).toBe(2); // two topics, two threads — not three
     } finally {
       peer.stop();
       if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;

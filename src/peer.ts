@@ -77,6 +77,10 @@ interface Conversation {
   /** Display name of this conversation's thread peer, derived from the
    *  first message. Persisted so re-materialization keeps the name. */
   label?: string;
+  /** Normalized routing key of the `topic:` that named this conversation,
+   *  kept separate from `label` because a label is a lossy slug — for a
+   *  topic with no ASCII it was empty, and routing silently stopped. */
+  topicKey?: string;
   /** Reply socket path of the CURRENT counterpart — whoever spoke most
    *  recently. Out-of-band notices go here. A turn's own reply does NOT:
    *  it goes to the sender whose message caused that turn, so a second
@@ -306,18 +310,51 @@ export function extractTopic(text: string): { topic: string | null; body: string
 }
 
 /** Peer name for a sender-chosen topic: codex-<topic-slug>. */
+/** How a topic ROUTES, independent of how it displays. Two messages naming
+ *  the same topic must land on the same conversation, so this must never
+ *  collapse to empty for a topic a human considers meaningful. It keeps the
+ *  text as written — only case, surrounding space, internal whitespace runs
+ *  and Unicode composition are normalized, so `登录重构` and ` Auth  Refactor `
+ *  are each stable keys. Never use a display slug for this: slugs drop
+ *  characters, and dropping all of them silently disables routing. */
+export function topicKey(topic: string): string {
+  return topic.normalize("NFC").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** Slug for the part of an address inside `codex(...)`. Keeps letters and
+ *  digits of ANY script — a Chinese or Cyrillic topic deserves a readable
+ *  address, and the registry stores names verbatim (probed). Everything else
+ *  becomes a separator, which excludes by construction the characters an
+ *  address must not carry: whitespace, our own parens, Claude Code's [ref]
+ *  and @mention syntax, path separators, and the XML-unsafe set that would
+ *  break the from-name attribute the receiver compares byte-for-byte.
+ *  Bounded by CODE POINTS so a multi-byte character is never split. */
+function addressSlug(text: string, maxChars: number): string {
+  const cleaned = text
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_-]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+  return [...cleaned].slice(0, maxChars).join("").replace(/-+$/g, "");
+}
+
 export function topicPeerLabel(topic: string): string {
-  const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+  const slug = addressSlug(topic, 30);
   return slug ? `codex(${slug})` : "";
 }
 
 export function threadPeerLabel(firstMessage: string, shortId: string): string {
-  const words = firstMessage.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  // Word-at-a-time so the slug ends on a boundary rather than mid-word.
+  // Scripts without spaces (Chinese, Japanese) yield one long token, which
+  // addressSlug's code-point bound then trims cleanly.
+  const words = firstMessage.normalize("NFC").toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(Boolean);
   let slug = "";
   for (const w of words) {
-    if (slug.length + w.length + 1 > 24) break;
-    slug += (slug ? "-" : "") + w;
+    const next = slug ? `${slug}-${w}` : w;
+    if ([...next].length > 24) break;
+    slug = next;
   }
+  if (!slug && words.length > 0) slug = addressSlug(words[0], 24);
   return `codex(${slug ? `${slug}-` : ""}${shortId.slice(0, 4)})`;
 }
 
@@ -552,7 +589,10 @@ export function createPeer(host: PeerHost): Peer {
 
   /** peer name → conversation, so a `topic:` line reopens the conversation
    *  it names instead of starting a duplicate. */
-  const byLabel = new Map<string, Conversation>();
+  /** topicKey -> conversation. Keyed by the ROUTING key, never by the
+   *  display label: a label is lossy, and for a topic with no ASCII it was
+   *  empty, so every message re-created the thread. */
+  const byTopic = new Map<string, Conversation>();
   /** threadId → conversation (reverse index for consult + reply routing). */
   const threadConversations = new Map<string, Conversation>();
   /** threadId → its per-thread peer (registry entry + socket + holder). */
@@ -612,6 +652,7 @@ export function createPeer(host: PeerHost): Peer {
             threadId: c.threadId,
             shortId: typeof c.shortId === "string" ? c.shortId : undefined,
             label: typeof c.label === "string" ? c.label : undefined,
+            topicKey: typeof c.topicKey === "string" ? c.topicKey : undefined,
             replyPath: c.replyPath,
             fromName: typeof c.fromName === "string" ? c.fromName : "claude",
             sandbox: typeof c.sandbox === "string" ? c.sandbox : undefined,
@@ -634,7 +675,7 @@ export function createPeer(host: PeerHost): Peer {
       }
       for (const conv of loaded) {
         threadConversations.set(conv.threadId, conv);
-        if (conv.label) byLabel.set(conv.label, conv);
+        if (conv.topicKey) byTopic.set(conv.topicKey, conv);
       }
     } catch { /* none yet */ }
   }
@@ -1236,11 +1277,11 @@ export function createPeer(host: PeerHost): Peer {
     // topic when given, else by sender. Either way the most recent sender
     // becomes the conversation's counterpart — the person actively talking
     // is who consults and replies go to.
-    const topicLabel = topic ? topicPeerLabel(topic) : "";
+    const topicRoute = topic ? topicKey(topic) : "";
     let conv = boundThreadId
       ? threadConversations.get(boundThreadId)
       : topic
-        ? (topicLabel ? byLabel.get(topicLabel) : undefined)
+        ? (topicRoute ? byTopic.get(topicRoute) : undefined)
         : defaultConversationFor(msg.replyPath);
 
     // A pending consult on this conversation's thread consumes the message
@@ -1273,10 +1314,12 @@ export function createPeer(host: PeerHost): Peer {
         saveConversations();
       } else {
         const { threadId, shortId, sandbox, model, effort, approval } = await startThread(msg.fromName, topic ?? deliveryText, headers);
-        const label = topicLabel || threadPeerLabel(deliveryText, shortId);
-        conv = { threadId, shortId, label, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, approval, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
+        // The address may still be unreadable (a topic of only emoji, say);
+        // routing does not depend on it.
+        const label = (topic ? topicPeerLabel(topic) : "") || threadPeerLabel(deliveryText, shortId);
+        conv = { threadId, shortId, label, topicKey: topicRoute || undefined, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, approval, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
         threadConversations.set(threadId, conv);
-        if (label) byLabel.set(label, conv);
+        if (topicRoute) byTopic.set(topicRoute, conv);
         createThreadPeer(threadId, shortId, label);
         saveConversations();
         host.log(`peer: new conversation "${label}" with ${msg.fromName} → thread ${threadId}`);
@@ -1367,7 +1410,9 @@ export function createPeer(host: PeerHost): Peer {
         // its ADDRESS, and a recreated thread is still the same conversation.
         if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId);
         threadConversations.set(threadId, conv);
-        if (conv.label) byLabel.set(conv.label, conv);
+        // Re-key the topic route onto the recreated thread — the topic still
+        // names this conversation even though its thread is new.
+        if (conv.topicKey) byTopic.set(conv.topicKey, conv);
         createThreadPeer(threadId, shortId, conv.label);
         saveConversations();
         await injectPeerMessage(threadId, msg.fromName, deliveryText);
