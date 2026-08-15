@@ -206,8 +206,23 @@ export function workspaceKey(cwd: string): string {
     canonical = resolve(wsRoot);
   }
   const slug = basename(canonical).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
-  const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-  return `${slug}-${hash}`;
+  return `${slug}-${workspaceHash(cwd)}`;
+}
+
+/** Stable identity of a workspace, independent of its display name: the
+ *  hash half of `workspaceKey`. Derived from the canonical workspace ROOT,
+ *  so every cwd inside one checkout agrees and two checkouts sharing a
+ *  directory name do not. Exported because the peer address needs the same
+ *  identity the state dir uses. */
+export function workspaceHash(cwd: string): string {
+  const wsRoot = resolveWorkspaceDir(cwd);
+  let canonical: string;
+  try {
+    canonical = realpathSync(wsRoot);
+  } catch {
+    canonical = resolve(wsRoot);
+  }
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }
 
 /**

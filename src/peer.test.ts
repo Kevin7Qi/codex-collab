@@ -3,6 +3,7 @@
 // behavior is exercised end to end by the contract tests, not here.
 
 import { describe, expect, test } from "bun:test";
+import { config } from "./config";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -17,6 +18,7 @@ import {
   peerCapability,
   peerModeFor,
   peerNameFor,
+  isCodexCollabSocket,
   procStartOf,
   sessionsDir,
   extractTopic,
@@ -148,19 +150,62 @@ describe("peerModeFor", () => {
 });
 
 describe("peerNameFor", () => {
+  /** The address without its workspace-hash suffix. */
+  const stem = (name: string) => name.replace(/-[0-9a-f]{6}$/, "");
+
   test("prefixes codex- and sanitizes the directory name", () => {
-    expect(peerNameFor("/Users/x/my proj !")).toBe("codex-my-proj");
-    expect(peerNameFor("/Users/x/visa_book")).toBe("codex-visa_book");
+    expect(stem(peerNameFor("/Users/x/my proj !"))).toBe("codex-my-proj");
+    expect(stem(peerNameFor("/Users/x/visa_book"))).toBe("codex-visa_book");
   });
 
   test("a directory already leading with codex does not stutter", () => {
-    expect(peerNameFor("/Users/x/codex-collab")).toBe("codex-collab");
-    expect(peerNameFor("/Users/x/codex_tools")).toBe("codex-tools");
+    expect(stem(peerNameFor("/Users/x/codex-collab"))).toBe("codex-collab");
+    expect(stem(peerNameFor("/Users/x/codex_tools"))).toBe("codex-tools");
   });
 
   test("never produces an empty suffix", () => {
-    expect(peerNameFor("/")).toBe("codex-workspace");
-    expect(peerNameFor("/Users/x/codex")).toBe("codex-workspace");
+    expect(stem(peerNameFor("/"))).toBe("codex-workspace");
+    expect(stem(peerNameFor("/Users/x/codex"))).toBe("codex-workspace");
+  });
+
+  test("every address carries a workspace-hash suffix", () => {
+    expect(peerNameFor("/Users/x/visa_book")).toMatch(/^codex-visa_book-[0-9a-f]{6}$/);
+  });
+
+  // The address lives in a registry shared by every workspace on the
+  // machine, so a name collision routes SendMessage to the wrong broker.
+  test("checkouts sharing a directory name get DIFFERENT addresses", () => {
+    const a = peerNameFor("/Users/x/work/api/codex-collab");
+    const b = peerNameFor("/Users/x/other/codex-collab");
+    expect(stem(a)).toBe(stem(b));   // same readable stem
+    expect(a).not.toBe(b);           // but distinct addresses
+  });
+
+  test("names that sanitize to the same stem still differ", () => {
+    expect(peerNameFor("/Users/x/my.proj")).not.toBe(peerNameFor("/Users/x/my-proj"));
+  });
+
+  test("a very long directory name is truncated without clipping the suffix", () => {
+    const name = peerNameFor(`/Users/x/${"a".repeat(120)}`);
+    expect(name.length).toBeLessThanOrEqual(40);
+    expect(name).toMatch(/-[0-9a-f]{6}$/);
+  });
+});
+
+describe("isCodexCollabSocket", () => {
+  test("recognizes our own broker sockets and not Claude's", () => {
+    expect(isCodexCollabSocket(`${config.dataDir}/workspaces/foo-abc/peer.sock`)).toBe(true);
+    expect(isCodexCollabSocket("/tmp/cc-socks/68002.sock")).toBe(false);
+  });
+
+  test("a path that merely starts with the same characters is not ours", () => {
+    expect(isCodexCollabSocket(`${config.dataDir}-evil/peer.sock`)).toBe(false);
+  });
+
+  test("missing or malformed values are not ours", () => {
+    expect(isCodexCollabSocket(undefined)).toBe(false);
+    expect(isCodexCollabSocket("")).toBe(false);
+    expect(isCodexCollabSocket(42)).toBe(false);
   });
 });
 
@@ -336,6 +381,68 @@ describe.skipIf(onWindows)("claim release on turn-start failure", () => {
       expect(released).toContain("thread-X");
     } finally {
       peer.stop();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
+
+describe.skipIf(onWindows)("liveness scan", () => {
+  // The broker stays resident while any live Claude session is registered.
+  // Every codex-collab broker also registers itself, so without excluding
+  // siblings each of two workspaces counts the other as an external Claude
+  // session: after the last real session exits, both idle timers reset
+  // forever and both brokers plus their app-server children never retire.
+  test("a sibling codex-collab broker does not count as a live Claude session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-live-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+
+    // A holder process stands in for the other broker: a live pid that is
+    // not this process, so `ours` cannot filter it out by pid alone.
+    const holder = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    await new Promise((r) => setTimeout(r, 300));
+    if (!holder.pid) throw new Error("holder spawn failed");
+
+    const registerAs = (name: string, socketPath: string) => {
+      writeFileSync(
+        join(dir, "sessions", `${holder.pid}.json`),
+        JSON.stringify(buildRegistryEntry({
+          pid: holder.pid!,
+          cwd: "/tmp",
+          name,
+          socketPath,
+          version: "2.1.226",
+          procStart: procStartOf(holder.pid!),
+          sessionId: "00000000-0000-4000-8000-00000000000b",
+        })),
+      );
+    };
+
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async () => ({}),
+      claimThread: () => true,
+      releaseThread: () => {},
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+
+    const peer = createPeer(host);
+    try {
+      // Another workspace's broker — socket under ~/.codex-collab.
+      registerAs("codex-other", join(config.dataDir, "workspaces", "other-abc123", "peer.sock"));
+      expect(peer.hasLiveSessions()).toBe(false);
+
+      // A real Claude session at the same live pid — socket under /tmp/cc-socks.
+      registerAs("real-claude-session", "/tmp/cc-socks/9999.sock");
+      expect(peer.hasLiveSessions()).toBe(true);
+    } finally {
+      peer.stop();
+      holder.kill();
       if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
       else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
       rmSync(dir, { recursive: true, force: true });

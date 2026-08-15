@@ -30,7 +30,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { homedir } from "node:os";
 import {
   registerThread,
@@ -44,7 +44,7 @@ import {
   pruneRuns,
 } from "./threads";
 import { EventDispatcher } from "./events";
-import { config } from "./config";
+import { config, workspaceHash } from "./config";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -187,15 +187,38 @@ export function sniffRegistryVersion(): string {
   return "2.1.226";
 }
 
-/** Peer display name for a workspace: codex-<dir>, sanitized. A directory
- *  that already leads with "codex" would stutter ("codex-codex-collab"), so
- *  that token is dropped from the suffix. */
+/** Peer address for a workspace: codex-<dir>-<workspace hash>, sanitized. A
+ *  directory that already leads with "codex" would stutter
+ *  ("codex-codex-collab"), so that token is dropped from the suffix.
+ *
+ *  The hash suffix is NOT decoration. This name is the messaging ADDRESS, in
+ *  a session registry shared by every workspace on the machine, and the
+ *  directory name alone collides whenever two checkouts end in the same
+ *  segment — or sanitize to it (`my.proj` and `my-proj`), or truncate to it.
+ *  A collision makes `ListAgents` ambiguous and can route `SendMessage` to
+ *  another workspace's broker. The suffix is the same hash
+ *  `~/.codex-collab/workspaces/<slug>-<hash>/` uses, so an address and its
+ *  state dir visibly correspond, and every cwd inside one checkout resolves
+ *  to one address. */
+/** True when a registry entry's messaging socket belongs to a codex-collab
+ *  broker (any workspace) rather than a real Claude session. Exported for
+ *  tests. Path-based rather than a marker field: the socket path is one we
+ *  already write, and Claude Code validates none of it. */
+export function isCodexCollabSocket(socketPath: unknown): boolean {
+  if (typeof socketPath !== "string" || socketPath.length === 0) return false;
+  const root = config.dataDir;
+  return socketPath === root || socketPath.startsWith(root + sep);
+}
+
 export function peerNameFor(cwd: string): string {
   const dir = basename(cwd)
     .replace(/[^a-zA-Z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .replace(/^codex[-_]?/i, "");
-  return `codex-${dir || "workspace"}`.slice(0, 40);
+  const suffix = workspaceHash(cwd).slice(0, 6);
+  // Truncate the stem, never the suffix — a clipped hash is a collision again.
+  const stem = `codex-${dir || "workspace"}`.slice(0, 40 - suffix.length - 1);
+  return `${stem}-${suffix}`;
 }
 
 /** Display name for a per-thread peer, derived from the conversation's
@@ -1565,6 +1588,14 @@ export function createPeer(host: PeerHost): Peer {
         try {
           const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
           if (entry?.pid !== pid) continue;
+          // A codex-collab broker for ANOTHER workspace is not a Claude
+          // session. `ours` only knows this broker's own pids, so without
+          // this each sibling counts the other as an external live session:
+          // once every real Claude session exits, both idle timers reset
+          // forever and both brokers — and their app-server children — stay
+          // resident. Ours are identifiable by where their socket lives
+          // (~/.codex-collab/...); Claude's are under /tmp/cc-socks/.
+          if (isCodexCollabSocket(entry?.messagingSocketPath)) continue;
           process.kill(pid, 0);
           if (typeof entry?.procStart === "string" && entry.procStart !== procStartOf(pid)) continue;
           return true;
