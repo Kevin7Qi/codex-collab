@@ -206,13 +206,15 @@ describe("peerNameFor", () => {
 });
 
 describe("isCodexCollabSocket", () => {
+  // Paths are built with join(): the check compares against the platform
+  // separator, so a hardcoded "/" fails on Windows for the right reason.
   test("recognizes our own broker sockets and not Claude's", () => {
-    expect(isCodexCollabSocket(`${config.dataDir}/workspaces/foo-abc/peer.sock`)).toBe(true);
+    expect(isCodexCollabSocket(join(config.dataDir, "workspaces", "foo-abc", "peer.sock"))).toBe(true);
     expect(isCodexCollabSocket("/tmp/cc-socks/68002.sock")).toBe(false);
   });
 
   test("a path that merely starts with the same characters is not ours", () => {
-    expect(isCodexCollabSocket(`${config.dataDir}-evil/peer.sock`)).toBe(false);
+    expect(isCodexCollabSocket(join(`${config.dataDir}-evil`, "peer.sock"))).toBe(false);
   });
 
   test("missing or malformed values are not ours", () => {
