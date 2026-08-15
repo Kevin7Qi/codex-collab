@@ -213,12 +213,12 @@ export function isCodexCollabSocket(socketPath: unknown): boolean {
 export function peerNameFor(cwd: string): string {
   const dir = basename(cwd)
     .replace(/[^a-zA-Z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .replace(/^codex[-_]?/i, "");
+    .replace(/^-+|-+$/g, "");
   const suffix = workspaceHash(cwd).slice(0, 6);
-  // Truncate the stem, never the suffix — a clipped hash is a collision again.
-  const stem = `codex-${dir || "workspace"}`.slice(0, 40 - suffix.length - 1);
-  return `${stem}-${suffix}`;
+  // "codex(" + inner + ")" must fit the 40-char budget; truncate the
+  // directory, never the hash — a clipped hash is a collision again.
+  const room = 40 - "codex()".length - suffix.length - 1;
+  return `codex(${(dir || "workspace").slice(0, room)}-${suffix})`;
 }
 
 /** Display name for a per-thread peer, derived from the conversation's
@@ -308,7 +308,7 @@ export function extractTopic(text: string): { topic: string | null; body: string
 /** Peer name for a sender-chosen topic: codex-<topic-slug>. */
 export function topicPeerLabel(topic: string): string {
   const slug = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
-  return slug ? `codex-${slug}` : "";
+  return slug ? `codex(${slug})` : "";
 }
 
 export function threadPeerLabel(firstMessage: string, shortId: string): string {
@@ -318,7 +318,7 @@ export function threadPeerLabel(firstMessage: string, shortId: string): string {
     if (slug.length + w.length + 1 > 24) break;
     slug += (slug ? "-" : "") + w;
   }
-  return `codex-${slug ? `${slug}-` : ""}${shortId.slice(0, 4)}`;
+  return `codex(${slug ? `${slug}-` : ""}${shortId.slice(0, 4)})`;
 }
 
 export function buildRegistryEntry(opts: {

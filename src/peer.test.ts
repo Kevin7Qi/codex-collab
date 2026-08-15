@@ -150,26 +150,38 @@ describe("peerModeFor", () => {
 });
 
 describe("peerNameFor", () => {
-  /** The address without its workspace-hash suffix. */
-  const stem = (name: string) => name.replace(/-[0-9a-f]{6}$/, "");
+  /** The workspace portion: what sits inside codex(...) minus the hash. */
+  const workspace = (name: string) =>
+    name.replace(/^codex\(/, "").replace(/-[0-9a-f]{6}\)$/, "");
 
-  test("prefixes codex- and sanitizes the directory name", () => {
-    expect(stem(peerNameFor("/Users/x/my proj !"))).toBe("codex-my-proj");
-    expect(stem(peerNameFor("/Users/x/visa_book"))).toBe("codex-visa_book");
+  test("names the agent first and carries the workspace in parentheses", () => {
+    expect(peerNameFor("/Users/x/visa_book")).toMatch(/^codex\(visa_book-[0-9a-f]{6}\)$/);
   });
 
-  test("a directory already leading with codex does not stutter", () => {
-    expect(stem(peerNameFor("/Users/x/codex-collab"))).toBe("codex-collab");
-    expect(stem(peerNameFor("/Users/x/codex_tools"))).toBe("codex-tools");
+  test("sanitizes the directory name", () => {
+    expect(workspace(peerNameFor("/Users/x/my proj !"))).toBe("my-proj");
+    expect(workspace(peerNameFor("/Users/x/visa_book"))).toBe("visa_book");
   });
 
-  test("never produces an empty suffix", () => {
-    expect(stem(peerNameFor("/"))).toBe("codex-workspace");
-    expect(stem(peerNameFor("/Users/x/codex"))).toBe("codex-workspace");
+  // "codex" is the AGENT, not a token to deduplicate. Stripping it from a
+  // codex-named directory made the address indistinguishable from Claude
+  // Code's own session name for the same folder (codex-collab-96).
+  test("a codex-named directory keeps its full name", () => {
+    expect(workspace(peerNameFor("/Users/x/codex-collab"))).toBe("codex-collab");
+    expect(workspace(peerNameFor("/Users/x/codex_tools"))).toBe("codex_tools");
   });
 
-  test("every address carries a workspace-hash suffix", () => {
-    expect(peerNameFor("/Users/x/visa_book")).toMatch(/^codex-visa_book-[0-9a-f]{6}$/);
+  test("never produces an empty workspace", () => {
+    expect(workspace(peerNameFor("/"))).toBe("workspace");
+    expect(workspace(peerNameFor("/Users/x/codex"))).toBe("codex");
+  });
+
+  test("carries no character that collides with an addressing syntax", () => {
+    const name = peerNameFor("/Users/x/my proj !");
+    // [] is Claude Code's ref suffix, @ its mention syntax, and whitespace
+    // breaks selection and shell use. <>&" would need XML escaping in the
+    // from-name attribute the receiver compares byte-for-byte.
+    expect(name).not.toMatch(/[\[\]@\/\s<>&"]/);
   });
 
   // The address lives in a registry shared by every workspace on the
@@ -177,18 +189,18 @@ describe("peerNameFor", () => {
   test("checkouts sharing a directory name get DIFFERENT addresses", () => {
     const a = peerNameFor("/Users/x/work/api/codex-collab");
     const b = peerNameFor("/Users/x/other/codex-collab");
-    expect(stem(a)).toBe(stem(b));   // same readable stem
-    expect(a).not.toBe(b);           // but distinct addresses
+    expect(workspace(a)).toBe(workspace(b)); // same readable workspace
+    expect(a).not.toBe(b);                   // but distinct addresses
   });
 
-  test("names that sanitize to the same stem still differ", () => {
+  test("names that sanitize to the same workspace still differ", () => {
     expect(peerNameFor("/Users/x/my.proj")).not.toBe(peerNameFor("/Users/x/my-proj"));
   });
 
-  test("a very long directory name is truncated without clipping the suffix", () => {
+  test("a very long directory name is truncated without clipping the hash", () => {
     const name = peerNameFor(`/Users/x/${"a".repeat(120)}`);
     expect(name.length).toBeLessThanOrEqual(40);
-    expect(name).toMatch(/-[0-9a-f]{6}$/);
+    expect(name).toMatch(/^codex\(a+-[0-9a-f]{6}\)$/);
   });
 });
 
@@ -214,7 +226,7 @@ describe("extractTopic / topicPeerLabel", () => {
     const { topic, body } = extractTopic("topic: auth refactor\nPlease review the login flow.");
     expect(topic).toBe("auth refactor");
     expect(body).toBe("Please review the login flow.");
-    expect(topicPeerLabel("auth refactor")).toBe("codex-auth-refactor");
+    expect(topicPeerLabel("auth refactor")).toBe("codex(auth-refactor)");
   });
 
   test("subject: works too, case-insensitive", () => {
@@ -295,19 +307,19 @@ describe("parseHeaders", () => {
 describe("threadPeerLabel", () => {
   test("derives a topic slug from the first message plus a short-id suffix", () => {
     expect(threadPeerLabel("Investigate the flaky broker test", "a1b2c3d4"))
-      .toBe("codex-investigate-the-flaky-a1b2");
-    expect(threadPeerLabel("Fix bug", "a1b2c3d4")).toBe("codex-fix-bug-a1b2");
+      .toBe("codex(investigate-the-flaky-a1b2)");
+    expect(threadPeerLabel("Fix bug", "a1b2c3d4")).toBe("codex(fix-bug-a1b2)");
   });
 
   test("bounds the slug and survives punctuation", () => {
     const label = threadPeerLabel("Re: [urgent!!] please, PLEASE review the enormous refactoring branch", "deadbeef");
     expect(label.length).toBeLessThanOrEqual(40);
-    expect(label.startsWith("codex-re-urgent-please-")).toBe(true);
-    expect(label.endsWith("-dead")).toBe(true);
+    expect(label.startsWith("codex(re-urgent-please-")).toBe(true);
+    expect(label.endsWith("-dead)")).toBe(true);
   });
 
   test("non-ASCII text falls back to the bare suffix", () => {
-    expect(threadPeerLabel("调查一下这个测试为什么不稳定", "a1b2c3d4")).toBe("codex-a1b2");
+    expect(threadPeerLabel("调查一下这个测试为什么不稳定", "a1b2c3d4")).toBe("codex(a1b2)");
   });
 });
 
