@@ -170,6 +170,18 @@ function createMockCodex(dir: string, opts?: {
    *  of a turn that was already settled (a watchdog-interrupted orphan, or
    *  a duplicate). The second turn itself never completes. */
   staleCompletionReplay?: boolean;
+  /** If true, the FIRST turn/start announces its turn and then fails the
+   *  request: turn/started is a notification and can land before the RPC
+   *  settles, so the server is left running a turn this request will never
+   *  report. Its completion arrives later, after a second turn has claimed
+   *  the thread. */
+  startedThenError?: boolean;
+  /** If true, the review announces an INNER turn with its own id before the
+   *  review turn completes — what real Codex does (observed on 0.147.0:
+   *  review/start responds with turn A, then turn/started names turn B, then
+   *  turn A completes). The inner turn/started must not make the broker treat
+   *  the review's own completion as belonging to some other turn. */
+  reviewInnerTurn?: boolean;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
@@ -177,6 +189,8 @@ function createMockCodex(dir: string, opts?: {
   const turnCompletedDelay = opts?.turnCompletedDelay ?? 10;
   const completeBeforeResponse = opts?.completeBeforeResponse ?? false;
   const reviewDelay = opts?.reviewDelay ?? 0;
+  const reviewInnerTurn = opts?.reviewInnerTurn ?? false;
+  const startedThenError = opts?.startedThenError ?? false;
   const goalContinuation = opts?.goalContinuation ?? false;
   const goalPausedInGap = opts?.goalPausedInGap ?? false;
   const goalPreexisting = opts?.goalPreexisting ?? false;
@@ -246,6 +260,20 @@ process.stdin.on("data", (chunk) => {
 
       case "turn/start": {
         const threadId = msg.params?.threadId || "thread-001";
+        ${startedThenError ? `
+        turnCounter++;
+        if (turnCounter === 1) {
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "inProgress", error: null } } });
+          respond({ id: msg.id, error: { code: -32000, message: "simulated request failure after turn/started" } });
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, 400);
+        } else {
+          respond({ id: msg.id, result: { turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+        }
+        break;
+        ` : ""}
         ${staleCompletionReplay ? `
         turnCounter++;
         const thisTurnId = "turn-" + String(turnCounter).padStart(3, "0");
@@ -382,6 +410,19 @@ process.stdin.on("data", (chunk) => {
             turn: { id: "review-turn-001", items: [], status: "inProgress", error: null },
             reviewThreadId: reviewThreadId,
           }});
+          ${reviewInnerTurn ? `
+          // Real Codex announces an inner turn under its own id partway
+          // through the review, BEFORE the review turn itself completes.
+          setTimeout(() => {
+            respond({
+              method: "turn/started",
+              params: {
+                threadId: reviewThreadId,
+                turn: { id: "review-inner-001", items: [], status: "inProgress", error: null },
+              },
+            });
+          }, 20);
+          ` : ""}
           ${sendTurnCompleted ? `
           setTimeout(() => {
             respond({
@@ -2512,6 +2553,98 @@ setInterval(() => {}, 1000);
 
         await client1.close();
         await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a turn announced before its request failed cannot settle a later claim", async () => {
+      // turn/started is a notification and can land BEFORE the RPC settles,
+      // so a failed streaming request can leave the server running a turn it
+      // will never report. If the broker releases the claim without recording
+      // that turn as settled, its late completion is treated as current: it
+      // is forwarded to whoever owns the thread NOW and releases that claim,
+      // leaving the new turn running with nobody listening.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, { startedThenError: true });
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+
+        // Turn 1: announced, then its request fails.
+        let failed = false;
+        try {
+          await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "one" }] });
+        } catch {
+          failed = true;
+        }
+        expect(failed).toBe(true);
+
+        // Turn 2 claims the thread.
+        const second = await client.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "two" }],
+        }) as { turn: { id: string } };
+        expect(second.turn.id).toBe("turn-002");
+
+        // Turn 1's completion lands while turn 2 owns the thread.
+        await new Promise((r) => setTimeout(r, 800));
+
+        // Turn 2's claim must survive it.
+        const other = await TestClient.connectAndInit(sockPath);
+        let refused = false;
+        try {
+          await other.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "three" }] });
+        } catch (e) {
+          refused = (e as Error).message.includes("already running");
+        }
+        expect(refused).toBe(true);
+
+        await other.close();
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a review's completion reaches the client even after an inner turn is announced", async () => {
+      // Real Codex (0.147.0) runs a review as: review/start responds naming
+      // turn A, an inner turn B announces itself, then turn A completes.
+      // turn/started refreshes the thread's recorded turn id to B, so a
+      // completion guard that compares the completion's id against it drops
+      // turn A's completion — and the client, which waits on exactly that id,
+      // never learns the review finished and burns its whole timeout.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, {
+        reviewInnerTurn: true,
+        sendTurnCompleted: true,
+        turnCompletedDelay: 300,
+      });
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        await client.request("review/start", {
+          threadId: "thread-001",
+          target: { type: "uncommittedChanges" },
+        });
+
+        await new Promise((r) => setTimeout(r, 1500));
+
+        const completions = notifications.filter((n) => n.method === "turn/completed");
+        const reviewCompletion = completions.find((n) =>
+          ((n.params as { turn?: { id?: string } })?.turn?.id) === "review-turn-001"
+        );
+        expect(reviewCompletion).toBeDefined();
+
+        await client.close();
       } finally {
         proc.kill();
       }

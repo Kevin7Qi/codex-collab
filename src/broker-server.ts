@@ -496,12 +496,21 @@ async function main() {
 
     // Drop a completion that belongs to an already-settled turn before it
     // can be routed or acted on: the thread may have changed hands since.
+    // Settled-ness is tracked explicitly — every path that abandons a turn
+    // records it: the watchdog before interrupting, the streaming failure
+    // path before releasing, and this guard when a completion passes. That
+    // coverage is what makes the id check below unnecessary. Do NOT
+    // additionally reject a completion for not
+    // matching the thread's CURRENT turn: a thread can legitimately carry
+    // more than one turn. Codex runs a review inline on the parent thread,
+    // announcing an inner turn whose turn/started retargets entry.turnId,
+    // and the review's own completion then arrives under the id the claim
+    // was made for. Rejecting it stranded every review — the client waits
+    // on exactly that id, and the thread is never released either.
     if (method === "turn/completed" && threadId) {
       const endedId = (params?.turn as { id?: unknown } | undefined)?.id;
       if (typeof endedId === "string") {
         if (turnAlreadyEnded(threadId, endedId)) return;
-        const current = threads.get(threadId)?.turnId;
-        if (current && current !== endedId) return; // an earlier turn's completion
         markTurnEnded(threadId, endedId);
       }
     }
@@ -767,9 +776,17 @@ async function main() {
       : undefined;
 
     if (result === null) {
-      // Request failed — no turn started. Release the claim if it is still
-      // this request's (turn/completed may already have raced it away).
-      if (entry && entry.requestPending) releaseThread(parentThreadId!);
+      // Request failed. Usually no turn started — but turn/started is a
+      // notification and can land BEFORE the RPC settles, so the server may
+      // be running a turn this failed request will never report. Record it
+      // as settled before letting the claim go: otherwise its completion
+      // arrives unmarked, after another turn has claimed the thread, and
+      // releases that turn's claim instead. Same reason the orphan watchdog
+      // marks before interrupting.
+      if (entry && entry.requestPending) {
+        if (entry.turnId) markTurnEnded(parentThreadId!, entry.turnId);
+        releaseThread(parentThreadId!);
+      }
       return;
     }
 
