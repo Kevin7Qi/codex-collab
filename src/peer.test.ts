@@ -36,6 +36,28 @@ import {
  *  mirrors production's own gate. */
 const onWindows = process.platform === "win32";
 
+/** Poll until `cond` holds, or fail after `timeoutMs`.
+ *
+ *  Integration tests here drive an async peer over a socket, so the question
+ *  is always "has this happened yet", never "has 250ms elapsed". A fixed
+ *  sleep answers the second question and only correlates with the first on
+ *  an unloaded machine — which is how a suite starts failing when it merely
+ *  runs slower. Polling is fast when the machine is fast and patient when it
+ *  is not, and it fails with a real deadline rather than a race. */
+async function waitFor(cond: () => boolean, timeoutMs = 5000, pollMs = 10): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (cond()) return;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  throw new Error("waitFor timed out — condition never held");
+}
+
+/** Bounded settle for the cases that prove a NEGATIVE ("nothing else was
+ *  delivered"). There is no condition to converge on, so time is the only
+ *  instrument; keep it generous so load cannot turn absence into a pass. */
+const SETTLE_MS = 400;
+
 /** Register a fake-but-valid sender in an isolated registry so the peer's
  *  registered-sender gate admits its messages. Uses OUR pid (alive, with a
  *  matching procStart) — the same liveness rules the real registry uses. */
@@ -577,20 +599,21 @@ describe.skipIf(onWindows)("topic routing", () => {
     };
 
     const peer = createPeer(host);
-    const send = async (text: string) => {
+    const send = async (text: string, until?: () => boolean) => {
       const line = buildEnvelope({ text, ourSocketPath: join(dir, "sender.sock"), ourName: "test-sender" });
       await new Promise<void>((resolve, reject) => {
         const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
         sock.on("error", reject);
       });
-      await new Promise((r) => setTimeout(r, 250));
+      if (until) await waitFor(until);
+      else await new Promise((r) => setTimeout(r, SETTLE_MS));
     };
 
     try {
-      await send("topic: alpha work\nfirst");
-      await send("topic: beta work\nsecond");
-      await send("topic: alpha work\nthird");
-      await send("fourth");
+      await send("topic: alpha work\nfirst", () => injected.length === 1);
+      await send("topic: beta work\nsecond", () => injected.length === 2);
+      await send("topic: alpha work\nthird", () => injected.length === 3);
+      await send("fourth", () => injected.length === 4);
 
       // Two topics → two threads (the fourth message names none, so it
       // continues whichever conversation the sender spoke to LAST — alpha,
@@ -643,19 +666,20 @@ describe.skipIf(onWindows)("topic routing", () => {
     };
 
     const peer = createPeer(host);
-    const send = async (text: string) => {
+    const send = async (text: string, until?: () => boolean) => {
       const line = buildEnvelope({ text, ourSocketPath: join(dir, "sender.sock"), ourName: "test-sender" });
       await new Promise<void>((resolve, reject) => {
         const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
         sock.on("error", reject);
       });
-      await new Promise((r) => setTimeout(r, 250));
+      if (until) await waitFor(until);
+      else await new Promise((r) => setTimeout(r, SETTLE_MS));
     };
 
     try {
-      await send("topic: 登录重构\n第一条");
-      await send("topic: 数据迁移\nsecond topic");
-      await send("topic: 登录重构\n第二条");
+      await send("topic: 登录重构\n第一条", () => injected.length === 1);
+      await send("topic: 数据迁移\nsecond topic", () => injected.length === 2);
+      await send("topic: 登录重构\n第二条", () => injected.length === 3);
 
       expect(injected).toEqual([
         "thread-1:[test-sender] 第一条",
@@ -878,13 +902,14 @@ describe.skipIf(onWindows)("conversation resilience", () => {
     mkdirSync(join(dir, "sessions"), { recursive: true });
     const senderSock = join(dir, "sender.sock");
     registerTestSender(join(dir, "sessions"), senderSock);
-    const send = async (text: string) => {
+    const send = async (text: string, until?: () => boolean) => {
       const line = buildEnvelope({ text, ourSocketPath: senderSock, ourName: "test-sender" });
       await new Promise<void>((resolve, reject) => {
         const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
         sock.on("error", reject);
       });
-      await new Promise((r) => setTimeout(r, 250));
+      if (until) await waitFor(until);
+      else await new Promise((r) => setTimeout(r, SETTLE_MS));
     };
     const cleanup = () => {
       if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
@@ -1207,13 +1232,14 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       servers.push(srv);
       registerTestSender(join(dir, "sessions"), sock, `session-${who}`);
     }
-    const sendAs = async (who: string, text: string, target = join(dir, "peer.sock")) => {
+    const sendAs = async (who: string, text: string, target = join(dir, "peer.sock"), until?: () => boolean) => {
       const line = buildEnvelope({ text, ourSocketPath: join(dir, `${who}.sock`), ourName: `session-${who}` });
       await new Promise<void>((resolve, reject) => {
         const s = net.connect({ path: target }, () => { s.write(line); s.end(); resolve(); });
         s.on("error", reject);
       });
-      await new Promise((r) => setTimeout(r, 250));
+      if (until) await waitFor(until);
+      else await new Promise((r) => setTimeout(r, SETTLE_MS));
     };
 
     const owners: Array<{ onNotification(m: string, p?: Record<string, unknown>): void }> = [];
@@ -1300,13 +1326,14 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       servers.push(srv);
       registerTestSender(join(dir, "sessions"), sock, `session-${who}`);
     }
-    const sendAs = async (who: string, text: string, target = join(dir, "peer.sock")) => {
+    const sendAs = async (who: string, text: string, target = join(dir, "peer.sock"), until?: () => boolean) => {
       const line = buildEnvelope({ text, ourSocketPath: join(dir, `${who}.sock`), ourName: `session-${who}` });
       await new Promise<void>((resolve, reject) => {
         const c = net.connect({ path: target }, () => { c.write(line); c.end(); resolve(); });
         c.on("error", reject);
       });
-      await new Promise((r) => setTimeout(r, 250));
+      if (until) await waitFor(until);
+      else await new Promise((r) => setTimeout(r, SETTLE_MS));
     };
 
     const owners: Array<{ onNotification(m: string, p?: Record<string, unknown>): void }> = [];

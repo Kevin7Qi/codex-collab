@@ -2590,8 +2590,12 @@ setInterval(() => {}, 1000);
         }) as { turn: { id: string } };
         expect(second.turn.id).toBe("turn-002");
 
-        // Turn 1's completion lands while turn 2 owns the thread.
-        await new Promise((r) => setTimeout(r, 800));
+        // Turn 1's completion lands while turn 2 owns the thread. This one
+        // proves a NEGATIVE — that the claim survives it — so there is no
+        // condition to converge on and time is the only instrument. The mock
+        // replays at +400ms; wait well past that so load cannot turn "not
+        // yet arrived" into a false pass.
+        await new Promise((r) => setTimeout(r, 2000));
 
         // Turn 2's claim must survive it.
         const other = await TestClient.connectAndInit(sockPath);
@@ -2636,13 +2640,14 @@ setInterval(() => {}, 1000);
           target: { type: "uncommittedChanges" },
         });
 
-        await new Promise((r) => setTimeout(r, 1500));
-
-        const completions = notifications.filter((n) => n.method === "turn/completed");
-        const reviewCompletion = completions.find((n) =>
+        const reviewCompleted = () => notifications.some((n) =>
+          n.method === "turn/completed" &&
           ((n.params as { turn?: { id?: string } })?.turn?.id) === "review-turn-001"
         );
-        expect(reviewCompletion).toBeDefined();
+        // Wait for the event, not for a duration: on a loaded machine the
+        // review simply takes longer, which must not read as a failure.
+        await waitFor(reviewCompleted).catch(() => { /* assert below reports it */ });
+        expect(reviewCompleted()).toBe(true);
 
         await client.close();
       } finally {
