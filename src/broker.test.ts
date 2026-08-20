@@ -561,6 +561,13 @@ function createMockBroker(
   const clientSockets: net.Socket[] = [];
   const server = net.createServer((socket) => {
     clientSockets.push(socket);
+    // A mock peer's socket errors are expected teardown noise, not test
+    // failures: when a test drives the client into disconnecting (buffer
+    // overflow, close mid-request), the next write on this side races the
+    // FIN and raises EPIPE/ECONNRESET. Without a listener that becomes an
+    // unhandled error and fails the test *because the behaviour under test
+    // worked*. Observed on the Ubuntu runner only — the race is lost there.
+    socket.on("error", () => { /* peer went away; that is the scenario */ });
     socket.setEncoding("utf8");
     let buffer = "";
     let handshakeDone = false;
@@ -983,7 +990,10 @@ describe("BrokerClient — buffer overflow protection", () => {
       const totalChunks = 11; // 11 MB total > 10 MB limit
       const chunk = "x".repeat(chunkSize);
       for (let i = 0; i < totalChunks; i++) {
-        if (serverSocket!.destroyed) break;
+        // Stop as soon as the client has gone: `destroyed` alone is not
+        // enough, since this side is not marked destroyed the instant the
+        // peer disconnects, and one more write then races the FIN.
+        if (closeFired || serverSocket!.destroyed) break;
         serverSocket!.write(chunk);
         await new Promise((r) => setTimeout(r, 10)); // yield to event loop
       }
