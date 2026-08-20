@@ -988,10 +988,15 @@ describe("BrokerClient — buffer overflow protection", () => {
         await new Promise((r) => setTimeout(r, 10)); // yield to event loop
       }
 
-      // Wait for the client to detect the overflow and disconnect
+      // Wait for BOTH observable effects of the overflow, not just the
+      // first one. The close callback and the pending request's rejection
+      // are independent async events; polling only on closeFired lets the
+      // loop exit before the rejection has propagated, so rejectedWith is
+      // still null when asserted — a race that surfaces as a failure only
+      // when the machine is loaded enough to reorder them.
       const deadline = Date.now() + 10_000;
-      while (!closeFired && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 50));
+      while ((!closeFired || rejectedWith === null) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
       }
       expect(closeFired).toBe(true);
       expect(rejectedWith).not.toBeNull();
