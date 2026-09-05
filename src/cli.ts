@@ -165,6 +165,10 @@ Commands:
                           build, and reinstall (--check: report only;
                           --skip: mute notices for the latest release)
   health                  Check prerequisites
+  peer [status|up]        Show this workspace's peer — capability, broker,
+                          registry entry, socket — or start one with 'up'
+                          (peer messaging is off entirely under
+                          'config mode cli', and unavailable on Windows)
   version                 Print version
 
 Options:

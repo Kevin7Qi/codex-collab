@@ -206,9 +206,57 @@ export function procStartOf(pid: number): string {
   }).toString().replace(/^\s+|\s+$/g, "");
 }
 
-/** A plausible Claude Code version string for our forged entry: borrow it
- *  from any live sibling session's entry, falling back to the last version
- *  this was verified against. */
+/** Lowest Claude Code that binds a cross-session messaging socket. From its
+ *  changelog: 2.1.224 "Added cross-session SendMessage … (macOS and Linux)".
+ *  Later releases fixed bugs around it, but this is where the capability
+ *  starts, and gating higher would refuse installs that work. */
+export const MESSAGING_FLOOR = "2.1.224";
+
+/** Compare dotted numeric versions. Returns <0, 0, >0 like a comparator, and
+ *  treats a missing or non-numeric segment as 0 so "2.1" sorts below "2.1.1"
+ *  and a suffixed build ("2.1.224-beta") compares on its numbers. */
+export function compareVersions(a: string, b: string): number {
+  const parts = (v: string) => v.split(".").map((n) => parseInt(n, 10) || 0);
+  const [x, y] = [parts(a), parts(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/** The installed Claude Code's version, or null when it cannot be determined
+ *  (not installed, not on PATH, or output we do not recognize).
+ *
+ *  Memoized: this shells out, and it is asked once per render and once per
+ *  broker start. A version that changes under a running process is a Claude
+ *  Code upgrade, which `skill sync` notices separately. */
+let claudeVersionCache: { value: string | null } | null = null;
+export function claudeCodeVersion(): string | null {
+  if (claudeVersionCache) return claudeVersionCache.value;
+  let value: string | null = null;
+  try {
+    // `claude --version` prints e.g. "2.1.241 (Claude Code)".
+    const out = execFileSync("claude", ["--version"], {
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    value = /(\d+\.\d+\.\d+)/.exec(out)?.[1] ?? null;
+  } catch { /* absent, not executable, or too slow — treat as unknown */ }
+  claudeVersionCache = { value };
+  return value;
+}
+
+/** Test seam: forget the memoized version. */
+export function resetClaudeVersionCache(): void {
+  claudeVersionCache = null;
+}
+
+/** A plausible Claude Code version string for our registry entries: borrow
+ *  it from any live sibling session's entry, else the installed binary's,
+ *  else the last version this was verified against. The registry does not
+ *  validate it, but `claude agents` shows it. */
 export function sniffRegistryVersion(): string {
   try {
     for (const file of readdirSync(sessionsDir())) {
@@ -224,7 +272,9 @@ export function sniffRegistryVersion(): string {
       } catch { /* unreadable entry — keep looking */ }
     }
   } catch { /* no registry dir */ }
-  return "2.1.226";
+  // No live sibling to borrow from: the installed binary's version, then
+  // the last one this was verified against.
+  return claudeCodeVersion() ?? "2.1.226";
 }
 
 /** Peer address for a workspace: codex-<dir>-<workspace hash>, sanitized. A
@@ -690,9 +740,83 @@ export function adoptionFor(
   return { threadId, sandbox: typeof p?.sandbox === "string" ? p.sandbox : undefined };
 }
 
+/** How this workspace collaborates. `auto` uses peer messaging where the
+ *  platform and the installed Claude Code support it and the CLI path
+ *  everywhere else; `peer` insists on it; `cli` turns the peer mechanisms
+ *  off entirely — no registration, no per-conversation addresses, no consult
+ *  tool — and leaves the CLI as the only channel. */
+export type CollabMode = "auto" | "peer" | "cli";
+export const COLLAB_MODES: readonly CollabMode[] = ["auto", "peer", "cli"] as const;
+
+/** Whether this machine can carry peer messaging at all. Deliberately NOT
+ *  the live-session probe peerCapability uses: this answers a question about
+ *  the INSTALL, so it must give the same answer whether or not a Claude
+ *  session happens to be running. Rendering a skill file off a live probe
+ *  would produce different files on the same machine minutes apart. */
+export function messagingSupported(): { ok: boolean; reason: string } {
+  if (process.platform === "win32") {
+    return { ok: false, reason: "Windows (cross-session messaging is macOS/Linux only)" };
+  }
+  const version = claudeCodeVersion();
+  if (version === null) {
+    return { ok: false, reason: "Claude Code not found on PATH" };
+  }
+  if (compareVersions(version, MESSAGING_FLOOR) < 0) {
+    return { ok: false, reason: `Claude Code ${version} is older than ${MESSAGING_FLOOR}` };
+  }
+  return { ok: true, reason: "" };
+}
+
+/** The configured mode, read straight from the user config file. The broker
+ *  must not import the CLI layer, and a broken config must degrade rather
+ *  than throw in a daemon — so this is a narrow read, not the full loader. */
+export function readConfiguredMode(): CollabMode | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(config.configFile, "utf-8"));
+    const raw = parsed?.mode;
+    return (COLLAB_MODES as readonly string[]).includes(raw) ? raw as CollabMode : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve the mode actually in force. Never returns "auto" — that is a
+ *  request to decide, not an answer. Precedence: the env kill switch, then
+ *  the configured mode, then what the machine supports. */
+export function resolveCollabMode(configured: CollabMode | undefined): {
+  mode: "peer" | "cli";
+  reason: string;
+} {
+  if (process.env.CODEX_COLLAB_PEER === "off") {
+    return { mode: "cli", reason: "CODEX_COLLAB_PEER=off" };
+  }
+  // The kill switch's counterpart: insist on the peer for this invocation,
+  // as `config mode peer` does persistently. Also what lets the suite
+  // exercise the peer on a machine with no `claude` binary, like CI.
+  if (process.env.CODEX_COLLAB_PEER === "on") {
+    return { mode: "peer", reason: "CODEX_COLLAB_PEER=on" };
+  }
+  if (configured === "cli") return { mode: "cli", reason: "config mode cli" };
+  const support = messagingSupported();
+  if (configured === "peer") {
+    // Asked for explicitly. Honor it even where support looks absent — the
+    // check can only see what is installed now, and being wrong here costs a
+    // peer that never registers, which `health` reports.
+    return { mode: "peer", reason: support.ok ? "config mode peer" : `config mode peer (despite: ${support.reason})` };
+  }
+  return support.ok
+    ? { mode: "peer", reason: "supported" }
+    : { mode: "cli", reason: support.reason };
+}
+
 export function peerCapability(): { ok: boolean; reason: string } {
+  // `mode cli` means the peer mechanisms are off, not merely undocumented:
+  // no registry entry, no per-conversation addresses, no consult tool. This
+  // is the one gate every one of them passes through, so refusing here is
+  // what makes the setting mean what it says.
+  const { mode, reason } = resolveCollabMode(readConfiguredMode());
+  if (mode === "cli") return { ok: false, reason };
   if (process.platform === "win32") return { ok: false, reason: "windows (messaging unsupported)" };
-  if (process.env.CODEX_COLLAB_PEER === "off") return { ok: false, reason: "CODEX_COLLAB_PEER=off" };
   if (!existsSync(sessionsDir())) return { ok: false, reason: "no Claude session registry" };
 
   // A Claude Code too old for peer messaging still keeps a session registry —

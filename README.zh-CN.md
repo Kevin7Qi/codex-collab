@@ -130,11 +130,13 @@ codex-collab follow --watch
 codex-collab peer up      # 启动 broker 与对等节点；单独执行 `peer` 查看状态
 ```
 
-此后，任意 Claude 会话的 `ListAgents` 中都会出现名为 `codex-<工作区>` 的对等节点——向它发送消息，Codex 即接手任务，完成后以对等消息回复。每个对话还会以独立节点出现。消息首行的 `topic:` 用于选择对话：`topic: auth refactor` 会接续名为 `codex-auth-refactor` 的对话，若不存在则新建——因此多个对话可并行进行，按 topic 自由切换（该行会在送达 Codex 前剥离）。未写 topic 时则接续自己最近的一次对话；未命名的对话由消息文本加线程短 ID 派生名称。回复来自该对话的地址，向其回信即延续该对话。
+此后，任意 Claude 会话的 `ListAgents` 中都会出现名为 `codex(<工作区>-<哈希>)` 的对等节点（尾部六位哈希派生自工作区路径，因代理注册表为全机共享，需借此避免不同仓库间的地址冲突）——向它发送消息，Codex 即接手任务，完成后以对等消息回复。每个对话还会以独立节点出现。消息首行的 `topic:` 用于选择对话：`topic: auth refactor` 会接续名为 `codex(auth-refactor-<哈希>)` 的对话，若不存在则新建——因此多个对话可并行进行，按 topic 自由切换（该行会在送达 Codex 前剥离）。后续的头部行可设置该对话的 `model:`、`effort:`、`timeout:`（每回合秒数；超时的回合会被终止并告知发送方）、`sandbox:` 与 `approval:`。未写 topic 时则接续自己最近的一次对话；未命名的对话由消息文本加线程短 ID 派生名称。回复来自该对话的地址，向其回信即延续该对话。
 
 任务进行中，Codex 可通过 `collab.consult` 工具调用向 Claude 提问：问题以 `[consult]` 消息送达，该会话的下一条回复会直接送回 Codex 正在运行的回合。consult 采取超时放行策略：无人应答时超时后 Codex 自行判断并继续。
 
-该机制可平滑降级：在 Windows 上、无会话注册表时、或设置 `CODEX_COLLAB_PEER=off` 后，下述各项功能与从前完全一致。只要有 Claude 会话在运行，broker 就保持常驻；最后一个会话退出后按常规空闲超时退场。
+Claude Code 会依据发送方声明的权限类别对入站对等消息设卡：对话仅在 `sandbox: danger-full-access` 下声明为 `bypass`，其余情况一律为 `prompting`。因此，以 `bypassPermissions` 模式运行的 Claude 会话会将 Codex 的回复暂扣待审，除非其 `crossSessionInbound` 设置为 `accept`。被暂扣的回复仍可通过 `codex-collab output <id> --last` 查看。
+
+该机制可平滑降级：在 Windows 上、无会话注册表时、或设置 `CODEX_COLLAB_PEER=off` 后，下述各项功能与从前完全一致（`CODEX_COLLAB_PEER=on` 则在单次调用中强制启用对等节点，效果同持久化的 `config mode peer`）。只要有 Claude 会话在运行，broker 就保持常驻；最后一个会话退出后按常规空闲超时退场。
 
 ## CLI 命令
 
@@ -295,7 +297,9 @@ codex-collab config model --unset       # 取消单个设置（恢复自动检�
 codex-collab config --unset             # 取消所有设置
 ```
 
-可配置项: `model`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`
+可配置项: `model`、`mode`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`
+
+`mode` 决定 codex-collab 与 Claude 的协作方式：`auto`（默认）在平台支持时采用对等消息通信，否则退回命令行路径；`peer` 强制使用对等消息；`cli` 则彻底关闭对等机制——不注册代理节点、不生成会话地址、不提供 consult 工具——一切交互均经由命令行完成。对等消息需要 macOS 或 Linux 且 Claude Code 版本不低于 2.1.224；在 Windows 或更早版本下，`auto` 会自行退回命令行路径，无需额外配置。
 
 优先级: `CLI 参数 > 配置文件 > 自动检测`
 

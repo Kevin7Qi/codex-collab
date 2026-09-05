@@ -10,6 +10,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { readFileSync } from "fs";
 import { listTemplates, type TemplateMeta } from "./config";
+import { readConfiguredMode, resolveCollabMode } from "./peer";
 import skillSource from "../SKILL.md" with { type: "text" };
 
 /** The SKILL.md source embedded at build time (placeholder not yet expanded). */
@@ -17,6 +18,37 @@ export const SKILL_SOURCE: string = skillSource;
 
 /** Placeholder line in the SKILL.md source replaced by the template table. */
 export const TEMPLATES_PLACEHOLDER = "<!-- TEMPLATES -->";
+
+/** Section markers that scope a block of the source to one collaboration
+ *  mode: `<!-- MODE:peer -->` … `<!-- /MODE:peer -->`. Both paths stay in
+ *  the source — the CLI one is load-bearing for Windows, for humans, and for
+ *  scripts — but Claude is only taught the one its machine actually uses.
+ *  Teaching both is how the file grew while promising to shrink. */
+const MODE_OPEN = /^<!--\s*MODE:(peer|cli)\s*-->$/;
+const MODE_CLOSE = /^<!--\s*\/MODE:(peer|cli)\s*-->$/;
+
+/** Drop the blocks that belong to the other mode. Unbalanced markers keep
+ *  their content rather than silently swallowing the rest of the file: a
+ *  mangled source should render a visibly odd skill, not a truncated one. */
+function applyModeSections(lines: string[], mode: "peer" | "cli"): string[] {
+  const out: string[] = [];
+  let skipping: string | null = null;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const close = MODE_CLOSE.exec(trimmed);
+    if (close) {
+      if (skipping === close[1]) skipping = null;
+      continue;
+    }
+    const open = MODE_OPEN.exec(trimmed);
+    if (open) {
+      if (open[1] !== mode) skipping = open[1];
+      continue;
+    }
+    if (skipping === null) out.push(line);
+  }
+  return out;
+}
 
 /** Directory Claude Code loads the skill from. */
 export function skillInstallDir(): string {
@@ -36,18 +68,31 @@ export function renderTemplateTable(templates: TemplateMeta[]): string {
   return ["| Template | Description |", "|----------|-------------|", ...rows].join("\n");
 }
 
-/** Expand the source SKILL.md: replace the placeholder line with the table. */
-export function renderSkillMd(source: string, templates: TemplateMeta[]): string {
+/** Expand the source SKILL.md: keep the sections this mode uses, then
+ *  replace the placeholder line with the table. */
+export function renderSkillMd(
+  source: string,
+  templates: TemplateMeta[],
+  mode: "peer" | "cli" = "peer",
+): string {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
-  return lines
+  return applyModeSections(lines, mode)
     .map((line) => (line === TEMPLATES_PLACEHOLDER ? renderTemplateTable(templates) : line))
     .join("\n");
+}
+
+/** The mode the installed skill should be rendered for. Keyed off the
+ *  INSTALL — platform, the configured mode, and the version of Claude Code
+ *  on PATH — never off whether a session happens to be running, or the same
+ *  machine would render different files minutes apart. */
+export function skillRenderMode(): "peer" | "cli" {
+  return resolveCollabMode(readConfiguredMode()).mode;
 }
 
 /** The SKILL.md this binary would install right now (embedded source +
  *  current built-in and user templates). */
 export function expectedSkillMd(): string {
-  return renderSkillMd(SKILL_SOURCE, listTemplates());
+  return renderSkillMd(SKILL_SOURCE, listTemplates(), skillRenderMode());
 }
 
 /** Installed SKILL.md content, or null if missing/unreadable. */

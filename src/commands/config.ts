@@ -3,7 +3,7 @@
 import { config, listTemplates, resolveStateDir } from "../config";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { peerCapability, sessionsDir } from "../peer";
+import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
 import { readPeerState, isAlive, type PeerState } from "./peer";
 import type { Model, AccountRead } from "../types";
 import {
@@ -30,6 +30,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     approval:  { validate: v => (config.approvalModes as readonly string[]).includes(v), hint: config.approvalModes.join(", ") },
     timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds, 1-${MAX_TIMEOUT_SECONDS} (e.g. 3600)` },
     memory:    { validate: v => v === "true" || v === "false", hint: "true, false (let Codex memory learn from created threads)" },
+    mode:      { validate: v => (COLLAB_MODES as readonly string[]).includes(v), hint: `${COLLAB_MODES.join(", ")} (auto: peer messaging where supported, CLI otherwise)` },
   };
 
   const cfg = loadUserConfig();
@@ -161,6 +162,11 @@ export function describeAuth(read: AccountRead | "unknown"): { ready: boolean; d
  *  to see that codex-collab is running in its degraded-but-complete mode
  *  rather than wonder why `ListAgents` shows nothing. */
 export function describePeer(dir: string): string {
+  // Name the mode that is in force, and where it came from. Whether the peer
+  // runs is now a setting as well as a capability, and "unavailable" without
+  // a reason reads like a broken install when it may be a deliberate choice.
+  const { mode, reason } = resolveCollabMode(readConfiguredMode());
+  if (mode === "cli") return `off — collaboration mode is cli (${reason}); the CLI paths are unaffected`;
   const capability = peerCapability();
   if (!capability.ok) return `unavailable — ${capability.reason} (CLI paths unaffected)`;
   let state: PeerState | null = null;

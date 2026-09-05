@@ -2,7 +2,7 @@
 // registry entry shape) plus capability gating. The live socket/registry
 // behavior is exercised end to end by the contract tests, not here.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { config } from "./config";
 import net from "node:net";
 import { spawn } from "node:child_process";
@@ -31,6 +31,10 @@ import {
   adoptionFor,
   workspaceSuffix,
   threadIsGone,
+  compareVersions,
+  resolveCollabMode,
+  messagingSupported,
+  MESSAGING_FLOOR,
   buildDelegation,
   escapeDelegation,
   type Conversation,
@@ -43,6 +47,17 @@ import {
  *  bind Unix paths, and capability's registry scan is unreachable. Skipping
  *  mirrors production's own gate. */
 const onWindows = process.platform === "win32";
+
+// The peer activates only where the mode check finds a messaging-capable
+// Claude Code on PATH; CI has none. Insist on it for this file, the way a
+// user without `claude` on PATH would — tests that need the machine's own
+// answer set or clear the variable themselves.
+const prevPeerEnv = process.env.CODEX_COLLAB_PEER;
+beforeAll(() => { process.env.CODEX_COLLAB_PEER = "on"; });
+afterAll(() => {
+  if (prevPeerEnv === undefined) delete process.env.CODEX_COLLAB_PEER;
+  else process.env.CODEX_COLLAB_PEER = prevPeerEnv;
+});
 
 /** Poll until `cond` holds, or fail after `timeoutMs`.
  *
@@ -2535,6 +2550,89 @@ describe.skipIf(onWindows)("peer status diagnosis", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("compareVersions", () => {
+  test("orders releases numerically, not lexically", () => {
+    // "2.1.9" vs "2.1.10" is where string comparison gets it wrong.
+    expect(compareVersions("2.1.10", "2.1.9")).toBeGreaterThan(0);
+    expect(compareVersions("2.1.224", "2.1.224")).toBe(0);
+    expect(compareVersions("2.1.223", "2.1.224")).toBeLessThan(0);
+    expect(compareVersions("2.2.0", "2.1.999")).toBeGreaterThan(0);
+  });
+
+  test("missing and non-numeric segments count as zero", () => {
+    expect(compareVersions("2.1", "2.1.0")).toBe(0);
+    expect(compareVersions("2.1.224-beta", "2.1.224")).toBe(0);
+    expect(compareVersions("", "0.0.0")).toBe(0);
+  });
+
+  test("the floor is the version the capability actually starts at", () => {
+    // 2.1.224 is where cross-session SendMessage was added. Later releases
+    // fixed bugs around it; gating on one of those would refuse installs
+    // that work.
+    expect(MESSAGING_FLOOR).toBe("2.1.224");
+  });
+});
+
+describe("resolveCollabMode", () => {
+  const withEnv = (value: string | undefined, fn: () => void) => {
+    const prev = process.env.CODEX_COLLAB_PEER;
+    if (value === undefined) delete process.env.CODEX_COLLAB_PEER;
+    else process.env.CODEX_COLLAB_PEER = value;
+    try { fn(); } finally {
+      if (prev === undefined) delete process.env.CODEX_COLLAB_PEER;
+      else process.env.CODEX_COLLAB_PEER = prev;
+    }
+  };
+
+  test("cli is honored whatever the machine supports", () => {
+    withEnv(undefined, () => {
+      expect(resolveCollabMode("cli").mode).toBe("cli");
+    });
+  });
+
+  test("the env switch can also insist on the peer, like `config mode peer`", () => {
+    withEnv("on", () => {
+      expect(resolveCollabMode("cli").mode).toBe("peer");
+      expect(resolveCollabMode(undefined).reason).toBe("CODEX_COLLAB_PEER=on");
+    });
+  });
+
+  test("the env kill switch outranks the configured mode", () => {
+    // A user who exported it wants the peer off for this invocation, even
+    // where the config says otherwise.
+    withEnv("off", () => {
+      expect(resolveCollabMode("peer").mode).toBe("cli");
+      expect(resolveCollabMode("auto").mode).toBe("cli");
+    });
+  });
+
+  test("peer is honored even where support looks absent, and says so", () => {
+    // The check can only see what is installed right now. Being wrong costs
+    // a peer that never registers, which `health` reports — better than
+    // silently overriding what the user asked for.
+    withEnv(undefined, () => {
+      const r = resolveCollabMode("peer");
+      expect(r.mode).toBe("peer");
+      if (!messagingSupported().ok) expect(r.reason).toContain("despite");
+    });
+  });
+
+  test("auto follows the machine, and never answers `auto`", () => {
+    withEnv(undefined, () => {
+      const r = resolveCollabMode("auto");
+      expect(r.mode).toBe(messagingSupported().ok ? "peer" : "cli");
+      // "auto" is a request to decide, not an answer.
+      expect(["peer", "cli"]).toContain(r.mode);
+    });
+  });
+
+  test("no configured mode behaves as auto", () => {
+    withEnv(undefined, () => {
+      expect(resolveCollabMode(undefined).mode).toBe(resolveCollabMode("auto").mode);
+    });
   });
 });
 

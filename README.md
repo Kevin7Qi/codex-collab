@@ -130,11 +130,13 @@ On macOS/Linux with a messaging-capable Claude Code, the workspace broker regist
 codex-collab peer up      # start the broker + peer; `peer` alone shows status
 ```
 
-From then on, any Claude session's `ListAgents` shows a `codex-<workspace>` peer — message it and Codex picks up the task, replying as a peer message when done. Each conversation also appears as its own peer. A `topic:` first line selects one — `topic: auth refactor` continues the conversation named `codex-auth-refactor` or starts it if new, so several conversations can run in parallel and you switch between them by topic (the line is stripped before Codex sees the message). With no topic line you continue your most recent conversation, and an unnamed conversation takes its name from the message text plus the thread's short ID. Replies come from that conversation's address, and replying to it continues that conversation.
+From then on, any Claude session's `ListAgents` shows a `codex(myproject-a1b2c3)` peer — message it and Codex picks up the task, replying as a peer message when done. Each conversation also appears as its own peer. A `topic:` first line selects one — `topic: auth refactor` continues the conversation named `codex(auth-refactor-a1b2c3)` or starts it if new, so several conversations can run in parallel and you switch between them by topic (the line is stripped before Codex sees the message). Further header lines set the conversation's `model:`, `effort:`, `timeout:` (seconds per turn; an overdue turn is stopped and the sender told), `sandbox:` and `approval:`. With no topic line you continue your most recent conversation, and an unnamed conversation takes its name from the message text plus the thread's short ID. Replies come from that conversation's address, and replying to it continues that conversation.
 
 Mid-task, Codex can ask its Claude peer a question through a `collab.consult` tool call; the question arrives as a `[consult]` message, and the next reply from that session is delivered back into Codex's running turn. Consults are fail-open: unanswered questions time out and Codex proceeds on its own judgment.
 
-The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before. The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
+Claude Code gates inbound peer messages on the sender's attested permission class. A conversation attests `bypass` only when it runs with `sandbox: danger-full-access`, otherwise `prompting` — so a Claude session running with `bypassPermissions` holds Codex's replies for review unless its `crossSessionInbound` setting is `accept`. A held reply is still readable with `codex-collab output <id> --last`.
+
+The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before (`CODEX_COLLAB_PEER=on` insists on the peer for one invocation, as `config mode peer` does persistently). The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
 
 ## CLI Commands
 
@@ -304,7 +306,9 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
+Available keys: `model`, `mode`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
+
+The `mode` key controls how codex-collab communicates with Claude: `auto` (the default) uses peer messaging when the platform supports it and falls back to the CLI path otherwise, `peer` insists on peer messaging, and `cli` disables peer mechanisms entirely — no agent-registry entry, no per-conversation addresses, no consult tool — routing everything through the command line. Peer messaging requires macOS or Linux with Claude Code 2.1.224 or newer; on Windows or older versions, `auto` falls back to the CLI path automatically without any configuration.
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 

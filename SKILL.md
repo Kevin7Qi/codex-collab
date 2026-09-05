@@ -7,13 +7,22 @@ description: Use when the user asks to invoke, delegate to, or collaborate with 
 
 codex-collab is a bridge between Claude and Codex. It communicates with Codex via the `codex app-server` JSON-RPC protocol, giving you structured, event-driven access to Codex's capabilities — prompting, code review, tool use, and file editing. Requires bun and the codex CLI on PATH (`codex-collab health` to verify).
 
+<!-- MODE:peer -->
 ## Choosing a path
 
-`ListAgents` shows Codex as `codex-<workspace>` (the workspace front door) plus one entry per ongoing conversation. `SendMessage` to any of them is the normal way to talk to Codex. Use the CLI (`run`, `review`) when you need a detached run you can `follow`, or structured output you will parse. Both paths produce the same threads: a CLI-started thread can be messaged afterwards, and a messaged conversation appears in `codex-collab threads`.
+`codex-collab peer up` (foreground, seconds, idempotent) prints the workspace's address, `codex(myproject-a1b2c3)`; `ListAgents` shows it plus one entry per ongoing conversation. `SendMessage` to any of them is the normal way to talk to Codex. Use the CLI instead for `review`, for a result you need within the current turn (`run` blocks and exits with a status code), and for `--goal`, `--template`, or interactive approval policies. Both paths produce the same threads: a CLI-started thread can be messaged afterwards, and a messaged conversation appears in `codex-collab threads`.
+<!-- /MODE:peer -->
 
+<!-- MODE:cli -->
+## Choosing a path
+
+Drive Codex interactions through the `codex-collab` CLI — `run` for tasks, `review` for code review, `--resume` for follow-ups. The ask channel is how Codex reaches you mid-task; `next` watches for those events.
+<!-- /MODE:cli -->
+
+<!-- MODE:peer -->
 ## Native Peer Messaging
 
-`SendMessage` to `codex-<workspace>` starts or continues a conversation. Any message may include a header block of `key: value` lines at the very start, one per line, stripped before Codex sees the text. Recognized keys: `topic:` names or selects the conversation (a `topic:` on a later message selects an existing conversation or starts a new one); `model:` and `effort:` set the conversation's model and reasoning effort — on a later message they change it from the next turn; `sandbox:` and `approval:` are fixed when the conversation starts (`approval:` accepts only `auto`, Codex Guardian, because interactive approval prompts route to CLI clients and cannot work over messaging). Parsing stops at the first line that is not a recognized key, so ordinary prose is never consumed as a header.
+`SendMessage` to `codex(myproject-a1b2c3)` starts or continues a conversation. Any message may open with a header block of `key: value` lines, stripped before Codex sees the text. `topic:` names or selects the conversation (a later `topic:` switches to that conversation, or starts it); `model:`, `effort:` and `timeout:` (seconds per turn; default 3600 or `config timeout`) set the conversation's settings and, on a later message, change them from the next turn; `sandbox:` and `approval:` are fixed when the conversation starts (`approval:` accepts only `auto`, Codex Guardian — interactive approval prompts route to CLI clients and cannot work over messaging). Parsing stops at the first line that is not a recognized key, so ordinary prose is never consumed as a header.
 
 ```
 topic: auth refactor
@@ -23,11 +32,12 @@ sandbox: read-only
 Review the login flow and tell me what you would change.
 ```
 
-Each conversation appears as its own entry in `ListAgents` under its name. Reply to a message's `from` address to continue that specific conversation. Messaging is asynchronous: after sending, end your turn — do not poll, sleep, or block waiting for a reply. The reply arrives on its own as a cross-session message that wakes your session, even if you are busy with other work when it lands, so nothing is lost by moving on.
+Each conversation appears as its own entry in `ListAgents` under its name. Reply to a message's `from` address to continue that specific conversation; a message to a busy conversation is delivered into the running turn and answered when it ends. Messaging is asynchronous: after sending, end your turn — do not poll, sleep, or block waiting for a reply. The reply arrives on its own as a cross-session message that wakes your session, even if you are busy with other work when it lands. A reply that lands mid-turn is folded into your context and is not shown to the user: relay its substance, or `codex-collab output <id> --last` so it appears in the transcript.
 
-Messaged conversations write the same run records as CLI runs, so `codex-collab progress <id>`, `output`, and `follow` work on them. Use `progress` to check whether a conversation is stuck, not to wait for a reply — the reply will be delivered to you regardless. Codex may send a `[consult]` message mid-task when it needs your judgment; reply to that address to answer. If you don't, Codex proceeds on its own after a timeout.
+Messaged conversations write the same run records as CLI runs, so `codex-collab progress <id>`, `output`, `follow` and `kill` work on them; the `<id>` is the short ID in the conversation's address (`peer-<id>.sock`), and `codex-collab threads` lists them alongside CLI runs. A turn that exceeds its limit is stopped and reported as a timeout, so silence means Codex is still working — use `progress` to see what it is doing, not to wait. Codex may send a `[consult]` message mid-task when it needs your judgment; reply to that address to answer. If you don't, Codex proceeds on its own after a timeout.
 
-If no `codex-*` entry appears in `ListAgents`, the CLI handles everything. Messaging requires a messaging-capable Claude Code on macOS or Linux; run `codex-collab peer up` to start it.
+If `peer up` reports messaging unavailable (Windows, or an older Claude Code), the CLI handles everything.
+<!-- /MODE:peer -->
 
 ## Run Command
 
@@ -55,8 +65,10 @@ cat prompt.md | codex-collab run - --content-only
 - For `run` and `review`: also use `run_in_background=true` — these take minutes. After launching, tell the user it's running and end your turn. **While running**: do NOT poll, block, wait, or spawn an agent to monitor — you will be notified automatically when the task finishes. If other tasks complete while Codex is running, handle them normally without checking on Codex. **When notified**: surface the result per Context Efficiency & Result Visibility below.
 - `run --detach` returns in seconds — run it in the **foreground**.
 - `follow` on a live run blocks until that run completes, and `follow --watch` never exits: both are primarily the **user's** view for their own terminal pane — don't run `--watch` yourself. The one agent-facing use: `follow <id>` in background Bash is the completion signal for a detached run (see Detached Runs below). `follow` on an already-finished run is a quick foreground replay.
+<!-- MODE:cli -->
 - `next` blocks until something needs a response — run it in the **background**; its exit is your notification (see the `next` section below).
-- All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `approve`, `decline`, `answer`, `questions`, `clean`, `delete`, `config`, `models`, `templates`, `skill`, `health`, `version`): run in the **foreground** — they complete in seconds. `update` is also foreground, but `update --yes` downloads and rebuilds, so allow it a few minutes.
+<!-- /MODE:cli -->
+- All other commands (`kill`, `threads`, `progress`, `output`, `peek`, `peer`, `approve`, `decline`, `answer`, `questions`, `clean`, `delete`, `config`, `models`, `templates`, `skill`, `health`, `version`): run in the **foreground** — they complete in seconds. `update` is also foreground, but `update --yes` downloads and rebuilds, so allow it a few minutes.
 
 If the user asks about progress mid-task, use `TaskOutput(block=false)` to read the background output stream, or `codex-collab progress <id>` for just the log tail. `<id>` is the codex-collab thread short ID (8-char hex), not the Claude Code task ID — it appears in the first progress line (`[codex] Thread a1b2c3d4 started`); `codex-collab threads` lists them. Progress lines stream in real time:
 
@@ -145,6 +157,7 @@ codex-collab run "large refactor task" --detach --approval auto
 
 **Completion signal for detached runs (agent-facing):** the detach parent exits when the turn *starts*, not when it finishes — so backgrounding `run --detach` gives you no completion notification. When you need one, run `codex-collab follow <id>` in background Bash: it exits exactly when the run reaches a terminal state (exit 0 = completed), and that exit is your notification.
 
+<!-- MODE:cli -->
 ### Watching for questions and approvals without polling (`next`)
 
 `codex-collab next` blocks until the first event that needs a response in the workspace — an ask-channel question (see The Ask Channel below) or a pending interactive approval — prints it **in full** (question body plus the answer command; no follow-up `questions <id>` needed), and exits. Exit codes: `0` event delivered · `10` workspace idle (nothing running, nothing pending — the self-cleaning path, so a watcher never dangles after the run ends) · `3` only with an explicit `--timeout <sec>`.
@@ -165,7 +178,9 @@ codex-collab next -d /path/to/project   # in background Bash; its exit = somethi
 **Respond and re-arm in the same message**: when `next` exits, issue the `answer` (or `approve`) and a fresh `next` as parallel tool calls — each event then costs exactly one wake-up plus one turn. Re-arm only *after* answering; `next` has no memory of delivered events, so re-arming while a question is still pending fires immediately with the same event. A parked `next` consumes zero context, and long runs can ask several times — keep the loop going until the run completes (its own exit notifies you) or `next` exits `10`.
 
 On-disk state backs all of this regardless of which process owns the run: the run record (`workspaces/*/runs/<runId>.json`) carries `pendingQuestion` and `pendingApproval` while blocked, and `questions[]` as the resolved audit trail.
+<!-- /MODE:cli -->
 
+<!-- MODE:cli -->
 ## The Ask Channel (Codex Asks, You Answer)
 
 On long or autonomous runs, Codex can pause mid-turn to ask you a question — without betting the run on your reply. Launch the run with the built-in `collab` template to teach it the channel:
@@ -176,7 +191,7 @@ codex-collab run "large refactor task…" --template collab --timeout 3600
 
 Mid-turn, Codex runs `codex-collab ask "…"`, which waits up to 10 minutes and then resolves one of two ways, both printed into Codex's own context: your answer (steering), or a graceful no-answer notice (fail-open; the run continues, and the unanswered question lands in the run record). Questions are *judgment*, not permission — unlike approvals they never block the run terminally. The template declares the channel and its costs but deliberately prescribes no rules: whether and when to ask is Codex's own call.
 
-In a **peer conversation** this same need is served by Codex's `collab.consult` tool — the question reaches you as a `[consult]` peer message, with the same fail-open deadline. The mailbox below is what CLI-started threads use, and what everything falls back to when no peer is available.
+The mailbox below is the channel Codex uses for mid-turn questions — and what everything falls back to.
 
 **Restate the channel when you resume a long collab thread.** The channel instructions ride the first prompt, and long threads compact oldest-first — so include one line in your own words in the resume prompt (e.g. "the collaboration channel is still open — `codex-collab ask` reaches me"). Codex only needs the gist; the mechanics are rediscoverable from `codex-collab --help`.
 
@@ -200,6 +215,7 @@ codex-collab questions            # list pending questions (id, age, time left)
 codex-collab questions <id>       # full text of one question (list view clips long ones)
 codex-collab answer <id> "text"   # answer one (prefix matching works)
 ```
+<!-- /MODE:cli -->
 
 ## Approvals
 
@@ -253,12 +269,14 @@ codex-collab delete <id>                # Archive thread (recoverable via `codex
 codex-collab delete <id> --purge        # Permanently delete server-side instead — NOT recoverable; needs explicit user intent
 codex-collab clean                      # Delete old logs, stale mappings, old question files
 codex-collab approve <id> | decline <id> # Answer a pending approval
+<!-- MODE:cli -->
 codex-collab answer <id> "text"         # Answer a pending ask-channel question (see The Ask Channel)
 codex-collab questions [id]             # List pending questions (with an ID: show its full text)
 codex-collab next [--timeout <sec>]     # Block until a question/approval needs you; print it in full
                                         # (exit 0 = event, 10 = workspace idle, 3 = timeout)
 codex-collab ask "q" [--timeout <sec>]  # (invoked BY CODEX mid-turn, not by you) post a question, wait, fail open
-codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, reasoning, sandbox, approval, timeout, memory)
+<!-- /MODE:cli -->
+codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, mode, reasoning, sandbox, approval, timeout, memory)
 codex-collab skill sync [--yes]         # Regenerate installed SKILL.md — diff first, --yes applies (see Staying Up to Date)
 codex-collab update [--check|--skip|--yes] # Check for / install a newer release (see Staying Up to Date)
 codex-collab models | templates | health | version
@@ -313,9 +331,16 @@ codex-collab run "survey the call sites first" --goal "migrate all call sites to
 
 - Give goal runs a generous `--timeout` (hours, not minutes) — it bounds the whole goal, and expiry pauses the goal safely rather than leaving it running headless.
 - A paused goal resumes when a new turn runs on that thread (`run --resume <id> "..."`); `kill --clear` abandons it.
+<!-- MODE:cli -->
 - Mid-goal, the ask channel and approvals work normally — `next` sees questions from continuation turns too.
+<!-- /MODE:cli -->
+<!-- MODE:peer -->
+- Mid-goal, approvals and consult messages work normally — continuation turns can send `[consult]` messages that reach you as peer messages.
+<!-- /MODE:peer -->
 - The server re-injects the objective into every continuation turn — the first prompt (and any template) rides only turn one. An objective too big to state in a sentence can point at a spec or plan file in the repo instead.
+<!-- MODE:cli -->
 - With `--template collab`, `--goal` appends a one-line ask-channel note to the objective, so channel awareness survives long goals.
+<!-- /MODE:cli -->
 - `threads` shows the latest goal state per thread: `[goal active: 45k/100k tokens]`.
 
 ## Templates
@@ -347,7 +372,12 @@ To hand off a thread to the Codex TUI, look up the full thread ID with `codex-co
 
 - **`run --resume` requires a prompt.** `review --resume` works without one (it uses the review workflow), but `run --resume <id>` will error if no prompt is given.
 - **Omit `-d` if already in the project directory** — it defaults to cwd. Only pass `-d` when the target project differs from your current directory.
+<!-- MODE:cli -->
 - **Multiple concurrent threads** are supported. Threads share a per-workspace broker for efficient resource usage. Ask-channel questions are workspace-scoped by design — `next` and `questions` see every run's questions, whoever answers first wins, and a second answer gets a clean "already answered" error.
+<!-- /MODE:cli -->
+<!-- MODE:peer -->
+- **Multiple concurrent threads** are supported. Threads share a per-workspace broker for efficient resource usage.
+<!-- /MODE:peer -->
 - **Validate Codex's findings.** After reading Codex's review or analysis output, verify each finding against the actual source code before presenting to the user. Drop false positives, note which findings you verified.
 - **Per-workspace scoping.** Threads and state are scoped per workspace (git repo root). Different repos have independent thread lists.
 - **First invocation per workspace** may take slightly longer to initialize; subsequent calls in the same session reuse the connection context.
@@ -361,4 +391,9 @@ To hand off a thread to the Codex TUI, look up the full thread ID with `codex-co
 | Thread not found | Use `codex-collab threads` to list active threads |
 | Process crashed mid-task | Resume with `--resume <id>` — thread state is persisted |
 | Approval request hanging | Run `codex-collab approve <id>` or `codex-collab decline <id>` |
+<!-- MODE:peer -->
+| Conversation's run completed but no reply arrived | Claude Code holds peer messages whose attested permission class differs from this session's (a `Held peer message` notice) — the user can release it, or set `crossSessionInbound` to `accept` in Claude Code settings. Read the reply meanwhile with `codex-collab output <id> --last`. |
+<!-- /MODE:peer -->
+<!-- MODE:cli -->
 | Question expired before answering | Codex already proceeded on its own judgment — the decision is in the run output and `questions[]` on the run record. To steer now, `run --resume <id>` once the run ends. |
+<!-- /MODE:cli -->

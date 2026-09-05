@@ -136,3 +136,71 @@ describe("unifiedDiff", () => {
     expect(diff).toContain("+++ new.md");
   });
 });
+
+// ─── mode-conditional sections ──────────────────────────────────────────────
+
+describe("renderSkillMd — mode sections", () => {
+  const src = [
+    "shared intro",
+    "<!-- MODE:peer -->",
+    "peer only",
+    "<!-- /MODE:peer -->",
+    "<!-- MODE:cli -->",
+    "cli only",
+    "<!-- /MODE:cli -->",
+    "shared outro",
+  ].join("\n");
+
+  test("each mode keeps its own sections and drops the other's", () => {
+    const peer = renderSkillMd(src, [], "peer");
+    expect(peer).toContain("peer only");
+    expect(peer).not.toContain("cli only");
+
+    const cli = renderSkillMd(src, [], "cli");
+    expect(cli).toContain("cli only");
+    expect(cli).not.toContain("peer only");
+  });
+
+  test("shared content survives either way, and markers never leak", () => {
+    for (const mode of ["peer", "cli"] as const) {
+      const out = renderSkillMd(src, [], mode);
+      expect(out).toContain("shared intro");
+      expect(out).toContain("shared outro");
+      expect(out).not.toContain("MODE:");
+    }
+  });
+
+  test("nested and repeated blocks of the same mode are handled", () => {
+    const repeated = [
+      "<!-- MODE:cli -->", "one", "<!-- /MODE:cli -->",
+      "keep",
+      "<!-- MODE:cli -->", "two", "<!-- /MODE:cli -->",
+    ].join("\n");
+    const peer = renderSkillMd(repeated, [], "peer");
+    expect(peer).toContain("keep");
+    expect(peer).not.toContain("one");
+    expect(peer).not.toContain("two");
+  });
+
+  test("an unclosed marker keeps its content rather than eating the file", () => {
+    // A mangled source should render a visibly odd skill, not a silently
+    // truncated one — the reader can see something is wrong.
+    const broken = ["<!-- MODE:peer -->", "kept", "tail"].join("\n");
+    expect(renderSkillMd(broken, [], "peer")).toContain("tail");
+  });
+
+  test("the template table still expands inside a mode section", () => {
+    const withTable = [
+      "<!-- MODE:peer -->", TEMPLATES_PLACEHOLDER, "<!-- /MODE:peer -->",
+    ].join("\n");
+    const out = renderSkillMd(withTable, [{ name: "collab", description: "d" }], "peer");
+    expect(out).toContain("collab");
+    expect(out).not.toContain(TEMPLATES_PLACEHOLDER);
+  });
+
+  test("a source with no markers renders identically in both modes", () => {
+    // Until the source is marked up, nothing changes for anyone.
+    const plain = "just\ncontent";
+    expect(renderSkillMd(plain, [], "peer")).toBe(renderSkillMd(plain, [], "cli"));
+  });
+});
