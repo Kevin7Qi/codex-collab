@@ -29,7 +29,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from "./process";
 import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
 import { RpcError } from "./types";
 import { config } from "./config";
-import { createPeer, type InternalOwner, type Peer } from "./peer";
+import { adoptionFor, createPeer, type InternalOwner, type Peer } from "./peer";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -316,6 +316,24 @@ async function main() {
       if (entry && !(entry.socket instanceof net.Socket)) releaseThread(threadId);
     },
     threadHasTurn: (threadId) => threads.has(threadId),
+    interruptThread: async (threadId) => {
+      const entry = threads.get(threadId);
+      if (!entry || entry.socket === null || entry.socket instanceof net.Socket) {
+        throw new Error("no peer turn is running on this thread");
+      }
+      if (!entry.turnId) throw new Error("the turn has not announced its id yet");
+      // Goal first, interrupt second (same order as `kill` and the orphan
+      // watchdog): with an active goal, interrupt alone makes the server
+      // start a fresh continuation turn.
+      if (goalActiveThreads.has(threadId)) {
+        try {
+          await appClient.request("thread/goal/set", { threadId, status: "paused" });
+        } catch (e) {
+          process.stderr.write(`[broker-server] Warning: could not pause the goal on ${threadId} before interrupting: ${e instanceof Error ? e.message : String(e)}\n`);
+        }
+      }
+      await appClient.request("turn/interrupt", { threadId, turnId: entry.turnId });
+    },
     log: (line) => process.stderr.write(`[broker-server] ${line}\n`),
   });
 
@@ -1029,7 +1047,8 @@ async function main() {
       // registration.
       if (method === "thread/start" || method === "thread/resume") {
         const thread = (result as { thread?: { id?: unknown } } | undefined)?.thread;
-        if (typeof thread?.id === "string") peer.adoptThread(thread.id);
+        const adopt = adoptionFor(thread?.id, params);
+        if (adopt) peer.adoptThread(adopt.threadId, adopt.sandbox);
       }
 
       if (isStreaming) {

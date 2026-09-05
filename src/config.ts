@@ -68,6 +68,10 @@ export const config = {
 
   // Timeouts
   defaultTimeout: 3600, // seconds — turn completion (1 hour)
+  // Largest turn timeout accepted anywhere (setTimeout's 32-bit ceiling, in
+  // seconds). The CLI flag, `config timeout`, and the peer's `timeout:`
+  // header all validate against this one number.
+  maxTimeoutSeconds: 2_147_483,
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
   // Broker idle timeout (ms) before a detached broker self-exits. Overridable
   // via CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS so tests can make brokers exit in

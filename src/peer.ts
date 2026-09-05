@@ -44,7 +44,7 @@ import {
   pruneRuns,
 } from "./threads";
 import { EventDispatcher } from "./events";
-import { config, workspaceHash } from "./config";
+import { config, resolveModel, resolveWorkspaceDir, workspaceHash } from "./config";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -67,10 +67,14 @@ export interface PeerHost {
   releaseThread(threadId: string): void;
   /** True when a turn is running (or starting) on the thread. */
   threadHasTurn(threadId: string): boolean;
+  /** Stop the peer-owned turn running on the thread (pausing an active goal
+   *  first, as `kill` does). Rejects when no peer turn is running there or
+   *  its id is not known yet. The turn's own turn/completed follows. */
+  interruptThread(threadId: string): Promise<void>;
   log(line: string): void;
 }
 
-interface Conversation {
+export interface Conversation {
   threadId: string;
   /** Short ID from the thread index — suffixes the thread peer's name. */
   shortId?: string;
@@ -100,6 +104,9 @@ interface Conversation {
    *  poisoned forever, every turn failing with no way to correct it. */
   model?: string;
   effort?: string;
+  /** Seconds a turn of this conversation may run before the peer stops it,
+   *  from a `timeout:` header. Unset means the workspace default. */
+  timeout?: number;
   /** "auto" when the conversation runs under Guardian review. Stored so a
    *  recreated thread (unrecoverable-thread recovery) keeps the setting. */
   approval?: string;
@@ -130,6 +137,11 @@ interface ThreadPeer {
   server: net.Server;
 }
 
+/** Why a peer turn did or did not start. "thread-gone" is the only outcome
+ *  the caller can do anything about — the rest have already been reported or
+ *  handled where they happened. */
+type TurnOutcome = "started" | "claim-lost" | "thread-gone" | "failed";
+
 /** Retire a thread peer after this much conversation inactivity. The
  *  conversation itself survives (the front door continues it, and the
  *  thread peer re-materializes on the next message). */
@@ -137,6 +149,30 @@ export const THREAD_PEER_LINGER_MS = 30 * 60_000;
 
 /** ListAgents flooding guard: at most this many thread peers at once. */
 export const MAX_THREAD_PEERS = 8;
+
+/** Cap on tracked conversations — one is adopted per CLI-created thread, so
+ *  the set is otherwise unbounded. See conversationsToEvict for the policy. */
+export const MAX_CONVERSATIONS = 64;
+
+/** Which conversations to drop to get back under the cap. Exempt ones are
+ *  reachable or owed something right now and are never candidates. Among the
+ *  rest, conversations nobody ever spoke to go first — an adopted CLI thread
+ *  is a courtesy address, a conversation with history is not — and within
+ *  each group the oldest goes first. Pure, so the policy is testable without
+ *  standing up sixty-five live conversations. */
+export function conversationsToEvict(
+  convs: Conversation[],
+  isExempt: (c: Conversation) => boolean,
+  cap: number = MAX_CONVERSATIONS,
+): Conversation[] {
+  const excess = convs.length - cap;
+  if (excess <= 0) return [];
+  const spoken = (c: Conversation) => Object.keys(c.lastInboundBy).length > 0;
+  return convs
+    .filter((c) => !isExempt(c))
+    .sort((a, b) => (Number(spoken(a)) - Number(spoken(b))) || (a.lastActivity - b.lastActivity))
+    .slice(0, excess);
+}
 
 interface PendingConsult {
   threadId: string;
@@ -215,7 +251,11 @@ export function isCodexCollabSocket(socketPath: unknown): boolean {
 }
 
 export function peerNameFor(cwd: string): string {
-  const dir = basename(cwd)
+  // Both halves must name the same thing. The hash is of the workspace ROOT,
+  // so the readable half is too: derived from cwd, starting the broker from
+  // a subdirectory would produce a different address for the same workspace
+  // state and socket.
+  const dir = basename(resolveWorkspaceDir(cwd))
     .replace(/[^a-zA-Z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
   const suffix = workspaceHash(cwd).slice(0, 6);
@@ -246,6 +286,8 @@ export interface MessageHeaders {
   effort?: string;
   sandbox?: string;
   approval?: string;
+  /** Seconds a turn may run, validated against config.maxTimeoutSeconds. */
+  timeout?: number;
 }
 
 /** Settings the header block accepts, with the values each allows. `approval`
@@ -284,13 +326,24 @@ export function parseHeaders(text: string): { headers: MessageHeaders; body: str
     } else if (key === "reasoning" || key === "effort") {
       if (headers.effort !== undefined || !HEADER_KEYS.effort!.includes(value)) break;
       headers.effort = value;
+    } else if (key === "timeout") {
+      // Whole seconds, same bounds as `--timeout`. A value that is not a
+      // number ends the block: "timeout: the login flow hangs" is prose.
+      if (headers.timeout !== undefined || !/^\d{1,10}$/.test(value)) break;
+      const seconds = Number(value);
+      if (seconds < 1 || seconds > config.maxTimeoutSeconds) break;
+      headers.timeout = seconds;
     } else if (key in HEADER_KEYS) {
       const allowed = HEADER_KEYS[key];
       const bag = headers as unknown as Record<string, unknown>;
       if (bag[key] !== undefined) break;
       if (allowed && !allowed.includes(value)) break;
       if (key === "model" && !MODEL_SLUG_RE.test(value)) break;
-      bag[key] = value;
+      // Aliases resolve HERE, at the input boundary, exactly as the CLI
+      // resolves `--model` in parseOptions. A conversation's model is
+      // restated on every turn it starts, so an unresolved alias would not
+      // fail once — it would fail every turn, forever.
+      bag[key] = key === "model" ? resolveModel(value) : value;
     } else {
       break;
     }
@@ -307,6 +360,29 @@ export function parseHeaders(text: string): { headers: MessageHeaders; body: str
 export function extractTopic(text: string): { topic: string | null; body: string } {
   const { headers, body } = parseHeaders(text);
   return { topic: headers.topic, body };
+}
+
+/** Whether an app-server error means the thread is no longer there, as
+ *  opposed to a request that merely failed. Only the first justifies
+ *  abandoning a conversation: a timeout, a dropped connection or an
+ *  internal error says nothing about whether the history still exists, and
+ *  treating them alike throws away a live conversation over a hiccup.
+ *
+ *  `not found` covers deletion and, from inject_items or turn/start, an
+ *  archived thread too; `is archived` is what resume says about the same
+ *  thread, and is the one case the history can still be recovered from. */
+export function threadIsGone(detail: string): boolean {
+  return /\bnot found\b/i.test(detail) || /\bis archived\b/i.test(detail);
+}
+
+/** The workspace half of every peer address this broker registers. The
+ *  session registry is shared across workspaces and the name IS the
+ *  messaging address, so a name carrying only a topic or a thread slug can
+ *  be claimed by two checkouts at once and SendMessage reaches whichever
+ *  registered last. Same suffix the front door carries, so every address
+ *  from one workspace is recognizably from it. */
+export function workspaceSuffix(cwd: string): string {
+  return workspaceHash(cwd).slice(0, 6);
 }
 
 /** Peer name for a sender-chosen topic: codex-<topic-slug>. */
@@ -338,12 +414,13 @@ function addressSlug(text: string, maxChars: number): string {
   return [...cleaned].slice(0, maxChars).join("").replace(/-+$/g, "");
 }
 
-export function topicPeerLabel(topic: string): string {
-  const slug = addressSlug(topic, 30);
-  return slug ? `codex(${slug})` : "";
+export function topicPeerLabel(topic: string, suffix = ""): string {
+  const slug = addressSlug(topic, suffix ? 24 : 30);
+  if (!slug) return "";
+  return `codex(${slug}${suffix ? `-${suffix}` : ""})`;
 }
 
-export function threadPeerLabel(firstMessage: string, shortId: string): string {
+export function threadPeerLabel(firstMessage: string, shortId: string, suffix = ""): string {
   // Word-at-a-time so the slug ends on a boundary rather than mid-word.
   // Scripts without spaces (Chinese, Japanese) yield one long token, which
   // addressSlug's code-point bound then trims cleanly.
@@ -351,11 +428,11 @@ export function threadPeerLabel(firstMessage: string, shortId: string): string {
   let slug = "";
   for (const w of words) {
     const next = slug ? `${slug}-${w}` : w;
-    if ([...next].length > 24) break;
+    if ([...next].length > (suffix ? 16 : 24)) break;
     slug = next;
   }
   if (!slug && words.length > 0) slug = addressSlug(words[0], 24);
-  return `codex(${slug ? `${slug}-` : ""}${shortId.slice(0, 4)})`;
+  return `codex(${slug ? `${slug}-` : ""}${shortId.slice(0, 4)}${suffix ? `-${suffix}` : ""})`;
 }
 
 export function buildRegistryEntry(opts: {
@@ -380,7 +457,10 @@ export function buildRegistryEntry(opts: {
     entrypoint: "cli",
     messagingSocketPath: opts.socketPath,
     name: opts.name,
-    nameSource: "explicit",
+    // Claude Code's own values are `derived` (from the cwd) and `user` (set
+    // deliberately). A peer address is chosen, never derived, and renderings
+    // that hide derived names keep a `user` one visible.
+    nameSource: "user",
     status: "idle",
     updatedAt: now,
     statusUpdatedAt: now,
@@ -490,7 +570,8 @@ export function buildEnvelope(opts: {
 
 export const PEER_DEVELOPER_INSTRUCTIONS = `You are working as a peer alongside Claude Code sessions in this workspace.
 
-- Messages from Claude arrive in your conversation as agent_message items authored by /root/claude. They come from a fellow agent, not from the human user.
+- Messages from Claude arrive as turn input inside a \`<codex_delegation>\` envelope when the thread is idle, or as an injected \`agent_message\` from \`/root/claude\` mid-turn. Either way, the sender is a fellow agent, not the human user.
+- The \`<input>\` body is XML-escaped (\`&amp;\` for \`&\`, \`&lt;\` for \`<\`, \`&gt;\` for \`>\`). Unescape mentally before reading or acting on content — never copy an escaped entity into code, a command, or a file.
 - To ask your peer a question mid-task and wait for the answer, call the collab.consult tool. If it returns no answer, proceed on your own best judgment.
 - When a peer's message started your current turn, your final message is delivered back to that peer automatically — write it to be read by them.`;
 
@@ -498,6 +579,46 @@ export const PEER_DEVELOPER_INSTRUCTIONS = `You are working as a peer alongside 
  *  consult tool is gone for the remainder of a resumed thread's life. */
 export const PEER_RESUME_INSTRUCTIONS = PEER_DEVELOPER_INSTRUCTIONS +
   `\n- NOTE: the collab.consult tool is unavailable in this session. Ask questions in your reply instead.`;
+
+/** Escape for the `<codex_delegation>` envelope. Order matters: `&` first,
+ *  or the entities the later rules produce get escaped a second time. */
+export function escapeDelegation(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Wrap a peer message in the envelope the Codex app parses out of ordinary
+ *  turn input and renders as a message bubble.
+ *
+ *  A text convention, not a protocol feature: the app's parser needs both
+ *  tags and unescapes the body, so an unparsed envelope still renders as
+ *  legible text. Injected items land in a pseudo-turn the app never
+ *  displays, whatever shape they take.
+ *
+ *  `source_thread_id` is empty: the sender is a Claude session, not a Codex
+ *  thread, and the app parses an empty value fine (it checks for the tag,
+ *  not for content). Attribution rides inside `<input>` instead. */
+export function buildDelegation(input: string, sourceThreadId = ""): string {
+  return [
+    "<codex_delegation>",
+    `  <source_thread_id>${escapeDelegation(sourceThreadId)}</source_thread_id>`,
+    `  <input>${escapeDelegation(input)}</input>`,
+    "</codex_delegation>",
+  ].join("\n");
+}
+
+/** The model a new conversation starts on: the message's header when it
+ *  carries one, else the workspace default — canonicalized either way.
+ *
+ *  Canonicalizing matters more here than on the CLI. A conversation restates
+ *  its model on every turn it starts, so an alias reaching thread/start
+ *  unresolved does not fail once; it fails every turn for the life of the
+ *  conversation, and `config model spark` would do that to all of them. */
+export function conversationModel(
+  header: string | undefined,
+  workspaceDefault: string | undefined,
+): string | undefined {
+  return resolveModel(header ?? workspaceDefault);
+}
 
 export const PEER_DYNAMIC_TOOLS = [{
   type: "namespace",
@@ -531,7 +652,7 @@ export interface Peer {
    *  Without this, starting work with `run` would foreclose ever talking to
    *  that conversation — the two entry points would produce different, and
    *  irreversibly different, kinds of thread. */
-  adoptThread(threadId: string): void;
+  adoptThread(threadId: string, sandbox?: string): void;
   /** Handle a dynamic tool call routed from the broker. */
   handleToolCall(params: Record<string, unknown>): Promise<Record<string, unknown>>;
   /** A turn ended on the thread (broker lifecycle tracking). Lets the peer
@@ -540,11 +661,33 @@ export interface Peer {
   /** Counts of the per-thread bookkeeping, for tests. These maps are keyed
    *  by thread and cleaned on release; a count that grows across completed
    *  conversations is a leak, which is otherwise invisible from outside. */
-  debugState(): { turnRecipients: number; pendingWakes: number; replyBuffers: number; activeRuns: number };
-  /** True when any OTHER live Claude session is registered — the broker's
-   *  idle shutdown defers while someone might still message the peer. */
+  debugState(): { turnRecipients: number; pendingWakes: number; replyBuffers: number; activeRuns: number; deadlines: number };
+  /** True when any OTHER live Claude session is registered with a messaging
+   *  socket — the broker's idle shutdown defers while someone might still
+   *  message the peer. */
   hasLiveSessions(): boolean;
   stop(): void;
+}
+
+/** Whether a thread the CLI just created or resumed should get a peer address,
+ *  and on what terms.
+ *
+ *  Ephemeral threads are excluded: that flag is the caller saying this is
+ *  scratch space — `review` opens one per run — so an address would spend a
+ *  thread-peer slot and a holder process on a conversation nobody can hold,
+ *  and put a review nobody meant to talk to in ListAgents.
+ *
+ *  The sandbox travels with it so the adopted conversation attests its OWN
+ *  from-mode. Guessing the workspace default instead could under-report a
+ *  full-access thread as sandboxed, which is the dangerous direction. */
+export function adoptionFor(
+  threadId: unknown,
+  params: unknown,
+): { threadId: string; sandbox: string | undefined } | null {
+  if (typeof threadId !== "string" || threadId.length === 0) return null;
+  const p = params as { ephemeral?: unknown; sandbox?: unknown } | undefined;
+  if (p?.ephemeral === true) return null;
+  return { threadId, sandbox: typeof p?.sandbox === "string" ? p.sandbox : undefined };
 }
 
 export function peerCapability(): { ok: boolean; reason: string } {
@@ -567,6 +710,11 @@ export function peerCapability(): { ok: boolean; reason: string } {
       try {
         const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
         if (typeof entry?.pid !== "number" || entry.pid === process.pid) continue;
+        // A sibling codex-collab broker is not a Claude session. Counting one
+        // as reachable answers "can a Claude session message us" with our own
+        // reflection, and reports messaging as supported on a Claude Code
+        // that binds no sockets. hasLiveSessions already excludes them.
+        if (isCodexCollabSocket(entry.messagingSocketPath)) continue;
         process.kill(entry.pid, 0);
         live++;
         if (typeof entry.messagingSocketPath === "string") reachable++;
@@ -584,6 +732,8 @@ export function createPeer(host: PeerHost): Peer {
   const socketPath = join(host.stateDir, "peer.sock");
   const name = peerNameFor(host.cwd);
   const entryPath = join(sessionsDir(), `${process.pid}.json`);
+  /** Workspace half of every address this broker hands out. */
+  const suffix = workspaceSuffix(host.cwd);
   const conversationsPath = join(host.stateDir, "peer-conversations.json");
   const stateFile = join(host.stateDir, "peer-state.json");
 
@@ -633,6 +783,15 @@ export function createPeer(host: PeerHost): Peer {
   const turnAudience = new Map<string, Set<string>>();
   /** Bounded msg_id dedupe (Claude Code retries identical sends). */
   const seenMsgIds = new Set<string>();
+  /** threadId → the deadline armed for the peer turn running there. A CLI
+   *  run has `--timeout`; without this, a messaged conversation whose turn
+   *  hung would block its thread forever and never answer, and the sender
+   *  could not tell that from Codex still working. */
+  const deadlines = new Map<string, { timer: ReturnType<typeof setTimeout>; runId: string | null; limitSec: number }>();
+  /** threadId → the limit (seconds) whose expiry stopped the current turn,
+   *  so its turn/completed is reported as a timeout rather than a bare
+   *  interruption. */
+  const timedOut = new Map<string, number>();
 
   let server: net.Server | null = null;
   let active = false;
@@ -658,6 +817,7 @@ export function createPeer(host: PeerHost): Peer {
             sandbox: typeof c.sandbox === "string" ? c.sandbox : undefined,
             model: typeof c.model === "string" ? c.model : undefined,
             effort: typeof c.effort === "string" ? c.effort : undefined,
+            timeout: typeof c.timeout === "number" && c.timeout > 0 ? c.timeout : undefined,
             approval: typeof c.approval === "string" ? c.approval : undefined,
             lastActivity: typeof c.lastActivity === "number" ? c.lastActivity : Date.now(),
             // Older files carry a single timestamp (or none): credit it to
@@ -728,7 +888,29 @@ export function createPeer(host: PeerHost): Peer {
     return best;
   }
 
+  /** Enforce MAX_CONVERSATIONS. A conversation with a live thread peer, a
+   *  running turn, a pending consult or an owed wake is reachable or owed
+   *  something right now and is never evicted. */
+  function pruneConversations(): void {
+    const evicted = conversationsToEvict(
+      [...threadConversations.values()],
+      (c) => threadPeers.has(c.threadId)
+        || activeRuns.has(c.threadId)
+        || pendingConsults.has(c.threadId)
+        || pendingWakes.has(c.threadId),
+    );
+    for (const c of evicted) {
+      threadConversations.delete(c.threadId);
+      // Only unhook the topic route if it still points at THIS conversation;
+      // a newer one may have taken the name over.
+      if (c.topicKey && byTopic.get(c.topicKey) === c) byTopic.delete(c.topicKey);
+    }
+  }
+
   function saveConversations(): void {
+    // Bound the set here rather than at each growth site: this is the one
+    // place every change to the map passes through on its way to disk.
+    pruneConversations();
     try {
       // The thread-indexed map holds EVERY conversation. Persisting a
       // per-sender map instead (keyed by reply path, one entry per sender)
@@ -908,10 +1090,24 @@ export function createPeer(host: PeerHost): Peer {
    *  response FIRST — so look the name up on a short delay rather than
    *  racing it, and fall back to a derived suffix if the index has nothing
    *  (an external thread, or an index write that failed). */
-  function adoptThread(threadId: string): void {
-    if (!active || stopped || threadPeers.has(threadId)) return;
+  function adoptThread(threadId: string, sandbox?: string): void {
+    if (!active || stopped) return;
+    const known = threadConversations.get(threadId);
+    if (known) {
+      // A resume of a conversation we already track. Refresh it so continued
+      // CLI work keeps the address alive instead of letting the linger sweep
+      // retire a thread somebody is actively using, and put the peer back if
+      // an earlier sweep already did.
+      known.lastActivity = Date.now();
+      if (!threadPeers.has(threadId)) {
+        createThreadPeer(threadId, known.shortId ?? threadId.replace(/-/g, "").slice(-8), known.label);
+      }
+      saveConversations();
+      return;
+    }
+    if (threadPeers.has(threadId)) return;
     const timer = setTimeout(() => {
-      if (!active || stopped || threadPeers.has(threadId)) return;
+      if (!active || stopped || threadPeers.has(threadId) || threadConversations.has(threadId)) return;
       let shortId: string | null = null;
       let preview = "";
       try {
@@ -919,7 +1115,28 @@ export function createPeer(host: PeerHost): Peer {
         if (shortId) preview = loadThreadIndex(host.stateDir)[shortId]?.preview ?? "";
       } catch { /* index unreadable — derive below */ }
       const id = shortId ?? threadId.replace(/-/g, "").slice(-8);
-      createThreadPeer(threadId, id, threadPeerLabel(preview, id));
+      const label = threadPeerLabel(preview, id, suffix);
+      createThreadPeer(threadId, id, label);
+      // A thread peer with no conversation behind it reads as idle to
+      // sweepThreadPeers, and is not restored on the next broker start.
+      threadConversations.set(threadId, {
+        threadId,
+        shortId: shortId ?? undefined,
+        label,
+        // No counterpart yet: an adopted thread is addressable but has not
+        // been spoken to. The empty lastInboundBy keeps it out of every
+        // sender's "the conversation I spoke to last" default, which is
+        // right — it is nobody's yet.
+        replyPath: "",
+        fromName: "",
+        // The sandbox the CLI actually asked for, so this conversation
+        // attests its own from-mode rather than the workspace default.
+        sandbox,
+        lastActivity: Date.now(),
+        lastInboundBy: {},
+      });
+      saveConversations();
+      host.log(`peer: adopted CLI thread ${threadId} as "${label}"`);
     }, 2000);
     timer.unref?.();
   }
@@ -981,6 +1198,7 @@ export function createPeer(host: PeerHost): Peer {
     if (!run) return;
     if (expectRunId && run.runId !== expectRunId) return;
     activeRuns.delete(threadId);
+    clearDeadline(threadId);
     try {
       run.dispatcher.flushOutput();
       run.dispatcher.flush();
@@ -1058,16 +1276,26 @@ export function createPeer(host: PeerHost): Peer {
           const reply = texts.join("\n\n").trim();
           finishRun(threadId, turn?.status ?? "completed", reply, turn?.error?.message ?? null);
           const died = turn?.status === "failed" || turn?.status === "interrupted";
+          // Stopped by its own deadline: say so, and say how to raise it.
+          // "interrupted" alone reads as someone having killed it.
+          const limitSec = timedOut.get(threadId);
+          timedOut.delete(threadId);
+          const limit = limitSec !== undefined
+            ? `${describeLimit(limitSec)} limit (a \`timeout:\` header in seconds on your next message raises it for this conversation)`
+            : null;
           if (reply) {
             // A turn that died mid-way may still have buffered text (its
             // opening message, typically). Delivering that alone reads as
             // Codex still working — or worse, as the finished answer. Say
-            // what happened. (Live-observed: `kill` on a peer turn delivered
-            // only "I'll run the two-minute wait…" with no hint of the kill.)
-            const note = died
-              ? `\n\n[codex-collab] Note: the turn ${turn!.status} after this text was written — it is not a complete reply${turn?.error?.message ? ` (${turn.error.message})` : ""}.`
-              : "";
+            // what happened.
+            const note = limit && died
+              ? `\n\n[codex-collab] Note: the turn was stopped after exceeding its ${limit} — the text above is not a complete reply.`
+              : died
+                ? `\n\n[codex-collab] Note: the turn ${turn!.status} after this text was written — it is not a complete reply${turn?.error?.message ? ` (${turn.error.message})` : ""}.`
+                : "";
             deliverAll(reply + note);
+          } else if (limit && died) {
+            deliverAll(`[codex-collab] The turn was stopped after exceeding its ${limit} before producing a reply. \`codex-collab output ${conv.shortId ?? threadId}\` shows what it did.`);
           } else if (died) {
             const err = turn?.error?.message;
             deliverAll(`[codex-collab] The turn ${turn?.status} before producing a reply${err ? `: ${err}` : "."}`);
@@ -1107,10 +1335,10 @@ export function createPeer(host: PeerHost): Peer {
       developerInstructions: PEER_DEVELOPER_INSTRUCTIONS,
       dynamicTools: PEER_DYNAMIC_TOOLS,
     };
-    const model = headers.model ?? userConfig.model;
+    const model = conversationModel(headers.model, userConfig.model);
     if (model) params.model = model;
-    // Reasoning effort reaches a thread only through `config`, which the peer
-    // used to drop entirely — a workspace default that silently did nothing.
+    // Reasoning effort reaches a thread only through `config` — thread/start
+    // carries no top-level field for it.
     const effort = headers.effort ?? userConfig.reasoning;
     if (effort) params.config = { model_reasoning_effort: effort };
     const result = await host.request("thread/start", params) as {
@@ -1158,13 +1386,17 @@ export function createPeer(host: PeerHost): Peer {
   /** Minimal user-defaults read (model/sandbox). commands/shared.ts owns the
    *  full loader, but the broker process should not import the CLI layer —
    *  and a broken config file must degrade, not die, in a daemon. */
-  function readUserConfig(): { model?: string; sandbox?: string; reasoning?: string } {
+  function readUserConfig(): { model?: string; sandbox?: string; reasoning?: string; timeout?: number } {
     try {
       const parsed = JSON.parse(readFileSync(config.configFile, "utf-8"));
+      const timeout = parsed?.timeout;
       return {
         model: typeof parsed?.model === "string" ? parsed.model : undefined,
         sandbox: typeof parsed?.sandbox === "string" ? parsed.sandbox : undefined,
         reasoning: typeof parsed?.reasoning === "string" ? parsed.reasoning : undefined,
+        timeout: typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0 && timeout <= config.maxTimeoutSeconds
+          ? timeout
+          : undefined,
       };
     } catch {
       return {};
@@ -1183,6 +1415,79 @@ export function createPeer(host: PeerHost): Peer {
     });
   }
 
+  /** The thread behind this conversation is not answering. Bring it back if
+   *  it is merely unloaded; failing that, replace it and tell the sender
+   *  what was lost. Returns true when the conversation is now on a NEW
+   *  thread — its history is gone and it is idle, which changes how the
+   *  message must be delivered. Throws if the thread is neither recoverable
+   *  nor provably gone, so a transient failure never costs a conversation. */
+  async function recoverThread(
+    conv: Conversation,
+    msg: InboundMessage,
+    headers: MessageHeaders,
+    topic: string | null,
+    deliveryText: string,
+  ): Promise<boolean> {
+    try {
+      // A resumed thread has lost its dynamic tools (thread/resume cannot
+      // re-declare them) — re-send instructions that say so.
+      await host.request("thread/resume", {
+        threadId: conv.threadId,
+        developerInstructions: PEER_RESUME_INSTRUCTIONS,
+      });
+      return false; // same thread, history intact
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      if (!threadIsGone(detail)) throw e;
+      // Gone for good. The conversation continues on a NEW thread and loses
+      // everything it knew, so the sender hears which case this was: an
+      // archived thread can still be restored, a deleted one cannot.
+      const wasArchived = /\bis archived\b/i.test(detail);
+      const lostThreadId = conv.threadId;
+      host.log(`peer: thread ${lostThreadId} ${wasArchived ? "is archived" : "unrecoverable"} (${detail}) — starting a new one`);
+      threadConversations.delete(conv.threadId);
+      retireThreadPeer(conv.threadId);
+      // Recreate from the CONVERSATION's settings, not this message's
+      // headers: a plain continuation carries none, and defaulting would
+      // silently escalate a read-only conversation to the workspace sandbox
+      // and drop its Guardian approval. The per-turn keys still honor the
+      // current message when it does carry them.
+      const recreate: MessageHeaders = {
+        topic: headers.topic,
+        model: headers.model ?? conv.model,
+        effort: headers.effort ?? conv.effort,
+        timeout: headers.timeout ?? conv.timeout,
+        sandbox: conv.sandbox,
+        approval: conv.approval,
+      };
+      const { threadId, shortId, sandbox, model, effort, approval } =
+        await startThread(msg.fromName, topic ?? deliveryText, recreate);
+      conv.threadId = threadId;
+      conv.shortId = shortId;
+      conv.sandbox = sandbox;
+      conv.model = model;
+      conv.effort = effort;
+      conv.approval = approval;
+      // Keep the conversation's name across a thread restart: its name is
+      // its ADDRESS, and a recreated thread is still the same conversation.
+      if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId, suffix);
+      threadConversations.set(threadId, conv);
+      // Re-key the topic route onto the recreated thread — the topic still
+      // names this conversation even though its thread is new.
+      if (conv.topicKey) byTopic.set(conv.topicKey, conv);
+      createThreadPeer(threadId, shortId, conv.label);
+      saveConversations();
+      deliverTo(
+        msg.replyPath,
+        wasArchived
+          ? `[codex-collab] That conversation's thread was archived, so its history is not available here. Your message went to a fresh thread (${shortId}) instead — it starts with no memory of the conversation. To bring the old one back: \`codex unarchive ${lostThreadId}\``
+          : `[codex-collab] That conversation's thread is gone, so its history is lost. Your message went to a fresh thread (${shortId}) instead — it starts with no memory of the conversation.`,
+        threadId,
+      );
+      return true;
+    }
+  }
+
   // ── Inbound ──
 
   /** Per-conversation FIFO for inbound messages. Two messages from the same
@@ -1196,8 +1501,20 @@ export function createPeer(host: PeerHost): Peer {
   const inboundQueues = new Map<string, Promise<void>>();
 
   function enqueueInbound(msg: InboundMessage, boundThreadId: string | null): void {
-    const key = boundThreadId ?? msg.replyPath;
-    const prev = inboundQueues.get(key) ?? Promise.resolve();
+    // Serialize on every key this message could resolve its conversation
+    // under, not just one. Keying by sender alone let two sessions open the
+    // same new topic in separate queues, where both miss byTopic before
+    // either had stored its conversation: two threads for one topic, and the
+    // route left pointing at whichever finished last. Keying by topic alone
+    // would break the other ordering — a sender's `topic: x` message
+    // followed by a bare continuation, where the second resolves through the
+    // default the first has to have recorded.
+    const keys = [
+      boundThreadId ? `thread:${boundThreadId}` : null,
+      boundThreadId ? null : topicOf(msg.text),
+      `sender:${msg.replyPath}`,
+    ].filter((k): k is string => k !== null);
+    const prev = Promise.all(keys.map((k) => inboundQueues.get(k) ?? Promise.resolve()));
     const next = prev
       .then(() => handleInbound(msg, boundThreadId))
       .catch((e) => {
@@ -1209,10 +1526,19 @@ export function createPeer(host: PeerHost): Peer {
         // The message stays unmarked in the dedupe set, so a retry retries.
         deliverTo(msg.replyPath, `[codex-collab] Your message could not be processed: ${detail}`, boundThreadId);
       });
-    inboundQueues.set(key, next);
+    for (const k of keys) inboundQueues.set(k, next);
     void next.finally(() => {
-      if (inboundQueues.get(key) === next) inboundQueues.delete(key);
+      for (const k of keys) if (inboundQueues.get(k) === next) inboundQueues.delete(k);
     });
+  }
+
+  /** The topic route a front-door message will resolve under, if it names
+   *  one. Parsing here as well as in the handler is cheap and pure. */
+  function topicOf(text: string): string | null {
+    const topic = parseHeaders(text).headers.topic;
+    if (!topic) return null;
+    const k = topicKey(topic);
+    return k ? `topic:${k}` : null;
   }
 
   /** Record a message id as handled. Called on SUCCESS paths only: marking
@@ -1316,8 +1642,8 @@ export function createPeer(host: PeerHost): Peer {
         const { threadId, shortId, sandbox, model, effort, approval } = await startThread(msg.fromName, topic ?? deliveryText, headers);
         // The address may still be unreadable (a topic of only emoji, say);
         // routing does not depend on it.
-        const label = (topic ? topicPeerLabel(topic) : "") || threadPeerLabel(deliveryText, shortId);
-        conv = { threadId, shortId, label, topicKey: topicRoute || undefined, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, approval, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
+        const label = (topic ? topicPeerLabel(topic, suffix) : "") || threadPeerLabel(deliveryText, shortId, suffix);
+        conv = { threadId, shortId, label, topicKey: topicRoute || undefined, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, timeout: headers.timeout, approval, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
         threadConversations.set(threadId, conv);
         if (topicRoute) byTopic.set(topicRoute, conv);
         createThreadPeer(threadId, shortId, label);
@@ -1355,84 +1681,58 @@ export function createPeer(host: PeerHost): Peer {
     if (!freshThread) {
       const settingsChanged =
         (headers.model !== undefined && headers.model !== conv.model) ||
-        (headers.effort !== undefined && headers.effort !== conv.effort);
+        (headers.effort !== undefined && headers.effort !== conv.effort) ||
+        (headers.timeout !== undefined && headers.timeout !== conv.timeout);
       if (settingsChanged) {
         if (headers.model !== undefined) conv.model = headers.model;
         if (headers.effort !== undefined) conv.effort = headers.effort;
+        if (headers.timeout !== undefined) conv.timeout = headers.timeout;
         saveConversations();
       }
       if (headers.sandbox !== undefined || headers.approval !== undefined) {
         deliverTo(
           conv.replyPath,
-          "[codex-collab] Note: sandbox: and approval: are fixed when a conversation starts — this conversation keeps its original settings (model:/effort: updates do apply, from the next turn). Start a new topic: to use a different sandbox or approval mode.",
+          "[codex-collab] Note: sandbox: and approval: are fixed when a conversation starts — this conversation keeps its original settings (model:/effort:/timeout: updates do apply, from the next turn). Start a new topic: to use a different sandbox or approval mode.",
           conv.threadId,
         );
       }
     }
 
-    // Deliver in native peer form, resuming an unloaded thread if needed.
-    // A resumed thread has lost its dynamic tools (thread/resume cannot
-    // re-declare them) — re-send instructions that say so.
-    try {
-      await injectPeerMessage(conv.threadId, msg.fromName, deliveryText);
-    } catch {
+    // Where the message goes depends on whether a turn is already running.
+    // Injection is the only channel that reaches a turn in flight; turn
+    // input is the only channel the Codex app renders. Using both would put
+    // the message in Codex's context twice, and an imperative one twice is
+    // an instruction it can carry out twice.
+    let running = host.threadHasTurn(conv.threadId);
+    let replaced = false;
+
+    if (running) {
       try {
-        await host.request("thread/resume", {
-          threadId: conv.threadId,
-          developerInstructions: PEER_RESUME_INSTRUCTIONS,
-        });
         await injectPeerMessage(conv.threadId, msg.fromName, deliveryText);
       } catch (e) {
-        // Thread unrecoverable (deleted?) — start fresh and redeliver.
-        host.log(`peer: thread ${conv.threadId} unrecoverable (${e instanceof Error ? e.message : String(e)}) — starting a new one`);
-        threadConversations.delete(conv.threadId);
-        retireThreadPeer(conv.threadId);
-        // Recreate from the CONVERSATION's settings, not this message's
-        // headers: a plain continuation carries none, and defaulting would
-        // silently escalate a read-only conversation to the workspace
-        // sandbox and drop its Guardian approval. The per-turn keys still
-        // honor the current message when it does carry them.
-        const recreate: MessageHeaders = {
-          topic: headers.topic,
-          model: headers.model ?? conv.model,
-          effort: headers.effort ?? conv.effort,
-          sandbox: conv.sandbox,
-          approval: conv.approval,
-        };
-        const { threadId, shortId, sandbox, model, effort, approval } = await startThread(msg.fromName, topic ?? deliveryText, recreate);
-        conv.threadId = threadId;
-        conv.shortId = shortId;
-        conv.sandbox = sandbox;
-        conv.model = model;
-        conv.effort = effort;
-        conv.approval = approval;
-        // Keep the conversation's name across a thread restart: its name is
-        // its ADDRESS, and a recreated thread is still the same conversation.
-        if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId);
-        threadConversations.set(threadId, conv);
-        // Re-key the topic route onto the recreated thread — the topic still
-        // names this conversation even though its thread is new.
-        if (conv.topicKey) byTopic.set(conv.topicKey, conv);
-        createThreadPeer(threadId, shortId, conv.label);
-        saveConversations();
-        await injectPeerMessage(threadId, msg.fromName, deliveryText);
+        if (!threadIsGone(e instanceof Error ? e.message : String(e))) throw e;
+        replaced = await recoverThread(conv, msg, headers, topic, deliveryText);
+        // A resumed thread is the same thread, still mid-turn. A replaced
+        // one is brand new and idle, so it takes the turn-input path below.
+        if (!replaced) await injectPeerMessage(conv.threadId, msg.fromName, deliveryText);
+        else running = false;
       }
     }
 
-    // The message is in the thread — delivery has happened; everything
-    // after is a best-effort wake-up. Only now is a retry a duplicate.
+    // The message has a thread to land on — delivery is happening; a retry
+    // from here would be a duplicate.
     markSeen(msg.msgId);
 
     // Mid-turn: the injection is read at the next sampling point — usually.
     // Record the debt: if the turn never samples again (past its last
     // sampling point, or CLI-owned with its reply going to its own client),
     // onThreadTurnEnded wakes the thread when the turn ends.
-    if (host.threadHasTurn(conv.threadId)) {
+    if (running) {
       queueWake(conv.threadId, msg.replyPath, deliveryText);
       // Whatever the turn says from here on answers this sender too: the
       // message arrived before it ended, and it may well have read it.
-      const running = turnAudience.get(conv.threadId);
-      if (running && running.size < MAX_AUDIENCE) running.add(msg.replyPath);
+      const audience = turnAudience.get(conv.threadId);
+      if (audience && audience.size < MAX_AUDIENCE) audience.add(msg.replyPath);
       // Arm the reply buffer if the running turn has none — a goal-mode
       // continuation turn runs with its buffer already consumed ("stay
       // silent per continuation"), and without re-arming, a message it
@@ -1445,10 +1745,25 @@ export function createPeer(host: PeerHost): Peer {
       return;
     }
 
-    // Idle: wake the thread. The claim can race a CLI run's turn/start;
-    // losing it leaves the message to that turn — which samples AFTER the
-    // injection, but answers its own client, so record the debt here too.
-    if (!await startPeerTurn(conv, deliveryText, [msg.replyPath])) {
+    // Idle: the turn carries the message, so starting it IS the delivery —
+    // which makes turn/start the point where a vanished thread shows up.
+    let outcome = await startPeerTurn(conv, deliveryText, [msg.replyPath]);
+    if (outcome === "thread-gone" && !replaced) {
+      // turn/start says only "not found" for a thread that is archived AND
+      // for one that is deleted; resume is what tells them apart, so the
+      // same recovery runs here as on the injection path.
+      replaced = await recoverThread(conv, msg, headers, topic, deliveryText);
+      outcome = await startPeerTurn(conv, deliveryText, [msg.replyPath]);
+    }
+    if (outcome === "claim-lost") {
+      // A concurrent turn claimed the thread first. It answers its own
+      // client, so the debt is recorded — and the message has to be injected
+      // after all, since that turn's input is already spent.
+      try {
+        await injectPeerMessage(conv.threadId, msg.fromName, deliveryText);
+      } catch (e) {
+        host.log(`peer: could not inject into a turn that won the claim: ${e instanceof Error ? e.message : String(e)}`);
+      }
       queueWake(conv.threadId, msg.replyPath, deliveryText);
     }
   }
@@ -1456,6 +1771,52 @@ export function createPeer(host: PeerHost): Peer {
   /** Claim the thread and start a peer-owned turn for a delivered message.
    *  Returns false when the claim was lost to a concurrent turn/start.
    *  `nudge` overrides the standard wake-up prompt. */
+  /** "45-second" below two minutes, "20-minute" from there: a 30-second
+   *  limit described as one minute misreports what happened. */
+  function describeLimit(limitSec: number): string {
+    return limitSec < 120 ? `${limitSec}-second` : `${Math.round(limitSec / 60)}-minute`;
+  }
+
+  /** Cap the turn just started on `conv`, at the conversation's own limit,
+   *  else the workspace's `config timeout`, else the CLI default. On expiry
+   *  the turn is interrupted the way `kill` does it; its turn/completed then
+   *  reports the timeout to the sender. Cleared by finishRun, so a turn that
+   *  ends in time never fires it, and the check on runId keeps a late timer
+   *  from stopping whatever turn replaced the one it was armed for. */
+  function armDeadline(conv: Conversation, runId: string | null): void {
+    clearDeadline(conv.threadId);
+    const threadId = conv.threadId;
+    const limitSec = conv.timeout ?? readUserConfig().timeout ?? config.defaultTimeout;
+    const timer = setTimeout(() => {
+      deadlines.delete(threadId);
+      const run = activeRuns.get(threadId);
+      if (!run || (runId !== null && run.runId !== runId)) return;
+      timedOut.set(threadId, limitSec);
+      host.log(`peer: turn on ${threadId} exceeded its ${limitSec}s limit — interrupting`);
+      host.interruptThread(threadId).catch((e) => {
+        // Still running, and nothing here can stop it: say so rather than
+        // let the silence continue. The run record stays open until the
+        // turn really ends.
+        timedOut.delete(threadId);
+        const detail = e instanceof Error ? e.message : String(e);
+        host.log(`peer: could not interrupt the overdue turn on ${threadId}: ${detail}`);
+        const shortId = conv.shortId ?? threadId;
+        for (const to of turnAudience.get(threadId) ?? [conv.replyPath]) {
+          deliverTo(to, `[codex-collab] The turn has run past its ${describeLimit(limitSec)} limit and could not be interrupted (${detail}) — it is still running. \`codex-collab kill ${shortId}\` stops it.`, threadId);
+        }
+      });
+    }, limitSec * 1000);
+    timer.unref?.();
+    deadlines.set(threadId, { timer, runId, limitSec });
+  }
+
+  function clearDeadline(threadId: string): void {
+    const armed = deadlines.get(threadId);
+    if (!armed) return;
+    clearTimeout(armed.timer);
+    deadlines.delete(threadId);
+  }
+
   /** Remember that `replyPath` is owed an answer on `threadId`. */
   function queueWake(threadId: string, replyPath: string, prompt: string): void {
     const perSender = pendingWakes.get(threadId) ?? new Map<string, string>();
@@ -1470,8 +1831,8 @@ export function createPeer(host: PeerHost): Peer {
     pendingWakes.set(threadId, perSender);
   }
 
-  async function startPeerTurn(conv: Conversation, runPrompt: string, recipients: string[], nudge?: string): Promise<boolean> {
-    if (!host.claimThread(conv.threadId, ownerFor(conv.threadId))) return false;
+  async function startPeerTurn(conv: Conversation, runPrompt: string, recipients: string[], nudge?: string): Promise<TurnOutcome> {
+    if (!host.claimThread(conv.threadId, ownerFor(conv.threadId))) return "claim-lost";
     // This turn samples everything delivered so far, so it inherits the
     // debts: anyone already waiting is owed an answer, and its context
     // contains their messages. Clearing the queue without adopting them
@@ -1497,11 +1858,16 @@ export function createPeer(host: PeerHost): Peer {
         threadId: conv.threadId,
         ...(conv.model ? { model: conv.model } : {}),
         ...(conv.effort ? { effort: conv.effort } : {}),
+        // Turn input is the only channel the Codex app renders.
         input: [{
           type: "text",
-          text: nudge ?? "(A peer message was just delivered to this conversation as an agent_message from /root/claude. Read it and respond or act accordingly.)",
+          text: buildDelegation(
+            `[message from ${conv.fromName || "a Claude peer"}]\n\n`
+            + (nudge ? `${nudge}\n\n${runPrompt}` : runPrompt),
+          ),
         }],
       });
+      armDeadline(conv, runId);
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       // Tear down THIS turn's state BEFORE releasing the claim. Releasing
@@ -1520,11 +1886,15 @@ export function createPeer(host: PeerHost): Peer {
       // whole life.
       host.releaseThread(conv.threadId);
       host.log(`peer: turn/start failed for ${conv.threadId}: ${detail}`);
+      // A vanished thread is recoverable, so the caller gets to try before
+      // the sender is told anything. Every other failure is final here.
+      if (threadIsGone(detail)) return "thread-gone";
       for (const to of recipients) {
         deliverTo(to, `[codex-collab] Could not start a turn: ${detail}`, conv.threadId);
       }
+      return "failed";
     }
-    return true;
+    return "started";
   }
 
   /** A turn on `threadId` ended (the broker's lifecycle tracking calls this
@@ -1555,12 +1925,23 @@ export function createPeer(host: PeerHost): Peer {
       return;
     }
     pendingWakes.delete(threadId);
+    const owed = [...pending.keys()];
     void startPeerTurn(
       conv,
       [...pending.values()].join("\n\n"),
-      [...pending.keys()],
+      owed,
       "(A peer message was delivered to this conversation while the previous turn was running, and it may not have been read or answered. Check the latest peer messages from /root/claude; respond to or act on anything unaddressed. If everything was already handled, reply briefly to the peer to say so.)",
-    ).catch((e) => {
+    ).then((outcome) => {
+      // startPeerTurn reports a vanished thread rather than announcing it,
+      // so the caller can recover. There is nothing to recover from here —
+      // no inbound message to redeliver — so the debt is settled by saying
+      // so, which is still better than the silence this used to be.
+      if (outcome === "thread-gone") {
+        for (const to of owed) {
+          deliverTo(to, "[codex-collab] That conversation's thread is gone, so the answer you were waiting for is not coming. Send again to start a fresh one.", conv.threadId);
+        }
+      }
+    }).catch((e) => {
       host.log(`peer: pending wake failed for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
     });
   }
@@ -1633,6 +2014,11 @@ export function createPeer(host: PeerHost): Peer {
         try {
           const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
           if (entry?.pid !== pid) continue;
+          // Only a session that binds a messaging socket can message the
+          // peer. An entry without one — a session on an older Claude Code,
+          // or a registry record of some other kind — has no way to reach
+          // us, so it must not keep the broker resident either.
+          if (typeof entry?.messagingSocketPath !== "string") continue;
           // A codex-collab broker for ANOTHER workspace is not a Claude
           // session. `ours` only knows this broker's own pids, so without
           // this each sibling counts the other as an external live session:
@@ -1755,6 +2141,8 @@ export function createPeer(host: PeerHost): Peer {
     stopped = true;
     active = false;
     if (sweepTimer) clearInterval(sweepTimer);
+    for (const threadId of [...deadlines.keys()]) clearDeadline(threadId);
+    timedOut.clear();
     pendingWakes.clear();
     turnAudience.clear();
     for (const [threadId, pending] of pendingConsults) {
@@ -1782,6 +2170,7 @@ export function createPeer(host: PeerHost): Peer {
       pendingWakes: pendingWakes.size,
       replyBuffers: replyBuffers.size,
       activeRuns: activeRuns.size,
+      deadlines: deadlines.size,
     }),
     hasLiveSessions,
     stop,

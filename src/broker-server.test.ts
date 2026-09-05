@@ -2552,8 +2552,8 @@ setInterval(() => {}, 1000);
         }
         expect(gotBusy).toBe(true);
 
-        // The PARENT thread carries no turn and stays free for other work —
-        // holding it for the connection's whole life was the old bug.
+        // The PARENT thread carries no turn and stays free for other work:
+        // a claim lasts a turn, not a connection.
         const parentTurn = await client2.request("turn/start", {
           threadId: "thread-001",
           input: [{ type: "text", text: "parent is free" }],
