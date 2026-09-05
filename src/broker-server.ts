@@ -749,6 +749,27 @@ async function main() {
     return true;
   }
 
+  /** Retry a rejected turn/interrupt against the turn the server says is
+   *  actually active, but only for the client that owns the thread. Returns
+   *  the successful result, or null to let the original error through. */
+  async function retargetInterrupt(
+    socket: net.Socket,
+    params: Record<string, unknown> | undefined,
+    error: unknown,
+  ): Promise<{ result: unknown } | null> {
+    const threadId = typeof params?.threadId === "string" ? params.threadId : null;
+    if (!threadId) return null;
+    if (threads.get(threadId)?.socket !== socket) return null;
+    const message = error instanceof Error ? error.message : String(error);
+    const found = /expected active turn id \S+ but found (\S+)/.exec(message)?.[1];
+    if (!found || found === params?.turnId) return null;
+    try {
+      return { result: await appClient.request("turn/interrupt", { threadId, turnId: found }) };
+    } catch {
+      return null; // the original error is the more useful one to report
+    }
+  }
+
   // ─── Streaming request settlement ──────────────────────────────────────
 
   /** A streaming request's response (or error) arrived. Fill in what only
@@ -778,14 +799,41 @@ async function main() {
     if (result === null) {
       // Request failed. Usually no turn started — but turn/started is a
       // notification and can land BEFORE the RPC settles, so the server may
-      // be running a turn this failed request will never report. Record it
-      // as settled before letting the claim go: otherwise its completion
-      // arrives unmarked, after another turn has claimed the thread, and
-      // releases that turn's claim instead. Same reason the orphan watchdog
-      // marks before interrupting.
+      // be running a turn this failed request will never report.
       if (entry && entry.requestPending) {
-        if (entry.turnId) markTurnEnded(parentThreadId!, entry.turnId);
-        releaseThread(parentThreadId!);
+        entry.requestPending = false;
+        if (!entry.turnId) {
+          // Nothing was ever announced: no turn to worry about.
+          releaseThread(parentThreadId!);
+          return;
+        }
+        // A turn WAS announced and its initiator has just been handed an
+        // error, so nobody is listening to it. Releasing the thread here
+        // would let a retry start a second turn beside one that is still
+        // running and still editing the workspace, unobserved. Treat it as
+        // an orphan — the same handling an initiator that disconnected
+        // mid-request gets, for the same reason.
+        entry.socket = null;
+        armOrphanWatchdog(parentThreadId!, entry);
+        try {
+          await appClient.request("turn/interrupt", { threadId: parentThreadId!, turnId: entry.turnId });
+          // Acknowledged: the turn existed. Hold the reservation and let
+          // turn/completed — or the watchdog, on a turn that never tears
+          // down — release it.
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e);
+          if (/not found|no active turn|not running/i.test(detail)) {
+            // The server does not know this turn, so nothing is running
+            // after all. Holding the thread until the watchdog would block
+            // it for half an hour over a turn that never existed.
+            markTurnEnded(parentThreadId!, entry.turnId);
+            releaseThread(parentThreadId!);
+          } else {
+            process.stderr.write(
+              `[broker-server] Warning: could not interrupt turn ${entry.turnId} after its request failed: ${detail}\n`,
+            );
+          }
+        }
       }
       return;
     }
@@ -990,6 +1038,20 @@ async function main() {
 
       send(socket, { id: message.id, result });
     } catch (error) {
+      // A stale interrupt names a turn that has since rotated (context
+      // compaction starts a new one), and the rejection names the turn that
+      // is active now. Retargeting it is only safe for the client that owns
+      // the thread: if the caller's own turn ended and another invocation
+      // claimed it, the named turn is that invocation's, and interrupting it
+      // cancels work nobody asked to stop. Ownership is only knowable here,
+      // which is why the CLI defers this to the broker.
+      if (method === "turn/interrupt") {
+        const retargeted = await retargetInterrupt(socket, params, error);
+        if (retargeted) {
+          send(socket, { id: message.id, result: retargeted.result });
+          return;
+        }
+      }
       if (isStreaming) {
         await settleStreamingRequest(socket, method, params, null, claimed);
       }

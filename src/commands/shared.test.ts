@@ -1250,6 +1250,7 @@ describe("startOrResumeThread", () => {
       close: async () => {},
       userAgent: "mock",
       brokerBusy: false,
+    isBrokered: false,
     };
     const opts = defaultOptions();
     opts.resumeId = sourceThreadId;
@@ -1356,6 +1357,7 @@ describe("startOrResumeThread", () => {
       close: async () => {},
       userAgent: "mock",
       brokerBusy: false,
+    isBrokered: false,
     };
   }
 
@@ -1837,6 +1839,7 @@ const client: any = {
   },
   notify() {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
   respond() {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
+    isBrokered: false,
 };
 let callNo = 0;
 
@@ -1880,6 +1883,7 @@ describe("delete --purge", () => {
       request: (async () => impl()) as AppServerClient["request"],
       notify: () => {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
       respond: () => {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
+    isBrokered: false,
     });
 
     expect(await tryServerDelete(clientFor(async () => ({})), "t1")).toBe("deleted");
@@ -1914,6 +1918,7 @@ describe("tryServerDelete: unsupported thread/delete must not read as success", 
     request: (async () => { throw err; }) as AppServerClient["request"],
     notify: () => {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
     respond: () => {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
+    isBrokered: false,
   });
 
   test("JSON-RPC -32601 (method not found) is a failure, not already_done", async () => {

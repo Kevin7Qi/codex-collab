@@ -182,6 +182,9 @@ function createMockCodex(dir: string, opts?: {
    *  turn A completes). The inner turn/started must not make the broker treat
    *  the review's own completion as belonging to some other turn. */
   reviewInnerTurn?: boolean;
+  /** If set, turn/interrupt rejects any turnId other than this one, with the
+   *  mismatch message real Codex uses when a turn has rotated mid-run. */
+  activeTurnId?: string;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
@@ -196,6 +199,7 @@ function createMockCodex(dir: string, opts?: {
   const goalPreexisting = opts?.goalPreexisting ?? false;
   const goalFastFirstTurn = opts?.goalFastFirstTurn ?? false;
   const staleCompletionReplay = opts?.staleCompletionReplay ?? false;
+  const activeTurnId = opts?.activeTurnId ?? null;
 
   const interruptLog = join(dir, "interrupts.log");
   const script = `#!/usr/bin/env bun
@@ -443,6 +447,11 @@ process.stdin.on("data", (chunk) => {
           threadId: msg.params?.threadId ?? null,
           turnId: msg.params?.turnId ?? null,
         }) + "\\n");
+        ${activeTurnId ? `
+        if (msg.params?.turnId !== ${JSON.stringify(activeTurnId)}) {
+          respond({ id: msg.id, error: { code: -32000, message: "expected active turn id " + msg.params?.turnId + " but found ${activeTurnId}" } });
+          break;
+        }` : ""}
         respond({ id: msg.id, result: {} });
         break;
 
@@ -2558,15 +2567,16 @@ setInterval(() => {}, 1000);
       }
     }, 15_000);
 
-    test("a turn announced before its request failed cannot settle a later claim", async () => {
+    test("a turn announced before its request failed keeps the thread until it ends", async () => {
       // turn/started is a notification and can land BEFORE the RPC settles,
       // so a failed streaming request can leave the server running a turn it
-      // will never report. If the broker releases the claim without recording
-      // that turn as settled, its late completion is treated as current: it
-      // is forwarded to whoever owns the thread NOW and releases that claim,
-      // leaving the new turn running with nobody listening.
+      // will never report. Its initiator has just been handed an error, so
+      // nobody is listening — but it is still running, and still editing the
+      // workspace. Releasing the thread would let a retry start a second turn
+      // beside it.
       const sockPath = testSocketPath(tempDir);
       const mockDir = createMockCodex(tempDir, { startedThenError: true });
+      const interruptLog = join(mockDir, "interrupts.log");
 
       const proc = spawnBroker(endpointFor(sockPath), mockDir);
       await waitForSocket(sockPath);
@@ -2583,32 +2593,112 @@ setInterval(() => {}, 1000);
         }
         expect(failed).toBe(true);
 
-        // Turn 2 claims the thread.
-        const second = await client.request("turn/start", {
-          threadId: "thread-001",
-          input: [{ type: "text", text: "two" }],
-        }) as { turn: { id: string } };
-        expect(second.turn.id).toBe("turn-002");
+        // The abandoned turn is interrupted rather than left to run on.
+        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        const interrupts = readFileSync(interruptLog, "utf-8")
+          .trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+        expect(interrupts.some((i) => i.turnId === "turn-001")).toBe(true);
 
-        // Turn 1's completion lands while turn 2 owns the thread. This one
-        // proves a NEGATIVE — that the claim survives it — so there is no
-        // condition to converge on and time is the only instrument. The mock
-        // replays at +400ms; wait well past that so load cannot turn "not
-        // yet arrived" into a false pass.
-        await new Promise((r) => setTimeout(r, 2000));
-
-        // Turn 2's claim must survive it.
+        // And the thread stays reserved while it may still be running: a
+        // retry must not start a second turn beside the first.
         const other = await TestClient.connectAndInit(sockPath);
         let refused = false;
         try {
-          await other.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "three" }] });
+          await other.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "two" }] });
         } catch (e) {
           refused = (e as Error).message.includes("already running");
         }
         expect(refused).toBe(true);
 
+        // Turn 1's completion (mock replays it at +400ms) frees the thread —
+        // the reservation is held until the turn really ends, not forever.
+        let second: { turn: { id: string } } | null = null;
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline && !second) {
+          try {
+            second = await other.request("turn/start", {
+              threadId: "thread-001", input: [{ type: "text", text: "two" }],
+            }) as { turn: { id: string } };
+          } catch {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+        }
+        expect(second).not.toBeNull();
+        expect(second!.turn.id).toBe("turn-002");
+
         await other.close();
         await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a stale interrupt is retargeted for the thread's owner", async () => {
+      // A long turn rotates ids (context compaction starts a new one), so the
+      // id the CLI recorded goes stale and turn/interrupt is rejected naming
+      // the turn that is active now. Without the retarget the original turn
+      // runs on with nobody listening — observed as a review outliving its
+      // own CLI timeout by twenty minutes.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, { activeTurnId: "turn-rotated", sendTurnCompleted: false });
+      const interruptLog = join(mockDir, "interrupts.log");
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "x" }] });
+
+        // The owner interrupts with the id it recorded, which is now stale.
+        await client.request("turn/interrupt", { threadId: "thread-001", turnId: "turn-001" });
+
+        await waitFor(() => existsSync(interruptLog)
+          && readFileSync(interruptLog, "utf-8").includes("turn-rotated"), 5000, 50);
+        const ids = readFileSync(interruptLog, "utf-8").trim().split("\n")
+          .filter(Boolean).map((l) => JSON.parse(l).turnId);
+        // Tried the stale id, then the one the server named.
+        expect(ids).toContain("turn-001");
+        expect(ids).toContain("turn-rotated");
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a stale interrupt is NOT retargeted for a client that does not own the thread", async () => {
+      // The rejection names whatever turn is active — which, once this
+      // caller's own turn has ended and another invocation has claimed the
+      // thread, is that invocation's turn. Retargeting there would cancel
+      // work nobody asked to stop, so the original error is returned instead.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, { activeTurnId: "turn-rotated", sendTurnCompleted: false });
+      const interruptLog = join(mockDir, "interrupts.log");
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const owner = await TestClient.connectAndInit(sockPath);
+        await owner.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "x" }] });
+
+        // A DIFFERENT connection interrupts a thread it does not own.
+        const stranger = await TestClient.connectAndInit(sockPath);
+        let failed = false;
+        try {
+          await stranger.request("turn/interrupt", { threadId: "thread-001", turnId: "turn-001" });
+        } catch (e) {
+          failed = (e as Error).message.includes("expected active turn id");
+        }
+        expect(failed).toBe(true);
+
+        // It reached the stale id only — the active turn was never touched.
+        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        const ids = readFileSync(interruptLog, "utf-8").trim().split("\n")
+          .filter(Boolean).map((l) => JSON.parse(l).turnId);
+        expect(ids).toContain("turn-001");
+        expect(ids).not.toContain("turn-rotated");
+
+        await stranger.close();
+        await owner.close();
       } finally {
         proc.kill();
       }

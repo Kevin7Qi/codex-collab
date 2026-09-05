@@ -67,7 +67,7 @@ export const config = {
   defaultApprovalPolicy: "never" as const,
 
   // Timeouts
-  defaultTimeout: 1200, // seconds — turn completion (20 min)
+  defaultTimeout: 3600, // seconds — turn completion (1 hour)
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
   // Broker idle timeout (ms) before a detached broker self-exits. Overridable
   // via CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS so tests can make brokers exit in

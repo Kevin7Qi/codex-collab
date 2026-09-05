@@ -275,7 +275,7 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write). **`review` rejects this flag** (exit 1) — reviews always run read-only, so don't pass it even to restate the default |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
-| `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 1200). Do not lower this — Codex tasks routinely take 5-15 minutes; increase for large reviews or complex tasks. When a goal is active the timeout scopes the WHOLE goal and expiry pauses it (see Goal Mode). (ask) Answer deadline, default 600. (next) Wait bound, default none — it waits until an event or workspace idle. |
+| `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 3600). Do not lower this — Codex tasks routinely take 5-15 minutes and large reviews can exceed 20. When a goal is active the timeout scopes the WHOLE goal and expiry pauses it (see Goal Mode). (ask) Answer deadline, default 600. (next) Wait bound, default none — it waits until an event or workspace idle. |
 | `--approval <policy>` | never, on-request, on-failure, untrusted, auto (default: never) — see Approvals. **`review` rejects this flag** (exit 1): Codex locks review sub-agents to `never`, so it could never take effect |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--detach` | (run) Return once the turn is running — see Detached Runs |
@@ -357,7 +357,7 @@ To hand off a thread to the Codex TUI, look up the full thread ID with `codex-co
 | Symptom | Fix |
 |---------|-----|
 | "codex CLI not found" | Install: `npm install -g @openai/codex` |
-| Turn timed out | Increase `--timeout` (e.g., `--timeout 1800` for 30 min). Large reviews and complex tasks often need more than the 20-min default. |
+| Turn timed out | At the 1-hour default, a timeout usually means a stuck process, not a slow one. Use `follow` for a live view or `output` to inspect the log. For genuinely large jobs, raise `--timeout` further. |
 | Thread not found | Use `codex-collab threads` to list active threads |
 | Process crashed mid-task | Resume with `--resume <id>` — thread state is persisted |
 | Approval request hanging | Run `codex-collab approve <id>` or `codex-collab decline <id>` |

@@ -203,7 +203,7 @@ The peer degrades cleanly: on Windows, without a session registry, or with `CODE
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto`: Codex's Guardian reviewer approves or denies each request autonomously — never blocks on a human; decisions stream as Guardian lines. `review` rejects this flag: Codex locks review sub-agents to `never`, so it could never take effect |
 | `--memory` | Let Codex's memory feature learn from threads this run creates. Default: created threads get `thread/memoryMode/set mode=disabled`; resumed threads are never touched (the flag is persistent per-thread, and a thread you created yourself should keep feeding your memory). Governs Codex's *local* memory consolidation (`~/.codex/memories`) only — the `personality` feature is explicit user config (not learned) and unaffected. Persistent form: `config memory true` |
-| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483). When a goal is active it scopes the whole goal, and expiry pauses the goal before exiting. For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
+| `--timeout <sec>` | Turn timeout (default: 3600, max 2147483). When a goal is active it scopes the whole goal, and expiry pauses the goal before exiting. For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
 | `--` | End of options; remaining arguments are treated as prompt text |
 
 **run**

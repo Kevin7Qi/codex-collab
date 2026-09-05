@@ -90,6 +90,12 @@ export interface AppServerClient {
    *  a current broker and for direct connections; it remains in the
    *  handshake for compatibility with older brokers. */
   brokerBusy: boolean;
+  /** True when this client reaches the app-server through the broker. The
+   *  broker arbitrates thread ownership, so anything that depends on knowing
+   *  who owns a thread — retargeting a stale interrupt, for one — belongs
+   *  there rather than here. A direct connection owns its app-server outright
+   *  and has no such question to answer. */
+  isBrokered: boolean;
 }
 
 /**
@@ -334,6 +340,7 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     close,
     userAgent: initResult.userAgent,
     brokerBusy: false,
+    isBrokered: false,
   };
 }
 
