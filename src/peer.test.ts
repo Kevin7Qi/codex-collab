@@ -2674,8 +2674,10 @@ describe.skipIf(onWindows)("turn deadlines", () => {
       stateDir: dir,
       request: async (method: string) => (method === "thread/start" ? { thread: { id: "thread-D" } } : {}),
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
-      releaseThread: () => {},
-      threadHasTurn: () => false,
+      releaseThread: (threadId) => { owners.delete(threadId); },
+      // Idle until the peer claims the thread — the deadline asks the host
+      // whether a turn still runs before it acts.
+      threadHasTurn: (threadId) => owners.has(threadId),
       interruptThread: async (threadId) => { interrupted.push(threadId); },
       log: () => {},
     };

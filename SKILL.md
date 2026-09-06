@@ -293,7 +293,12 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `-s, --sandbox <mode>` | Sandbox: read-only, workspace-write, danger-full-access (default: workspace-write). **`review` rejects this flag** (exit 1) — reviews always run read-only, so don't pass it even to restate the default |
 | `-d, --dir <path>` | Working directory (default: cwd) |
 | `--resume <id>` | Resume existing thread (run and review) |
+<!-- MODE:peer -->
+| `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 3600). Do not lower this — Codex tasks routinely take 5-15 minutes and large reviews can exceed 20. When a goal is active the timeout scopes the WHOLE goal and expiry pauses it (see Goal Mode). |
+<!-- /MODE:peer -->
+<!-- MODE:cli -->
 | `--timeout <sec>` | (run, review) Turn timeout in seconds (default: 3600). Do not lower this — Codex tasks routinely take 5-15 minutes and large reviews can exceed 20. When a goal is active the timeout scopes the WHOLE goal and expiry pauses it (see Goal Mode). (ask) Answer deadline, default 600. (next) Wait bound, default none — it waits until an event or workspace idle. |
+<!-- /MODE:cli -->
 | `--approval <policy>` | never, on-request, on-failure, untrusted, auto (default: never) — see Approvals. **`review` rejects this flag** (exit 1): Codex locks review sub-agents to `never`, so it could never take effect |
 | `--memory` | Let Codex's memory feature learn from threads this run creates (default: created threads are excluded so agent-driven sessions don't shape Codex's picture of the user) |
 | `--detach` | (run) Return once the turn is running — see Detached Runs |
@@ -323,9 +328,16 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 
 A goal makes the server keep starting continuation turns on its own until the objective is done (Codex's Goal mode, `goals = true` in the user's `~/.codex/config.toml`). Codex can create one mid-turn, or you set one explicitly — worth it for open-ended objectives that take an unknown number of turns (get CI green, migrate every call site); a bounded single task gains nothing from one:
 
+<!-- MODE:peer -->
+```bash
+codex-collab run "survey the call sites first" --goal "migrate all call sites to the v2 API, tests green" --budget 150000 --timeout 7200
+```
+<!-- /MODE:peer -->
+<!-- MODE:cli -->
 ```bash
 codex-collab run "survey the call sites first" --goal "migrate all call sites to the v2 API, tests green" --budget 150000 --template collab --timeout 7200
 ```
+<!-- /MODE:cli -->
 
 `run` follows the whole goal: continuation turns stream into the same run record and log, `follow`/`output`/`threads` see them, and the run's exit code reflects the goal's end — completed (0), blocked/limited (7), timed out and paused (3). Practical implications:
 

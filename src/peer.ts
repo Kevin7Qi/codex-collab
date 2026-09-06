@@ -1380,6 +1380,7 @@ export function createPeer(host: PeerHost): Peer {
         } else if (method === "turn/completed") {
           // There is no turn/failed notification — failure and interruption
           // arrive as turn/completed with turn.status set accordingly.
+          clearDeadline(threadId); // the turn is over, run record or not
           const texts = replyBuffers.get(threadId);
           replyBuffers.delete(threadId);
           updateStatus("idle");
@@ -1913,8 +1914,12 @@ export function createPeer(host: PeerHost): Peer {
     const limitSec = conv.timeout ?? readUserConfig().timeout ?? config.defaultTimeout;
     const timer = setTimeout(() => {
       deadlines.delete(threadId);
+      // The ledger is best-effort, so the turn's existence is asked of the
+      // host, not of activeRuns; the run id only guards against a newer
+      // turn having replaced the one this deadline was armed for.
+      if (!host.threadHasTurn(threadId)) return;
       const run = activeRuns.get(threadId);
-      if (!run || (runId !== null && run.runId !== runId)) return;
+      if (run && runId !== null && run.runId !== runId) return;
       timedOut.set(threadId, limitSec);
       host.log(`peer: turn on ${threadId} exceeded its ${limitSec}s limit — interrupting`);
       host.interruptThread(threadId).catch((e) => {
