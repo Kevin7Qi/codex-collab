@@ -165,6 +165,26 @@ function createMockCodex(dir: string, opts?: {
    *  response, then a continuation turn starts. The broker must claim
    *  ownership despite the already-completed first turn. */
   goalFastFirstTurn?: boolean;
+  /** If true, each turn gets its own id, and the SECOND turn is followed by
+   *  a replay of the FIRST turn's completion — the late-arriving completion
+   *  of a turn that was already settled (a watchdog-interrupted orphan, or
+   *  a duplicate). The second turn itself never completes. */
+  staleCompletionReplay?: boolean;
+  /** If true, the FIRST turn/start announces its turn and then fails the
+   *  request: turn/started is a notification and can land before the RPC
+   *  settles, so the server is left running a turn this request will never
+   *  report. Its completion arrives later, after a second turn has claimed
+   *  the thread. */
+  startedThenError?: boolean;
+  /** If true, the review announces an INNER turn with its own id before the
+   *  review turn completes — what real Codex does (observed on 0.147.0:
+   *  review/start responds with turn A, then turn/started names turn B, then
+   *  turn A completes). The inner turn/started must not make the broker treat
+   *  the review's own completion as belonging to some other turn. */
+  reviewInnerTurn?: boolean;
+  /** If set, turn/interrupt rejects any turnId other than this one, with the
+   *  mismatch message real Codex uses when a turn has rotated mid-run. */
+  activeTurnId?: string;
 }): string {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
@@ -172,10 +192,14 @@ function createMockCodex(dir: string, opts?: {
   const turnCompletedDelay = opts?.turnCompletedDelay ?? 10;
   const completeBeforeResponse = opts?.completeBeforeResponse ?? false;
   const reviewDelay = opts?.reviewDelay ?? 0;
+  const reviewInnerTurn = opts?.reviewInnerTurn ?? false;
+  const startedThenError = opts?.startedThenError ?? false;
   const goalContinuation = opts?.goalContinuation ?? false;
   const goalPausedInGap = opts?.goalPausedInGap ?? false;
   const goalPreexisting = opts?.goalPreexisting ?? false;
   const goalFastFirstTurn = opts?.goalFastFirstTurn ?? false;
+  const staleCompletionReplay = opts?.staleCompletionReplay ?? false;
+  const activeTurnId = opts?.activeTurnId ?? null;
 
   const interruptLog = join(dir, "interrupts.log");
   const script = `#!/usr/bin/env bun
@@ -191,6 +215,7 @@ function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 
 let buffer = "";
 let approvalIdCounter = 1;
+let turnCounter = 0;
 process.stdin.setEncoding("utf-8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -239,6 +264,38 @@ process.stdin.on("data", (chunk) => {
 
       case "turn/start": {
         const threadId = msg.params?.threadId || "thread-001";
+        ${startedThenError ? `
+        turnCounter++;
+        if (turnCounter === 1) {
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "inProgress", error: null } } });
+          respond({ id: msg.id, error: { code: -32000, message: "simulated request failure after turn/started" } });
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, 400);
+        } else {
+          respond({ id: msg.id, result: { turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-002", items: [], status: "inProgress", error: null } } });
+        }
+        break;
+        ` : ""}
+        ${staleCompletionReplay ? `
+        turnCounter++;
+        const thisTurnId = "turn-" + String(turnCounter).padStart(3, "0");
+        respond({ id: msg.id, result: { turn: { id: thisTurnId, items: [], status: "inProgress", error: null } } });
+        respond({ method: "turn/started", params: { threadId: threadId, turn: { id: thisTurnId, items: [], status: "inProgress", error: null } } });
+        if (turnCounter === 1) {
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, 30);
+        } else {
+          // Turn 2 is running. Replay turn 1's completion: already settled,
+          // and the thread has changed hands since.
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, 60);
+        }
+        break;
+        ` : ""}
         ${goalFastFirstTurn ? `
         // Fast-turn race on a goal thread: goal becomes active and the turn
         // completes BEFORE the turn/start response reaches the broker.
@@ -357,6 +414,19 @@ process.stdin.on("data", (chunk) => {
             turn: { id: "review-turn-001", items: [], status: "inProgress", error: null },
             reviewThreadId: reviewThreadId,
           }});
+          ${reviewInnerTurn ? `
+          // Real Codex announces an inner turn under its own id partway
+          // through the review, BEFORE the review turn itself completes.
+          setTimeout(() => {
+            respond({
+              method: "turn/started",
+              params: {
+                threadId: reviewThreadId,
+                turn: { id: "review-inner-001", items: [], status: "inProgress", error: null },
+              },
+            });
+          }, 20);
+          ` : ""}
           ${sendTurnCompleted ? `
           setTimeout(() => {
             respond({
@@ -377,6 +447,11 @@ process.stdin.on("data", (chunk) => {
           threadId: msg.params?.threadId ?? null,
           turnId: msg.params?.turnId ?? null,
         }) + "\\n");
+        ${activeTurnId ? `
+        if (msg.params?.turnId !== ${JSON.stringify(activeTurnId)}) {
+          respond({ id: msg.id, error: { code: -32000, message: "expected active turn id " + msg.params?.turnId + " but found ${activeTurnId}" } });
+          break;
+        }` : ""}
         respond({ id: msg.id, result: {} });
         break;
 
@@ -437,7 +512,10 @@ function spawnBroker(
   }
 
   const proc = Bun.spawn(["bun", ...args], {
-    env: envWithPathPrefix(mockCodexDir),
+    // Peer off: these tests exercise routing, and an active peer would
+    // write into the developer's REAL Claude session registry and keep the
+    // broker resident past its idle timeout while any real session lives.
+    env: { ...envWithPathPrefix(mockCodexDir), CODEX_COLLAB_PEER: "off" },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -725,7 +803,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
-    test("initialize returns busy=true when a stream is active", async () => {
+    test("initialize reports busy=false even while a turn is active — the broker as a whole is never busy", async () => {
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
@@ -742,14 +820,15 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         });
         await new Promise((r) => setTimeout(r, 100));
 
-        // Client 2 connects — initialize should report busy
+        // Client 2 connects — with thread-scoped routing, the broker is not
+        // globally busy; only thread-001 itself is contended.
         const client2 = await TestClient.connect(sockPath);
         const result = await client2.request("initialize", {
           clientInfo: { name: "test", title: null, version: "0.0.1" },
           capabilities: { experimentalApi: false },
         }) as { userAgent: string; busy: boolean };
 
-        expect(result.busy).toBe(true);
+        expect(result.busy).toBe(false);
 
         await client1.close();
         await client2.close();
@@ -758,7 +837,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
       }
     }, 15_000);
 
-    test("initialize returns busy=true while a streaming request is pending", async () => {
+    test("a second turn on a DIFFERENT thread runs while a streaming request is pending", async () => {
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
       const mockDir = createMockCodex(tempDir, {
@@ -776,17 +855,17 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
           input: [{ type: "text", text: "hello" }],
         });
 
-        // The broker has accepted the streaming request, but turn/start has
-        // not returned yet, so stream ownership has not been established.
+        // The first streaming request is still pending — a second client on
+        // another thread must not be blocked by it.
         await new Promise((r) => setTimeout(r, 100));
 
-        const client2 = await TestClient.connect(sockPath);
-        const result = await client2.request("initialize", {
-          clientInfo: { name: "test", title: null, version: "0.0.1" },
-          capabilities: { experimentalApi: false },
-        }) as { userAgent: string; busy: boolean };
+        const client2 = await TestClient.connectAndInit(sockPath);
+        const result = await client2.request("turn/start", {
+          threadId: "thread-002",
+          input: [{ type: "text", text: "hello too" }],
+        }) as { turn: { id: string } };
 
-        expect(result.busy).toBe(true);
+        expect(result.turn.id).toBe("turn-001"); // mock's fixed turn id
 
         await pendingTurn;
         await client1.close();
@@ -813,8 +892,8 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         });
 
         // Same socket sends a non-streaming RPC the mock rejects with -32601.
-        // Before the fix, the broker's catch path cleared activeStreamSocket
-        // for non-streaming errors, letting a second client interleave.
+        // A failed unrelated request must not release the thread claim —
+        // the turn on thread-001 is still running.
         let errored = false;
         try {
           await client1.request("nonexistent/method", {});
@@ -823,14 +902,19 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
         }
         expect(errored).toBe(true);
 
-        // Stream ownership must still be held — the turn is still running.
-        const client2 = await TestClient.connect(sockPath);
-        const result = await client2.request("initialize", {
-          clientInfo: { name: "test", title: null, version: "0.0.1" },
-          capabilities: { experimentalApi: false },
-        }) as { userAgent: string; busy: boolean };
-
-        expect(result.busy).toBe(true);
+        // Thread ownership must still be held — a second client's turn/start
+        // on the same thread bounces with -32001.
+        const client2 = await TestClient.connectAndInit(sockPath);
+        let busyCode: number | null = null;
+        try {
+          await client2.request("turn/start", {
+            threadId: "thread-001",
+            input: [{ type: "text", text: "interloper" }],
+          });
+        } catch (e) {
+          busyCode = (e as { code?: number }).code ?? null;
+        }
+        expect(busyCode).toBe(-32001);
 
         await client1.close();
         await client2.close();
@@ -1023,7 +1107,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
   // ── Concurrency control ───────────────────────────────────────────────────
 
   describe("concurrency control", () => {
-    test("second client gets -32001 busy error during active stream", async () => {
+    test("second client gets -32001 busy error for a turn on the SAME thread", async () => {
 
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
@@ -1057,7 +1141,7 @@ describe.skipIf(!SOCKETS_AVAILABLE)("broker-server", () => {
           });
           throw new Error("Expected busy error");
         } catch (err: any) {
-          expect(err.message).toContain("Shared Codex broker is busy");
+          expect(err.message).toContain("A turn is already running on this thread");
           expect(err.code).toBe(-32001);
         }
 
@@ -1379,6 +1463,50 @@ setInterval(() => {}, 1000);
       }
     }, 15_000);
 
+    test("a late completion from an already-settled turn does not free the thread", async () => {
+      // A turn/interrupt is only an acknowledgement, so an orphan reaped by
+      // the watchdog can still emit turn/completed afterwards — by which
+      // time another turn may own the thread. Acting on it would release
+      // that turn's claim and leave it running with nobody listening.
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { staleCompletionReplay: true });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        // Turn 1 runs and completes — the thread is free.
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "one" }] });
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed"), 3000);
+
+        // Turn 2 claims the thread; turn 1's completion is replayed while it runs.
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "two" }] });
+        await new Promise((r) => setTimeout(r, 300));
+
+        // The thread must still be owned: a competing start is refused.
+        const other = await TestClient.connectAndInit(sockPath);
+        let refused = false;
+        try {
+          await other.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "three" }] });
+        } catch (e) {
+          refused = (e as Error).message.includes("already running");
+        }
+        expect(refused).toBe(true);
+
+        // And the stale completion was not forwarded a second time.
+        expect(notifications.filter((n) => n.method === "turn/completed").length).toBe(1);
+
+        await other.close();
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
     test("notifications are not sent to non-owning sockets", async () => {
 
       const sockPath = testSocketPath(tempDir);
@@ -1410,6 +1538,51 @@ setInterval(() => {}, 1000);
 
         // Client 2 should NOT have received the notification
         expect(notifications2.length).toBe(0);
+
+        await client1.close();
+        await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("two threads stream concurrently, each client receiving only its own thread's notifications", async () => {
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
+      // Long enough completion delay that the two turns genuinely overlap.
+      const mockDir = createMockCodex(tempDir, { turnCompletedDelay: 200 });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client1 = await TestClient.connectAndInit(sockPath);
+        const client2 = await TestClient.connectAndInit(sockPath);
+        const notifs1 = collectNotifications(client1);
+        const notifs2 = collectNotifications(client2);
+
+        // Both turns in flight at once — neither blocks the other.
+        await Promise.all([
+          client1.request("turn/start", {
+            threadId: "thread-A",
+            input: [{ type: "text", text: "one" }],
+          }),
+          client2.request("turn/start", {
+            threadId: "thread-B",
+            input: [{ type: "text", text: "two" }],
+          }),
+        ]);
+
+        const completedFor = (notifs: Array<Record<string, unknown>>, threadId: string) =>
+          notifs.some((n) =>
+            n.method === "turn/completed" &&
+            (n.params as { threadId?: string } | undefined)?.threadId === threadId);
+
+        await waitFor(() => completedFor(notifs1, "thread-A") && completedFor(notifs2, "thread-B"));
+
+        // Strict partition: neither client saw the other thread's traffic.
+        expect(completedFor(notifs1, "thread-B")).toBe(false);
+        expect(completedFor(notifs2, "thread-A")).toBe(false);
 
         await client1.close();
         await client2.close();
@@ -1824,6 +1997,41 @@ setInterval(() => {}, 1000);
     }, 15_000);
   });
 
+  describe("broker/shutdown ifIdle", () => {
+    test("is refused while a turn is claimed, so a replacement never kills live work", async () => {
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { turnDelay: 3000 });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      const client = await TestClient.connectAndInit(sockPath);
+      try {
+        const started = await client.request("thread/start", { cwd: tempDir }) as { thread: { id: string } };
+        // Claims the thread; the mock answers in 3s.
+        const turn = client.request("turn/start", { threadId: started.thread.id, input: [] });
+        await new Promise((r) => setTimeout(r, 200));
+
+        let code: number | undefined;
+        try {
+          await client.request("broker/shutdown", { ifIdle: true });
+        } catch (e) {
+          code = (e as { code?: number }).code;
+        }
+        expect(code).toBe(-32001);
+        // Still up, and the turn it protected finishes normally.
+        expect(await exitsWithin(proc, 500)).toBe(false);
+        await turn;
+
+        // Unconditional shutdown is unchanged.
+        expect(await client.request("broker/shutdown")).toEqual({});
+        expect(await exitsWithin(proc, 5000)).toBe(true);
+      } finally {
+        await client.close();
+      }
+    }, 20_000);
+  });
+
   // ── Idle timeout ──────────────────────────────────────────────────────────
 
   describe("idle timeout", () => {
@@ -2166,12 +2374,13 @@ setInterval(() => {}, 1000);
         await new Promise((r) => setTimeout(r, 500));
 
         // A second client must NOT be able to start a streaming RPC on
-        // the same app-server while the orphan is still unwinding.
+        // the SAME thread while the orphan is still unwinding — the
+        // reservation survives the successful interrupt RPC.
         const client2 = await TestClient.connectAndInit(sockPath);
         let gotBusy = false;
         try {
           await client2.request("turn/start", {
-            threadId: "thread-orphan-2",
+            threadId: "thread-orphan",
             input: [{ type: "text", text: "no" }],
           });
         } catch (err) {
@@ -2180,6 +2389,13 @@ setInterval(() => {}, 1000);
           expect((err as { code?: number }).code).toBe(-32001);
         }
         expect(gotBusy).toBe(true);
+
+        // A DIFFERENT thread is unaffected by the unwinding orphan.
+        const other = await client2.request("turn/start", {
+          threadId: "thread-orphan-2",
+          input: [{ type: "text", text: "fine" }],
+        }) as { turn: { id: string } };
+        expect(other.turn.id).toBe("turn-001");
         await client2.close();
       } finally {
         proc.kill();
@@ -2334,7 +2550,7 @@ setInterval(() => {}, 1000);
   // ── Streaming methods ─────────────────────────────────────────────────────
 
   describe("streaming methods", () => {
-    test("review/start establishes stream ownership with reviewThreadId", async () => {
+    test("review/start claims the review SUBTHREAD and frees the parent", async () => {
 
       const sockPath = testSocketPath(tempDir);
       const endpoint = endpointFor(sockPath);
@@ -2358,11 +2574,11 @@ setInterval(() => {}, 1000);
         }) as { turn: { id: string }; reviewThreadId: string };
         expect(reviewResult.reviewThreadId).toBe("review-thread-001");
 
-        // Immediately try client 2 — review stream is still active (5s delay)
+        // The review turn runs on the subthread — that is what's claimed.
         let gotBusy = false;
         try {
           await client2.request("turn/start", {
-            threadId: "thread-001",
+            threadId: "review-thread-001",
             input: [{ type: "text", text: "hello" }],
           });
         } catch (err: any) {
@@ -2371,8 +2587,194 @@ setInterval(() => {}, 1000);
         }
         expect(gotBusy).toBe(true);
 
+        // The PARENT thread carries no turn and stays free for other work:
+        // a claim lasts a turn, not a connection.
+        const parentTurn = await client2.request("turn/start", {
+          threadId: "thread-001",
+          input: [{ type: "text", text: "parent is free" }],
+        }) as { turn: { id: string } };
+        expect(parentTurn.turn.id).toBe("turn-001");
+
         await client1.close();
         await client2.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a turn announced before its request failed keeps the thread until it ends", async () => {
+      // turn/started is a notification and can land BEFORE the RPC settles,
+      // so a failed streaming request can leave the server running a turn it
+      // will never report. Its initiator has just been handed an error, so
+      // nobody is listening — but it is still running, and still editing the
+      // workspace. Releasing the thread would let a retry start a second turn
+      // beside it.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, { startedThenError: true });
+      const interruptLog = join(mockDir, "interrupts.log");
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+
+        // Turn 1: announced, then its request fails.
+        let failed = false;
+        try {
+          await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "one" }] });
+        } catch {
+          failed = true;
+        }
+        expect(failed).toBe(true);
+
+        // The abandoned turn is interrupted rather than left to run on.
+        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        const interrupts = readFileSync(interruptLog, "utf-8")
+          .trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+        expect(interrupts.some((i) => i.turnId === "turn-001")).toBe(true);
+
+        // And the thread stays reserved while it may still be running: a
+        // retry must not start a second turn beside the first.
+        const other = await TestClient.connectAndInit(sockPath);
+        let refused = false;
+        try {
+          await other.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "two" }] });
+        } catch (e) {
+          refused = (e as Error).message.includes("already running");
+        }
+        expect(refused).toBe(true);
+
+        // Turn 1's completion (mock replays it at +400ms) frees the thread —
+        // the reservation is held until the turn really ends, not forever.
+        let second: { turn: { id: string } } | null = null;
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline && !second) {
+          try {
+            second = await other.request("turn/start", {
+              threadId: "thread-001", input: [{ type: "text", text: "two" }],
+            }) as { turn: { id: string } };
+          } catch {
+            await new Promise((r) => setTimeout(r, 100));
+          }
+        }
+        expect(second).not.toBeNull();
+        expect(second!.turn.id).toBe("turn-002");
+
+        await other.close();
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a stale interrupt is retargeted for the thread's owner", async () => {
+      // A long turn rotates ids (context compaction starts a new one), so the
+      // id the CLI recorded goes stale and turn/interrupt is rejected naming
+      // the turn that is active now. Without the retarget the original turn
+      // runs on with nobody listening — observed as a review outliving its
+      // own CLI timeout by twenty minutes.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, { activeTurnId: "turn-rotated", sendTurnCompleted: false });
+      const interruptLog = join(mockDir, "interrupts.log");
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "x" }] });
+
+        // The owner interrupts with the id it recorded, which is now stale.
+        await client.request("turn/interrupt", { threadId: "thread-001", turnId: "turn-001" });
+
+        await waitFor(() => existsSync(interruptLog)
+          && readFileSync(interruptLog, "utf-8").includes("turn-rotated"), 5000, 50);
+        const ids = readFileSync(interruptLog, "utf-8").trim().split("\n")
+          .filter(Boolean).map((l) => JSON.parse(l).turnId);
+        // Tried the stale id, then the one the server named.
+        expect(ids).toContain("turn-001");
+        expect(ids).toContain("turn-rotated");
+        await client.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a stale interrupt is NOT retargeted for a client that does not own the thread", async () => {
+      // The rejection names whatever turn is active — which, once this
+      // caller's own turn has ended and another invocation has claimed the
+      // thread, is that invocation's turn. Retargeting there would cancel
+      // work nobody asked to stop, so the original error is returned instead.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, { activeTurnId: "turn-rotated", sendTurnCompleted: false });
+      const interruptLog = join(mockDir, "interrupts.log");
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const owner = await TestClient.connectAndInit(sockPath);
+        await owner.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "x" }] });
+
+        // A DIFFERENT connection interrupts a thread it does not own.
+        const stranger = await TestClient.connectAndInit(sockPath);
+        let failed = false;
+        try {
+          await stranger.request("turn/interrupt", { threadId: "thread-001", turnId: "turn-001" });
+        } catch (e) {
+          failed = (e as Error).message.includes("expected active turn id");
+        }
+        expect(failed).toBe(true);
+
+        // It reached the stale id only — the active turn was never touched.
+        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        const ids = readFileSync(interruptLog, "utf-8").trim().split("\n")
+          .filter(Boolean).map((l) => JSON.parse(l).turnId);
+        expect(ids).toContain("turn-001");
+        expect(ids).not.toContain("turn-rotated");
+
+        await stranger.close();
+        await owner.close();
+      } finally {
+        proc.kill();
+      }
+    }, 15_000);
+
+    test("a review's completion reaches the client even after an inner turn is announced", async () => {
+      // Real Codex (0.147.0) runs a review as: review/start responds naming
+      // turn A, an inner turn B announces itself, then turn A completes.
+      // turn/started refreshes the thread's recorded turn id to B, so a
+      // completion guard that compares the completion's id against it drops
+      // turn A's completion — and the client, which waits on exactly that id,
+      // never learns the review finished and burns its whole timeout.
+      const sockPath = testSocketPath(tempDir);
+      const mockDir = createMockCodex(tempDir, {
+        reviewInnerTurn: true,
+        sendTurnCompleted: true,
+        turnCompletedDelay: 300,
+      });
+
+      const proc = spawnBroker(endpointFor(sockPath), mockDir);
+      await waitForSocket(sockPath);
+
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+
+        await client.request("review/start", {
+          threadId: "thread-001",
+          target: { type: "uncommittedChanges" },
+        });
+
+        const reviewCompleted = () => notifications.some((n) =>
+          n.method === "turn/completed" &&
+          ((n.params as { turn?: { id?: string } })?.turn?.id) === "review-turn-001"
+        );
+        // Wait for the event, not for a duration: on a loaded machine the
+        // review simply takes longer, which must not read as a failure.
+        await waitFor(reviewCompleted).catch(() => { /* assert below reports it */ });
+        expect(reviewCompleted()).toBe(true);
+
+        await client.close();
       } finally {
         proc.kill();
       }

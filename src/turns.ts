@@ -54,6 +54,27 @@ export async function tryInterruptTurn(
     if (e instanceof Error
         && !e.message.includes("not found")
         && !e.message.includes("already")) {
+      // The recorded turn id can go stale mid-turn: long turns rotate ids
+      // (context compaction spawns a new turn), and interrupting with the
+      // original id fails with a mismatch — leaving the turn running as an
+      // orphan (observed: a 20-minute review outliving its CLI timeout).
+      // The rejection names the turn that was active AT THAT MOMENT.
+      //
+      // Interrupting that id is only safe while this invocation still owns
+      // the thread. If ours ended and another invocation claimed it, the
+      // named turn is THEIRS, and interrupting it cancels work nobody asked
+      // to stop. Through the broker, ownership is the broker's to know and
+      // it does this retarget itself. A direct connection owns its own
+      // app-server, so no other invocation can be running there.
+      const found = client.isBrokered
+        ? undefined
+        : /expected active turn id \S+ but found (\S+)/.exec(e.message)?.[1];
+      if (found && found !== turnId) {
+        try {
+          await client.request("turn/interrupt", { threadId, turnId: found });
+          return;
+        } catch { /* fall through to the warning */ }
+      }
       const prefix = context ? `could not interrupt turn ${context}` : "could not interrupt turn";
       console.error(`[codex] Warning: ${prefix}: ${e.message}`);
     }

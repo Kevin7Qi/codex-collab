@@ -15,6 +15,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Why
 
+- **Native peer messaging** — The workspace broker registers Codex as a peer in Claude Code's cross-session messaging, so Claude sessions message Codex directly (`SendMessage`) and Codex answers back — including asking Claude questions mid-task via a `collab.consult` tool. No CLI in the hot path.
 - **Structured communication** — Talks to Codex via JSON-RPC over stdio. Every event is typed and parseable.
 - **Event-driven progress** — Streams progress lines as Codex works, so Claude sees what's happening in real time.
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
@@ -121,6 +122,22 @@ codex-collab run "large refactor" --detach --approval auto
 codex-collab follow --watch
 ```
 
+## Native Peer Messaging
+
+On macOS/Linux with a messaging-capable Claude Code, the workspace broker registers Codex in Claude Code's session registry:
+
+```bash
+codex-collab peer up      # start the broker + peer; `peer` alone shows status
+```
+
+From then on, any Claude session's `ListAgents` shows a `codex(myproject-a1b2c3)` peer — message it and Codex picks up the task, replying as a peer message when done. Each conversation also appears as its own peer. A `topic:` first line selects one — `topic: auth refactor` continues the conversation named `codex(auth-refactor-a1b2c3)` or starts it if new, so several conversations can run in parallel and you switch between them by topic (the line is stripped before Codex sees the message). Further header lines set the conversation's `model:`, `effort:`, `timeout:` (seconds per turn; an overdue turn is stopped and the sender told), `sandbox:` and `approval:`. With no topic line you continue your most recent conversation, and an unnamed conversation takes its name from the message text plus the thread's short ID. Replies come from that conversation's address, and replying to it continues that conversation.
+
+Mid-task, Codex can ask its Claude peer a question through a `collab.consult` tool call; the question arrives as a `[consult]` message, and the next reply from that session is delivered back into Codex's running turn. Consults are fail-open: unanswered questions time out and Codex proceeds on its own judgment.
+
+Claude Code gates inbound peer messages on the sender's attested permission class. A conversation attests `bypass` only when it runs with `sandbox: danger-full-access`, otherwise `prompting` — so a Claude session running with `bypassPermissions` holds Codex's replies for review unless its `crossSessionInbound` setting is `accept`. A held reply is still readable with `codex-collab output <id> --last`. A CLI turn on a messaged conversation with an explicit `-s` changes the sandbox that conversation runs and attests from then on, since Codex keeps a per-turn override for the turns that follow.
+
+The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before (`CODEX_COLLAB_PEER=on` insists on the peer for one invocation, as `config mode peer` does persistently). The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
+
 ## CLI Commands
 
 | Command | Description |
@@ -131,6 +148,7 @@ codex-collab follow --watch
 | `follow [id]` | Live view of a running thread in your own terminal pane. Without an ID it attaches to the active run; `--watch` keeps following each new run |
 | `output <id> [--last]` | Full log for a thread (`--last`: only the latest turn's output) |
 | `kill <id> [--clear]` | Stop a running thread. An active goal is paused first; `--clear` abandons it |
+| `peer [up]` | Show the native-messaging peer's status; `peer up` starts the broker (and with it the peer) |
 
 <details>
 <summary>Questions and approvals</summary>
@@ -187,7 +205,7 @@ codex-collab follow --watch
 | `--resume <id>` | Resume existing thread |
 | `--approval <policy>` | Approval policy: never, on-request, on-failure, untrusted, auto (default: never). `auto`: Codex's Guardian reviewer approves or denies each request autonomously — never blocks on a human; decisions stream as Guardian lines. `review` rejects this flag: Codex locks review sub-agents to `never`, so it could never take effect |
 | `--memory` | Let Codex's memory feature learn from threads this run creates. Default: created threads get `thread/memoryMode/set mode=disabled`; resumed threads are never touched (the flag is persistent per-thread, and a thread you created yourself should keep feeding your memory). Governs Codex's *local* memory consolidation (`~/.codex/memories`) only — the `personality` feature is explicit user config (not learned) and unaffected. Persistent form: `config memory true` |
-| `--timeout <sec>` | Turn timeout (default: 1200, max 2147483). When a goal is active it scopes the whole goal, and expiry pauses the goal before exiting. For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
+| `--timeout <sec>` | Turn timeout (default: 3600, max 2147483). When a goal is active it scopes the whole goal, and expiry pauses the goal before exiting. For `ask`: answer deadline (default: 600); for `next`: wait deadline (default: wait indefinitely) |
 | `--` | End of options; remaining arguments are treated as prompt text |
 
 **run**
@@ -288,7 +306,9 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
+Available keys: `model`, `mode`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
+
+The `mode` key controls how codex-collab communicates with Claude: `auto` (the default) uses peer messaging when the platform supports it and falls back to the CLI path otherwise, `peer` insists on peer messaging, and `cli` disables peer mechanisms entirely — no agent-registry entry, no per-conversation addresses, no consult tool — routing everything through the command line. Peer messaging requires macOS or Linux with Claude Code 2.1.224 or newer; on Windows or older versions, `auto` falls back to the CLI path automatically without any configuration. A broker reads the mode when it starts and keeps its peer state until it restarts, so after changing the mode run `codex-collab peer up` in the workspace to apply it — the broker is replaced only when no turn is running.
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 

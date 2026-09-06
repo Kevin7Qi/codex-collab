@@ -350,6 +350,19 @@ export type LastOutput =
   | { kind: "output"; text: string; note: string | null }
   | { kind: "none"; reason: string; running: boolean };
 
+/** True when a thread has no local run records at all — a thread discovered
+ *  from the server, or one whose runs have been pruned. Peer conversations
+ *  write run records like CLI runs do, so they no longer land here; when a
+ *  thread genuinely has no local history, `peek` is the honest answer rather
+ *  than a claim that nothing happened. */
+function hasNoLocalRuns(stateDir: string, shortId: string): boolean {
+  try {
+    return listRunsForThread(stateDir, shortId).length === 0;
+  } catch {
+    return false;
+  }
+}
+
 export function pickLastOutput(rec: RunRecord | null, logContent: string): LastOutput {
   if (rec) {
     if (rec.status === "running") {
@@ -386,14 +399,20 @@ export async function handleOutput(args: string[]): Promise<void> {
     if (res.kind === "none") {
       const hint = res.running
         ? `Watch it: codex-collab follow ${shortId}`
-        : `Full history: codex-collab output ${shortId}`;
+        : hasNoLocalRuns(ws.stateDir, shortId)
+          ? `This thread has no runs from this machine — read its server-side history with: codex-collab peek ${shortId}`
+          : `Full history: codex-collab output ${shortId}`;
       die(`${res.reason}\n${hint}`);
     }
     if (res.note) console.error(`[codex] Note: ${res.note}`);
     console.log(res.text);
     return;
   }
-  if (content === null) die(`No log file for thread`);
+  if (content === null) {
+    die(hasNoLocalRuns(ws.stateDir, shortId)
+      ? `No local log for ${shortId}. This thread has no runs from this machine — read its server-side history with: codex-collab peek ${shortId}`
+      : `No log file for thread`);
+  }
   if (options.contentOnly) {
     const blocks = extractAgentOutputBlocks(content);
     for (const block of blocks) console.log(block);
@@ -412,7 +431,15 @@ export async function handleProgress(args: string[]): Promise<void> {
   const { shortId } = resolveLogTarget(positional, "Usage: codex-collab progress <id>", ws);
   const content = readThreadLog(ws.stateDir, ws.logsDir, shortId);
   if (content === null) {
-    console.log("No activity yet.");
+    // No local log AND no local runs: the thread's history lives on the
+    // server (a thread discovered from it, or pruned runs). Saying "no
+    // activity" would be a lie about a thread that may be mid-turn right
+    // now — point at the view that reads the server, not a local mirror.
+    console.log(
+      hasNoLocalRuns(ws.stateDir, shortId)
+        ? `No local activity log for ${shortId}. This thread has no runs from this machine — read its server-side history with: codex-collab peek ${shortId}`
+        : "No activity yet.",
+    );
     return;
   }
 

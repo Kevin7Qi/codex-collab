@@ -67,7 +67,11 @@ export const config = {
   defaultApprovalPolicy: "never" as const,
 
   // Timeouts
-  defaultTimeout: 1200, // seconds — turn completion (20 min)
+  defaultTimeout: 3600, // seconds — turn completion (1 hour)
+  // Largest turn timeout accepted anywhere (setTimeout's 32-bit ceiling, in
+  // seconds). The CLI flag, `config timeout`, and the peer's `timeout:`
+  // header all validate against this one number.
+  maxTimeoutSeconds: 2_147_483,
   requestTimeout: 30_000, // milliseconds — individual protocol requests (30s)
   // Broker idle timeout (ms) before a detached broker self-exits. Overridable
   // via CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS so tests can make brokers exit in
@@ -139,6 +143,31 @@ Object.freeze(config);
 
 export type ReasoningEffort = (typeof config.reasoningEfforts)[number];
 export type SandboxMode = (typeof config.sandboxModes)[number];
+
+/** Wire shape of a sandbox mode: thread/start's `sandbox` accepts the
+ *  kebab-case string, turn/start's `sandboxPolicy` override wants this. */
+export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
+  switch (mode) {
+    case "read-only": return { type: "readOnly" };
+    case "workspace-write": return { type: "workspaceWrite" };
+    case "danger-full-access": return { type: "dangerFullAccess" };
+  }
+}
+
+/** The mode a `sandboxPolicy` (or a kebab-case string) names; undefined
+ *  for a shape this build does not know, so protocol drift is never read
+ *  as one of the three modes. */
+export function sandboxModeOf(policy: unknown): SandboxMode | undefined {
+  if (typeof policy === "string") {
+    return (config.sandboxModes as readonly string[]).includes(policy) ? policy as SandboxMode : undefined;
+  }
+  switch ((policy as { type?: unknown } | null)?.type) {
+    case "readOnly": return "read-only";
+    case "workspaceWrite": return "workspace-write";
+    case "dangerFullAccess": return "danger-full-access";
+    default: return undefined;
+  }
+}
 export type ApprovalPolicy = (typeof config.approvalPolicies)[number];
 export type ApprovalMode = (typeof config.approvalModes)[number];
 
@@ -206,8 +235,23 @@ export function workspaceKey(cwd: string): string {
     canonical = resolve(wsRoot);
   }
   const slug = basename(canonical).replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
-  const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-  return `${slug}-${hash}`;
+  return `${slug}-${workspaceHash(cwd)}`;
+}
+
+/** Stable identity of a workspace, independent of its display name: the
+ *  hash half of `workspaceKey`. Derived from the canonical workspace ROOT,
+ *  so every cwd inside one checkout agrees and two checkouts sharing a
+ *  directory name do not. Exported because the peer address needs the same
+ *  identity the state dir uses. */
+export function workspaceHash(cwd: string): string {
+  const wsRoot = resolveWorkspaceDir(cwd);
+  let canonical: string;
+  try {
+    canonical = realpathSync(wsRoot);
+  } catch {
+    canonical = resolve(wsRoot);
+  }
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }
 
 /**

@@ -1,6 +1,10 @@
 // src/commands/config.ts — config, models, health command handlers
 
-import { config, listTemplates } from "../config";
+import { config, listTemplates, resolveStateDir } from "../config";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
+import { readPeerState, isAlive, type PeerState } from "./peer";
 import type { Model, AccountRead } from "../types";
 import {
   die,
@@ -24,8 +28,9 @@ export async function handleConfig(args: string[]): Promise<void> {
     reasoning: { validate: v => (config.reasoningEfforts as readonly string[]).includes(v), hint: config.reasoningEfforts.join(", ") },
     sandbox:   { validate: v => (config.sandboxModes as readonly string[]).includes(v), hint: config.sandboxModes.join(", ") },
     approval:  { validate: v => (config.approvalModes as readonly string[]).includes(v), hint: config.approvalModes.join(", ") },
-    timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds, 1-${MAX_TIMEOUT_SECONDS} (e.g. 1200)` },
+    timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds, 1-${MAX_TIMEOUT_SECONDS} (e.g. 3600)` },
     memory:    { validate: v => v === "true" || v === "false", hint: "true, false (let Codex memory learn from created threads)" },
+    mode:      { validate: v => (COLLAB_MODES as readonly string[]).includes(v), hint: `${COLLAB_MODES.join(", ")} (auto: peer messaging where supported, CLI otherwise)` },
   };
 
   const cfg = loadUserConfig();
@@ -88,6 +93,12 @@ export async function handleConfig(args: string[]): Promise<void> {
     key === "timeout" ? Number(value) : key === "memory" ? value === "true" : value;
   saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
+  if (key === "mode") {
+    // The mode is read when a broker starts. One already running keeps its
+    // peer (or its lack of one) until it restarts, so the setting alone
+    // changes nothing visible for that workspace.
+    console.log("Brokers already running keep their current peer state until they restart — `codex-collab peer up` applies the mode to this workspace's broker.");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +160,43 @@ export function describeAuth(read: AccountRead | "unknown"): { ready: boolean; d
   return { ready: true, detail: "not reported (no account and no auth requirement given)" };
 }
 
+/** One-line native-peer verdict for `health`.
+ *
+ *  Never fatal: peer messaging is an enhancement, and every CLI path works
+ *  without it. The point is to make the fallback VISIBLE — on Windows, on an
+ *  older Claude Code, or with the peer switched off, the user should be able
+ *  to see that codex-collab is running in its degraded-but-complete mode
+ *  rather than wonder why `ListAgents` shows nothing. */
+export function describePeer(dir: string): string {
+  // Name the mode that is in force, and where it came from. Whether the peer
+  // runs is now a setting as well as a capability, and "unavailable" without
+  // a reason reads like a broken install when it may be a deliberate choice.
+  const { mode, reason } = resolveCollabMode(readConfiguredMode());
+  if (mode === "cli") {
+    // A broker that registered its peer before the mode changed keeps it
+    // until it restarts; "off" alone would contradict what ListAgents shows.
+    let lingering: PeerState | null = null;
+    try { lingering = readPeerState(resolveStateDir(dir)); } catch { /* unreadable — report the mode alone */ }
+    return lingering && isAlive(lingering.pid)
+      ? `off — collaboration mode is cli (${reason}), but the broker running as pid ${lingering.pid} still serves "${lingering.name}" from before the change ('codex-collab peer up' retires it)`
+      : `off — collaboration mode is cli (${reason}); the CLI paths are unaffected`;
+  }
+  const capability = peerCapability();
+  if (!capability.ok) return `unavailable — ${capability.reason} (CLI paths unaffected)`;
+  let state: PeerState | null = null;
+  try {
+    state = readPeerState(resolveStateDir(dir));
+  } catch {
+    return "available (state unreadable)";
+  }
+  if (!state) return "available, not running (start it with 'codex-collab peer up')";
+  if (!isAlive(state.pid)) return "available, not running (stale state — 'codex-collab peer up')";
+  const registered = existsSync(join(sessionsDir(), `${state.pid}.json`));
+  return registered
+    ? `registered as "${state.name}" (broker pid ${state.pid})`
+    : `broker running (pid ${state.pid}) but its registry entry is missing — 'codex-collab peer up'`;
+}
+
 export async function handleHealth(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
   const findCmd = process.platform === "win32" ? "where" : "which";
@@ -182,6 +230,7 @@ export async function handleHealth(args: string[]): Promise<void> {
 
   const auth = describeAuth(account);
   console.log(`  account: ${auth.detail}`);
+  console.log(`  peer: ${describePeer(options.dir)}`);
 
   // Missing auth is reported, never fatal. This command's exit code answers
   // "is the installation sound?" — install.sh runs it as its own final check,

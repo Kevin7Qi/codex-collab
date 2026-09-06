@@ -96,6 +96,7 @@ function buildMockClient(
     async close() {},
     userAgent: "mock/1.0",
     brokerBusy: false,
+    isBrokered: false,
   };
 
   return { client, emit, requestHandlers, triggerClose };

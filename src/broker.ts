@@ -39,7 +39,7 @@ export function isBrokerBusyError(e: unknown): boolean {
  */
 export function wrapBrokerBusy(e: unknown): unknown {
   if (isBrokerBusyError(e) && e instanceof Error) {
-    e.message = "Codex broker is busy serving another invocation. Retry in a moment, or wait for the in-flight turn to finish.";
+    e.message = "A turn is already running on this thread. Wait for it to finish (or kill it), or target another thread.";
   }
   return e;
 }

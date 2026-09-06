@@ -149,5 +149,6 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     close,
     userAgent,
     brokerBusy,
+    isBrokered: true,
   };
 }

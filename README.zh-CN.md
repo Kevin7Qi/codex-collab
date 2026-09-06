@@ -15,6 +15,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 
 ## 核心优势
 
+- **原生对等消息**：工作区 broker 会将 Codex 注册为 Claude Code 跨会话消息体系中的对等节点，Claude 会话可直接向 Codex 发送消息（`SendMessage`），Codex 也会以消息回复——任务中途还能通过 `collab.consult` 工具向 Claude 提问。热路径上不再经过 CLI。
 - **结构化通信**：与 Codex 之间通过 stdio JSON-RPC 通信，每个事件都有完整的类型定义，可解析、可追踪。
 - **实时进度反馈**：Codex 工作时实时推送进度，Claude 随时掌握运行状态。
 - **一键代码审查**：一条命令即可在只读沙箱中审查 PR、未提交更改或特定 commit。
@@ -121,6 +122,22 @@ codex-collab run "大规模重构" --detach --approval auto
 codex-collab follow --watch
 ```
 
+## 原生对等消息
+
+在 macOS/Linux 上，若所用 Claude Code 支持跨会话消息，工作区 broker 会把 Codex 注册进 Claude Code 的会话注册表：
+
+```bash
+codex-collab peer up      # 启动 broker 与对等节点；单独执行 `peer` 查看状态
+```
+
+此后，任意 Claude 会话的 `ListAgents` 中都会出现名为 `codex(<工作区>-<哈希>)` 的对等节点（尾部六位哈希派生自工作区路径，因代理注册表为全机共享，需借此避免不同仓库间的地址冲突）——向它发送消息，Codex 即接手任务，完成后以对等消息回复。每个对话还会以独立节点出现。消息首行的 `topic:` 用于选择对话：`topic: auth refactor` 会接续名为 `codex(auth-refactor-<哈希>)` 的对话，若不存在则新建——因此多个对话可并行进行，按 topic 自由切换（该行会在送达 Codex 前剥离）。后续的头部行可设置该对话的 `model:`、`effort:`、`timeout:`（每回合秒数；超时的回合会被终止并告知发送方）、`sandbox:` 与 `approval:`。未写 topic 时则接续自己最近的一次对话；未命名的对话由消息文本加线程短 ID 派生名称。回复来自该对话的地址，向其回信即延续该对话。
+
+任务进行中，Codex 可通过 `collab.consult` 工具调用向 Claude 提问：问题以 `[consult]` 消息送达，该会话的下一条回复会直接送回 Codex 正在运行的回合。consult 采取超时放行策略：无人应答时超时后 Codex 自行判断并继续。
+
+Claude Code 会依据发送方声明的权限类别对入站对等消息设卡：对话仅在 `sandbox: danger-full-access` 下声明为 `bypass`，其余情况一律为 `prompting`。因此，以 `bypassPermissions` 模式运行的 Claude 会话会将 Codex 的回复暂扣待审，除非其 `crossSessionInbound` 设置为 `accept`。被暂扣的回复仍可通过 `codex-collab output <id> --last` 查看。若以命令行在某个消息对话上显式指定 `-s` 运行回合，该对话此后运行并声明的沙箱即随之改变——Codex 会将逐回合的覆盖保留至后续回合。
+
+该机制可平滑降级：在 Windows 上、无会话注册表时、或设置 `CODEX_COLLAB_PEER=off` 后，下述各项功能与从前完全一致（`CODEX_COLLAB_PEER=on` 则在单次调用中强制启用对等节点，效果同持久化的 `config mode peer`）。只要有 Claude 会话在运行，broker 就保持常驻；最后一个会话退出后按常规空闲超时退场。
+
 ## CLI 命令
 
 | 命令 | 说明 |
@@ -131,6 +148,7 @@ codex-collab follow --watch
 | `follow [id]` | 在你自己的终端分屏中实时查看运行中的会话。不带 ID 时自动附着到活跃运行；`--watch` 会持续跟踪每一次新运行 |
 | `output <id> [--last]` | 查看会话完整日志（`--last`: 只输出最近一轮的结果） |
 | `kill <id> [--clear]` | 中断运行中的会话。若存在进行中的 goal 会先暂停；`--clear` 表示直接放弃 |
+| `peer [up]` | 查看原生消息对等节点的状态；`peer up` 启动 broker（对等节点随之注册） |
 
 <details>
 <summary>提问与审批</summary>
@@ -187,7 +205,7 @@ codex-collab follow --watch
 | `--resume <id>` | 恢复已有会话 |
 | `--approval <policy>` | 审批策略: never, on-request, on-failure, untrusted, auto（默认: never）。`auto`: Codex 的 Guardian 审查器自主批准或拒绝每个请求，绝不阻塞等待人工；决策以 Guardian 进度行的形式实时展示。`review` 不接受此参数：Codex 将审查子代理的审批策略锁定为 `never`，该参数不可能生效 |
 | `--memory` | 允许 Codex 的记忆功能学习本次运行创建的会话。默认: 创建的会话会执行 `thread/memoryMode/set mode=disabled`；恢复的会话永不改动（该标记按会话持久保存，你自己创建的会话应继续进入你的记忆）。只作用于 Codex 的*本地*记忆整合（`~/.codex/memories`）；`personality` 属于显式用户配置（非学习所得），不受影响。持久化设置: `config memory true` |
-| `--timeout <sec>` | 单轮超时时间，单位秒（默认: 1200，最大 2147483）。存在进行中的 goal 时，该时限约束整个 goal，超时会先暂停 goal 再退出。用于 `ask` 时为回答等待时限（默认 600）；用于 `next` 时为等待上限（默认无限期等待） |
+| `--timeout <sec>` | 单轮超时时间，单位秒（默认: 3600，最大 2147483）。存在进行中的 goal 时，该时限约束整个 goal，超时会先暂停 goal 再退出。用于 `ask` 时为回答等待时限（默认 600）；用于 `next` 时为等待上限（默认无限期等待） |
 | `--` | 选项结束标记；其后的参数一律视为提示词文本 |
 
 **run**
@@ -279,7 +297,9 @@ codex-collab config model --unset       # 取消单个设置（恢复自动检�
 codex-collab config --unset             # 取消所有设置
 ```
 
-可配置项: `model`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`
+可配置项: `model`、`mode`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`
+
+`mode` 决定 codex-collab 与 Claude 的协作方式：`auto`（默认）在平台支持时采用对等消息通信，否则退回命令行路径；`peer` 强制使用对等消息；`cli` 则彻底关闭对等机制——不注册代理节点、不生成会话地址、不提供 consult 工具——一切交互均经由命令行完成。对等消息需要 macOS 或 Linux 且 Claude Code 版本不低于 2.1.224；在 Windows 或更早版本下，`auto` 会自行退回命令行路径，无需额外配置。broker 在启动时读取该模式，并在重启前保持原有的对等节点状态，因此修改模式后需在工作区内执行 `codex-collab peer up` 以使其生效——仅在没有回合运行时才会替换 broker。
 
 优先级: `CLI 参数 > 配置文件 > 自动检测`
 

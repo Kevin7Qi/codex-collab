@@ -159,7 +159,7 @@ export const VALID_REVIEW_MODES = ["pr", "uncommitted", "commit", "custom"] as c
 /** Max --timeout / config timeout in seconds: the turn timeout feeds
  *  setTimeout(sec * 1000), and delays beyond 2^31-1 ms overflow the 32-bit
  *  timer and fire after ~1ms — every turn would instantly "time out". */
-export const MAX_TIMEOUT_SECONDS = 2_147_483;
+export const MAX_TIMEOUT_SECONDS = config.maxTimeoutSeconds;
 
 /** Shell metacharacters that must not appear in git refs. Braces are allowed
  *  so reflog refs like HEAD@{1} work — git is always invoked with an argv
@@ -1154,13 +1154,8 @@ export function resolveApproval(mode: ApprovalMode): {
 }
 
 /** Map a kebab-case sandbox mode to the app-server's sandboxPolicy wire shape. */
-export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
-  switch (mode) {
-    case "read-only": return { type: "readOnly" };
-    case "workspace-write": return { type: "workspaceWrite" };
-    case "danger-full-access": return { type: "dangerFullAccess" };
-  }
-}
+import { sandboxPolicyFor } from "../config";
+export { sandboxPolicyFor };
 
 /** Inverse of sandboxPolicyFor, for display: thread/start|fork echo the
  *  sandbox as either the kebab-case string they were sent or the wire

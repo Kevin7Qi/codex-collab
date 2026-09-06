@@ -27,6 +27,7 @@ codex-collab health
 | `src/types.ts` | Protocol types (JSON-RPC, threads, turns, items, approvals) |
 | `src/config.ts` | Configuration constants, workspace resolution |
 | `src/broker.ts` | Shared app-server lifecycle (connection pooling) |
+| `src/peer.ts` | Native peer messaging (Claude session-registry entries, messaging sockets, consult bridge, per-thread peers) |
 | `src/broker-client.ts` | Socket-based client for connecting to the broker server |
 | `src/broker-server.ts` | Detached broker server process (multiplexes JSON-RPC between clients and app-server) |
 | `src/process.ts` | Process spawn/lifecycle utilities |
@@ -45,8 +46,9 @@ codex-collab health
 - Communicates with Codex via `codex app-server` JSON-RPC protocol over stdio
 - Per-workspace state under `~/.codex-collab/workspaces/{slug}-{hash}/` (threads, logs, runs, approvals, kill signals, PIDs)
 - User defaults stored in `~/.codex-collab/config.json` (model, reasoning, sandbox, approval, timeout)
-- Broker manages a shared app-server per workspace via Unix socket / named pipe; falls back to direct connection when broker is busy (parallel execution) or unavailable
+- Broker manages a shared app-server per workspace via Unix socket / named pipe with thread-scoped routing: parallel runs on different threads multiplex over the one app-server; only same-thread contention (or an unavailable broker) falls back to a direct connection
 - Short IDs are 8-char hex, support prefix resolution
 - Run ledger tracks per-invocation state (status, timing, output) under `runs/`
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running
 - Skill installed to `~/.claude/skills/codex-collab/` via `install.sh` (build + copy; `--dev` for symlinks)
+- Contract tests against live `codex`/`claude` binaries live in `contracts/` — opt-in via `CODEX_COLLAB_CONTRACTS=1 bun test contracts/` (skipped by default; spends a few trivial model turns and writes probe entries into the real session registry with cleanup)
