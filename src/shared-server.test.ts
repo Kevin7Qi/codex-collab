@@ -4,7 +4,7 @@
 // speaking just enough JSON-RPC to exercise the framing and the handshake.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import {
   acceptKeyFor,
@@ -152,9 +152,11 @@ describe.skipIf(onWindows)("shared-server: WebSocket client", () => {
 
 describe("shared-server: preference and socket resolution", () => {
   test("control socket path derives from CODEX_HOME, with an explicit override winning", () => {
-    expect(controlSocketPath({ CODEX_HOME: "/x/codex" })).toBe(join("/x/codex", "app-server-control", "app-server-control.sock"));
-    expect(controlSocketPath({ HOME: "/home/u" })).toBe(join("/home/u", ".codex", "app-server-control", "app-server-control.sock"));
-    expect(controlSocketPath({ CODEX_COLLAB_SERVER_SOCKET: "/tmp/other.sock", CODEX_HOME: "/x" })).toBe("/tmp/other.sock");
+    // Expectations go through resolve() too: on Windows an absolute POSIX
+    // path gains the current drive, and the function resolves its inputs.
+    expect(controlSocketPath({ CODEX_HOME: "/x/codex" })).toBe(join(resolve("/x/codex"), "app-server-control", "app-server-control.sock"));
+    expect(controlSocketPath({ HOME: "/home/u" })).toBe(join(resolve("/home/u"), ".codex", "app-server-control", "app-server-control.sock"));
+    expect(controlSocketPath({ CODEX_COLLAB_SERVER_SOCKET: "/tmp/other.sock", CODEX_HOME: "/x" })).toBe(resolve("/tmp/other.sock"));
   });
 
   test("the environment overrides the config file, and unknown values fall back to auto", () => {
