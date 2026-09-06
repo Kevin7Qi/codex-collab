@@ -257,6 +257,7 @@ export function createRpcEndpoint(opts: RpcEndpointOptions): RpcEndpoint {
         entry.reject(new RpcError(
           `JSON-RPC error ${e.code}: ${e.message}${e.data ? ` (${JSON.stringify(e.data)})` : ""}`,
           e.code,
+          e.message,
         ));
       }
       return;

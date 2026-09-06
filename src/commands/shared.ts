@@ -11,7 +11,7 @@ import {
   type ApprovalPolicy,
   type ApprovalMode,
 } from "../config";
-import { type AppServerClient, connectDirectWithRetry } from "../client";
+import type { AppServerClient } from "../client";
 import { ensureConnection, getCurrentSessionId, isBrokerBusyError } from "../broker";
 import {
   registerThread,
@@ -200,6 +200,10 @@ export const EXIT_CODES = {
    *  limit). The goal persists on the thread — steer with a resume turn, or
    *  abandon it with `kill --clear`. */
   goalBlocked: 7,
+  /** The thread is open for writing in another Codex process (the Codex
+   *  app, a `codex` session, a daemon) — Codex allows one writer per
+   *  thread. Intact and retryable once that process leaves it idle. */
+  threadHeld: 8,
 } as const;
 
 /** Errors can carry an explicit exit code (set where the context to classify
@@ -728,39 +732,21 @@ async function safeCloseClient(client: AppServerClient): Promise<void> {
   }
 }
 
-/** Connect to app server, run fn, then close the client (even on error).
+/** Run `fn` with a client, closing it afterwards.
  *
- *  For streaming callers, transparently retries once via `connectDirect`
- *  when fn throws a BROKER_BUSY error. The broker's busy state is set when
- *  another invocation owns the shared stream; the initial check in
- *  `ensureConnection` is one-shot, so two callers can both pass it before
- *  either has actually claimed the stream — only the racing loser sees
- *  BROKER_BUSY on its first stream-owning RPC (`thread/start` etc.).
- *  Auto-falling back to a direct connection mirrors the documented
- *  parallel-execution behavior. */
+ *  A BROKER_BUSY error from `fn` (another invocation owns the thread) is
+ *  final. It used to trigger a retry on a private direct connection, back
+ *  when that could take the thread over; since Codex enforces one writer per
+ *  thread, a second app-server resuming a thread the broker's server holds
+ *  is refused outright, and on a shared server the "retry" would merely
+ *  inject the prompt into the running turn. Either way the honest answer
+ *  is the broker's: the thread is busy. */
 export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>, cwd?: string, streaming = false): Promise<T> {
   const workingDir = cwd ?? process.cwd();
-  let client = await ensureConnection(workingDir, streaming);
+  const client = await ensureConnection(workingDir, streaming);
   activeClient = client;
   try {
-    try {
-      return await fn(client);
-    } catch (e) {
-      if (!streaming || !isBrokerBusyError(e)) throw e;
-      // Lost the busy race after handshake — drop the broker client and
-      // retry via direct connection. The first attempt's side effects
-      // (e.g. a failed RunRecord recorded by the command's own catch
-      // handler) remain, like a user-observable "started, then retried"
-      // sequence.
-      console.error("[broker] Broker became busy after handshake — retrying with direct connection.");
-      await safeCloseClient(client);
-      // Retrying variant: this spawns an app-server while the busy broker's
-      // is still live, which is exactly when they contend for codex's sqlite
-      // state — the one path that most needs the second attempt.
-      client = await connectDirectWithRetry({ cwd: workingDir });
-      activeClient = client;
-      return await fn(client);
-    }
+    return await fn(client);
   } finally {
     await safeCloseClient(client);
     activeClient = undefined;
@@ -932,6 +918,46 @@ export function consumeInjectedRunId(): string | null {
   return stickyInjectedRunId ?? null;
 }
 
+/** Codex refuses to resume a thread another app-server process holds open
+ *  for writing (one writer per thread, since 0.145). */
+export function isThreadHeldError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /\balready has an active writer\b/i.test(msg);
+}
+
+export const THREAD_HELD_RETRIES = 3;
+export const THREAD_HELD_RETRY_DELAY_MS = 1500;
+
+/** thread/resume, retried briefly when the thread is held elsewhere — a
+ *  `codex` session that just exited, or a thread the server is still
+ *  closing, frees up within seconds — then explained: the raw message names
+ *  a full thread id and nothing else, and the remedy is not obvious. */
+export async function resumeUnlessHeld(
+  client: AppServerClient,
+  resumeParams: Record<string, unknown>,
+  shortId: string,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<ThreadStartResponse> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+    } catch (e) {
+      if (!isThreadHeldError(e)) throw e;
+      if (attempt < THREAD_HELD_RETRIES) {
+        await sleep(THREAD_HELD_RETRY_DELAY_MS);
+        continue;
+      }
+      const held = new Error(
+        `Thread ${shortId} is open for writing in another Codex process — the Codex app, a \`codex\` session, or an app-server daemon. ` +
+        `Codex allows one writer per thread. Close it there, or wait about a minute after it goes idle, then retry. ` +
+        `(Running codex-collab on the same app-server as that process avoids this: see 'codex-collab health'.)`,
+      );
+      tagExitCode(held, EXIT_CODES.threadHeld);
+      throw held;
+    }
+  }
+}
+
 /** Start or resume a thread, returning threadId, shortId, runId, and effective config. */
 export async function startOrResumeThread(
   client: AppServerClient,
@@ -1017,7 +1043,7 @@ export async function startOrResumeThread(
       if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
       // Forced overrides from caller (e.g., review forces sandbox to read-only)
       if (extraStartParams) Object.assign(resumeParams, extraStartParams);
-      effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+      effective = await resumeUnlessHeld(client, resumeParams, shortId);
       // Ensure the thread is in our local index (may not be if it was created externally)
       if (!findShortId(ws.stateDir, threadId)) {
         shortId = registerThread(ws.stateDir, threadId, {

@@ -72,6 +72,16 @@ export interface PeerHost {
    *  nothing to stop — and rejects when the turn's id is not known yet. On
    *  true, the turn's own turn/completed follows. */
   interruptThread(threadId: string): Promise<boolean>;
+  /** Make sure the broker's connection is subscribed to the thread before
+   *  a turn starts on it — a turn on an unsubscribed thread runs with no
+   *  events reaching us. `resumeParams` is applied only when the server
+   *  has unloaded the thread (a rejoin keeps a loaded thread as it is).
+   *  Resolves to the server's thread/resume answer, or null when nothing
+   *  had to be done. */
+  ensureSubscribed(threadId: string, resumeParams: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+  /** The peer no longer keeps the thread loaded (its thread peer retired):
+   *  let the broker drop the subscription if nothing else needs it. */
+  releaseThreadSubscription(threadId: string): void;
   log(line: string): void;
 }
 
@@ -111,6 +121,13 @@ export interface Conversation {
   /** "auto" when the conversation runs under Guardian review. Stored so a
    *  recreated thread (unrecoverable-thread recovery) keeps the setting. */
   approval?: string;
+  /** Who created the thread. A conversation the peer started declared the
+   *  consult tool on it, and that tool survives only while the thread stays
+   *  loaded — so the peer keeps such threads subscribed until their thread
+   *  peer retires. A CLI-started (adopted) thread never had it. Absent on
+   *  records from before this field, which reads as "cli": after a broker
+   *  restart the tool is gone from a resumed thread anyway. */
+  origin?: "peer" | "cli";
   /** Last inbound/outbound activity, for thread-peer retirement. */
   lastActivity: number;
   /** reply path → when THAT sender last spoke to this conversation. The
@@ -426,6 +443,20 @@ export function threadIsGone(detail: string): boolean {
   return /\bnot found\b/i.test(detail) || /\bis archived\b/i.test(detail);
 }
 
+/** Codex (0.145+) lets one process write a thread at a time; a resume of a
+ *  thread another app-server holds — the Codex app's, a `codex` session's,
+ *  a daemon's — is refused with this wording. Not a lost thread: it is
+ *  intact, merely in use elsewhere, and free again a minute or so after
+ *  that process leaves it idle. */
+export function threadHeldElsewhere(detail: string): boolean {
+  return /\balready has an active writer\b/i.test(detail);
+}
+
+/** What a sender is told when its conversation's thread is held elsewhere. */
+export const THREAD_HELD_NOTICE =
+  "[codex-collab] This conversation's thread is open for writing in another Codex process (the Codex app, a `codex` session, or an app-server daemon). " +
+  "Close it there, or wait about a minute after it goes idle, then send your message again — nothing was lost.";
+
 /** The workspace half of every peer address this broker registers. The
  *  session registry is shared across workspaces and the name IS the
  *  messaging address, so a name carrying only a topic or a thread slug can
@@ -699,6 +730,10 @@ export interface Peer {
    *  tools were declared by the peer, so their calls belong to it no matter
    *  who runs the current turn. */
   ownsThread(threadId: string): boolean;
+  /** True while the peer wants the thread to stay loaded on the app-server:
+   *  a conversation it started, whose thread peer has not retired. The
+   *  broker leaves such threads subscribed when their turns end. */
+  keepsThreadLoaded(threadId: string): boolean;
   /** A CLI turn on this thread carried a sandbox override. Codex keeps a
    *  per-turn override for the turns that follow, so the conversation's
    *  recorded sandbox — the basis of the `from-mode` it attests — must
@@ -1217,6 +1252,8 @@ export function createPeer(host: PeerHost): Peer {
     try { unlinkSync(tp.socketPath); } catch { /* none */ }
     try { unlinkSync(tp.entryPath); } catch { /* none */ }
     try { tp.holder.kill(); } catch { /* already dead */ }
+    // Nothing keeps the thread loaded now; the next message re-subscribes.
+    host.releaseThreadSubscription(threadId);
   }
 
   /** Sweep idle thread peers. The conversation record survives — the next
@@ -1278,6 +1315,7 @@ export function createPeer(host: PeerHost): Peer {
         // The sandbox the CLI actually asked for, so this conversation
         // attests its own from-mode rather than the workspace default.
         sandbox,
+        origin: "cli",
         lastActivity: Date.now(),
         lastInboundBy: {},
       });
@@ -1639,6 +1677,7 @@ export function createPeer(host: PeerHost): Peer {
       conv.model = model;
       conv.effort = effort;
       conv.approval = approval;
+      conv.origin = "peer"; // a fresh thread/start declared the consult tool again
       // Keep the conversation's name across a thread restart: its name is
       // its ADDRESS, and a recreated thread is still the same conversation.
       if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId, suffix);
@@ -1695,7 +1734,11 @@ export function createPeer(host: PeerHost): Peer {
         // thread/start — say, an invalid `model:` header — or an
         // unrecoverable thread) reads as Codex silently thinking forever.
         // The message stays unmarked in the dedupe set, so a retry retries.
-        deliverTo(msg.replyPath, `[codex-collab] Your message could not be processed: ${detail}`, boundThreadId);
+        deliverTo(
+          msg.replyPath,
+          threadHeldElsewhere(detail) ? THREAD_HELD_NOTICE : `[codex-collab] Your message could not be processed: ${detail}`,
+          boundThreadId,
+        );
       });
     for (const k of keys) inboundQueues.set(k, next);
     void next.finally(() => {
@@ -1814,7 +1857,7 @@ export function createPeer(host: PeerHost): Peer {
         // The address may still be unreadable (a topic of only emoji, say);
         // routing does not depend on it.
         const label = (topic ? topicPeerLabel(topic, suffix) : "") || threadPeerLabel(deliveryText, shortId, suffix);
-        conv = { threadId, shortId, label, topicKey: topicRoute || undefined, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, timeout: headers.timeout, approval, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
+        conv = { threadId, shortId, label, topicKey: topicRoute || undefined, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, timeout: headers.timeout, approval, origin: "peer", lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
         threadConversations.set(threadId, conv);
         if (topicRoute) byTopic.set(topicRoute, conv);
         createThreadPeer(threadId, shortId, label);
@@ -2035,6 +2078,11 @@ export function createPeer(host: PeerHost): Peer {
     );
     refreshStatus(conv.threadId);
     try {
+      // A thread whose turn ended was released (unsubscribed) unless the
+      // peer kept it; events of a turn on an unsubscribed thread never
+      // reach us, so subscribe again first. Unloaded threads come back with
+      // the resume instructions, which say the consult tool is gone.
+      await host.ensureSubscribed(conv.threadId, { developerInstructions: PEER_RESUME_INSTRUCTIONS });
       // Every peer-started turn restates the conversation's model/effort:
       // turn/start accepts both, which is what makes a continuation
       // message's `model:`/`effort:` update actually take effect.
@@ -2082,7 +2130,11 @@ export function createPeer(host: PeerHost): Peer {
       // the sender is told anything. Every other failure is final here.
       if (threadIsGone(detail)) return "thread-gone";
       for (const to of recipients) {
-        deliverTo(to, `[codex-collab] Could not start a turn: ${detail}`, conv.threadId);
+        deliverTo(
+          to,
+          threadHeldElsewhere(detail) ? THREAD_HELD_NOTICE : `[codex-collab] Could not start a turn: ${detail}`,
+          conv.threadId,
+        );
       }
       return "failed";
     }
@@ -2376,6 +2428,8 @@ export function createPeer(host: PeerHost): Peer {
   return {
     get active() { return active; },
     ownsThread: (threadId: string) => threadConversations.has(threadId),
+    keepsThreadLoaded: (threadId: string) =>
+      threadConversations.get(threadId)?.origin === "peer" && threadPeers.has(threadId),
     noteThreadSandbox,
     adoptThread,
     handleToolCall,

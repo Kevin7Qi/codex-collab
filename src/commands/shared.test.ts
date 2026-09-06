@@ -2153,3 +2153,45 @@ describe("resolveThreadIdAllowRaw", () => {
     expect(result.stderr.toString()).toContain("Thread not found");
   });
 });
+
+describe("held threads (Codex's single-writer lock)", () => {
+  const { isThreadHeldError, resumeUnlessHeld, EXIT_CODES, THREAD_HELD_RETRIES } = require("./shared") as typeof import("./shared");
+  const { RpcError } = require("../types") as typeof import("../types");
+  const heldError = () => new RpcError(
+    "JSON-RPC error -32600: thread 01a07434-451a-73b0-bc84-018dcda41fd4 already has an active writer",
+    -32600,
+    "thread 01a07434-451a-73b0-bc84-018dcda41fd4 already has an active writer",
+  );
+
+  test("recognizes the server's wording and nothing else", () => {
+    expect(isThreadHeldError(heldError())).toBe(true);
+    expect(isThreadHeldError(new Error("thread not found"))).toBe(false);
+    expect(isThreadHeldError("already has an active writer")).toBe(true);
+  });
+
+  test("retries briefly, then explains and tags the exit code", async () => {
+    let calls = 0;
+    const client = { request: async () => { calls++; throw heldError(); } } as unknown as import("../client").AppServerClient;
+    const sleeps: number[] = [];
+    const err = await resumeUnlessHeld(client, { threadId: "x" }, "c17d6ad2", async (ms) => { sleeps.push(ms); }).catch((e: unknown) => e) as Error & { exitCode?: number };
+    expect(calls).toBe(THREAD_HELD_RETRIES);
+    expect(sleeps).toHaveLength(THREAD_HELD_RETRIES - 1);
+    expect(err.message).toContain("Thread c17d6ad2 is open for writing in another Codex process");
+    expect(err.message).toContain("Close it there");
+    expect(err.message).not.toContain("JSON-RPC");
+    expect(err.exitCode).toBe(EXIT_CODES.threadHeld);
+  });
+
+  test("a hold that clears during the retries is invisible to the caller", async () => {
+    let calls = 0;
+    const client = { request: async () => { calls++; if (calls < 2) throw heldError(); return { thread: { id: "t" }, model: "m" }; } } as unknown as import("../client").AppServerClient;
+    const result = await resumeUnlessHeld(client, { threadId: "t" }, "s", async () => {});
+    expect(result.thread.id).toBe("t");
+    expect(calls).toBe(2);
+  });
+
+  test("other errors pass through untouched", async () => {
+    const client = { request: async () => { throw new RpcError("JSON-RPC error -32600: thread t not found", -32600, "thread t not found"); } } as unknown as import("../client").AppServerClient;
+    await expect(resumeUnlessHeld(client, { threadId: "t" }, "s", async () => {})).rejects.toThrow("not found");
+  });
+});

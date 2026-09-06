@@ -219,6 +219,9 @@ function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 let buffer = "";
 let approvalIdCounter = 1;
 let turnCounter = 0;
+// Bookkeeping the hygiene tests read back through mock/state.
+const unsubscribed = [];
+const pendingServerRequests = new Map();
 process.stdin.setEncoding("utf-8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -233,7 +236,54 @@ process.stdin.on("data", (chunk) => {
     // Notification — no id
     if (msg.id === undefined) continue;
 
+    // A response to one of this mock's own server requests (an approval
+    // it emitted): hand it to whoever is waiting, never treat it as a call.
+    if (msg.method === undefined) {
+      const waiter = pendingServerRequests.get(String(msg.id));
+      if (waiter) { pendingServerRequests.delete(String(msg.id)); waiter(msg); }
+      continue;
+    }
+
     switch (msg.method) {
+      case "thread/unsubscribe":
+        unsubscribed.push(msg.params?.threadId);
+        respond({ id: msg.id, result: { status: "unsubscribed" } });
+        break;
+
+      case "thread/loaded/list":
+        respond({ id: msg.id, result: { data: [], nextCursor: null } });
+        break;
+
+      case "mock/state":
+        respond({ id: msg.id, result: { unsubscribed: [...unsubscribed] } });
+        break;
+
+      case "mock/foreignApproval": {
+        // A server request for a thread the caller names (default: one no
+        // broker client ever claimed) — what a shared app-server sends every
+        // subscribed client when the Codex app or a TUI is the one running
+        // the turn. The method param picks the request kind. Reports whether the
+        // broker answered within half a second.
+        const reqId = "foreign-" + (approvalIdCounter++);
+        let answer = null;
+        pendingServerRequests.set(reqId, (m) => { answer = m; });
+        respond({
+          id: reqId,
+          method: msg.params?.method ?? "item/commandExecution/requestApproval",
+          params: { threadId: msg.params?.threadId ?? "foreign-001", turnId: "turn-f", itemId: "item-f", command: "rm -rf /", cwd: "/tmp" },
+        });
+        setTimeout(() => {
+          pendingServerRequests.delete(reqId);
+          respond({ id: msg.id, result: { answered: answer !== null, answer } });
+        }, 500);
+        break;
+      }
+
+      case "turn/steer":
+        // Joining a running turn: the answer names the turn that is running.
+        respond({ id: msg.id, result: { turnId: "turn-active" } });
+        break;
+
       case "initialize":
         respond({ id: msg.id, result: { userAgent: "mock-codex/0.1.0" } });
         break;
@@ -1777,6 +1827,104 @@ setInterval(() => {}, 1000);
   });
 
   // ── Approval forwarding ───────────────────────────────────────────────────
+
+  describe("shared app-server hygiene", () => {
+    test("a thread is unsubscribed once its turn ends and nothing here needs it", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: true });
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+        await client.request("thread/start", { cwd: tempDir });
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed"), 5000);
+        // The release is deferred behind the peer hook; poll the mock's ledger.
+        let released: string[] = [];
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+          released = ((await client.request("mock/state")) as { unsubscribed: string[] }).unsubscribed;
+          if (released.includes("thread-001")) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(released).toContain("thread-001");
+        // The subscription is a per-connection fact, not a claim: the
+        // thread is free for a new turn, which resubscribes on resume.
+        await client.request("thread/resume", { threadId: "thread-001" }).catch(() => undefined);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("a request of any kind for a thread nobody here owns gets no answer, while our own thread's still gets method-not-found", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir);
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const foreign = (await client.request("mock/foreignApproval", { method: "item/tool/requestUserInput" })) as { answered: boolean };
+        expect(foreign.answered).toBe(false);
+        // A thread this client claimed: the old answer stands, so the server
+        // treats an unhandled question as declined and the turn moves on.
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        const ours = (await client.request("mock/foreignApproval", { method: "item/tool/requestUserInput", threadId: "thread-001" })) as { answered: boolean; answer: { error?: { code?: number } } };
+        expect(ours.answered).toBe(true);
+        expect(ours.answer.error?.code).toBe(-32601);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("a turn joined with turn/steer routes its events here but leaves its approvals to the client that owns it", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir);
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const joined = (await client.request("turn/steer", { threadId: "thread-001", expectedTurnId: "turn-active", input: [{ type: "text", text: "and this" }] })) as { turnId: string };
+        expect(joined.turnId).toBe("turn-active");
+        const outcome = (await client.request("mock/foreignApproval", { threadId: "thread-001" })) as { answered: boolean };
+        expect(outcome.answered).toBe(false);
+        expect(client.messages.some((m) => m.method === "item/commandExecution/requestApproval")).toBe(false);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("an approval for a thread nobody here owns is left for its owner to answer", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir);
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const outcome = (await client.request("mock/foreignApproval")) as { answered: boolean; answer: unknown };
+        // Neither answered upstream nor forwarded to a client that never
+        // claimed the thread.
+        expect(outcome.answered).toBe(false);
+        expect(client.messages.some((m) => m.method === "item/commandExecution/requestApproval")).toBe(false);
+        // The broker is still healthy afterwards.
+        expect(await client.request("thread/start", { cwd: tempDir })).toBeDefined();
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+  });
 
   describe("approval forwarding", () => {
     test("client receives forwarded approval request and responds — round-trip", async () => {

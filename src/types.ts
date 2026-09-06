@@ -148,7 +148,13 @@ export type CodexErrorInfo =
 
 /** Error carrying a JSON-RPC error code for protocol-level error forwarding. */
 export class RpcError extends Error {
-  constructor(message: string, public readonly rpcCode: number) {
+  /**
+   * @param message  Display form, "JSON-RPC error <code>: <detail>".
+   * @param rpcCode  The wire code.
+   * @param detail   The server's own message, un-prefixed — what a relay
+   *                 (the broker) forwards, so the prefix is applied once.
+   */
+  constructor(message: string, public readonly rpcCode: number, public readonly detail?: string) {
     super(message);
     this.name = "RpcError";
   }

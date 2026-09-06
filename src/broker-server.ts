@@ -242,6 +242,15 @@ async function main() {
    *  exactly the one a quiet thread still needs when its orphan's late
    *  completion finally lands. */
   const endedTurns = new Map<string, string[]>();
+  /** Threads this connection is subscribed to on the app-server — every
+   *  thread/start or thread/resume that succeeded, minus every
+   *  thread/unsubscribe. Subscription is what carries a thread's events to
+   *  us: a turn started on an unsubscribed thread runs silently (verified),
+   *  so anything that starts a turn must re-subscribe first. Idle threads
+   *  are released (see releaseThread) so a private server can unload them
+   *  — and with them Codex's per-thread writer lock, which is what lets the
+   *  Codex app or a TUI open the thread afterwards. */
+  const subscribedThreads = new Set<string>();
   // Deep enough that a late completion is still recognized after several
   // more turns have come and gone on the thread. It cannot be unbounded, so
   // a replay older than this many turns — arriving while a fresh claim has
@@ -306,7 +315,20 @@ async function main() {
   const peer: Peer = createPeer({
     cwd,
     stateDir,
-    request: (method, params) => appClient.request(method, params ?? {}),
+    request: async (method, params) => {
+      const result = await appClient.request(method, params ?? {});
+      // The peer's own thread/start and thread/resume subscribe this
+      // connection exactly as a client's do; keep the set truthful.
+      if (method === "thread/start" || method === "thread/resume") {
+        const id = (result as { thread?: { id?: unknown } } | undefined)?.thread?.id;
+        if (typeof id === "string") subscribedThreads.add(id);
+      } else if (method === "thread/unsubscribe" && typeof params?.threadId === "string") {
+        subscribedThreads.delete(params.threadId);
+      }
+      return result;
+    },
+    ensureSubscribed: (threadId, resumeParams) => ensureSubscribed(threadId, resumeParams),
+    releaseThreadSubscription: (threadId) => releaseIdleSubscription(threadId),
     claimThread: (threadId, owner: InternalOwner) => {
       if (threads.has(threadId)) return false;
       threads.set(threadId, {
@@ -431,6 +453,53 @@ async function main() {
     if (entry.watchdog) clearTimeout(entry.watchdog);
     threads.delete(threadId);
     notifyTurnEnded(threadId);
+    // Deferred like the peer hook, and after it: the hook may start a
+    // replacement turn on this thread, which must find it still subscribed.
+    setImmediate(() => releaseIdleSubscription(threadId));
+  }
+
+  /** Drop our subscription to a thread nothing here still needs: no turn
+   *  runs on it, no goal is between turns, and the peer is not keeping it
+   *  (a conversation the peer started keeps its consult tool only while it
+   *  stays loaded, so the peer holds those until their thread peer
+   *  retires). On a shared app-server this is what stops other clients'
+   *  turns on the thread from streaming here; it also lets the server
+   *  unload the thread — and release Codex's writer lock — where it does
+   *  that for unsubscribed idle threads (0.153.4 was not observed to).
+   *  Anything that runs a turn here later re-subscribes first. */
+  function releaseIdleSubscription(threadId: string): void {
+    if (shutdownInitiated || !subscribedThreads.has(threadId)) return;
+    if (threads.has(threadId) || goalActiveThreads.has(threadId)) return;
+    if (peer.keepsThreadLoaded(threadId)) return;
+    unsubscribeThread(threadId);
+  }
+
+  function unsubscribeThread(threadId: string): void {
+    subscribedThreads.delete(threadId);
+    appClient.request("thread/unsubscribe", { threadId }).catch((e) => {
+      process.stderr.write(`[broker-server] Warning: thread/unsubscribe failed for ${threadId}: ${e instanceof Error ? e.message : String(e)}\n`);
+    });
+  }
+
+  /** Make sure this connection is subscribed to `threadId` before a turn
+   *  starts on it. A still-loaded thread is rejoined as it is (a bare
+   *  resume, so its tools and instructions survive); one the server has
+   *  unloaded is resumed with the peer's resume instructions, which say the
+   *  consult tool is gone. Returns the mode the thread runs under, from the
+   *  server's own answer. */
+  async function ensureSubscribed(threadId: string, resumeParams: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    if (subscribedThreads.has(threadId)) return null;
+    let loaded = false;
+    try {
+      const list = await appClient.request<{ data?: unknown }>("thread/loaded/list", {});
+      loaded = Array.isArray(list?.data) && list.data.includes(threadId);
+    } catch { /* older server: treat as unloaded and send the instructions */ }
+    const result = await appClient.request<Record<string, unknown>>(
+      "thread/resume",
+      loaded ? { threadId } : { threadId, ...resumeParams },
+    );
+    subscribedThreads.add(threadId);
+    return result;
   }
 
   /** Tell the peer a thread's turn is over, on the NEXT tick. Deferring is
@@ -1128,8 +1197,11 @@ async function main() {
       // registration.
       if (method === "thread/start" || method === "thread/resume") {
         const thread = (result as { thread?: { id?: unknown } } | undefined)?.thread;
+        if (typeof thread?.id === "string") subscribedThreads.add(thread.id);
         const adopt = adoptionFor(thread?.id, params);
         if (adopt) peer.adoptThread(adopt.threadId, adopt.sandbox);
+      } else if (method === "thread/unsubscribe" && typeof params?.threadId === "string") {
+        subscribedThreads.delete(params.threadId);
       }
       // A per-turn sandbox override persists in Codex for the turns that
       // follow, so a conversation the peer tracks must record it — its
@@ -1164,9 +1236,13 @@ async function main() {
       }
       send(socket, {
         id: message.id,
+        // Forward the server's own message, not our prefixed display form:
+        // the client prefixes once more on receipt, and a doubled
+        // "JSON-RPC error -32600: JSON-RPC error -32600: …" is what it
+        // used to print.
         error: buildJsonRpcError(
           error instanceof RpcError ? error.rpcCode : -32000,
-          (error as Error).message,
+          error instanceof RpcError && error.detail !== undefined ? error.detail : (error as Error).message,
         ),
       });
     } finally {
