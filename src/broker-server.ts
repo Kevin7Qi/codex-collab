@@ -28,7 +28,7 @@ import {
 import { terminateProcessTree, waitForProcessTreeExit } from "./process";
 import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
 import { RpcError } from "./types";
-import { config } from "./config";
+import { config, sandboxModeOf } from "./config";
 import { adoptionFor, createPeer, type InternalOwner, type Peer } from "./peer";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -313,7 +313,17 @@ async function main() {
       // Only entries the peer itself owns — a client socket's claim is not
       // the peer's to free.
       const entry = threads.get(threadId);
-      if (entry && !(entry.socket instanceof net.Socket)) releaseThread(threadId);
+      if (!entry || entry.socket === null || entry.socket instanceof net.Socket) return;
+      // turn/started can land before the request that started it settles.
+      // The peer is releasing because that request failed — but a turn
+      // was announced, so it is running with nobody listening. Freeing
+      // the thread would let the next message start a second turn beside
+      // it; treat it as the orphan it is, as a client's failed request is.
+      if (entry.turnId) {
+        void orphanUnheardTurn(threadId, entry);
+        return;
+      }
+      releaseThread(threadId);
     },
     threadHasTurn: (threadId) => threads.has(threadId),
     interruptThread: async (threadId) => {
@@ -788,6 +798,31 @@ async function main() {
     }
   }
 
+  /** A turn was announced for a request that then failed, so it runs with
+   *  nobody listening. Hold the reservation, interrupt the turn, and let
+   *  turn/completed — or the watchdog, on a turn that never tears down —
+   *  release it. If the server does not know the turn, nothing is running
+   *  after all: release now rather than block the thread for half an hour
+   *  over a turn that never existed. */
+  async function orphanUnheardTurn(threadId: string, entry: ThreadEntry): Promise<void> {
+    if (!entry.turnId) return;
+    entry.socket = null;
+    armOrphanWatchdog(threadId, entry);
+    try {
+      await appClient.request("turn/interrupt", { threadId, turnId: entry.turnId });
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      if (/not found|no active turn|not running/i.test(detail)) {
+        markTurnEnded(threadId, entry.turnId);
+        releaseThread(threadId);
+      } else {
+        process.stderr.write(
+          `[broker-server] Warning: could not interrupt turn ${entry.turnId} after its request failed: ${detail}\n`,
+        );
+      }
+    }
+  }
+
   // ─── Streaming request settlement ──────────────────────────────────────
 
   /** A streaming request's response (or error) arrived. Fill in what only
@@ -831,27 +866,7 @@ async function main() {
         // running and still editing the workspace, unobserved. Treat it as
         // an orphan — the same handling an initiator that disconnected
         // mid-request gets, for the same reason.
-        entry.socket = null;
-        armOrphanWatchdog(parentThreadId!, entry);
-        try {
-          await appClient.request("turn/interrupt", { threadId: parentThreadId!, turnId: entry.turnId });
-          // Acknowledged: the turn existed. Hold the reservation and let
-          // turn/completed — or the watchdog, on a turn that never tears
-          // down — release it.
-        } catch (e) {
-          const detail = e instanceof Error ? e.message : String(e);
-          if (/not found|no active turn|not running/i.test(detail)) {
-            // The server does not know this turn, so nothing is running
-            // after all. Holding the thread until the watchdog would block
-            // it for half an hour over a turn that never existed.
-            markTurnEnded(parentThreadId!, entry.turnId);
-            releaseThread(parentThreadId!);
-          } else {
-            process.stderr.write(
-              `[broker-server] Warning: could not interrupt turn ${entry.turnId} after its request failed: ${detail}\n`,
-            );
-          }
-        }
+        await orphanUnheardTurn(parentThreadId!, entry);
       }
       return;
     }
@@ -882,7 +897,11 @@ async function main() {
       // it would block same-thread turns for the connection's whole life.
       if (entry) releaseThread(parentThreadId!);
 
-      if (!threads.has(reviewThreadId)) {
+      // An inline review runs on the parent thread itself. If its completion
+      // landed before this response, it was routed through the parent claim
+      // and released it — recreating a claim for a finished turn would hold
+      // the thread until the watchdog.
+      if (!threads.has(reviewThreadId) && !(turnId && turnAlreadyEnded(reviewThreadId, turnId))) {
         reviewEntry = {
           socket: entry ? entry.socket : socket.destroyed ? null : socket,
           turnId,
@@ -1060,6 +1079,13 @@ async function main() {
         const thread = (result as { thread?: { id?: unknown } } | undefined)?.thread;
         const adopt = adoptionFor(thread?.id, params);
         if (adopt) peer.adoptThread(adopt.threadId, adopt.sandbox);
+      }
+      // A per-turn sandbox override persists in Codex for the turns that
+      // follow, so a conversation the peer tracks must record it — its
+      // attested from-mode is derived from that record.
+      if (method === "turn/start" && streamThreadId && params?.sandboxPolicy !== undefined && peer.ownsThread(streamThreadId)) {
+        const mode = sandboxModeOf(params.sandboxPolicy);
+        if (mode) peer.noteThreadSandbox(streamThreadId, mode);
       }
 
       if (isStreaming) {

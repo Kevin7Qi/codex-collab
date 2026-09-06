@@ -134,7 +134,7 @@ From then on, any Claude session's `ListAgents` shows a `codex(myproject-a1b2c3)
 
 Mid-task, Codex can ask its Claude peer a question through a `collab.consult` tool call; the question arrives as a `[consult]` message, and the next reply from that session is delivered back into Codex's running turn. Consults are fail-open: unanswered questions time out and Codex proceeds on its own judgment.
 
-Claude Code gates inbound peer messages on the sender's attested permission class. A conversation attests `bypass` only when it runs with `sandbox: danger-full-access`, otherwise `prompting` — so a Claude session running with `bypassPermissions` holds Codex's replies for review unless its `crossSessionInbound` setting is `accept`. A held reply is still readable with `codex-collab output <id> --last`.
+Claude Code gates inbound peer messages on the sender's attested permission class. A conversation attests `bypass` only when it runs with `sandbox: danger-full-access`, otherwise `prompting` — so a Claude session running with `bypassPermissions` holds Codex's replies for review unless its `crossSessionInbound` setting is `accept`. A held reply is still readable with `codex-collab output <id> --last`. A CLI turn on a messaged conversation with an explicit `-s` changes the sandbox that conversation runs and attests from then on, since Codex keeps a per-turn override for the turns that follow.
 
 The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before (`CODEX_COLLAB_PEER=on` insists on the peer for one invocation, as `config mode peer` does persistently). The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
 

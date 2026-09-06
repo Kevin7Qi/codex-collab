@@ -44,7 +44,7 @@ import {
   pruneRuns,
 } from "./threads";
 import { EventDispatcher } from "./events";
-import { config, resolveModel, resolveWorkspaceDir, workspaceHash } from "./config";
+import { config, resolveModel, resolveWorkspaceDir, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -699,6 +699,12 @@ export interface Peer {
    *  tools were declared by the peer, so their calls belong to it no matter
    *  who runs the current turn. */
   ownsThread(threadId: string): boolean;
+  /** A CLI turn on this thread carried a sandbox override. Codex keeps a
+   *  per-turn override for the turns that follow, so the conversation's
+   *  recorded sandbox — the basis of the `from-mode` it attests — must
+   *  follow it, or a conversation escalated to full access would go on
+   *  attesting "prompting". */
+  noteThreadSandbox(threadId: string, sandbox: SandboxMode): void;
   /** Give a thread a peer address after a CLI client created or resumed it.
    *  Without this, starting work with `run` would foreclose ever talking to
    *  that conversation — the two entry points would produce different, and
@@ -1388,7 +1394,20 @@ export function createPeer(host: PeerHost): Peer {
             host.log(`peer: progress logging failed: ${e instanceof Error ? e.message : String(e)}`);
           }
         }
-        if (method === "item/completed") {
+        if (method === "turn/started" && !activeRuns.has(threadId)) {
+          // A goal continuation: the broker kept our claim across the turn
+          // boundary, but the previous turn's run record closed with it.
+          // Without a record this turn is invisible to `progress`, `kill`
+          // returns early on a thread that reads as completed, and no
+          // deadline covers it. Open one and cap it like any peer turn.
+          const conv = threadConversations.get(threadId);
+          if (conv) {
+            const runId = beginRun(threadId, conv.shortId ?? threadId.replace(/-/g, "").slice(-8), "(goal continuation)", conv.model);
+            runningPeerTurns.add(threadId);
+            refreshStatus(threadId);
+            armDeadline(conv, runId);
+          }
+        } else if (method === "item/completed") {
           const item = params?.item as { type?: string; text?: string } | undefined;
           if (item?.type === "agentMessage" && typeof item.text === "string") {
             replyBuffers.get(threadId)?.push(item.text);
@@ -1401,6 +1420,9 @@ export function createPeer(host: PeerHost): Peer {
           replyBuffers.delete(threadId);
           runningPeerTurns.delete(threadId);
           refreshStatus(threadId);
+          // A consult this turn was waiting on dies with it; left pending,
+          // the sender's next message would be swallowed as its answer.
+          settleConsult(threadId);
           const conv = threadConversations.get(threadId);
           if (!conv) return;
           conv.lastActivity = Date.now();
@@ -1410,12 +1432,9 @@ export function createPeer(host: PeerHost): Peer {
           const deliverAll = (text: string) => {
             for (const to of audience) deliverTo(to, text, threadId);
           };
-          // Buffer already consumed (or never armed): this is a goal-mode
-          // continuation turn completing after the reply was delivered —
-          // stay silent rather than spam the sender per continuation.
-          if (!texts) return;
           const turn = params?.turn as { status?: string; error?: { message?: string } | null } | undefined;
-          const reply = texts.join("\n\n").trim();
+          const reply = (texts ?? []).join("\n\n").trim();
+          // Every turn closes its record — a goal continuation's too.
           finishRun(threadId, turn?.status ?? "completed", reply, turn?.error?.message ?? null);
           const died = turn?.status === "failed" || turn?.status === "interrupted";
           // Stopped by its own deadline: say so, and say how to raise it.
@@ -1425,6 +1444,16 @@ export function createPeer(host: PeerHost): Peer {
           const limit = limitSec !== undefined
             ? `${describeLimit(limitSec)} limit (a \`timeout:\` header in seconds on your next message raises it for this conversation)`
             : null;
+          if (!texts) {
+            // Buffer already consumed: a goal continuation completing after
+            // the reply was delivered. Stay silent rather than spam the
+            // sender per continuation — unless the deadline stopped it,
+            // which pauses the goal and is news.
+            if (limit && died) {
+              deliverAll(`[codex-collab] The goal's continuation turn was stopped after exceeding its ${limit}. The goal is paused; send a message to resume it.`);
+            }
+            return;
+          }
           if (reply) {
             // A turn that died mid-way may still have buffered text (its
             // opening message, typically). Delivering that alone reads as
@@ -1882,8 +1911,12 @@ export function createPeer(host: PeerHost): Peer {
       // output is discarded and the consumed flag suppresses the wake.
       // Armed, whatever the turn says from here on is delivered as the
       // reply. (For a CLI-owned turn this entry sits unused — its
-      // notifications never reach ownerFor — and the wake path resets it.)
+      // notifications never reach ordinary ownerFor — and the wake path resets it.)
       if (!replyBuffers.has(conv.threadId)) replyBuffers.set(conv.threadId, []);
+      // The turn may have ended while the injection was in flight. The
+      // broker's turn-ended hook ran before the wake was queued and found
+      // nothing owed; nothing else will fire, so settle the debt now.
+      if (!host.threadHasTurn(conv.threadId)) onThreadTurnEnded(conv.threadId);
       return;
     }
 
@@ -2009,6 +2042,10 @@ export function createPeer(host: PeerHost): Peer {
         threadId: conv.threadId,
         ...(conv.model ? { model: conv.model } : {}),
         ...(conv.effort ? { effort: conv.effort } : {}),
+        // Restated every turn, like the model: a CLI `-s` on this thread
+        // persists in Codex past its own turn, and the conversation must
+        // run — and attest — the sandbox it records.
+        ...(conv.sandbox ? { sandboxPolicy: sandboxPolicyFor(conv.sandbox as SandboxMode) } : {}),
         // Turn input is the only channel the Codex app renders.
         input: [{
           type: "text",
@@ -2057,8 +2094,29 @@ export function createPeer(host: PeerHost): Peer {
    *  turn never sampled after the injection — or was CLI-owned, whose reply
    *  went to its own client — start a peer turn so the sender gets an
    *  answer. */
+  /** Resolve a consult whose turn is over: the tool call it answers is
+   *  gone, and an entry left pending would eat the sender's next message. */
+  function settleConsult(threadId: string): void {
+    const pending = pendingConsults.get(threadId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingConsults.delete(threadId);
+    pending.resolve(null);
+  }
+
+  function noteThreadSandbox(threadId: string, sandbox: SandboxMode): void {
+    const conv = threadConversations.get(threadId);
+    if (!conv || conv.sandbox === sandbox) return;
+    conv.sandbox = sandbox;
+    saveConversations();
+    host.log(`peer: conversation on ${threadId} now runs ${sandbox} (CLI override)`);
+  }
+
   function onThreadTurnEnded(threadId: string): void {
     if (stopped) return;
+    // Whatever turn just ended — ours, or a CLI turn consulting through
+    // us — its consult cannot be answered any more.
+    settleConsult(threadId);
     // This hook is deferred a tick, so a replacement turn may already have
     // claimed the thread and installed ITS audience and buffers. Touch
     // nothing in that case — deleting here wipes the live turn's audience,
@@ -2318,6 +2376,7 @@ export function createPeer(host: PeerHost): Peer {
   return {
     get active() { return active; },
     ownsThread: (threadId: string) => threadConversations.has(threadId),
+    noteThreadSandbox,
     adoptThread,
     handleToolCall,
     onThreadTurnEnded,

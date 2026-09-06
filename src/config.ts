@@ -143,6 +143,31 @@ Object.freeze(config);
 
 export type ReasoningEffort = (typeof config.reasoningEfforts)[number];
 export type SandboxMode = (typeof config.sandboxModes)[number];
+
+/** Wire shape of a sandbox mode: thread/start's `sandbox` accepts the
+ *  kebab-case string, turn/start's `sandboxPolicy` override wants this. */
+export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
+  switch (mode) {
+    case "read-only": return { type: "readOnly" };
+    case "workspace-write": return { type: "workspaceWrite" };
+    case "danger-full-access": return { type: "dangerFullAccess" };
+  }
+}
+
+/** The mode a `sandboxPolicy` (or a kebab-case string) names; undefined
+ *  for a shape this build does not know, so protocol drift is never read
+ *  as one of the three modes. */
+export function sandboxModeOf(policy: unknown): SandboxMode | undefined {
+  if (typeof policy === "string") {
+    return (config.sandboxModes as readonly string[]).includes(policy) ? policy as SandboxMode : undefined;
+  }
+  switch ((policy as { type?: unknown } | null)?.type) {
+    case "readOnly": return "read-only";
+    case "workspaceWrite": return "workspace-write";
+    case "dangerFullAccess": return "danger-full-access";
+    default: return undefined;
+  }
+}
 export type ApprovalPolicy = (typeof config.approvalPolicies)[number];
 export type ApprovalMode = (typeof config.approvalModes)[number];
 

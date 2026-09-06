@@ -4,6 +4,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { config } from "./config";
+import { listRuns } from "./threads";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
@@ -2856,6 +2857,178 @@ describe.skipIf(onWindows)("registry status", () => {
       if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
       else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(onWindows)("turn lifecycle edges", () => {
+  /** A peer over a fake host that records every request, whose threads
+   *  start instantly and whose turns the test drives by hand. */
+  function setUp(opts: {
+    threadHasTurn?: (id: string, owners: Map<string, unknown>) => boolean;
+    /** Runs inside every host request, before it resolves — for state that
+     *  must change while an RPC is in flight. */
+    onRequest?: (method: string) => void;
+  } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), "peer-edge-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const lines: string[] = [];
+    const inbox = net.createServer((sock) => {
+      sock.setEncoding("utf8");
+      let buf = "";
+      sock.on("data", (c: string) => {
+        buf += c;
+        let i: number;
+        while ((i = buf.indexOf("\n")) !== -1) {
+          const l = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (l) lines.push(l);
+        }
+      });
+    });
+    inbox.listen(senderSock);
+    const owners = new Map<string, { onNotification(m: string, p?: Record<string, unknown>): void }>();
+    const requests: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    let started = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        requests.push({ method, params });
+        opts.onRequest?.(method);
+        if (method === "thread/start") return { thread: { id: `thread-${++started}` } };
+        return {};
+      },
+      claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
+      releaseThread: (threadId) => { owners.delete(threadId); },
+      threadHasTurn: (threadId) => (opts.threadHasTurn ? opts.threadHasTurn(threadId, owners) : owners.has(threadId)),
+      interruptThread: async () => true,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    const send = (text: string) => new Promise<void>((resolve, reject) => {
+      const line = buildEnvelope({ text, ourSocketPath: senderSock, ourName: "test-sender" });
+      const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+      sock.on("error", reject);
+    });
+    const complete = (id: string, text: string | null, status = "completed") => {
+      const owner = owners.get(id)!;
+      if (text !== null) owner.onNotification("item/completed", { threadId: id, item: { type: "agentMessage", text } });
+      owner.onNotification("turn/completed", { threadId: id, turn: { status, error: null } });
+    };
+    const tearDown = () => {
+      peer.stop();
+      inbox.close();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    };
+    /** The from-mode a delivered line attests. */
+    const modeOf = (line: string): string | undefined =>
+      /from-mode="(\w+)"/.exec((JSON.parse(line) as { message: { content: string } }).message.content)?.[1];
+    return { peer, send, owners, requests, lines, complete, tearDown, dir, modeOf };
+  }
+
+  test("a peer turn restates the conversation's sandbox, and a CLI override moves it", async () => {
+    const t = setUp();
+    try {
+      await t.send("sandbox: read-only\nlook around");
+      await waitFor(() => t.owners.has("thread-1"));
+      const first = t.requests.find((r) => r.method === "turn/start")!;
+      expect(first.params?.sandboxPolicy).toEqual({ type: "readOnly" });
+      t.complete("thread-1", "seen");
+      await waitFor(() => t.lines.length > 0);
+      expect(t.modeOf(t.lines[0])).toBe("prompting");
+
+      // `run --resume <id> -s danger-full-access` carried a per-turn override,
+      // which Codex keeps for the turns that follow.
+      t.peer.noteThreadSandbox("thread-1", "danger-full-access");
+      t.owners.delete("thread-1");
+      await t.send("and now?");
+      await waitFor(() => t.owners.has("thread-1"));
+      const second = t.requests.filter((r) => r.method === "turn/start")[1]!;
+      expect(second.params?.sandboxPolicy).toEqual({ type: "dangerFullAccess" });
+      t.complete("thread-1", "done");
+      await waitFor(() => t.lines.length > 1);
+      expect(t.modeOf(t.lines[1])).toBe("bypass");
+    } finally {
+      t.tearDown();
+    }
+  });
+
+  test("a goal continuation gets its own run record and deadline, and closes it silently", async () => {
+    const t = setUp();
+    try {
+      await t.send("timeout: 60\nmigrate everything");
+      await waitFor(() => t.owners.has("thread-1"));
+      t.complete("thread-1", "first turn done");
+      await waitFor(() => t.lines.length > 0);
+      expect(t.peer.debugState()).toMatchObject({ activeRuns: 0, deadlines: 0 });
+
+      // The goal is active: the broker kept the claim, and the server
+      // announces a continuation. Nothing else tells the peer.
+      t.owners.get("thread-1")!.onNotification("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
+      expect(t.peer.debugState()).toMatchObject({ activeRuns: 1, deadlines: 1 });
+      expect(listRuns(t.dir).filter((r) => r.status === "running")).toHaveLength(1);
+
+      t.complete("thread-1", "continuation done");
+      expect(t.peer.debugState()).toMatchObject({ activeRuns: 0, deadlines: 0 });
+      expect(listRuns(t.dir).filter((r) => r.status === "running")).toHaveLength(0);
+      await new Promise((r) => setTimeout(r, SETTLE_MS));
+      expect(t.lines).toHaveLength(1); // continuations do not spam the sender
+    } finally {
+      t.tearDown();
+    }
+  });
+
+  test("a consult dies with its turn instead of eating the sender's next message", async () => {
+    const t = setUp();
+    try {
+      await t.send("do the thing");
+      await waitFor(() => t.owners.has("thread-1"));
+      const answer = t.peer.handleToolCall({ threadId: "thread-1", tool: "consult", arguments: { question: "which?" } });
+      await waitFor(() => t.lines.some((l) => l.includes("[consult]")));
+      // The turn is interrupted while the question is out.
+      t.complete("thread-1", null, "interrupted");
+      const result = await answer;
+      expect(JSON.stringify(result)).toContain("No answer arrived");
+      t.owners.delete("thread-1");
+      // The next message is new work, not a late answer to a dead call.
+      await t.send("try again");
+      await waitFor(() => t.requests.filter((r) => r.method === "turn/start").length === 2);
+    } finally {
+      t.tearDown();
+    }
+  });
+
+  test("a message whose turn ended during injection is still answered", async () => {
+    // The turn is running when the message arrives, and gone by the time
+    // the injection RPC returns — the broker's hook fired before any wake
+    // was queued, so nothing else would settle it.
+    let running = false;
+    const t = setUp({
+      threadHasTurn: (id, owners) => running || owners.has(id),
+      // The CLI turn finishes while the injection RPC is in flight.
+      onRequest: (method) => { if (method === "thread/inject_items") running = false; },
+    });
+    try {
+      await t.send("first");
+      await waitFor(() => t.owners.has("thread-1"));
+      t.complete("thread-1", "ok");
+      await waitFor(() => t.lines.length > 0);
+      t.owners.delete("thread-1");
+
+      running = true; // a CLI turn now holds the thread
+      await t.send("second");
+      // No broker hook will fire for a turn that ended mid-injection; the
+      // peer must notice on its own and start the answering turn.
+      await waitFor(() => t.requests.filter((r) => r.method === "turn/start").length === 2);
+    } finally {
+      t.tearDown();
     }
   });
 });

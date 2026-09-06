@@ -1154,13 +1154,8 @@ export function resolveApproval(mode: ApprovalMode): {
 }
 
 /** Map a kebab-case sandbox mode to the app-server's sandboxPolicy wire shape. */
-export function sandboxPolicyFor(mode: SandboxMode): { type: string } {
-  switch (mode) {
-    case "read-only": return { type: "readOnly" };
-    case "workspace-write": return { type: "workspaceWrite" };
-    case "danger-full-access": return { type: "dangerFullAccess" };
-  }
-}
+import { sandboxPolicyFor } from "../config";
+export { sandboxPolicyFor };
 
 /** Inverse of sandboxPolicyFor, for display: thread/start|fork echo the
  *  sandbox as either the kebab-case string they were sent or the wire

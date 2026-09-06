@@ -134,7 +134,7 @@ codex-collab peer up      # 启动 broker 与对等节点；单独执行 `peer` 
 
 任务进行中，Codex 可通过 `collab.consult` 工具调用向 Claude 提问：问题以 `[consult]` 消息送达，该会话的下一条回复会直接送回 Codex 正在运行的回合。consult 采取超时放行策略：无人应答时超时后 Codex 自行判断并继续。
 
-Claude Code 会依据发送方声明的权限类别对入站对等消息设卡：对话仅在 `sandbox: danger-full-access` 下声明为 `bypass`，其余情况一律为 `prompting`。因此，以 `bypassPermissions` 模式运行的 Claude 会话会将 Codex 的回复暂扣待审，除非其 `crossSessionInbound` 设置为 `accept`。被暂扣的回复仍可通过 `codex-collab output <id> --last` 查看。
+Claude Code 会依据发送方声明的权限类别对入站对等消息设卡：对话仅在 `sandbox: danger-full-access` 下声明为 `bypass`，其余情况一律为 `prompting`。因此，以 `bypassPermissions` 模式运行的 Claude 会话会将 Codex 的回复暂扣待审，除非其 `crossSessionInbound` 设置为 `accept`。被暂扣的回复仍可通过 `codex-collab output <id> --last` 查看。若以命令行在某个消息对话上显式指定 `-s` 运行回合，该对话此后运行并声明的沙箱即随之改变——Codex 会将逐回合的覆盖保留至后续回合。
 
 该机制可平滑降级：在 Windows 上、无会话注册表时、或设置 `CODEX_COLLAB_PEER=off` 后，下述各项功能与从前完全一致（`CODEX_COLLAB_PEER=on` 则在单次调用中强制启用对等节点，效果同持久化的 `config mode peer`）。只要有 Claude 会话在运行，broker 就保持常驻；最后一个会话退出后按常规空闲超时退场。
 
