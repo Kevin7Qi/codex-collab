@@ -45,6 +45,7 @@ import {
 } from "./threads";
 import { EventDispatcher } from "./events";
 import { config, resolveModel, resolveWorkspaceDir, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
+import { resolveModelDefaults } from "./models";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -1544,11 +1545,21 @@ export function createPeer(host: PeerHost): Peer {
       developerInstructions: PEER_DEVELOPER_INSTRUCTIONS,
       dynamicTools: PEER_DYNAMIC_TOOLS,
     };
-    const model = conversationModel(headers.model, userConfig.model);
+    let model = conversationModel(headers.model, userConfig.model);
+    let effort = headers.effort ?? userConfig.reasoning;
+    // Nothing named a model or an effort: pick them the way the CLI does
+    // (see resolveDefaults) — the server default walked up its upgrade
+    // chain, and the strongest effort under the ceiling. A prompt typed at
+    // a terminal and the same prompt arriving as a message must not run on
+    // different models. On failure the server chooses, as before.
+    if (model === undefined || effort === undefined) {
+      const defaults = await workspaceModelDefaults(model, effort);
+      model ??= defaults?.model;
+      effort ??= defaults?.effort;
+    }
     if (model) params.model = model;
     // Reasoning effort reaches a thread only through `config` — thread/start
     // carries no top-level field for it.
-    const effort = headers.effort ?? userConfig.reasoning;
     if (effort) params.config = { model_reasoning_effort: effort };
     const result = await host.request("thread/start", params) as {
       thread: { id: string };
@@ -1590,6 +1601,39 @@ export function createPeer(host: PeerHost): Peer {
       effort,
       approval: headers.approval === "auto" ? "auto" : undefined,
     };
+  }
+
+  /** The model list is paginated and a broker lives for hours; one fetch
+   *  per new conversation would add a round-trip to every first message.
+   *  Cached for a while — long enough to matter, short enough that a model
+   *  released today is picked up today. */
+  const MODEL_DEFAULTS_TTL_MS = 60 * 60 * 1000;
+  let modelDefaultsCache: { at: number; forModel: string | undefined; value: { model?: string; effort?: string } | null } | null = null;
+  async function workspaceModelDefaults(
+    presetModel: string | undefined,
+    presetEffort: string | undefined,
+  ): Promise<{ model?: string; effort?: string } | null> {
+    // What is cached is derived from the model alone — the best model, and
+    // the effort that model gets by default — keyed on the preset model,
+    // since one model's default effort is not another's. A message's own
+    // `effort:` is applied on top, never stored: cached, it would become
+    // every later conversation's default for an hour.
+    let derived: { model?: string; effort?: string } | null;
+    if (modelDefaultsCache && modelDefaultsCache.forModel === presetModel && Date.now() - modelDefaultsCache.at < MODEL_DEFAULTS_TTL_MS) {
+      derived = modelDefaultsCache.value;
+    } else {
+      try {
+        derived = await resolveModelDefaults(
+          { request: <T,>(method: string, params?: unknown) => host.request(method, params as Record<string, unknown>) as Promise<T> },
+          { model: presetModel, effort: undefined },
+        );
+        modelDefaultsCache = { at: Date.now(), forModel: presetModel, value: derived };
+      } catch (e) {
+        host.log(`peer: could not resolve model defaults (${e instanceof Error ? e.message : String(e)}) — the server chooses`);
+        return null;
+      }
+    }
+    return derived ? { model: derived.model, effort: presetEffort ?? derived.effort } : null;
   }
 
   /** Minimal user-defaults read (model/sandbox). commands/shared.ts owns the

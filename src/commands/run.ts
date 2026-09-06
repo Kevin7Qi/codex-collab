@@ -187,6 +187,11 @@ async function detachRun(
   dieWithRunnerOutput(`Detached runner did not start a turn within ${DETACH_HANDSHAKE_TIMEOUT_MS / 1000}s — terminated it.`);
 }
 
+/** True when a template body tells Codex it can reach the ask channel. */
+export function advertisesAskChannel(templateBody: string): boolean {
+  return /\bcodex-collab ask\b/.test(templateBody);
+}
+
 export async function handleRun(args: string[]): Promise<void> {
   // Scrub the detach parent's injected runId out of the environment before
   // anything can spawn (broker, app-server, Codex's shell commands all
@@ -233,6 +238,20 @@ export async function handleRun(args: string[]): Promise<void> {
       }
       options.sandbox = meta.sandbox as SandboxMode;
       options.explicit.add("sandbox");
+    }
+    // The ask channel is a mailbox that `codex-collab ask` writes from
+    // INSIDE Codex's sandbox, in temp space. A read-only sandbox denies
+    // that write, so a template that advertises the channel would launch a
+    // run in which every question fails with EPERM and Codex carries on
+    // without asking — a silent no-op for exactly the runs (investigations,
+    // reviews) most likely to want it. Refuse at launch instead.
+    if (advertisesAskChannel(body) && options.sandbox === "read-only") {
+      die(
+        `Template "${options.template}" advertises the ask channel, which cannot work under -s read-only: ` +
+        `\`codex-collab ask\` runs inside Codex's sandbox and a read-only sandbox blocks its mailbox.
+` +
+        `Use -s workspace-write, or run without --template ${options.template}.`,
+      );
     }
   }
   const ws = getWorkspacePaths(options.dir);

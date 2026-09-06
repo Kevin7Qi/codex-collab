@@ -1,7 +1,7 @@
 // src/render.test.ts — display contract for `follow`
 
 import { describe, expect, test } from "bun:test";
-import { LogEntryParser, renderEntry, renderFinalStatus, type LogEntry } from "./render";
+import { LogEntryParser, localClock, renderEntry, renderFinalStatus, type LogEntry } from "./render";
 
 const PLAIN = { color: false, width: 120 };
 
@@ -49,20 +49,24 @@ describe("LogEntryParser", () => {
 });
 
 describe("renderEntry", () => {
+  const TS = "2026-07-02T09:24:07.375Z";
+  // Prefixes render in the viewer's local time; bun pins TZ to UTC for tests
+  // unless the environment sets one, so derive the expectation either way.
+  const clock = localClock(TS);
   const entry = (body: string, extra: string[] = []): LogEntry => ({
-    ts: "2026-07-02T09:24:07.375Z",
+    ts: TS,
     lines: [body, ...extra],
   });
 
   test("command completions show exit-status marks", () => {
-    expect(renderEntry(entry("command: npm test (exit 0)"), PLAIN)[0]).toBe("09:24:07 ✓ npm test");
-    expect(renderEntry(entry("command: npm test (exit 1)"), PLAIN)[0]).toBe("09:24:07 ✗ npm test (exit 1)");
+    expect(renderEntry(entry("command: npm test (exit 0)"), PLAIN)[0]).toBe(`${clock} ✓ npm test`);
+    expect(renderEntry(entry("command: npm test (exit 1)"), PLAIN)[0]).toBe(`${clock} ✗ npm test (exit 1)`);
   });
 
   test("approval prompts are marked and their indented block is preserved", () => {
-    expect(renderEntry(entry("[codex] APPROVAL NEEDED"), PLAIN)[0]).toBe("09:24:07 ⏸ APPROVAL NEEDED");
+    expect(renderEntry(entry("[codex] APPROVAL NEEDED"), PLAIN)[0]).toBe(`${clock} ⏸ APPROVAL NEEDED`);
     expect(renderEntry(entry("[codex]   Approve: codex-collab approve x"), PLAIN)[0])
-      .toBe("09:24:07   Approve: codex-collab approve x");
+      .toBe(`${clock}   Approve: codex-collab approve x`);
   });
 
   test("agent output renders as a separated result block, untruncated", () => {
@@ -116,5 +120,24 @@ describe("drain keeps partial lines inside agent-output blocks", () => {
     const drained = p.drain();
     expect(drained).toHaveLength(1);
     expect(drained[0].lines).toEqual(["agent output:", "first line", "partial tail"]);
+  });
+});
+
+describe("localClock", () => {
+  test("renders the entry's instant in the viewer's local time, not the UTC digits", () => {
+    const iso = "2026-07-04T03:24:37.365Z";
+    const expected = new Date(iso);
+    const two = (n: number) => String(n).padStart(2, "0");
+    expect(localClock(iso)).toBe(`${two(expected.getHours())}:${two(expected.getMinutes())}:${two(expected.getSeconds())}`);
+  });
+
+  test("falls back to the stored digits for an unparseable timestamp", () => {
+    expect(localClock("2026-99-99T03:24:37.365Z", new Date("garbage"))).toBe("03:24:37");
+  });
+
+  test("the rendered prefix carries the local clock", () => {
+    const iso = "2026-07-04T03:24:37.365Z";
+    const line = renderEntry({ ts: iso, lines: ["[codex] Running: ls"] }, { color: false, width: 120 })[0];
+    expect(line.startsWith(localClock(iso) + " ")).toBe(true);
   });
 });

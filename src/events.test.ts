@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { EventDispatcher } from "./events";
+import { EventDispatcher, collapseToOneLine } from "./events";
 import { mkdirSync, rmSync, readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -1075,5 +1075,13 @@ describe("ask-channel review-hardening regressions", () => {
     });
     expect(pendings[pendings.length - 1]).toMatchObject({ id: idB });
     dispatcher.reset();
+  });
+});
+
+describe("collapseToOneLine", () => {
+  test("a multi-line command becomes one physical line with visible breaks", () => {
+    expect(collapseToOneLine("bash -lc 'cat <<EOF\nline one\nline two\nEOF'")).toBe("bash -lc 'cat <<EOF ⏎ line one ⏎ line two ⏎ EOF'");
+    expect(collapseToOneLine("a\r\nb")).toBe("a ⏎ b");
+    expect(collapseToOneLine("single")).toBe("single");
   });
 });

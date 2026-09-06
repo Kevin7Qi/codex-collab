@@ -3223,3 +3223,56 @@ describe.skipIf(onWindows)("shared app-server: subscriptions and held threads", 
     }
   }, 20_000);
 });
+
+describe.skipIf(onWindows)("model defaults for conversations", () => {
+  test("a message's own effort is applied but never cached as the workspace default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-defaults-"));
+    const prev = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const threadStarts: Array<Record<string, unknown>> = [];
+    let listCalls = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "model/list") {
+          listCalls++;
+          return { data: [{ id: "gpt-best", isDefault: true, upgrade: null, supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "xhigh" }] }], nextCursor: null };
+        }
+        if (method === "thread/start") { threadStarts.push(params ?? {}); return { thread: { id: `thread-${threadStarts.length}` } }; }
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      threadHasTurn: () => false,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await sendLine(dir, buildEnvelope({ text: "topic: first\neffort: low\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => threadStarts.length === 1);
+      await sendLine(dir, buildEnvelope({ text: "topic: second\n\nhello again", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => threadStarts.length === 2);
+      const effortOf = (p: Record<string, unknown>) => (p.config as { model_reasoning_effort?: string } | undefined)?.model_reasoning_effort;
+      // Both run on the resolved model — the CLI's choice — and the second
+      // conversation gets the model's own default effort, not the first
+      // message's `effort: low`.
+      expect(threadStarts[0].model).toBe("gpt-best");
+      expect(effortOf(threadStarts[0])).toBe("low");
+      expect(threadStarts[1].model).toBe("gpt-best");
+      expect(effortOf(threadStarts[1])).toBe("xhigh");
+      expect(listCalls).toBe(1); // cached for the second conversation
+    } finally {
+      peer.stop();
+      if (prev === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});

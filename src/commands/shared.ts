@@ -32,6 +32,7 @@ import {
 } from "../threads";
 import type { PendingApproval, RunGoalState } from "../types";
 import { RpcError, TurnTimeoutError } from "../types";
+import { resolveModelDefaults } from "../models";
 import { EventDispatcher } from "../events";
 import {
   autoApproveHandler,
@@ -802,61 +803,7 @@ export function armQuestionChannel(
 // Model auto-selection
 // ---------------------------------------------------------------------------
 
-/** Fetch all pages of a paginated endpoint. */
-export async function fetchAllPages<T>(
-  client: AppServerClient,
-  method: string,
-  baseParams?: Record<string, unknown>,
-): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | undefined;
-  do {
-    const params: Record<string, unknown> = { ...baseParams };
-    if (cursor) params.cursor = cursor;
-    const page = await client.request<{ data: T[]; nextCursor: string | null }>(method, params);
-    items.push(...page.data);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return items;
-}
-
-/** Pick the best model by following the upgrade chain from the server default,
- *  then preferring a -codex variant if one exists at the latest generation. */
-export function pickBestModel(models: Model[]): string | undefined {
-  const byId = new Map(models.map(m => [m.id, m]));
-
-  // Start from the server's default model
-  let current = models.find(m => m.isDefault);
-  if (!current) return undefined;
-
-  // Follow the upgrade chain to the latest generation
-  const visited = new Set<string>();
-  while (current.upgrade && !visited.has(current.id)) {
-    visited.add(current.id);
-    const next = byId.get(current.upgrade);
-    if (!next) break; // upgrade target not in the list
-    current = next;
-  }
-
-  // Prefer -codex variant if available at this generation
-  if (!current.id.endsWith("-codex")) {
-    const codexVariant = byId.get(current.id + "-codex");
-    if (codexVariant && codexVariant.upgrade === null) return codexVariant.id;
-  }
-
-  return current.id;
-}
-
-/** Pick the highest reasoning effort a model supports, capped at the
- *  auto-select ceiling. */
-function pickAutoEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
-  const available = new Set(supported.map(s => s.reasoningEffort));
-  const ceiling = config.reasoningEfforts.indexOf(config.autoEffortCeiling);
-  for (let i = ceiling; i >= 0; i--) {
-    if (available.has(config.reasoningEfforts[i])) return config.reasoningEfforts[i];
-  }
-  return undefined;
-}
+export { fetchAllPages, pickBestModel } from "../models";
 
 /** Auto-resolve model and/or reasoning effort when not set by CLI or config. */
 export async function resolveDefaults(client: AppServerClient, opts: Options): Promise<void> {
@@ -869,28 +816,23 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
   const needReasoning = !isSet("reasoning");
   if (!needModel && !needReasoning) return;
 
-  let models: Model[];
+  let resolved: { model?: string; effort?: string } | null;
   try {
-    models = await fetchAllPages<Model>(client, "model/list", { includeHidden: true });
+    resolved = await resolveModelDefaults(client, {
+      model: needModel ? undefined : opts.model,
+      effort: needReasoning ? undefined : opts.reasoning,
+    });
   } catch (e) {
     console.error(`[codex] Warning: could not fetch model list (${e instanceof Error ? e.message : String(e)}). Model and reasoning will be determined by the server.`);
     return;
   }
-  if (models.length === 0) {
+  if (resolved === null) {
     console.error(`[codex] Warning: server returned no models. Model and reasoning will be determined by the server.`);
     return;
   }
 
-  if (needModel) {
-    opts.model = pickBestModel(models);
-  }
-
-  if (needReasoning) {
-    const modelData = models.find(m => m.id === opts.model);
-    if (modelData?.supportedReasoningEfforts?.length) {
-      opts.reasoning = pickAutoEffort(modelData.supportedReasoningEfforts);
-    }
-  }
+  if (needModel) opts.model = resolved.model;
+  if (needReasoning && resolved.effort) opts.reasoning = resolved.effort as ReasoningEffort;
 }
 
 // ---------------------------------------------------------------------------

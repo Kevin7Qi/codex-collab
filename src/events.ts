@@ -631,7 +631,13 @@ export class EventDispatcher {
    *  by follow/output from the log. Strip escape sequences at this single
    *  boundary so embedded ANSI can't redraw or disguise what's shown. */
   private progress(text: string): void {
-    const clean = sanitizeForTerminal(text);
+    // One progress entry is one physical line, on the terminal and in the
+    // log. A command with embedded newlines (heredocs, inline scripts) used
+    // to become one timestamped line followed by a wall of unattributed
+    // continuation lines; the line-oriented log parser then rendered them
+    // as orphans. The newline is kept visible rather than dropped, so the
+    // command is still legible and nothing is lost.
+    const clean = collapseToOneLine(sanitizeForTerminal(text));
     this.onProgress(clean);
     this.log(`[codex] ${clean}`);
     this.flush();
@@ -643,6 +649,12 @@ export class EventDispatcher {
     // Auto-flush every 20 entries
     if (this.logBuffer.length >= 20) this.flush();
   }
+}
+
+/** Fold a multi-line progress payload onto one line, marking each break
+ *  with a visible glyph. Exported for tests. */
+export function collapseToOneLine(text: string): string {
+  return text.replace(/\r?\n/g, " ⏎ ");
 }
 
 /** Collapse shell-quoting differences so question text can be matched
