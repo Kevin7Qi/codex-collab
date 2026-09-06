@@ -128,6 +128,9 @@ function envWithPathPrefix(dir: string): Record<string, string> {
     env[k] = v;
   }
   env.PATH = `${dir}${delimiter}${inherited}`;
+  // Hermetic: a developer running Codex's app-server daemon must not have
+  // the broker under test attach to it instead of the mock on PATH.
+  env.CODEX_COLLAB_SERVER = "private";
   return env;
 }
 

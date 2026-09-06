@@ -207,3 +207,19 @@ describe("pickLastOutput (output --last)", () => {
     expect(pickLastOutput(null, "").kind).toBe("none");
   });
 });
+
+describe("server thread state (threads --discover)", () => {
+  const { serverThreadState, serverStateNote } = require("./threads") as typeof import("./threads");
+  test("maps the app-server's status onto three states", () => {
+    expect(serverThreadState({ type: "active", activeFlags: ["waitingOnApproval"] })).toBe("active");
+    expect(serverThreadState({ type: "idle" })).toBe("loaded");
+    expect(serverThreadState({ type: "notLoaded" })).toBe("not loaded");
+    expect(serverThreadState(undefined)).toBe("not loaded");
+  });
+  test("only live states get a listing note", () => {
+    expect(serverStateNote("active")).toContain("active on the app-server");
+    expect(serverStateNote("loaded")).toContain("open on the app-server");
+    expect(serverStateNote("not loaded")).toBe("");
+    expect(serverStateNote(undefined)).toBe("");
+  });
+});

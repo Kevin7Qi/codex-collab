@@ -375,3 +375,29 @@ describe("brokerReadyTimeout", () => {
     }
   });
 });
+
+describe("describeServer (health)", () => {
+  const { describeServer } = require("./commands/config") as typeof import("./commands/config");
+  const env = { CODEX_HOME: "/h/.codex" };
+  test("a shared server names the socket and what it buys", () => {
+    const line = describeServer({ kind: "shared", socketPath: "/h/.codex/app-server-control/app-server-control.sock" }, { ...env, CODEX_COLLAB_SERVER: "auto" });
+    expect(line).toContain("shared");
+    expect(line).toContain("app-server-control.sock");
+    expect(line).toContain("live");
+  });
+  test("a private server says why the shared one was not used", () => {
+    const missing = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => false, "darwin");
+    expect(missing).toContain("pid 42");
+    expect(missing).toContain("no Codex app-server is listening");
+    expect(missing).toContain("codex app-server daemon start");
+    const present = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, "linux");
+    expect(present).toContain("exists but this broker started before it answered");
+    const chosen = describeServer({ kind: "private" }, { ...env, CODEX_COLLAB_SERVER: "private" }, () => true, "darwin");
+    expect(chosen).toContain("CODEX_COLLAB_SERVER=private");
+  });
+  test("on Windows a private server is the only kind, and the line says so", () => {
+    const line = describeServer({ kind: "private", pid: 7 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, "win32");
+    expect(line).toContain("not available on Windows");
+    expect(line).not.toContain("daemon start");
+  });
+});

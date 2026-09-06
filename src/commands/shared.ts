@@ -580,6 +580,10 @@ export interface UserConfig {
   approval?: ApprovalMode;
   timeout?: number;
   memory?: boolean;
+  /** Collaboration mode; read by the broker (see peer.ts). */
+  mode?: string;
+  /** Which app-server to run on; read at broker start (see shared-server.ts). */
+  server?: string;
 }
 
 export function loadUserConfig(): UserConfig {

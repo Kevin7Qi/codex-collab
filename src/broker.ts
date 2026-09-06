@@ -10,7 +10,8 @@ import path from "node:path";
 import { spawn as childSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { BrokerState, SessionState, ParsedEndpoint } from "./types";
-import { connectDirectWithRetry, type AppServerClient } from "./client";
+import type { AppServerClient } from "./client";
+import { connectAppServer } from "./shared-server";
 import { config, resolveStateDir } from "./config";
 import { acquireLockAsync, LockTimeoutError } from "./lock";
 import { terminateProcessTree, isProcessAlive, processLooksLikeBun } from "./process";
@@ -498,7 +499,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         `[broker] Existing broker was spawned by codex-collab ${state.version ?? "(pre-0.3)"}, this is ${config.clientVersion} — using a direct connection until it retires on idle.`,
       );
       saveSession();
-      return connectDirectWithRetry({ cwd });
+      return connectAppServer({ cwd });
     }
     if (!(await isBrokerAlive(state.endpoint))) return null;
     try {
@@ -508,7 +509,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
         await client.close();
         console.error("[broker] Broker is busy — using direct connection for this invocation.");
         saveSession();
-        return connectDirectWithRetry({ cwd });
+        return connectAppServer({ cwd });
       }
       saveSession();
       return client;
@@ -536,7 +537,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
     // Could not acquire lock — another process may be spawning.
     // Fall back to direct connection.
     console.error("[broker] Warning: could not acquire spawn lock. Using direct connection.");
-    return connectDirectWithRetry({ cwd });
+    return connectAppServer({ cwd });
   }
 
   try {
@@ -563,7 +564,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
       } catch (e) {
         console.error(`[broker] Warning: failed to save session state: ${(e as Error).message}`);
       }
-      return connectDirectWithRetry({ cwd });
+      return connectAppServer({ cwd });
     };
 
     // 3. Spawn a new broker
@@ -614,7 +615,7 @@ export async function ensureConnection(cwd: string, streaming = false): Promise<
       console.error(
         `[broker] Warning: failed to connect to new broker: ${(e as Error).message}. Using direct connection.`,
       );
-      return connectDirectWithRetry({ cwd });
+      return connectAppServer({ cwd });
     }
   } finally {
     release();

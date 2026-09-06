@@ -21,10 +21,9 @@
 import net from "node:net";
 import fs, { chmodSync } from "node:fs";
 import path from "node:path";
-import {
-  connectDirectWithRetry,
-  type AppServerClient,
-} from "./client";
+import { type AppServerClient } from "./client";
+import { NO_RESPONSE } from "./rpc";
+import { connectAppServer } from "./shared-server";
 import { terminateProcessTree, waitForProcessTreeExit } from "./process";
 import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
 import { RpcError } from "./types";
@@ -42,7 +41,10 @@ const MAX_BUFFER_SIZE = 10 * 1024 * 1024;
 
 /** Methods that start a streaming turn on a thread named in their params —
  *  the socket that initiates one owns that thread until turn/completed. */
-const STREAMING_METHODS = new Set(["turn/start", "review/start"]);
+/** Methods whose response names a turn the caller must then receive events
+ *  for. `turn/steer` joins a turn another client is running on a shared
+ *  app-server; its claim is marked joined, since the turn is not ours. */
+const STREAMING_METHODS = new Set(["turn/start", "review/start", "turn/steer"]);
 
 // ─── Argument parsing ───────────────────────────────────────────────────────
 
@@ -145,7 +147,10 @@ async function main() {
   // be starting or dying alongside it and contending for codex's sqlite
   // state. Losing that race here kills the broker before it ever binds, and
   // the client sees only "broker did not become ready in time".
-  const appClient = await connectDirectWithRetry({
+  // Codex's shared server when its control socket answers (one writer per
+  // thread, and every other client of that server sees these turns live),
+  // else a private child as before. `onSpawn` fires only for the child.
+  const appClient = await connectAppServer({
     cwd,
     onSpawn: (pid) => {
       appServerPid = pid;
@@ -199,6 +204,10 @@ async function main() {
     awaitingContinuation: boolean;
     /** Per-thread orphan watchdog (armed when the owner disconnects). */
     watchdog: ReturnType<typeof setTimeout> | null;
+    /** The claim joined a turn another client of a shared app-server is
+     *  running (`turn/steer`). Its approvals, questions and tool calls are
+     *  that client's to answer; ours only routes the events. */
+    joined?: boolean;
   }
   const threads = new Map<string, ThreadEntry>();
   /** All connected sockets. */
@@ -352,17 +361,42 @@ async function main() {
   // (whoever runs the current turn — a CLI-driven turn on a peer thread
   // still consults through the peer, which declared the tool); any other
   // thread's calls forward to the client socket that owns it, since that
-  // client declared whatever tools the thread has. Unknown threads fall
-  // back to the peer's fail-open answer.
+  // client declared whatever tools the thread has. A thread that is
+  // nobody's here gets no answer at all: on a shared app-server the call
+  // fans out to every subscribed client, and the one that declared the
+  // tool is the one meant to answer it.
   appClient.onRequest("item/tool/call", (params) => {
     const p = (params ?? {}) as Record<string, unknown>;
     const threadId = typeof p.threadId === "string" ? p.threadId : "";
-    if (peer.ownsThread(threadId)) return peer.handleToolCall(p);
     const entry = threads.get(threadId);
+    if (entry?.joined) return NO_RESPONSE;
+    // On a shared server the tool may be another client's: the peer's
+    // consult tool is the only one declared from here.
+    if (appClient.server.kind === "shared" && p.tool !== "consult") return NO_RESPONSE;
+    if (peer.ownsThread(threadId)) return peer.handleToolCall(p);
     if (entry?.socket instanceof net.Socket && !entry.socket.destroyed) {
       return forwardRequestToSocket(entry.socket, "item/tool/call", p);
     }
-    return peer.handleToolCall(p);
+    return NO_RESPONSE;
+  });
+
+  // Every other server-sent request — user-input questions, MCP
+  // elicitations, permission approvals, whatever the protocol adds — used
+  // to be answered "method not found", which the server takes as a
+  // decline. That is right for our own turns and wrong for anyone else's:
+  // on a shared app-server the request also reaches the client that can
+  // answer it, and the first reply settles it. Stay silent for turns that
+  // are not ours.
+  appClient.onAnyRequest((method, params) => {
+    const threadId = (params as { threadId?: unknown } | undefined)?.threadId;
+    if (typeof threadId === "string") {
+      const entry = threads.get(threadId);
+      if (entry?.joined) return NO_RESPONSE;
+      if (!entry && !peer.ownsThread(threadId)) return NO_RESPONSE;
+    }
+    const err = new Error(`Method not found: ${method}`) as Error & { code: number };
+    err.code = -32601;
+    throw err;
   });
 
   function resetIdleTimer(): void {
@@ -660,10 +694,21 @@ async function main() {
       // Only client sockets can answer approvals interactively. Peer-owned
       // threads run with approvalPolicy "never", so an approval arriving for
       // one is unexpected — deny it (fail-closed: permission, not judgment).
-      const target = entry?.socket instanceof net.Socket && !entry.socket.destroyed
+      // A thread with no claim here is someone else's turn on a shared
+      // app-server — the Codex app's or a TUI's — and the request reached
+      // us only because we are subscribed to the thread. Stay silent: the
+      // first answer settles the request, and a denial from here would
+      // override the dialog the user is looking at.
+      if (!entry || entry.joined) return NO_RESPONSE;
+      const target = entry.socket instanceof net.Socket && !entry.socket.destroyed
         ? entry.socket
         : null;
       if (!target) {
+        // On a shared server a peer-claimed thread can be running someone
+        // else's turn (the message was folded into it); a denial from here
+        // would settle that user's dialog. Private servers have no such
+        // turns, and there the fail-closed denial stands.
+        if (appClient.server.kind === "shared") return NO_RESPONSE;
         throw new Error("No active client to forward approval request");
       }
       return forwardRequestToSocket(target, method, reqParams);
@@ -872,7 +917,10 @@ async function main() {
     }
 
     const turn = result?.turn as Record<string, unknown> | undefined;
-    const turnId = typeof turn?.id === "string" ? turn.id : null;
+    // turn/steer answers with the joined turn's id at the top level.
+    const turnId = typeof turn?.id === "string"
+      ? turn.id
+      : (typeof result?.turnId === "string" ? result.turnId : null);
     // review/start runs the turn on a distinct review subthread that only
     // the response names; interrupting the parent is a no-op.
     const reviewThreadId = method === "review/start" && typeof result?.reviewThreadId === "string"
@@ -978,6 +1026,8 @@ async function main() {
           // Thread-scoped routing: the broker as a whole is never busy.
           // Same-thread contention is reported per request with -32001.
           busy: false,
+          // Which app-server this broker runs turns on, for `health`.
+          server: appClient.server,
         },
       });
       return;
@@ -1056,6 +1106,7 @@ async function main() {
         requestPending: true,
         awaitingContinuation: false,
         watchdog: null,
+        joined: method === "turn/steer",
       };
       threads.set(streamThreadId, claimed);
     }

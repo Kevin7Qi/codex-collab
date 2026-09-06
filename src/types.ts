@@ -69,7 +69,8 @@ export interface Thread {
   modelProvider: string;
   createdAt: number;
   updatedAt: number;
-  // status is only populated on thread/read, not on thread/list
+  // Populated on thread/read; thread/list carries it from Codex 0.153 on
+  // (idle/active/notLoaded), which `threads --discover` shows.
   status?: ThreadStatus;
   path: string | null;
   cwd: string;

@@ -13,11 +13,13 @@ import { createHash } from "node:crypto";
 import { acquireLockAsync } from "./lock";
 import type { InitializeParams, InitializeResponse, RequestId } from "./types";
 import { config } from "./config";
+import type { ServerInfo } from "./shared-server";
 import {
   createRpcEndpoint,
   type NotificationHandler,
   type AnyNotificationHandler,
   type ServerRequestHandler,
+  type AnyServerRequestHandler,
 } from "./rpc";
 
 export type { RequestId } from "./types";
@@ -35,6 +37,7 @@ export {
   type NotificationHandler,
   type AnyNotificationHandler,
   type ServerRequestHandler,
+  type AnyServerRequestHandler,
 } from "./rpc";
 
 /** Options for connectDirect(). */
@@ -71,6 +74,9 @@ export interface AppServerClient {
   /** Register a handler for server-sent requests (e.g. approval). One handler per method;
    *  new registrations replace previous ones. Returns an unsubscribe function. */
   onRequest(method: string, handler: ServerRequestHandler): () => void;
+  /** Register the handler for server-sent requests no `onRequest` handler
+   *  claims (default: "method not found"). Returns an unsubscribe function. */
+  onAnyRequest(handler: AnyServerRequestHandler): () => void;
   /** Send a response to a server-sent request. */
   respond(id: RequestId, result: unknown): void;
   /** Register a callback invoked when the connection closes unexpectedly
@@ -96,6 +102,10 @@ export interface AppServerClient {
    *  there rather than here. A direct connection owns its app-server outright
    *  and has no such question to answer. */
   isBrokered: boolean;
+  /** Which app-server this connection reaches: Codex's shared server over
+   *  its control socket, or a private child. Through the broker, whichever
+   *  the broker itself is on. */
+  server: ServerInfo;
 }
 
 /**
@@ -335,12 +345,14 @@ export async function connectDirect(opts?: ConnectOptions): Promise<AppServerCli
     on: endpoint.on,
     onAny: endpoint.onAny,
     onRequest: endpoint.onRequest,
+    onAnyRequest: endpoint.onAnyRequest,
     respond: endpoint.respond,
     onClose: endpoint.onClose,
     close,
     userAgent: initResult.userAgent,
     brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private", ...(proc.pid ? { pid: proc.pid } : {}) },
   };
 }
 

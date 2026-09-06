@@ -1245,12 +1245,14 @@ describe("startOrResumeThread", () => {
       on: () => () => {},
       onAny: () => () => {},
       onRequest: () => () => {},
+      onAnyRequest: () => () => {},
       respond: () => {},
       onClose: () => () => {},
       close: async () => {},
       userAgent: "mock",
       brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private" },
     };
     const opts = defaultOptions();
     opts.resumeId = sourceThreadId;
@@ -1352,12 +1354,14 @@ describe("startOrResumeThread", () => {
       on: () => () => {},
       onAny: () => () => {},
       onRequest: () => () => {},
+      onAnyRequest: () => () => {},
       respond: () => {},
       onClose: () => () => {},
       close: async () => {},
       userAgent: "mock",
       brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private" },
     };
   }
 
@@ -1838,8 +1842,10 @@ const client: any = {
     return {};
   },
   notify() {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
+  onAnyRequest: () => () => {},
   respond() {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private" },
 };
 let callNo = 0;
 
@@ -1882,8 +1888,10 @@ describe("delete --purge", () => {
     const clientFor = (impl: () => Promise<unknown>): AppServerClient => ({
       request: (async () => impl()) as AppServerClient["request"],
       notify: () => {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
+      onAnyRequest: () => () => {},
       respond: () => {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private" },
     });
 
     expect(await tryServerDelete(clientFor(async () => ({})), "t1")).toBe("deleted");
@@ -1917,8 +1925,10 @@ describe("tryServerDelete: unsupported thread/delete must not read as success", 
   const clientThrowing = (err: Error): AppServerClient => ({
     request: (async () => { throw err; }) as AppServerClient["request"],
     notify: () => {}, on: () => () => {}, onAny: () => () => {}, onRequest: () => () => {},
+    onAnyRequest: () => () => {},
     respond: () => {}, onClose: () => () => {}, close: async () => {}, userAgent: "mock", brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private" },
   });
 
   test("JSON-RPC -32601 (method not found) is a failure, not already_done", async () => {

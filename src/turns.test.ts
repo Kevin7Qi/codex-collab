@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { runTurn, runReview, runTurnWithGoalFollow, belongsToTurn } from "./turns";
+import { runTurn, runReview, runTurnWithGoalFollow, belongsToTurn, tryInterruptTurn } from "./turns";
 import { EventDispatcher } from "./events";
 import { autoApproveHandler } from "./approvals";
 import type { ApprovalHandler } from "./approvals";
@@ -88,6 +88,7 @@ function buildMockClient(
       requestHandlers.set(method, handler);
       return () => { requestHandlers.delete(method); };
     },
+    onAnyRequest: () => () => {},
     respond() {},
     onClose(handler: () => void) {
       closeHandlers.add(handler);
@@ -97,6 +98,7 @@ function buildMockClient(
     userAgent: "mock/1.0",
     brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private" },
   };
 
   return { client, emit, requestHandlers, triggerClose };
@@ -1963,5 +1965,96 @@ describe("guardianWarning routing", () => {
 
     expect(lines.some(l => l.includes("risk accepted for thr-1"))).toBe(true);
     expect(lines.some(l => l.includes("leak from another thread"))).toBe(false);
+  });
+});
+
+describe("shared app-server: joining a running turn", () => {
+  test("turn/start becomes turn/steer when the thread already has a turn in progress, and the joined turn's completion ends the run", async () => {
+    const calls: string[] = [];
+    const { client, emit } = buildMockClient((method) => {
+      calls.push(method);
+      if (method === "thread/read") return { thread: { id: "thr-1", turns: [{ id: "old-1", status: "completed" }, { id: "active-9", status: "inProgress" }] } };
+      if (method === "turn/steer") {
+        setTimeout(() => emit("item/agentMessage/delta", { threadId: "thr-1", turnId: "active-9", itemId: "m", delta: "folded answer" }), 20);
+        setTimeout(() => emit("turn/completed", completedTurn("active-9")), 50);
+        return { turnId: "active-9" };
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    client.server = { kind: "shared", socketPath: "/s" };
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "join-turn.log"), () => {});
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "also do this" }], {
+      dispatcher, approvalHandler: autoApproveHandler, timeoutMs: 5000, killSignalsDir: TEST_KILL_DIR,
+    });
+    expect(result.status).toBe("completed");
+    expect(result.output).toBe("folded answer");
+    expect(calls).toEqual(["thread/read", "turn/steer"]);
+  });
+
+  test("an idle thread on a shared server starts a turn as usual", async () => {
+    const calls: string[] = [];
+    const { client, emit } = buildMockClient((method) => {
+      calls.push(method);
+      if (method === "thread/read") return { thread: { id: "thr-1", turns: [{ id: "old-1", status: "completed" }] } };
+      if (method === "turn/start") { setTimeout(() => emit("turn/completed", completedTurn("turn-2")), 30); return inProgressTurn("turn-2"); }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    client.server = { kind: "shared", socketPath: "/s" };
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "join-idle.log"), () => {});
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "go" }], {
+      dispatcher, approvalHandler: autoApproveHandler, timeoutMs: 5000, killSignalsDir: TEST_KILL_DIR,
+    });
+    expect(result.status).toBe("completed");
+    expect(calls).toEqual(["thread/read", "turn/start"]);
+  });
+
+  test("a private server never reads the thread first", async () => {
+    const calls: string[] = [];
+    const { client, emit } = buildMockClient((method) => {
+      calls.push(method);
+      if (method === "turn/start") { setTimeout(() => emit("turn/completed", completedTurn("turn-3")), 30); return inProgressTurn("turn-3"); }
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    const dispatcher = new EventDispatcher(join(TEST_LOG_DIR, "private.log"), () => {});
+    await runTurn(client, "thr-1", [{ type: "text", text: "go" }], {
+      dispatcher, approvalHandler: autoApproveHandler, timeoutMs: 5000, killSignalsDir: TEST_KILL_DIR,
+    });
+    expect(calls).toEqual(["turn/start"]);
+  });
+});
+
+describe("tryInterruptTurn retargeting", () => {
+  const mismatch = "JSON-RPC error -32600: expected active turn id ours but found theirs";
+  function client(server: { kind: "private" | "shared" }, isBrokered = false) {
+    const targeted: string[] = [];
+    const c = buildMockClient((method, params) => {
+      if (method === "turn/interrupt") {
+        targeted.push((params as { turnId: string }).turnId);
+        if (targeted.length === 1) throw new Error(mismatch);
+        return {};
+      }
+      throw new Error(`Unexpected method: ${method}`);
+    }).client;
+    c.server = server;
+    c.isBrokered = isBrokered;
+    return { c, targeted };
+  }
+
+  test("a direct connection to a private server retargets the stale id", async () => {
+    const { c, targeted } = client({ kind: "private" });
+    await tryInterruptTurn(c, "thr-1", "ours");
+    expect(targeted).toEqual(["ours", "theirs"]);
+  });
+
+  test("a direct connection to a shared server does not — the named turn may be another client's", async () => {
+    const { c, targeted } = client({ kind: "shared" });
+    await tryInterruptTurn(c, "thr-1", "ours");
+    expect(targeted).toEqual(["ours"]);
+  });
+
+  test("through the broker the broker retargets, never the client", async () => {
+    const { c, targeted } = client({ kind: "private" }, true);
+    await tryInterruptTurn(c, "thr-1", "ours");
+    expect(targeted).toEqual(["ours"]);
   });
 });

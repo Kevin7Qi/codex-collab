@@ -20,12 +20,14 @@ function clientWith(onRequest: (method: string, params?: unknown) => unknown): A
     on: () => () => {},
     onAny: () => () => {},
     onRequest: () => () => {},
+    onAnyRequest: () => () => {},
     respond() {},
     onClose: () => () => {},
     async close() {},
     userAgent: "mock/1.0",
     brokerBusy: false,
     isBrokered: false,
+    server: { kind: "private" },
   };
 }
 

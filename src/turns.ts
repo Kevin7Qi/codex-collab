@@ -64,9 +64,10 @@ export async function tryInterruptTurn(
       // the thread. If ours ended and another invocation claimed it, the
       // named turn is THEIRS, and interrupting it cancels work nobody asked
       // to stop. Through the broker, ownership is the broker's to know and
-      // it does this retarget itself. A direct connection owns its own
-      // app-server, so no other invocation can be running there.
-      const found = client.isBrokered
+      // it does this retarget itself. A direct connection to a PRIVATE
+      // app-server owns it outright, so no other invocation can be running
+      // there; on a shared server the named turn may be another client's.
+      const found = client.isBrokered || client.server.kind !== "private"
         ? undefined
         : /expected active turn id \S+ but found (\S+)/.exec(e.message)?.[1];
       if (found && found !== turnId) {
@@ -196,6 +197,53 @@ const GOAL_CONTINUATION_POLL_MS = 500;
 /** Re-read thread/goal/get at this cadence while waiting for a continuation
  *  turn, in case a goal/updated notification was lost. */
 const GOAL_REPOLL_INTERVAL_MS = 5_000;
+
+/** The id of the turn running on `threadId` right now, or null. Asked only
+ *  on a shared app-server, where another client may be driving the thread. */
+async function activeTurnOn(client: AppServerClient, threadId: string): Promise<string | null> {
+  try {
+    const read = await client.request<{ thread?: { turns?: Array<{ id?: unknown; status?: unknown }> } }>(
+      "thread/read",
+      { threadId, includeTurns: true },
+    );
+    const active = read.thread?.turns?.find((t) => t.status === "inProgress");
+    return typeof active?.id === "string" ? active.id : null;
+  } catch {
+    return null; // an older server, or a thread we cannot read: start normally
+  }
+}
+
+/**
+ * turn/start — or, on a shared app-server whose thread already has a turn
+ * running, turn/steer into it. Codex folds a turn/start's input into a
+ * running turn anyway, but answers with a submission id the events never
+ * carry, and the caller would wait out its timeout for a turn that
+ * finished; steering names the turn that will actually answer.
+ */
+async function startOrJoinTurn(
+  client: AppServerClient,
+  method: string,
+  params: TurnStartParams | ReviewStartParams,
+  opts: TurnOptions,
+): Promise<TurnStartResponse & { reviewThreadId?: string }> {
+  if (method === "turn/start" && client.server.kind === "shared") {
+    const active = await activeTurnOn(client, params.threadId);
+    if (active) {
+      try {
+        const steered = await client.request<{ turnId: string }>("turn/steer", {
+          threadId: params.threadId,
+          expectedTurnId: active,
+          input: (params as TurnStartParams).input,
+        });
+        opts.dispatcher.progressLine("Joined the turn already running on this thread");
+        return { turn: { id: steered.turnId, items: [], status: "inProgress", error: null } } as TurnStartResponse;
+      } catch {
+        // It finished in the meantime: a turn of our own is the right thing now.
+      }
+    }
+  }
+  return client.request<TurnStartResponse & { reviewThreadId?: string }>(method, params);
+}
 
 /**
  * Run a turn, then — if the thread has an active goal — keep following the
@@ -843,7 +891,7 @@ async function executeTurn(
 
   try {
     const startResponse = await Promise.race([
-      client.request<TurnStartResponse & { reviewThreadId?: string }>(method, params),
+      startOrJoinTurn(client, method, params, opts),
       killSignal,
       connectionLossPromise,
     ]);
