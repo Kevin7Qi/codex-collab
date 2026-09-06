@@ -93,6 +93,12 @@ export async function handleConfig(args: string[]): Promise<void> {
     key === "timeout" ? Number(value) : key === "memory" ? value === "true" : value;
   saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
+  if (key === "mode") {
+    // The mode is read when a broker starts. One already running keeps its
+    // peer (or its lack of one) until it restarts, so the setting alone
+    // changes nothing visible for that workspace.
+    console.log("Brokers already running keep their current peer state until they restart — `codex-collab peer up` applies the mode to this workspace's broker.");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +172,15 @@ export function describePeer(dir: string): string {
   // runs is now a setting as well as a capability, and "unavailable" without
   // a reason reads like a broken install when it may be a deliberate choice.
   const { mode, reason } = resolveCollabMode(readConfiguredMode());
-  if (mode === "cli") return `off — collaboration mode is cli (${reason}); the CLI paths are unaffected`;
+  if (mode === "cli") {
+    // A broker that registered its peer before the mode changed keeps it
+    // until it restarts; "off" alone would contradict what ListAgents shows.
+    let lingering: PeerState | null = null;
+    try { lingering = readPeerState(resolveStateDir(dir)); } catch { /* unreadable — report the mode alone */ }
+    return lingering && isAlive(lingering.pid)
+      ? `off — collaboration mode is cli (${reason}), but the broker running as pid ${lingering.pid} still serves "${lingering.name}" from before the change ('codex-collab peer up' retires it)`
+      : `off — collaboration mode is cli (${reason}); the CLI paths are unaffected`;
+  }
   const capability = peerCapability();
   if (!capability.ok) return `unavailable — ${capability.reason} (CLI paths unaffected)`;
   let state: PeerState | null = null;

@@ -9,8 +9,8 @@ import { resolveStateDir } from "../config";
 import { parseOptions } from "./shared";
 import { peerCapability, peerNameFor, sessionsDir } from "../peer";
 import { listRuns } from "../threads";
-import { loadBrokerState, teardownBroker } from "../broker";
-import { ensureConnection } from "../broker";
+import { ensureConnection, isBrokerAlive, isBrokerBusyError, loadBrokerState } from "../broker";
+import { connectToBroker } from "../broker-client";
 
 export interface PeerState {
   pid: number;
@@ -54,26 +54,65 @@ export async function handlePeer(args: string[]): Promise<void> {
 
   if (sub === "up") {
     // A broker decides once, at startup, whether it can register a peer —
-    // so one that started before Claude Code was installed, or before the
-    // session registry existed, stays peerless for its whole life. Merely
-    // connecting to it changes nothing, which is why `peer up` used to
-    // report the same failure however many times it was run. Replace it,
-    // but only when replacing it cannot interrupt anything.
-    const existing = loadBrokerState(stateDir);
-    if (existing?.pid && isAlive(existing.pid) && !readPeerState(stateDir) && peerCapability().ok) {
+    // so one that started before Claude Code was installed, or under
+    // `config mode cli`, keeps that answer for its whole life. Merely
+    // connecting to it changes nothing. So `peer up` retires a broker whose
+    // peer state disagrees with what the mode now says: peerless (or with a
+    // half-registered peer) when the peer should run, or serving a peer
+    // when the mode says it must not. The broker itself refuses while a
+    // turn is claimed — a ledger snapshot here cannot see a turn that
+    // starts a moment later, only the broker can.
+    const capability = peerCapability();
+    const broker = loadBrokerState(stateDir);
+    // Liveness by the socket, never by the pid alone: a broker that crashed
+    // leaves a pid the OS may hand to something unrelated.
+    const brokerLive = broker?.endpoint ? await isBrokerAlive(broker.endpoint) : false;
+    const state = readPeerState(stateDir);
+    const peerHealthy = state !== null
+      && isAlive(state.pid)
+      && existsSync(join(sessionsDir(), `${state.pid}.json`))
+      && existsSync(state.socketPath);
+    let why: string | null = null;
+    if (brokerLive && capability.ok && !peerHealthy) {
+      why = state ? "its peer is not fully registered" : "has no peer";
+    } else if (brokerLive && !capability.ok && state && isAlive(state.pid)) {
+      why = `still serves a peer though peer messaging is off (${capability.reason})`;
+    }
+    if (why && broker) {
       const running = listRuns(stateDir).filter((r) => r.status === "running");
       if (running.length > 0) {
-        console.error(`A broker is running for this workspace but has no peer, and it cannot be replaced while ${running.length} run${running.length === 1 ? " is" : "s are"} in flight.`);
+        console.error(`The broker for this workspace must be replaced (${why}), but not while ${running.length} run${running.length === 1 ? " is" : "s are"} in flight.`);
         console.error(`Wait for ${running.length === 1 ? "it" : "them"} to finish, or stop ${running.length === 1 ? "it" : "them"} with \`codex-collab kill\`, then run \`codex-collab peer up\` again.`);
         process.exit(1);
       }
-      console.log("Broker is running without a peer — replacing it so the peer can register.");
-      teardownBroker(stateDir, existing);
+      console.log(`Broker is running and ${why} — stopping it${capability.ok ? " so a new one can register the peer" : ""}.`);
+      try {
+        const client = await connectToBroker({ endpoint: broker.endpoint! });
+        try {
+          await client.request("broker/shutdown", { ifIdle: true });
+        } finally {
+          await client.close().catch(() => undefined);
+        }
+      } catch (e) {
+        if (isBrokerBusyError(e)) {
+          console.error("A turn started on the broker just now, so it was left running. Run `codex-collab peer up` again once it finishes.");
+          process.exit(1);
+        }
+        // Unreachable after all (it exited between the probe and now):
+        // nothing to stop, carry on to start a fresh one.
+      }
+      // The broker exits once its app-server is closed; a fresh one must
+      // not race that.
+      for (let i = 0; i < 100 && await isBrokerAlive(broker.endpoint); i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
     }
-    // Spawning the broker starts the peer with it; the connection itself is
-    // only the vehicle and closes right away.
-    const client = await ensureConnection(cwd);
-    await client.close();
+    if (capability.ok) {
+      // Spawning the broker starts the peer with it; the connection itself is
+      // only the vehicle and closes right away.
+      const client = await ensureConnection(cwd);
+      await client.close();
+    }
     // Fall through to status so `peer up` reports what it achieved.
   } else if (sub !== "status") {
     console.error(`Unknown peer subcommand: ${sub} (expected: status, up)`);
@@ -82,7 +121,15 @@ export async function handlePeer(args: string[]): Promise<void> {
 
   const capability = peerCapability();
   console.log(`Peer capability: ${capability.ok ? "available" : `unavailable — ${capability.reason}`}`);
-  if (!capability.ok) return;
+  if (!capability.ok) {
+    // Off by mode, yet a broker that started under the old answer may still
+    // be serving a peer. Say so — `health` says "off", ListAgents disagrees.
+    const stale = readPeerState(stateDir);
+    if (stale && isAlive(stale.pid)) {
+      console.log(`Peer: still registered as "${stale.name}" by the running broker (pid ${stale.pid}), which started before the mode changed. \`codex-collab peer up\` retires it.`);
+    }
+    return;
+  }
 
   const state = readPeerState(stateDir);
   if (!state) {

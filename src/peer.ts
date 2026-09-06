@@ -68,9 +68,10 @@ export interface PeerHost {
   /** True when a turn is running (or starting) on the thread. */
   threadHasTurn(threadId: string): boolean;
   /** Stop the peer-owned turn running on the thread (pausing an active goal
-   *  first, as `kill` does). Rejects when no peer turn is running there or
-   *  its id is not known yet. The turn's own turn/completed follows. */
-  interruptThread(threadId: string): Promise<void>;
+   *  first, as `kill` does). Resolves false when no peer turn runs there —
+   *  nothing to stop — and rejects when the turn's id is not known yet. On
+   *  true, the turn's own turn/completed follows. */
+  interruptThread(threadId: string): Promise<boolean>;
   log(line: string): void;
 }
 
@@ -916,6 +917,10 @@ export function createPeer(host: PeerHost): Peer {
    *  so its turn/completed is reported as a timeout rather than a bare
    *  interruption. */
   const timedOut = new Map<string, number>();
+  /** Threads with a peer-owned turn in flight. The front door's registry
+   *  status is busy while this is non-empty — with two conversations
+   *  running, the first to finish must not mark the workspace idle. */
+  const runningPeerTurns = new Set<string>();
 
   let server: net.Server | null = null;
   let active = false;
@@ -1046,14 +1051,24 @@ export function createPeer(host: PeerHost): Peer {
     }
   }
 
-  function updateStatus(status: "idle" | "busy"): void {
+  function writeStatus(path: string, status: "idle" | "busy"): void {
     try {
-      const entry = JSON.parse(readFileSync(entryPath, "utf-8"));
+      const entry = JSON.parse(readFileSync(path, "utf-8"));
+      if (entry.status === status) return;
       entry.status = status;
       entry.updatedAt = Date.now();
       entry.statusUpdatedAt = Date.now();
-      writeFileSync(entryPath, JSON.stringify(entry));
+      writeFileSync(path, JSON.stringify(entry));
     } catch { /* entry gone — re-registration happens on next start */ }
+  }
+
+  /** Reflect the peer turns in flight in the registry: the front door is
+   *  busy while any conversation runs, a conversation's own entry while its
+   *  turn does. What ListAgents shows, so the answer to "is Codex free". */
+  function refreshStatus(threadId: string): void {
+    writeStatus(entryPath, runningPeerTurns.size > 0 ? "busy" : "idle");
+    const tp = threadPeers.get(threadId);
+    if (tp) writeStatus(tp.entryPath, runningPeerTurns.has(threadId) ? "busy" : "idle");
   }
 
   // ── Outbound ──
@@ -1173,6 +1188,7 @@ export function createPeer(host: PeerHost): Peer {
       threadPeers.set(threadId, {
         threadId, name: tpName, socketPath: tpSocketPath, entryPath: tpEntryPath, holder, server,
       });
+      if (runningPeerTurns.has(threadId)) writeStatus(tpEntryPath, "busy");
       host.log(`peer: thread peer "${tpName}" registered for ${threadId}`);
     } catch (e) {
       host.log(`peer: could not create thread peer for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
@@ -1383,7 +1399,8 @@ export function createPeer(host: PeerHost): Peer {
           clearDeadline(threadId); // the turn is over, run record or not
           const texts = replyBuffers.get(threadId);
           replyBuffers.delete(threadId);
-          updateStatus("idle");
+          runningPeerTurns.delete(threadId);
+          refreshStatus(threadId);
           const conv = threadConversations.get(threadId);
           if (!conv) return;
           conv.lastActivity = Date.now();
@@ -1922,7 +1939,11 @@ export function createPeer(host: PeerHost): Peer {
       if (run && runId !== null && run.runId !== runId) return;
       timedOut.set(threadId, limitSec);
       host.log(`peer: turn on ${threadId} exceeded its ${limitSec}s limit — interrupting`);
-      host.interruptThread(threadId).catch((e) => {
+      host.interruptThread(threadId).then((stopped) => {
+        // The thread's turn is someone else's now (a CLI run claimed it
+        // after ours ended): not overdue, nothing to report.
+        if (!stopped) timedOut.delete(threadId);
+      }).catch((e) => {
         // Still running, and nothing here can stop it: say so rather than
         // let the silence continue. The run record stays open until the
         // turn really ends.
@@ -1972,13 +1993,14 @@ export function createPeer(host: PeerHost): Peer {
     for (const waiting of carried?.keys() ?? []) audience.add(waiting);
     turnAudience.set(conv.threadId, audience);
     replyBuffers.set(conv.threadId, []);
+    runningPeerTurns.add(conv.threadId);
     const runId = beginRun(
       conv.threadId,
       conv.shortId ?? conv.threadId.replace(/-/g, "").slice(-8),
       runPrompt,
       conv.model,
     );
-    updateStatus("busy");
+    refreshStatus(conv.threadId);
     try {
       // Every peer-started turn restates the conversation's model/effort:
       // turn/start accepts both, which is what makes a continuation
@@ -1996,7 +2018,10 @@ export function createPeer(host: PeerHost): Peer {
           ),
         }],
       });
-      armDeadline(conv, runId);
+      // turn/completed can land before this response for a fast turn; its
+      // handler has then consumed the buffer, and a deadline armed now would
+      // outlive the turn it was meant for.
+      if (replyBuffers.has(conv.threadId)) armDeadline(conv, runId);
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       // Tear down THIS turn's state BEFORE releasing the claim. Releasing
@@ -2008,7 +2033,8 @@ export function createPeer(host: PeerHost): Peer {
       replyBuffers.delete(conv.threadId);
       turnAudience.delete(conv.threadId);
       finishRun(conv.threadId, "failed", "", detail, runId);
-      updateStatus("idle");
+      runningPeerTurns.delete(conv.threadId);
+      refreshStatus(conv.threadId);
       // The claim MUST be released: no turn started, so no turn/completed
       // will ever free it, and an internal owner never disconnects — a
       // leaked claim blocks the thread (and idle shutdown) for the broker's
@@ -2272,6 +2298,7 @@ export function createPeer(host: PeerHost): Peer {
     if (sweepTimer) clearInterval(sweepTimer);
     for (const threadId of [...deadlines.keys()]) clearDeadline(threadId);
     timedOut.clear();
+    runningPeerTurns.clear();
     pendingWakes.clear();
     turnAudience.clear();
     for (const [threadId, pending] of pendingConsults) {

@@ -299,7 +299,7 @@ codex-collab config --unset             # 取消所有设置
 
 可配置项: `model`、`mode`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`
 
-`mode` 决定 codex-collab 与 Claude 的协作方式：`auto`（默认）在平台支持时采用对等消息通信，否则退回命令行路径；`peer` 强制使用对等消息；`cli` 则彻底关闭对等机制——不注册代理节点、不生成会话地址、不提供 consult 工具——一切交互均经由命令行完成。对等消息需要 macOS 或 Linux 且 Claude Code 版本不低于 2.1.224；在 Windows 或更早版本下，`auto` 会自行退回命令行路径，无需额外配置。
+`mode` 决定 codex-collab 与 Claude 的协作方式：`auto`（默认）在平台支持时采用对等消息通信，否则退回命令行路径；`peer` 强制使用对等消息；`cli` 则彻底关闭对等机制——不注册代理节点、不生成会话地址、不提供 consult 工具——一切交互均经由命令行完成。对等消息需要 macOS 或 Linux 且 Claude Code 版本不低于 2.1.224；在 Windows 或更早版本下，`auto` 会自行退回命令行路径，无需额外配置。broker 在启动时读取该模式，并在重启前保持原有的对等节点状态，因此修改模式后需在工作区内执行 `codex-collab peer up` 以使其生效——仅在没有回合运行时才会替换 broker。
 
 优先级: `CLI 参数 > 配置文件 > 自动检测`
 

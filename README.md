@@ -308,7 +308,7 @@ codex-collab config --unset
 
 Available keys: `model`, `mode`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
 
-The `mode` key controls how codex-collab communicates with Claude: `auto` (the default) uses peer messaging when the platform supports it and falls back to the CLI path otherwise, `peer` insists on peer messaging, and `cli` disables peer mechanisms entirely — no agent-registry entry, no per-conversation addresses, no consult tool — routing everything through the command line. Peer messaging requires macOS or Linux with Claude Code 2.1.224 or newer; on Windows or older versions, `auto` falls back to the CLI path automatically without any configuration.
+The `mode` key controls how codex-collab communicates with Claude: `auto` (the default) uses peer messaging when the platform supports it and falls back to the CLI path otherwise, `peer` insists on peer messaging, and `cli` disables peer mechanisms entirely — no agent-registry entry, no per-conversation addresses, no consult tool — routing everything through the command line. Peer messaging requires macOS or Linux with Claude Code 2.1.224 or newer; on Windows or older versions, `auto` falls back to the CLI path automatically without any configuration. A broker reads the mode when it starts and keeps its peer state until it restarts, so after changing the mode run `codex-collab peer up` in the workspace to apply it — the broker is replaced only when no turn is running.
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 

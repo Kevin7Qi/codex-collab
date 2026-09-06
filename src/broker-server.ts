@@ -318,9 +318,8 @@ async function main() {
     threadHasTurn: (threadId) => threads.has(threadId),
     interruptThread: async (threadId) => {
       const entry = threads.get(threadId);
-      if (!entry || entry.socket === null || entry.socket instanceof net.Socket) {
-        throw new Error("no peer turn is running on this thread");
-      }
+      // Not a peer turn (none, an orphan, or a client's): nothing to stop.
+      if (!entry || entry.socket === null || entry.socket instanceof net.Socket) return false;
       if (!entry.turnId) throw new Error("the turn has not announced its id yet");
       // Goal first, interrupt second (same order as `kill` and the orphan
       // watchdog): with an active goal, interrupt alone makes the server
@@ -333,6 +332,7 @@ async function main() {
         }
       }
       await appClient.request("turn/interrupt", { threadId, turnId: entry.turnId });
+      return true;
     },
     log: (line) => process.stderr.write(`[broker-server] ${line}\n`),
   });
@@ -969,8 +969,20 @@ async function main() {
       return;
     }
 
-    // Handle broker/shutdown
+    const params = message.params as Record<string, unknown> | undefined;
+
+    // Handle broker/shutdown. `ifIdle` makes it conditional: a replacement
+    // (`peer up`) must not kill a turn that claimed a thread after the
+    // caller looked — only the broker knows, so only the broker decides.
     if (message.id !== undefined && message.method === "broker/shutdown") {
+      const ifIdle = (params as { ifIdle?: unknown } | undefined)?.ifIdle === true;
+      if (ifIdle && (threads.size > 0 || inflightRequests > 0 || pendingForwardedRequests.size > 0)) {
+        send(socket, {
+          id: message.id,
+          error: buildJsonRpcError(BROKER_BUSY_RPC_CODE, "A turn is running on this broker."),
+        });
+        return;
+      }
       send(socket, { id: message.id, result: {} });
       await shutdown(server);
       process.exit(0);
@@ -993,7 +1005,6 @@ async function main() {
     }
 
     const method = message.method as string;
-    const params = message.params as Record<string, unknown> | undefined;
 
     // ─── Same-thread contention ───────────────────────────────
 

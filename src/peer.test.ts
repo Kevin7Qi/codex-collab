@@ -468,7 +468,7 @@ describe.skipIf(onWindows)("claim release on turn-start failure", () => {
       },
       claimThread: (threadId) => { claimed.add(threadId); return true; },
       releaseThread: (threadId) => { released.push(threadId); },
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -544,7 +544,7 @@ describe.skipIf(onWindows)("liveness scan", () => {
       request: async () => ({}),
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -609,7 +609,7 @@ describe.skipIf(onWindows)("inbound serialization", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -676,7 +676,7 @@ describe.skipIf(onWindows)("inbound serialization across senders", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true,
       log: () => {},
     };
@@ -731,7 +731,7 @@ describe.skipIf(onWindows)("topic routing", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true, // stay mid-turn: no turn/start, just injection
       log: () => {},
     };
@@ -799,7 +799,7 @@ describe.skipIf(onWindows)("topic routing", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true,
       log: () => {},
     };
@@ -885,7 +885,7 @@ describe.skipIf(onWindows)("delivery honesty", () => {
       },
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false, // idle → the peer starts (and owns) a turn
       log: () => {},
     };
@@ -950,7 +950,7 @@ describe.skipIf(onWindows)("delivery honesty", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -1006,7 +1006,7 @@ describe.skipIf(onWindows)("delivery honesty", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -1079,7 +1079,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true, // injection only — turns are not the subject here
       log: () => {},
     };
@@ -1152,7 +1152,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
         },
         claimThread: () => true,
         releaseThread: () => {},
-        interruptThread: async () => {},
+        interruptThread: async () => true,
         threadHasTurn: () => true, // injection only — turns are not the subject
         log: () => {},
       };
@@ -1189,7 +1189,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true, // the thread start is the subject, not the turn
       log: () => {},
     };
@@ -1222,7 +1222,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false, // idle
       log: () => {},
     };
@@ -1255,7 +1255,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -1300,7 +1300,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -1343,7 +1343,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -1383,7 +1383,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true,
       log: () => {},
     };
@@ -1423,7 +1423,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -1470,7 +1470,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -1511,7 +1511,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -1584,7 +1584,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       // The worst case for the peer's failure path: the broker releases and
       // re-enters the peer synchronously, from inside that path's own call.
       releaseThread: (threadId) => { claimed = false; peer.onThreadTurnEnded(threadId); },
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => claimed,
       log: () => {},
     };
@@ -1636,7 +1636,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true,
       log: () => {},
     };
@@ -1709,7 +1709,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
       releaseThread: () => { hasTurn = false; },
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -1802,7 +1802,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
       releaseThread: () => { hasTurn = false; },
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -1849,7 +1849,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
       releaseThread: () => { hasTurn = false; },
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -1881,7 +1881,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true, // injection only
       log: () => {},
     };
@@ -1930,7 +1930,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true,
       log: () => {},
     };
@@ -1966,7 +1966,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       request: async () => ({}),
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -2007,7 +2007,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       request: async () => ({}),
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -2058,7 +2058,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -2112,7 +2112,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => hasTurn,
       log: () => {},
     };
@@ -2154,7 +2154,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => false,
       log: () => {},
     };
@@ -2184,7 +2184,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       },
       claimThread: () => true,
       releaseThread: () => {},
-      interruptThread: async () => {},
+      interruptThread: async () => true,
       threadHasTurn: () => true, // injection only
       log: () => {},
     };
@@ -2678,7 +2678,7 @@ describe.skipIf(onWindows)("turn deadlines", () => {
       // Idle until the peer claims the thread — the deadline asks the host
       // whether a turn still runs before it acts.
       threadHasTurn: (threadId) => owners.has(threadId),
-      interruptThread: async (threadId) => { interrupted.push(threadId); },
+      interruptThread: async (threadId) => { interrupted.push(threadId); return true; },
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2721,6 +2721,58 @@ describe.skipIf(onWindows)("turn deadlines", () => {
     }
   });
 
+  test("a turn that completed before turn/start returned gets no deadline", async () => {
+    // turn/completed is a notification and can land before the RPC settles.
+    const dir = mkdtempSync(join(tmpdir(), "peer-deadline-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const inbox = listen(senderSock);
+    const owners = new Map<string, { onNotification(m: string, p?: Record<string, unknown>): void }>();
+    const interrupted: string[] = [];
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "thread/start") return { thread: { id: "thread-F" } };
+        if (method === "turn/start") {
+          // The whole turn happens before the response is written.
+          const owner = owners.get((params as { threadId: string }).threadId)!;
+          owner.onNotification("item/completed", { threadId: "thread-F", item: { type: "agentMessage", text: "quick" } });
+          owner.onNotification("turn/completed", { threadId: "thread-F", turn: { status: "completed", error: null } });
+          owners.delete("thread-F");
+        }
+        return {};
+      },
+      claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
+      releaseThread: (threadId) => { owners.delete(threadId); },
+      threadHasTurn: (threadId) => owners.has(threadId),
+      interruptThread: async (threadId) => { interrupted.push(threadId); return true; },
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      const line = buildEnvelope({ text: "timeout: 1\nplease do the thing", ourSocketPath: senderSock, ourName: "test-sender" });
+      await new Promise<void>((resolve, reject) => {
+        const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+        sock.on("error", reject);
+      });
+      await waitFor(() => inbox.lines.length > 0);
+      expect(parseEnvelope(inbox.lines[0])!.text).toBe("quick");
+      expect(peer.debugState().deadlines).toBe(0);
+      await new Promise((r) => setTimeout(r, 1_300));
+      expect(interrupted).toEqual([]);
+    } finally {
+      peer.stop();
+      inbox.close();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a turn that ends in time is never interrupted, and leaves no deadline behind", async () => {
     const t = setUp();
     try {
@@ -2737,6 +2789,73 @@ describe.skipIf(onWindows)("turn deadlines", () => {
       expect(t.interrupted).toEqual([]);
     } finally {
       t.tearDown();
+    }
+  });
+});
+
+describe.skipIf(onWindows)("registry status", () => {
+  test("the front door stays busy until the last conversation's turn ends; each conversation reports its own", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-status-"));
+    const prevSessions = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    const sessions = join(dir, "sessions");
+    process.env.CODEX_COLLAB_SESSIONS_DIR = sessions;
+    mkdirSync(sessions, { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(sessions, senderSock);
+    const owners = new Map<string, { onNotification(m: string, p?: Record<string, unknown>): void }>();
+    let started = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => (method === "thread/start" ? { thread: { id: `thread-${++started}` } } : {}),
+      claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
+      releaseThread: (threadId) => { owners.delete(threadId); },
+      threadHasTurn: (threadId) => owners.has(threadId),
+      interruptThread: async () => true,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    const statusOf = (match: (name: string) => boolean): string | undefined => {
+      for (const f of readdirSync(sessions)) {
+        if (!f.endsWith(".json")) continue;
+        const entry = JSON.parse(readFileSync(join(sessions, f), "utf-8"));
+        if (typeof entry.name === "string" && match(entry.name)) return entry.status;
+      }
+      return undefined;
+    };
+    const frontDoor = (n: string) => n === peerNameFor(dir);
+    const send = (text: string) => new Promise<void>((resolve, reject) => {
+      const line = buildEnvelope({ text, ourSocketPath: senderSock, ourName: "test-sender" });
+      const sock = net.connect({ path: join(dir, "peer.sock") }, () => { sock.write(line); sock.end(); resolve(); });
+      sock.on("error", reject);
+    });
+    try {
+      await send("topic: alpha\nfirst");
+      await waitFor(() => owners.has("thread-1"));
+      await send("topic: beta\nsecond");
+      await waitFor(() => owners.has("thread-2"));
+      expect(statusOf(frontDoor)).toBe("busy");
+      expect(statusOf((n) => n.startsWith("codex(alpha"))).toBe("busy");
+      expect(statusOf((n) => n.startsWith("codex(beta"))).toBe("busy");
+
+      const finish = (id: string) => {
+        const owner = owners.get(id)!;
+        owner.onNotification("item/completed", { threadId: id, item: { type: "agentMessage", text: "done" } });
+        owner.onNotification("turn/completed", { threadId: id, turn: { status: "completed", error: null } });
+        owners.delete(id);
+      };
+      finish("thread-1");
+      expect(statusOf(frontDoor)).toBe("busy"); // beta still runs
+      expect(statusOf((n) => n.startsWith("codex(alpha"))).toBe("idle");
+      expect(statusOf((n) => n.startsWith("codex(beta"))).toBe("busy");
+      finish("thread-2");
+      expect(statusOf(frontDoor)).toBe("idle");
+      expect(statusOf((n) => n.startsWith("codex(beta"))).toBe("idle");
+    } finally {
+      peer.stop();
+      if (prevSessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prevSessions;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

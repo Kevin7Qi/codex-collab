@@ -1997,6 +1997,41 @@ setInterval(() => {}, 1000);
     }, 15_000);
   });
 
+  describe("broker/shutdown ifIdle", () => {
+    test("is refused while a turn is claimed, so a replacement never kills live work", async () => {
+      const sockPath = testSocketPath(tempDir);
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { turnDelay: 3000 });
+
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      const client = await TestClient.connectAndInit(sockPath);
+      try {
+        const started = await client.request("thread/start", { cwd: tempDir }) as { thread: { id: string } };
+        // Claims the thread; the mock answers in 3s.
+        const turn = client.request("turn/start", { threadId: started.thread.id, input: [] });
+        await new Promise((r) => setTimeout(r, 200));
+
+        let code: number | undefined;
+        try {
+          await client.request("broker/shutdown", { ifIdle: true });
+        } catch (e) {
+          code = (e as { code?: number }).code;
+        }
+        expect(code).toBe(-32001);
+        // Still up, and the turn it protected finishes normally.
+        expect(await exitsWithin(proc, 500)).toBe(false);
+        await turn;
+
+        // Unconditional shutdown is unchanged.
+        expect(await client.request("broker/shutdown")).toEqual({});
+        expect(await exitsWithin(proc, 5000)).toBe(true);
+      } finally {
+        await client.close();
+      }
+    }, 20_000);
+  });
+
   // ── Idle timeout ──────────────────────────────────────────────────────────
 
   describe("idle timeout", () => {
