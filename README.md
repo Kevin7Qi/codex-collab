@@ -138,13 +138,21 @@ Claude Code gates inbound peer messages on the sender's attested permission clas
 
 The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before (`CODEX_COLLAB_PEER=on` insists on the peer for one invocation, as `config mode peer` does persistently). The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
 
+## Codex's App-Server
+
+Codex can run one shared, multi-client app-server per machine. `codex app-server daemon start` binds it at `~/.codex/app-server-control/app-server-control.sock`; the `codex` terminal UI and the Codex desktop app (on Linux hosts it reaches over SSH) attach to it automatically. On a Mac the desktop app runs a private server of its own that nothing can join.
+
+When that socket answers, codex-collab's workspace broker attaches to it instead of spawning a private `codex app-server`. Everything on a shared server is one space: turns codex-collab starts render live in the Codex app or terminal UI, `threads --discover` marks threads other clients have open or running, and `run --resume <id>` joins such a thread. A prompt sent to a thread whose turn is already running is folded into that turn rather than starting a second one, and that turn stays the other client's: its approvals are answered where the user is looking, never by codex-collab. A turn codex-collab starts on an idle thread is its own, as always. `health` prints which server the broker is on. Not available on Windows.
+
+Without a shared server, Codex 0.145+ allows one writer per thread. A thread open in the Codex app or a `codex` session cannot be resumed by codex-collab until that process lets go — reported as exit code 8 with a message naming the holder. A thread the broker has used frees up about seven minutes (0.153.4) after the broker lets go of it — at turn end for a CLI run, when its thread peer retires after 30 idle minutes for a messaged conversation. Sharing one app-server removes the conflict entirely.
+
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
 | `run "prompt" [opts]` | Start a thread, send a prompt, wait, print the output (`run -` reads the prompt from stdin) |
 | `review [opts]` | Code review (PR, uncommitted, or a specific commit) |
-| `threads [--json] [--all]` | List threads (`--discover` scans the server, `--session` limits to this session) |
+| `threads [--json] [--all]` | List threads (`--discover` scans the server and marks threads open or active on the app-server, `--session` limits to this session) |
 | `follow [id]` | Live view of a running thread in your own terminal pane. Without an ID it attaches to the active run; `--watch` keeps following each new run |
 | `output <id> [--last]` | Full log for a thread (`--last`: only the latest turn's output) |
 | `kill <id> [--clear]` | Stop a running thread. An active goal is paused first; `--clear` abandons it |
@@ -186,7 +194,7 @@ The peer degrades cleanly: on Windows, without a session registry, or with `CODE
 | `clean` | Delete old logs and stale mappings |
 | `skill sync [--yes]` | Regenerate the installed SKILL.md when it drifts from the binary or template set. Prints the diff, applies only on confirmation |
 | `update` | Check for a newer release and install it with confirmation. See [Upgrading](#upgrading) |
-| `health` | Check dependencies and authentication |
+| `health` | Check dependencies and authentication, and name the app-server the broker runs on |
 | `version` | Print version (also `-v`/`--version` before a command) |
 
 </details>
@@ -306,9 +314,11 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `mode`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
+Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
 
 The `mode` key controls how codex-collab communicates with Claude: `auto` (the default) uses peer messaging when the platform supports it and falls back to the CLI path otherwise, `peer` insists on peer messaging, and `cli` disables peer mechanisms entirely — no agent-registry entry, no per-conversation addresses, no consult tool — routing everything through the command line. Peer messaging requires macOS or Linux with Claude Code 2.1.224 or newer; on Windows or older versions, `auto` falls back to the CLI path automatically without any configuration. A broker reads the mode when it starts and keeps its peer state until it restarts, so after changing the mode run `codex-collab peer up` in the workspace to apply it — the broker is replaced only when no turn is running.
+
+The `server` key controls how the broker connects to the Codex app-server: `auto` (the default) attaches to the shared app-server when its control socket answers and falls back to a private server otherwise, `shared` insists on the shared server and fails if there is none, and `private` always spawns a private server. A broker reads the key when it starts, so after changing it run `codex-collab peer up` in the workspace to apply — the broker is replaced only when no turn is running.
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 
