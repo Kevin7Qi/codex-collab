@@ -29,6 +29,7 @@ import {
   setActiveReviewThreadId,
   setActiveShortId,
   setActiveTurnId,
+  setActiveTurnOwnership,
   setActiveWsPaths,
   setActiveRunId,
   sandboxModeLabel,
@@ -149,7 +150,8 @@ export async function handleReview(args: string[]): Promise<void> {
         }),
         timeoutMs: options.timeout * 1000,
         killSignalsDir: ws.killSignalsDir,
-        onTurnId: (id) => setActiveTurnId(id),
+        // Reviews run on a thread of their own and are never joined.
+        onTurnId: (id) => { setActiveTurnId(id); setActiveTurnOwnership("own"); },
         onReviewThreadId: (id) => setActiveReviewThreadId(id),
       });
 
@@ -168,6 +170,7 @@ export async function handleReview(args: string[]): Promise<void> {
       dispatcher.setQuestionContext(null);
       setActiveThreadId(undefined);
       setActiveReviewThreadId(undefined);
+      setActiveTurnOwnership("unknown");
       setActiveShortId(undefined);
       setActiveTurnId(undefined);
       setActiveWsPaths(undefined);

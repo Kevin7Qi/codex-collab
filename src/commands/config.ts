@@ -212,6 +212,9 @@ export function describeServer(
   env: NodeJS.ProcessEnv = process.env,
   socketExists: (path: string) => boolean = existsSync,
   platform: string = process.platform,
+  /** Whether the connection described runs through the workspace broker
+   *  (which keeps the server it started on) or is this invocation's own. */
+  brokered = true,
 ): string {
   const { preference, reason } = serverPreference(env);
   if (server.kind === "shared") {
@@ -221,9 +224,12 @@ export function describeServer(
   if (!attachSupported(platform)) return `private app-server${pid} — attaching to Codex's shared server is not available on Windows`;
   if (preference === "private") return `private app-server${pid} (${reason})`;
   const socket = controlSocketPath(env);
-  return socketExists(socket)
-    ? `private app-server${pid} — Codex's socket at ${socket} exists but this broker started before it answered ('codex-collab peer up' to reconnect)`
-    : `private app-server${pid} — no Codex app-server is listening at ${socket} ('codex app-server daemon start' shares one; the TUI attaches to it too)`;
+  if (!socketExists(socket)) {
+    return `private app-server${pid} — no Codex app-server is listening at ${socket} ('codex app-server daemon start' shares one; the TUI attaches to it too)`;
+  }
+  return brokered
+    ? `private app-server${pid} — Codex's socket at ${socket} exists but the broker keeps the server it started on (\`codex-collab peer up\` to restart on the shared one)`
+    : `private app-server${pid} — Codex's socket at ${socket} exists but this invocation did not attach (under \`auto\`, tried the socket and fell back)`;
 }
 
 export async function handleHealth(args: string[]): Promise<void> {
@@ -243,7 +249,7 @@ export async function handleHealth(args: string[]): Promise<void> {
   try {
     account = await withClient(async (client) => {
       console.log(`  app-server: OK (${client.userAgent})`);
-      console.log(`  server: ${describeServer(client.server)}`);
+      console.log(`  server: ${describeServer(client.server, process.env, existsSync, process.platform, client.isBrokered)}`);
       // A failure here must not fail the whole check: older codex builds may
       // not know account/read, and a busy broker or transient RPC error is
       // not evidence that the user is logged out.

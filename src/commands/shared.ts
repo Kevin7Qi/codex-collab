@@ -684,6 +684,12 @@ export let activeThreadId: string | undefined;
 export let activeReviewThreadId: string | undefined;
 export let activeShortId: string | undefined;
 export let activeTurnId: string | undefined;
+/** Whose turn the active run is waiting on. "unknown" from the moment a
+ *  thread is active until the start settles; "joined" when it turned out to
+ *  be another client's turn on a shared app-server. Shutdown pauses a goal
+ *  or interrupts a turn only for "own" — never for one we merely joined,
+ *  and never while we do not yet know. */
+export let activeTurnOwnership: "unknown" | "own" | "joined" = "unknown";
 export let activeWsPaths: WorkspacePaths | undefined;
 export let activeRunId: string | undefined;
 export let shuttingDown = false;
@@ -693,6 +699,7 @@ export function setActiveThreadId(id: string | undefined): void { activeThreadId
 export function setActiveReviewThreadId(id: string | undefined): void { activeReviewThreadId = id; }
 export function setActiveShortId(id: string | undefined): void { activeShortId = id; }
 export function setActiveTurnId(id: string | undefined): void { activeTurnId = id; }
+export function setActiveTurnOwnership(value: "unknown" | "own" | "joined"): void { activeTurnOwnership = value; }
 export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeWsPaths = ws; }
 export function setActiveRunId(id: string | undefined): void { activeRunId = id; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
@@ -891,7 +898,7 @@ export async function resumeUnlessHeld(
       }
       const held = new Error(
         `Thread ${shortId} is open for writing in another Codex process — the Codex app, a \`codex\` session, or an app-server daemon. ` +
-        `Codex allows one writer per thread. Close it there, or wait about a minute after it goes idle, then retry. ` +
+        `Codex allows one writer per thread. Close it there, or wait several minutes after it goes idle for the thread to be unloaded, then retry. ` +
         `(Running codex-collab on the same app-server as that process avoids this: see 'codex-collab health'.)`,
       );
       tagExitCode(held, EXIT_CODES.threadHeld);
@@ -1325,11 +1332,16 @@ export function recordRunFailure(
   threadId: string,
   runId: string,
   error: unknown,
+  /** The thread itself is still running for someone else (this invocation
+   *  was refused as busy): record only this invocation's failure. */
+  opts: { threadLive?: boolean } = {},
 ): void {
-  try {
-    updateThreadStatus(ws.stateDir, threadId, "failed");
-  } catch (e) {
-    console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+  if (!opts.threadLive) {
+    try {
+      updateThreadStatus(ws.stateDir, threadId, "failed");
+    } catch (e) {
+      console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
   try {
     updateRun(ws.stateDir, runId, {

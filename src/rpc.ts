@@ -121,8 +121,8 @@ export type NotificationHandler = (params: unknown) => void;
 export type AnyNotificationHandler = (method: string, params: unknown) => void;
 
 /** Handler for server-sent requests (e.g. approval requests). Returns the result to send back. */
-export type ServerRequestHandler = (params: unknown) => unknown | Promise<unknown>;
-export type AnyServerRequestHandler = (method: string, params: unknown) => unknown | Promise<unknown>;
+export type ServerRequestHandler = (params: unknown, requestId?: RequestId) => unknown | Promise<unknown>;
+export type AnyServerRequestHandler = (method: string, params: unknown, requestId?: RequestId) => unknown | Promise<unknown>;
 
 /** A request handler's way to answer nothing at all. On a shared app-server
  *  a request fans out to every client subscribed to its thread and the first
@@ -198,7 +198,17 @@ export function createRpcEndpoint(opts: RpcEndpointOptions): RpcEndpoint {
   const notificationHandlers = new Map<string, Set<NotificationHandler>>();
   const anyNotificationHandlers = new Set<AnyNotificationHandler>();
   const requestHandlers = new Map<string, ServerRequestHandler>();
-  let anyRequestHandler: AnyServerRequestHandler | null = null;
+  /** Catch-all handlers, innermost last: a turn's briefly replaces a
+   *  connection's guard and disposing it — in any order — restores what
+   *  stood before, never a handler its owner already released. */
+  const anyRequestHandlers: AnyServerRequestHandler[] = [];
+  const anyRequestHandler = (): AnyServerRequestHandler | null => anyRequestHandlers[anyRequestHandlers.length - 1] ?? null;
+  /** Server requests being handled right now, by id. A shared server
+   *  re-sends a thread's pending requests to a client that rejoins it —
+   *  including one this client is answering already, whose duplicate
+   *  would otherwise be handled afresh and settle the original with
+   *  whatever the second handling said. */
+  const inFlightServerRequests = new Set<string>();
   const closeHandlers = new Set<() => void>();
   let closed = false;
   let failReason: string | null = null;
@@ -265,12 +275,16 @@ export function createRpcEndpoint(opts: RpcEndpointOptions): RpcEndpoint {
 
     if (isRequest(msg)) {
       const specific = requestHandlers.get(msg.method);
-      const fallback = anyRequestHandler;
+      const fallback = anyRequestHandler();
       const handler: ServerRequestHandler | undefined = specific
-        ?? (fallback ? (params) => fallback(msg.method, params) : undefined);
+        ?? (fallback ? (params, id) => fallback(msg.method, params, id) : undefined);
       if (handler) {
+        const key = String(msg.id);
+        if (inFlightServerRequests.has(key)) return; // a re-send of a request being answered: the first handling settles it
+        inFlightServerRequests.add(key);
         Promise.resolve()
-          .then(() => handler(msg.params))
+          .then(() => handler(msg.params, msg.id))
+          .finally(() => { inFlightServerRequests.delete(key); })
           .then(
             (res) => { if (res !== NO_RESPONSE) write(formatResponse(msg.id, res)); },
             (err) => {
@@ -393,9 +407,10 @@ export function createRpcEndpoint(opts: RpcEndpointOptions): RpcEndpoint {
   }
 
   function onAnyRequest(handler: AnyServerRequestHandler): () => void {
-    anyRequestHandler = handler;
+    anyRequestHandlers.push(handler);
     return () => {
-      if (anyRequestHandler === handler) anyRequestHandler = null;
+      const at = anyRequestHandlers.lastIndexOf(handler);
+      if (at !== -1) anyRequestHandlers.splice(at, 1);
     };
   }
 

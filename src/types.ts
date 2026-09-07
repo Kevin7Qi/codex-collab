@@ -646,6 +646,10 @@ export interface RunRecord {
    *  goal was seen during this run; survives completion so post-mortems can
    *  say how the goal ended and what it cost. */
   goal?: RunGoalState | null;
+  /** The turn this run waited on was another client's, joined on a shared
+   *  app-server (`run --resume` into a running turn). Stopping the run
+   *  stops the wait, never that turn. */
+  joined?: boolean;
 }
 
 /** Observer-facing goal snapshot on the run record. `turns` counts the turns

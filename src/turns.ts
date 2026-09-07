@@ -17,6 +17,8 @@ import {
 import type { EventDispatcher } from "./events";
 import type { ApprovalHandler } from "./approvals";
 import { config } from "./config";
+import { NO_RESPONSE } from "./rpc";
+import { isBrokerBusyError } from "./broker";
 import { pauseThreadGoal, readThreadGoal } from "./goals";
 
 const STALE_KILL_SIGNAL_MS = 1000;
@@ -103,6 +105,15 @@ export interface TurnOptions {
   /** Called with the turn ID once the turn/start (or review/start) response arrives.
    *  Used by the CLI signal handler to send turn/interrupt on Ctrl-C. */
   onTurnId?: (turnId: string) => void;
+  /** The turn was JOINED, not started: on a shared app-server the thread
+   *  already had another client's turn running and our input was steered
+   *  into it. That turn is theirs — its approvals are theirs to answer, and
+   *  a kill or timeout here stops our wait, never their turn. */
+  onJoinedTurn?: () => void;
+  /** The turn is known to be ours — normally as the start answers, but
+   *  also late, when a kill overtook the start and its answer was
+   *  awaited afterwards. The goal wrapper's brakes depend on it. */
+  onTurnOwned?: () => void;
   /** Called with the review subthread ID once review/start responds. Lets the
    *  CLI signal handler target the right thread for `turn/interrupt`. Never
    *  fires for normal turns. */
@@ -220,15 +231,126 @@ async function activeTurnOn(client: AppServerClient, threadId: string): Promise<
  * carry, and the caller would wait out its timeout for a turn that
  * finished; steering names the turn that will actually answer.
  */
+/** turn/start fields that describe how OUR turn should run. None of them
+ *  can apply to a turn another client is running, and Codex would fold the
+ *  input into that turn while silently keeping its settings. */
+const TURN_OVERRIDE_KEYS = ["sandboxPolicy", "model", "effort", "approvalPolicy", "approvalsReviewer", "cwd"] as const;
+
+/** A start refused because another client's turn holds the thread: the
+ *  thread is live for that client, and the record of it must say so. */
+export class ThreadBusyError extends Error {
+  readonly threadLive = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "ThreadBusyError";
+  }
+}
+
+/** The text items of a turn's input, for telling a turn that carries it. */
+export function inputTexts(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((i): i is { type: "text"; text: string } => !!i && typeof i === "object" && (i as { type?: unknown }).type === "text" && typeof (i as { text?: unknown }).text === "string")
+    .map((i) => i.text);
+}
+
+/** What one read of a thread says about a submission of ours: the turn
+ *  in progress, and the turns whose record carries our input as a user
+ *  message — the positive sign that a turn absorbed the submission. A
+ *  shared server acknowledges a submission before its turn necessarily
+ *  starts: the turn that just ended may have absorbed the input, or merely
+ *  preceded a turn of ours; only its record tells which. The match is
+ *  exact: a short prompt found inside someone else's message is no
+ *  evidence. `readable` false: the server could not be asked. */
+export interface ThreadFacts {
+  readable: boolean;
+  active: string | null;
+  carriers: string[];
+}
+
+export async function readThreadFacts(
+  request: (method: string, params: Record<string, unknown>) => Promise<unknown>,
+  threadId: string,
+  texts: string[],
+): Promise<ThreadFacts> {
+  const wanted = texts.map((t) => t.trim()).filter((t) => t.length > 0);
+  try {
+    const read = await request("thread/read", { threadId, includeTurns: true }) as
+      { thread?: { turns?: Array<{ id?: unknown; status?: unknown; items?: unknown }> } } | null;
+    const turns = read?.thread?.turns ?? [];
+    const active = turns.find((t) => t.status === "inProgress");
+    const carriers: string[] = [];
+    for (const turn of turns) {
+      if (typeof turn.id !== "string" || wanted.length === 0) continue;
+      const items = Array.isArray(turn.items) ? turn.items as Array<{ type?: unknown; content?: unknown }> : [];
+      const carries = items.some((item) =>
+        item?.type === "userMessage" && Array.isArray(item.content) &&
+        (item.content as Array<{ type?: unknown; text?: unknown }>).some((c) =>
+          c?.type === "text" && typeof c.text === "string" && wanted.includes(c.text.trim())));
+      if (carries) carriers.push(turn.id);
+    }
+    return { readable: true, active: typeof active?.id === "string" ? active.id : null, carriers };
+  } catch {
+    return { readable: false, active: null, carriers: [] };
+  }
+}
+
+/** What a start still in flight settles to, for whoever must stop the
+ *  turn it became (a signal handler, say) before it is known. */
+export interface SettledStart {
+  joined: boolean;
+  turnId: string;
+  reviewThreadId: string | null;
+}
+const pendingStarts = new Map<string, Promise<SettledStart | null>>();
+
+/** Wait (at most `timeoutMs`) for the start in flight on `threadId` to
+ *  settle: null when none is pending, it failed, or time ran out. */
+export async function awaitPendingStart(threadId: string, timeoutMs: number): Promise<SettledStart | null> {
+  const pending = pendingStarts.get(threadId);
+  if (!pending) return null;
+  return Promise.race([pending, new Promise<null>((r) => setTimeout(r, timeoutMs))]);
+}
+
+/** What the thread's events said while the start was in flight: the turns
+ *  that started and the turns that completed. A turn/start whose id never
+ *  appears among them, while some other turn completed, was absorbed into
+ *  that turn — which may already be over. */
+export interface ObservedTurns {
+  started: string[];
+  completed: string[];
+}
+
 async function startOrJoinTurn(
   client: AppServerClient,
   method: string,
   params: TurnStartParams | ReviewStartParams,
   opts: TurnOptions,
-): Promise<TurnStartResponse & { reviewThreadId?: string }> {
+  observed: () => ObservedTurns = () => ({ started: [], completed: [] }),
+  onAccepted?: (turnId: string) => void,
+): Promise<{
+  response: TurnStartResponse & { reviewThreadId?: string };
+  joined: boolean;
+  /** Overrides the prompt was submitted with that a turn it was absorbed
+   *  into does not run under. */
+  overridesUnapplied?: readonly string[];
+}> {
+  const overrides = method === "turn/start"
+    ? TURN_OVERRIDE_KEYS.filter((k) => (params as unknown as Record<string, unknown>)[k] !== undefined)
+    : [];
   if (method === "turn/start" && client.server.kind === "shared") {
-    const active = await activeTurnOn(client, params.threadId);
-    if (active) {
+    // A steer names the turn it expects; when that turn has ended and
+    // another is running (a goal continuation, say), read again and steer
+    // that one. Only a thread with no turn in progress gets one of ours.
+    let active = await activeTurnOn(client, params.threadId);
+    for (let attempt = 0; active && attempt < 3; attempt++) {
+      if (overrides.length > 0) {
+        throw new ThreadBusyError(
+          "Another client of the shared app-server is running a turn on this thread, and a " +
+          `${overrides.map((k) => `\`${k}\``).join("/")} override cannot apply to it. ` +
+          "Retry without overrides to add your prompt to that turn, or wait for it to finish.",
+        );
+      }
       try {
         const steered = await client.request<{ turnId: string }>("turn/steer", {
           threadId: params.threadId,
@@ -236,13 +358,82 @@ async function startOrJoinTurn(
           input: (params as TurnStartParams).input,
         });
         opts.dispatcher.progressLine("Joined the turn already running on this thread");
-        return { turn: { id: steered.turnId, items: [], status: "inProgress", error: null } } as TurnStartResponse;
-      } catch {
-        // It finished in the meantime: a turn of our own is the right thing now.
+        return {
+          response: { turn: { id: steered.turnId, items: [], status: "inProgress", error: null } } as TurnStartResponse,
+          joined: true,
+        };
+      } catch (e) {
+        // Another invocation through this broker owns the thread: that is
+        // the documented retryable condition, not a failure to join.
+        if (isBrokerBusyError(e)) throw e;
+        const again = await activeTurnOn(client, params.threadId);
+        if (again === active) {
+          // The turn is still running and would not take the steer. A
+          // turn/start now would be folded into it unobserved.
+          throw new ThreadBusyError(
+            `Another client of the shared app-server is running a turn on this thread and it could not be joined ` +
+            `(${e instanceof Error ? e.message : String(e)}). Retry once it finishes.`,
+          );
+        }
+        active = again;
       }
     }
+    if (active) {
+      throw new ThreadBusyError("Another client of the shared app-server keeps starting turns on this thread faster than they can be joined. Retry in a moment.");
+    }
   }
-  return client.request<TurnStartResponse & { reviewThreadId?: string }>(method, params);
+  const before = observed();
+  const response = await client.request<TurnStartResponse & { reviewThreadId?: string }>(method, params);
+  if (method === "turn/start" && client.server.kind === "shared" && !observed().started.includes(response.turn.id)) {
+    // Between the read and this start another client may have started a
+    // turn; Codex then folded our input into it and answered with an id
+    // its events never carry. (A start already seen starting is ours and
+    // needs no further look.) The thread's active turn is the truth — and
+    // when that turn already finished, the events seen since the
+    // submission are: a completion for a turn that is not ours, none for
+    // the id we got. (A completion seen before the submission belongs to
+    // an earlier turn and says nothing about this one.)
+    // The id is recorded before the read: a kill landing meanwhile must be
+    // able to stop the turn this may turn out to be.
+    onAccepted?.(response.turn.id);
+    // A broker has already decided this, from the same evidence, before it
+    // answered — its answer says so, and the reads below are spared.
+    const decided = (response as { absorbedBy?: unknown }).absorbedBy;
+    let absorbedBy: string | null;
+    if (client.isBrokered && (decided === null || typeof decided === "string")) {
+      absorbedBy = decided;
+    } else {
+      const facts = await readThreadFacts(
+        (m, p) => client.request(m, p), params.threadId, inputTexts((params as { input?: unknown }).input),
+      );
+      const seen = observed();
+      const completedSince = seen.completed.slice(before.completed.length);
+      // A turn of ours that was seen starting, or reported running, is ours
+      // whatever else happened: it may have finished already, with another
+      // client's turn or a goal continuation active since. Only an id the
+      // events never announced was absorbed — into the active turn, or into
+      // a turn already over whose record carries our input (a completion
+      // alone says nothing: the turn may merely have preceded ours).
+      absorbedBy = seen.started.includes(response.turn.id) || facts.active === response.turn.id
+        ? null
+        : facts.active
+          ?? completedSince.find((id) => id !== response.turn.id && facts.carriers.includes(id))
+          ?? null;
+      if (absorbedBy && client.isBrokered) {
+        // The broker's claim must stand for the joined turn too, or its
+        // orphan recovery would later interrupt another client's work.
+        await client.request("broker/joined", { threadId: params.threadId, turnId: absorbedBy }).catch(() => undefined);
+      }
+    }
+    if (absorbedBy) {
+      opts.dispatcher.progressLine("Joined the turn that started on this thread in the meantime");
+      // The prompt is in that turn now, under that turn's settings: an
+      // override asked for here did not apply, and the caller must not be
+      // told the turn ran under it (see executeTurn).
+      return { response: { ...response, turn: { ...response.turn, id: absorbedBy } }, joined: true, overridesUnapplied: overrides };
+    }
+  }
+  return { response, joined: false };
 }
 
 /**
@@ -288,7 +479,9 @@ export async function runTurnWithGoalFollow(
   unsubs.push(client.on("thread/goal/updated", (params) => {
     const p = params as ThreadGoalUpdatedParams;
     if (p?.threadId !== threadId || !p.goal) return;
-    notifyGoal(p.goal);
+    // A goal on a thread whose turn is another client's is that client's:
+    // never this run's to record (or to exit blocked on).
+    if (owned()) notifyGoal(p.goal);
   }));
   unsubs.push(client.on("thread/goal/cleared", (params) => {
     if ((params as ThreadGoalClearedParams)?.threadId !== threadId) return;
@@ -306,9 +499,28 @@ export async function runTurnWithGoalFollow(
   const followedTurnIds = new Set<string>();
   const startedTurnIds: string[] = [];
   let following = false;
+  // Unknown until the start settles: a kill during a shared server's read
+  // or steer ends the first turn "interrupted" before either callback ran,
+  // and a goal on the thread may well be another client's.
+  // (Read through a function: the closures below mutate it, which TypeScript
+  // does not see when narrowing the variable at the checks further down.)
+  let ownershipState: "unknown" | "own" | "joined" = "unknown";
+  const ownership = (): "unknown" | "own" | "joined" => ownershipState;
+  // On a private server no other client can own a turn: a start whose
+  // answer never settled here still owned whatever it accepted.
+  const owned = (): boolean => ownershipState === "own" || (ownershipState === "unknown" && client.server.kind === "private");
   const wrappedOpts: GoalRunOptions = {
     ...opts,
+    onJoinedTurn: () => {
+      ownershipState = "joined";
+      opts.onJoinedTurn?.();
+    },
+    onTurnOwned: () => {
+      if (ownershipState === "unknown") ownershipState = "own";
+      opts.onTurnOwned?.();
+    },
     onTurnId: (id) => {
+      if (ownershipState === "unknown") ownershipState = "own";
       // turn/started for our own turn can beat the turn/start response —
       // un-queue it, or the follow loop would try to follow our own turn.
       ownTurnIds.add(id);
@@ -366,9 +578,10 @@ export async function runTurnWithGoalFollow(
    *  must not read as "goal cleared" (= completed) and end the follow with
    *  a false success while the server keeps working. The repoll cadence
    *  retries; the deadline is the backstop if reads never recover. */
-  const readGoal = async (): Promise<ThreadGoal | null> => {
+  const readGoal = async (opts2: { record?: boolean } = {}): Promise<ThreadGoal | null> => {
     const { goal, ok } = await readThreadGoal(client, threadId);
     if (!ok) return lastGoal;
+    if (goal && opts2.record === false) return goal; // learned, not yet recorded: whose it is is not known
     if (goal) notifyGoal(goal);
     else if (goalSeen && connectionDown === null) {
       lastGoal = null;
@@ -440,8 +653,10 @@ export async function runTurnWithGoalFollow(
     // goal-mode thread) fires no goal/updated during our turn, and every
     // abnormal-exit brake below keys off knowing it exists. The get also
     // travels through the broker, which learns the active goal from it and
-    // retains stream ownership across the coming continuation turns.
-    await readGoal();
+    // retains stream ownership across the coming continuation turns. It is
+    // not recorded yet: on a shared server the turn may turn out to be
+    // another client's, and so would the goal.
+    await readGoal({ record: false });
 
     let first: TurnResult;
     try {
@@ -451,11 +666,17 @@ export async function runTurnWithGoalFollow(
       // burning headless after the CLI exits with code 3. pauseAndInterrupt
       // does its own authoritative read — cached flags would miss a goal
       // that appeared mid-turn without any notification reaching us.
-      if (e instanceof TurnTimeoutError) {
+      if (e instanceof TurnTimeoutError && owned()) {
         await pauseAndInterrupt(null, "on timeout");
       }
       throw e;
     }
+
+    // A joined turn was another client's, and so is any goal on the thread:
+    // nothing here to pause, follow, interrupt — or report as this run's.
+    // (A start that never settled is unknown, and only a private server
+    // lets that count as ours.)
+    if (!owned()) return { ...finish(first), goal: null, goalSeen: false };
 
     if (first.status === "interrupted") {
       // Killed during turn 1. The goal-aware `kill` pauses the goal itself,
@@ -488,7 +709,8 @@ export async function runTurnWithGoalFollow(
       for (const buffered of preFollowBuffer.splice(0)) {
         dispatchNotification(opts.dispatcher, buffered.method, buffered.params);
       }
-      followUnsubs.push(...registerApprovalHandlers(client, opts, followAbort.signal));
+      followUnsubs.push(...registerApprovalHandlers(client, opts, followAbort.signal, undefined, () => ({ threadIds: [threadId], turnId: null })));
+      followUnsubs.push(declineUnhandledRequests(client, threadId, () => null, async () => owned()));
 
       let connectionLost: ((err: Error) => void) | null = null;
       const connectionLossPromise = new Promise<never>((_resolve, reject) => {
@@ -712,6 +934,9 @@ async function executeTurn(
   type BufferedNotification = { method: string; params: unknown };
   const notificationBuffer: BufferedNotification[] = [];
   let turnId: string | null = null;
+  /** The id the server accepted for a start whose ownership is still being read: a target for a kill, not yet an id to route by. */
+  let acceptedTurnId: string | null = null;
+  let startAttempt: ReturnType<typeof startOrJoinTurn> | null = null;
 
   // --- Completion inference ---
   let inferenceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -756,10 +981,39 @@ async function executeTurn(
     }
   }
 
+  // Whose turn the requests arriving here belong to. Unknown until the
+  // start settles; a joined turn belongs to another client of a shared
+  // app-server (see startOrJoinTurn), and nothing below may answer for it
+  // or stop it. While unknown, a shared server's requests are still not
+  // ours to settle — they may be for the turn we are about to join.
+  let ownership: "unknown" | "own" | "joined" = "unknown";
+  let ownershipKnown!: () => void;
+  const ownershipSettled = new Promise<void>((resolve) => { ownershipKnown = resolve; });
+  const settleOwnership = (value: "own" | "joined"): void => {
+    if (ownership !== "unknown") return;
+    ownership = value;
+    ownershipKnown();
+  };
+  const joinedTurn = (): boolean => ownership === "joined";
+  const ownedTurn = (): boolean => ownership === "own";
+  const ownershipUnknown = (): boolean => ownership === "unknown";
+  /** Whether a request arriving now is ours to answer. On a shared server an
+   *  unknown ownership means WAIT, not decline: an approval for our own turn
+   *  can arrive in the same read as the turn/start response, and a reply of
+   *  silence would strand that turn. Held requests are answered once the
+   *  start settles — ours, or left alone. */
+  const ours = async (): Promise<boolean> => {
+    if (ownership === "unknown" && client.server.kind === "shared") await ownershipSettled;
+    return ownership !== "joined";
+  };
+
   // AbortController for cancelling in-flight approval polls on turn completion/timeout
   const abortController = new AbortController();
-  const unsubs = registerApprovalHandlers(client, opts, abortController.signal);
-
+  const unsubs = registerApprovalHandlers(client, opts, abortController.signal, ours, () => ({
+    threadIds: reviewSubthreadId ? [threadId, reviewSubthreadId] : [threadId],
+    // A review's approvals may carry its inner turn's id: scope by thread alone there.
+    turnId: reviewSubthreadId ? null : turnId,
+  }));
   // For reviews the running turn fires its item events on the review
   // subthread (set below after the start response returns). Predicate is
   // captured as a closure so it picks up reviewSubthreadId once it's known.
@@ -770,6 +1024,8 @@ async function executeTurn(
   ): boolean =>
     belongsToTurn(p, threadId, expectedTurnId)
     || (reviewSubthreadId !== null && belongsToTurn(p, reviewSubthreadId, expectedTurnId));
+
+  unsubs.push(declineUnhandledRequests(client, threadId, () => reviewSubthreadId, ours, () => (reviewSubthreadId ? null : turnId)));
 
   // Route a notification to the dispatcher and the completion-inference
   // logic, dropping events that belong to a different turn. On a shared
@@ -805,6 +1061,18 @@ async function executeTurn(
     } else if (method === "item/completed") {
       processItemCompleted(params as ItemCompletedParams);
     }
+  }
+
+  // The thread's turn lifecycle as seen from here, from before the start:
+  // the item buffer above holds only dispatched item events, and a start
+  // absorbed into another client's turn is recognized by these.
+  const seenTurns: ObservedTurns = { started: [], completed: [] };
+  for (const lifecycle of ["turn/started", "turn/completed"] as const) {
+    unsubs.push(client.on(lifecycle, (params) => {
+      const p = params as { threadId?: unknown; turn?: { id?: unknown } } | undefined;
+      if (p?.threadId !== threadId || typeof p?.turn?.id !== "string") return;
+      (lifecycle === "turn/started" ? seenTurns.started : seenTurns.completed).push(p.turn.id);
+    }));
   }
 
   for (const method of DISPATCHED_NOTIFICATION_METHODS) {
@@ -890,11 +1158,40 @@ async function executeTurn(
   });
 
   try {
-    const startResponse = await Promise.race([
-      startOrJoinTurn(client, method, params, opts),
+    const observed = (): ObservedTurns => ({ started: [...seenTurns.started], completed: [...seenTurns.completed] });
+    // A turn the server accepted is recorded as soon as it is, so that a
+    // kill landing while its ownership is still being read can stop it —
+    // as a target only: events keep buffering until the id they should
+    // be filtered by is known, which for an absorbed start is another.
+    startAttempt = startOrJoinTurn(client, method, params, opts, observed, (id) => { acceptedTurnId = id; });
+    startAttempt.catch(() => undefined); // its failure surfaces through the race below
+    const settled = startAttempt.then(
+      (s) => ({ joined: s.joined, turnId: s.response.turn.id, reviewThreadId: typeof s.response.reviewThreadId === "string" ? s.response.reviewThreadId : null }),
+      () => null,
+    );
+    pendingStarts.set(threadId, settled);
+    settled.finally(() => { if (pendingStarts.get(threadId) === settled) pendingStarts.delete(threadId); });
+    const started = await Promise.race([
+      startAttempt,
       killSignal,
       connectionLossPromise,
     ]);
+    const startResponse = started.response;
+    settleOwnership(started.joined ? "joined" : "own");
+    if (started.joined) opts.onJoinedTurn?.();
+    else opts.onTurnOwned?.();
+    if (started.overridesUnapplied && started.overridesUnapplied.length > 0) {
+      // Too late to refuse: Codex folded the prompt into the other
+      // client's turn. What can still be refused is reporting success
+      // for settings that turn does not run under.
+      const named = started.overridesUnapplied.map((k) => `\`${k}\``).join("/");
+      throw new ThreadBusyError(
+        "Another client of the shared app-server started a turn on this thread just as this prompt was " +
+        `submitted, and Codex folded the prompt into that turn — which does not run under the ${named} ` +
+        "override asked for here. That turn is the other client's; its outcome is not reported here. " +
+        "Retry once it finishes.",
+      );
+    }
     const { turn } = startResponse;
     if (typeof startResponse.reviewThreadId === "string") {
       // For reviews, the running turn lives on a *review* subthread distinct
@@ -966,13 +1263,49 @@ async function executeTurn(
     // stream stays busy until the orphan watchdog (~30 min) fires, blocking
     // every subsequent invocation. The separate `kill` command may have
     // already interrupted — "not found" / "already" errors are expected.
-    const interruptThreadId = reviewSubthreadId ?? threadId;
+    // A joined turn is another client's: a kill or timeout here ends our
+    // wait and leaves their turn — and their goal — alone.
+    let stopId = turnId ?? acceptedTurnId;
     if (e instanceof KillSignalError) {
       opts.dispatcher.flushOutput();
       opts.dispatcher.flush();
-      if (turnId !== null) {
-        await runBeforeInterruptHook(opts);
-        await tryInterruptTurn(client, interruptThreadId, turnId, "on kill");
+      if (ownershipUnknown() && startAttempt !== null) {
+        // Whose turn the start became is not known yet: its answer, or the
+        // read of the thread after it, is still out. Wait (briefly) for
+        // the verdict — a turn of ours is stopped with its goal paused
+        // first, here and in the goal wrapper; another client's is left
+        // alone. On a direct shared connection nothing else would: the
+        // server outlives the connection, and no broker recovers what it
+        // accepted. On a private server the answer can only be ours, but
+        // the goal it may carry is still paused only once that is known.
+        const late = await Promise.race([
+          startAttempt.then((s) => s, () => null),
+          new Promise<null>((r) => setTimeout(r, 5000)),
+        ]);
+        if (late) {
+          settleOwnership(late.joined ? "joined" : "own");
+          if (late.joined) opts.onJoinedTurn?.();
+          else {
+            opts.onTurnOwned?.();
+            stopId = late.response.turn.id;
+            // A review runs on the subthread the answer names.
+            if (typeof late.response.reviewThreadId === "string") {
+              reviewSubthreadId = late.response.reviewThreadId;
+              opts.onReviewThreadId?.(reviewSubthreadId);
+            }
+          }
+        }
+      }
+      // The answer may have landed during the wait while its ownership
+      // read ran on: what it accepted is still ours to stop by id.
+      if (stopId === null) stopId = turnId ?? acceptedTurnId;
+      const interruptThreadId = reviewSubthreadId ?? threadId;
+      if (stopId !== null && !joinedTurn()) {
+        // A turn whose ownership was still being read is stopped by id
+        // alone (the server refuses an id that is not its active turn);
+        // its goal, if any, is paused only once the turn is known ours.
+        if (ownedTurn()) await runBeforeInterruptHook(opts);
+        await tryInterruptTurn(client, interruptThreadId, stopId, "on kill");
       }
       return {
         status: "interrupted",
@@ -983,12 +1316,15 @@ async function executeTurn(
         durationMs: Date.now() - startTime,
       };
     }
-    if (turnId !== null) {
-      await runBeforeInterruptHook(opts);
-      await tryInterruptTurn(client, interruptThreadId, turnId);
+    if (stopId !== null && !joinedTurn()) {
+      if (ownedTurn()) await runBeforeInterruptHook(opts);
+      await tryInterruptTurn(client, reviewSubthreadId ?? threadId, stopId);
     }
     throw e;
   } finally {
+    // A start that failed or was abandoned never owned a turn: requests
+    // held for it are released as not ours.
+    settleOwnership("joined");
     clearInferenceTimer();
     inferenceResolver = null;
     killAbort.abort();
@@ -1025,17 +1361,87 @@ function isPidAlive(pid: number): boolean {
  * lives in executeTurn, where it can filter by the active turn.
  * Returns an array of unsubscribe functions for cleanup.
  */
-function registerApprovalHandlers(client: AppServerClient, opts: TurnOptions, signal: AbortSignal): Array<() => void> {
+/**
+ * Every server request the run has no handler for — a user-input question,
+ * an elicitation, a tool call — is declined by "method not found" for our
+ * own turn (the server takes it as a decline and moves on), and left to its
+ * owner for a joined one. Through the broker this never fires; on a direct
+ * shared connection it is the only guard, and there a request that names
+ * no thread of ours — another client's, or one to the connection itself,
+ * such as an auth-token refresh — is not ours to answer either: the first
+ * answer wins, and a decline from here would fail it for its owner.
+ */
+function declineUnhandledRequests(
+  client: AppServerClient,
+  threadId: string,
+  subthread: () => string | null,
+  ours: () => Promise<boolean>,
+  /** Our turn, once known: a request naming another turn on the thread —
+   *  a successor's question arriving with our completion — is its. */
+  turn: () => string | null = () => null,
+): () => void {
+  return client.onAnyRequest(async (method, params) => {
+    if (client.server.kind === "shared") {
+      const p = params as { threadId?: unknown; turnId?: unknown } | null | undefined;
+      const forThread = p?.threadId;
+      if (forThread !== threadId && forThread !== subthread()) return NO_RESPONSE;
+      const own = turn();
+      if (own !== null && typeof p?.turnId === "string" && p.turnId !== own) return NO_RESPONSE;
+      // A dynamic tool belongs to whoever declared it on the thread — the
+      // broker's `consult`, say, on a thread the peer created — not to the
+      // connection running the turn; this one implements none.
+      if (method === "item/tool/call") return NO_RESPONSE;
+    }
+    if (!(await ours())) return NO_RESPONSE;
+    const err = new Error(`Method not found: ${method}`) as Error & { code: number };
+    err.code = -32601;
+    throw err;
+  });
+}
+
+/** What an approval must name to be this run's to answer on a shared
+ *  server: one of its threads, and — once known — its turn. */
+interface ApprovalScope {
+  threadIds: string[];
+  turnId: string | null;
+}
+
+function withinScope(params: unknown, scope: ApprovalScope): boolean {
+  const p = params as { threadId?: unknown; turnId?: unknown } | null | undefined;
+  if (typeof p?.threadId === "string" && !scope.threadIds.includes(p.threadId)) return false;
+  if (scope.turnId !== null && typeof p?.turnId === "string" && p.turnId !== scope.turnId) return false;
+  return true;
+}
+
+function registerApprovalHandlers(
+  client: AppServerClient,
+  opts: TurnOptions,
+  signal: AbortSignal,
+  ours: () => boolean | Promise<boolean> = () => true,
+  /** On a shared server approvals fan out to every subscribed client and
+   *  can name another client's turn — one that started right after ours
+   *  ended, say. Only those within scope are answered. */
+  scope?: () => ApprovalScope,
+): Array<() => void> {
   const { approvalHandler } = opts;
   const unsubs: Array<() => void> = [];
+  const answerable = async (params: unknown): Promise<boolean> => {
+    if (!(await ours())) return false;
+    if (scope && client.server.kind === "shared" && !withinScope(params, scope())) return false;
+    return true;
+  };
 
   // Approval requests (server -> client requests expecting a response).
   // The AppServerClient.onRequest handler returns the result directly;
-  // the client takes care of sending the JSON-RPC response.
+  // the client takes care of sending the JSON-RPC response. On a shared
+  // app-server they fan out to every client subscribed to the thread and
+  // the first answer wins: for a turn we only joined, the answer is the
+  // owning client's to give, so ours is silence.
   unsubs.push(
     client.onRequest(
       "item/commandExecution/requestApproval",
       async (params) => {
+        if (!(await answerable(params))) return NO_RESPONSE;
         const decision = await approvalHandler.handleCommandApproval(
           params as CommandApprovalRequest,
           signal,
@@ -1049,6 +1455,7 @@ function registerApprovalHandlers(client: AppServerClient, opts: TurnOptions, si
     client.onRequest(
       "item/fileChange/requestApproval",
       async (params) => {
+        if (!(await answerable(params))) return NO_RESPONSE;
         const decision = await approvalHandler.handleFileChangeApproval(
           params as FileChangeApprovalRequest,
           signal,

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import net from "node:net";
 import {
   acceptKeyFor,
   attachSupported,
@@ -30,7 +31,7 @@ type Handler = (msg: Record<string, unknown>, reply: (m: unknown) => void, ws: {
 /** A fake app-server on a unix socket: answers initialize, then hands every
  *  other request to `onRequest`. Returns the server and a way to push
  *  notifications / server requests to the most recent client. */
-function fakeServer(socketPath: string, onRequest: Handler) {
+function fakeServer(socketPath: string, onRequest: Handler, opts: { silentInitialize?: boolean } = {}) {
   let latest: { send(s: string): void } | null = null;
   const server = Bun.serve({
     unix: socketPath,
@@ -44,7 +45,7 @@ function fakeServer(socketPath: string, onRequest: Handler) {
         const msg = JSON.parse(String(raw)) as Record<string, unknown>;
         const reply = (m: unknown) => ws.send(JSON.stringify(m));
         if (msg.method === "initialize") {
-          reply({ id: msg.id, result: { userAgent: "fake-shared/1.0" } });
+          if (!opts.silentInitialize) reply({ id: msg.id, result: { userAgent: "fake-shared/1.0" } });
           return;
         }
         if (msg.id === undefined) return; // notifications
@@ -61,6 +62,54 @@ function fakeServer(socketPath: string, onRequest: Handler) {
 }
 
 describe.skipIf(onWindows)("shared-server: WebSocket client", () => {
+  test("a socket that accepts and hangs up before any answer fails at once, not at the deadline", async () => {
+    const dir = shortTempDir();
+    const socketPath = join(dir, "h.sock");
+    const server = net.createServer((sock) => { sock.destroy(); });
+    await new Promise<void>((r) => server.listen(socketPath, () => r()));
+    try {
+      const started = Date.now();
+      const err = await connectShared({ socketPath, connectTimeout: 3000, requestTimeout: 30_000 }).catch((e: unknown) => e) as Error;
+      expect(err.message).toContain("closed the connection");
+      expect(Date.now() - started).toBeLessThan(1500);
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a large message arriving in many chunks is decoded whole", async () => {
+    const dir = shortTempDir();
+    const socketPath = join(dir, "big.sock");
+    const big = "x".repeat(300_000);
+    const fake = fakeServer(socketPath, () => {});
+    try {
+      const client = await connectShared({ socketPath, connectTimeout: 2000, requestTimeout: 5000 });
+      const got = new Promise<string>((resolve) => client.on("big/notification", (p) => resolve((p as { text: string }).text)));
+      fake.push({ method: "big/notification", params: { text: big } });
+      expect((await got).length).toBe(big.length);
+      await client.close();
+    } finally {
+      fake.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a socket that upgrades but never answers initialize fails within the connect deadline", async () => {
+    const dir = shortTempDir();
+    const socketPath = join(dir, "s.sock");
+    const fake = fakeServer(socketPath, () => {}, { silentInitialize: true });
+    try {
+      const started = Date.now();
+      const err = await connectShared({ socketPath, connectTimeout: 300, requestTimeout: 30_000 }).catch((e: unknown) => e) as Error;
+      expect(err.message).toContain("initializ");
+      expect(Date.now() - started).toBeLessThan(3000); // not the 30 s request timeout
+    } finally {
+      fake.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   let dir: string;
   let sock: string;
   beforeEach(() => { dir = shortTempDir(); sock = join(dir, "s.sock"); });
@@ -159,9 +208,20 @@ describe("shared-server: preference and socket resolution", () => {
     expect(controlSocketPath({ CODEX_COLLAB_SERVER_SOCKET: "/tmp/other.sock", CODEX_HOME: "/x" })).toBe(resolve("/tmp/other.sock"));
   });
 
-  test("the environment overrides the config file, and unknown values fall back to auto", () => {
-    expect(serverPreference({ CODEX_COLLAB_SERVER: "private" })).toEqual({ preference: "private", reason: "CODEX_COLLAB_SERVER=private" });
-    expect(serverPreference({ CODEX_COLLAB_SERVER: "bogus" }).preference).toBe("auto");
+  test("the environment overrides the config file, then the file, then auto", () => {
+    const dir = shortTempDir();
+    try {
+      const cfg = join(dir, "config.json");
+      expect(serverPreference({ CODEX_COLLAB_SERVER: "private" }, cfg)).toEqual({ preference: "private", reason: "CODEX_COLLAB_SERVER=private" });
+      // An unknown environment value is ignored; with no file, auto applies.
+      expect(serverPreference({ CODEX_COLLAB_SERVER: "bogus" }, cfg).preference).toBe("auto");
+      writeFileSync(cfg, JSON.stringify({ server: "shared" }));
+      expect(serverPreference({ CODEX_COLLAB_SERVER: "bogus" }, cfg)).toEqual({ preference: "shared", reason: "config server shared" });
+      writeFileSync(cfg, JSON.stringify({ server: "nonsense" }));
+      expect(serverPreference({}, cfg).preference).toBe("auto");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("attach is unsupported on Windows only", () => {
@@ -225,6 +285,13 @@ describe.skipIf(onWindows)("shared-server: connectAppServer decision", () => {
     const client = await connectAppServer({ command: ["bun", "run", mock] });
     expect(client.server.kind).toBe("private");
     await client.close();
+  });
+
+  test("shared on Windows is refused, not quietly downgraded to a private server", async () => {
+    process.env.CODEX_COLLAB_SERVER = "shared";
+    const err = await connectAppServer(undefined, "win32").catch((e: unknown) => e) as Error;
+    expect(err.message).toContain("cannot be reached on Windows");
+    expect(err.message).toContain("config server auto");
   });
 
   test("private never looks at the socket", async () => {

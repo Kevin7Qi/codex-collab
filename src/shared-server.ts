@@ -23,7 +23,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { config } from "./config";
-import { createRpcEndpoint } from "./rpc";
+import { createRpcEndpoint, NO_RESPONSE } from "./rpc";
 import { connectDirectWithRetry, type AppServerClient, type ConnectOptions } from "./client";
 import type { InitializeParams, InitializeResponse } from "./types";
 
@@ -58,13 +58,16 @@ export function controlSocketPath(env: NodeJS.ProcessEnv = process.env): string 
  *  then `config server`, else `auto`. Read directly from the config file
  *  rather than through the CLI's loader: the broker uses this too, and a
  *  broken config file must degrade in a daemon, not die. */
-export function serverPreference(env: NodeJS.ProcessEnv = process.env): { preference: ServerPreference; reason: string } {
+export function serverPreference(
+  env: NodeJS.ProcessEnv = process.env,
+  configFile: string = config.configFile,
+): { preference: ServerPreference; reason: string } {
   const fromEnv = env.CODEX_COLLAB_SERVER?.trim();
   if (fromEnv && (SERVER_PREFERENCES as readonly string[]).includes(fromEnv)) {
     return { preference: fromEnv as ServerPreference, reason: `CODEX_COLLAB_SERVER=${fromEnv}` };
   }
   try {
-    const parsed = JSON.parse(readFileSync(config.configFile, "utf-8"));
+    const parsed = JSON.parse(readFileSync(configFile, "utf-8"));
     const configured = parsed?.server;
     if (typeof configured === "string" && (SERVER_PREFERENCES as readonly string[]).includes(configured)) {
       return { preference: configured as ServerPreference, reason: `config server ${configured}` };
@@ -122,22 +125,28 @@ export interface Frame { fin: boolean; opcode: number; payload: Buffer }
 /** Parse as many complete frames as `buf` holds. Returns them and the
  *  unconsumed remainder. Server frames arrive unmasked; a masked one is
  *  still decoded, since decoding is cheap and refusing is not useful. */
-export function decodeFrames(buf: Buffer): { frames: Frame[]; rest: Buffer } {
+/** Decode the complete frames at the head of `buf`. `rest` is the
+ *  incomplete tail, and `need` how many bytes in all the frame it begins
+ *  takes (0 when unknown, or nothing is pending): a reader can then
+ *  collect input until that much has arrived instead of re-parsing on
+ *  every chunk. */
+export function decodeFrames(buf: Buffer): { frames: Frame[]; rest: Buffer; need: number } {
   const frames: Frame[] = [];
   let offset = 0;
+  let need = 0;
   for (;;) {
-    if (buf.length - offset < 2) break;
+    if (buf.length - offset < 2) { need = buf.length - offset > 0 ? 2 : 0; break; }
     const fin = (buf[offset] & 0x80) !== 0;
     const opcode = buf[offset] & 0x0f;
     const masked = (buf[offset + 1] & 0x80) !== 0;
     let len = buf[offset + 1] & 0x7f;
     let pos = offset + 2;
     if (len === 126) {
-      if (buf.length - pos < 2) break;
+      if (buf.length - pos < 2) { need = 4; break; }
       len = buf.readUInt16BE(pos);
       pos += 2;
     } else if (len === 127) {
-      if (buf.length - pos < 8) break;
+      if (buf.length - pos < 8) { need = 10; break; }
       const big = buf.readBigUInt64BE(pos);
       if (big > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("WebSocket frame too large");
       len = Number(big);
@@ -145,20 +154,22 @@ export function decodeFrames(buf: Buffer): { frames: Frame[]; rest: Buffer } {
     }
     let mask: Buffer | null = null;
     if (masked) {
-      if (buf.length - pos < 4) break;
+      if (buf.length - pos < 4) { need = pos - offset + 4; break; }
       mask = buf.subarray(pos, pos + 4);
       pos += 4;
     }
-    if (buf.length - pos < len) break;
+    if (buf.length - pos < len) { need = pos - offset + len; break; }
     let payload = buf.subarray(pos, pos + len);
     if (mask) {
       const m = mask;
-      payload = Buffer.from(payload.map((b, i) => b ^ m[i & 3]));
+      const unmasked = Buffer.allocUnsafe(len);
+      for (let i = 0; i < len; i++) unmasked[i] = payload[i] ^ m[i & 3];
+      payload = unmasked;
     }
     frames.push({ fin, opcode, payload });
     offset = pos + len;
   }
-  return { frames, rest: buf.subarray(offset) };
+  return { frames, rest: buf.subarray(offset), need };
 }
 
 /** The Sec-WebSocket-Accept value a compliant server returns for `key`. */
@@ -179,7 +190,13 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
   let upgraded = false;
   let gone = false;
   let goneReason: string | null = null;
+  // Input not yet decoded: the incomplete frame's head, plus the chunks
+  // that followed it, joined only once the frame can be complete — a
+  // large frame arrives in many chunks, and joining on each is quadratic.
   let inbound: Buffer = Buffer.alloc(0);
+  let pendingChunks: Buffer[] = [];
+  let pendingBytes = 0;
+  let needBytes = 0;
   let fragments: Buffer[] = [];
   let fragmentOpcode = OP_TEXT;
 
@@ -233,8 +250,15 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
   });
 
   function onFrames(chunk: Buffer): void {
-    inbound = chunk.length > 0 ? Buffer.concat([inbound, chunk]) : inbound;
-    let parsed: { frames: Frame[]; rest: Buffer };
+    if (chunk.length > 0) {
+      pendingChunks.push(chunk);
+      pendingBytes += chunk.length;
+    }
+    if (needBytes > 0 && inbound.length + pendingBytes < needBytes) return; // the frame cannot be complete yet
+    inbound = Buffer.concat([inbound, ...pendingChunks]);
+    pendingChunks = [];
+    pendingBytes = 0;
+    let parsed: { frames: Frame[]; rest: Buffer; need: number };
     try {
       parsed = decodeFrames(inbound);
     } catch (e) {
@@ -242,6 +266,7 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
       return;
     }
     inbound = parsed.rest;
+    needBytes = parsed.need;
     for (const frame of parsed.frames) {
       switch (frame.opcode) {
         case OP_PING:
@@ -289,12 +314,23 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
   }
 
   socket.on("close", () => settleGone("App server connection closed"));
+  // Bun emits no "close" of its own after the peer ends the connection: the
+  // half-closed socket would sit there, its requests waiting on their own
+  // timeouts. Treat the peer's end as the end.
+  socket.on("end", () => {
+    settleGone("App server connection closed by the server");
+    if (!socket.destroyed) socket.destroy();
+  });
   socket.on("error", (err) => {
     if (!upgraded) return; // surfaced through the connect/upgrade rejection
     settleGone(`App server socket error: ${err.message}`);
   });
 
-  // Connect + upgrade, bounded.
+  // Connect + upgrade + handshake, bounded together: a socket that
+  // upgrades but never answers `initialize` must fail within the same
+  // deadline, or the caller's own readiness budget goes on waiting for a
+  // server that is not there (and `auto` never falls back).
+  const connectDeadline = Date.now() + connectTimeout;
   await new Promise<void>((resolveConnect, rejectConnect) => {
     const timer = setTimeout(() => {
       socket.destroy();
@@ -306,6 +342,11 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
       rejectConnect(e);
     };
     socket.once("error", (err) => { if (!upgraded) fail(new Error(`Could not connect to the app-server at ${opts.socketPath}: ${err.message}`)); });
+    // A socket that accepts and hangs up before any answer must not burn
+    // the whole deadline: `auto` has a private server to fall back to.
+    const hungUp = (): void => { if (!upgraded) fail(new Error(`The app-server at ${opts.socketPath} closed the connection before the WebSocket upgrade`)); };
+    socket.once("end", hungUp);
+    socket.once("close", hungUp);
     awaitUpgrade.then(() => { clearTimeout(timer); resolveConnect(); }, fail);
     socket.connect({ path: opts.socketPath });
   });
@@ -325,6 +366,14 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
     });
   }
 
+  // A shared server sends every client subscribed to a thread that thread's
+  // requests — and re-sends the pending ones to a client that rejoins — and
+  // the first reply settles them. Until something here has a turn of its
+  // own and registers handlers for it, the only correct answer is none:
+  // "method not found" would be taken as a decline of someone else's
+  // approval or question.
+  endpoint.onAnyRequest(() => NO_RESPONSE);
+
   const initParams: InitializeParams = {
     clientInfo: { name: config.clientName, title: null, version: config.clientVersion },
     capabilities: {
@@ -334,7 +383,18 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
   };
   let initResult: InitializeResponse;
   try {
-    initResult = await endpoint.request<InitializeResponse>("initialize", initParams);
+    let handshakeTimer: ReturnType<typeof setTimeout> | null = null;
+    const handshakeDeadline = new Promise<never>((_resolve, reject) => {
+      handshakeTimer = setTimeout(
+        () => reject(new Error(`Timed out initializing the app-server at ${opts.socketPath}`)),
+        Math.max(50, connectDeadline - Date.now()),
+      );
+    });
+    try {
+      initResult = await Promise.race([endpoint.request<InitializeResponse>("initialize", initParams), handshakeDeadline]);
+    } finally {
+      if (handshakeTimer) clearTimeout(handshakeTimer);
+    }
     endpoint.notify("initialized");
   } catch (e) {
     await close();
@@ -374,9 +434,17 @@ function attachRequiredError(socketPath: string, detail: string | null): Error {
  * private one. A caller that names a `command` is running a mock server
  * and always gets the private path.
  */
-export async function connectAppServer(opts?: ConnectOptions): Promise<AppServerClient> {
-  const { preference } = serverPreference();
-  if (!opts?.command && preference !== "private" && attachSupported()) {
+export async function connectAppServer(opts?: ConnectOptions, platform: string = process.platform): Promise<AppServerClient> {
+  const { preference, reason } = serverPreference();
+  // `shared` is an insistence, not a preference: where attaching cannot
+  // work at all, say so rather than start the private server it ruled out.
+  if (!opts?.command && preference === "shared" && !attachSupported(platform)) {
+    throw new Error(
+      `${reason} asks for Codex's shared app-server, which cannot be reached on Windows (its control socket is a unix socket). ` +
+      `Use 'codex-collab config server auto' or 'private'.`,
+    );
+  }
+  if (!opts?.command && preference !== "private" && attachSupported(platform)) {
     const env = opts?.env ? { ...process.env, ...opts.env } : process.env;
     const socketPath = controlSocketPath(env);
     if (existsSync(socketPath)) {

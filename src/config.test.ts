@@ -391,7 +391,9 @@ describe("describeServer (health)", () => {
     expect(missing).toContain("no Codex app-server is listening");
     expect(missing).toContain("codex app-server daemon start");
     const present = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, "linux");
-    expect(present).toContain("exists but this broker started before it answered");
+    expect(present).toContain("exists but the broker keeps the server it started on");
+    const direct = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, "linux", false);
+    expect(direct).toContain("this invocation did not attach");
     const chosen = describeServer({ kind: "private" }, { ...env, CODEX_COLLAB_SERVER: "private" }, () => true, "darwin");
     expect(chosen).toContain("CODEX_COLLAB_SERVER=private");
   });

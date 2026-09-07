@@ -93,7 +93,13 @@ export async function handlePeer(args: string[]): Promise<void> {
         await probe.close().catch(() => undefined);
       } catch { /* went away between the probe and now */ }
       const sharedAvailable = attachSupported() && existsSync(controlSocketPath());
-      if (kind === "private" && preference !== "private" && sharedAvailable) {
+      if (kind === "private" && preference === "shared") {
+        // `shared` forbids the private server the broker is on — replace it
+        // either way; without a socket the replacement fails and says so.
+        serverWhy = sharedAvailable
+          ? `runs a private app-server though \`config server\` is shared and Codex's is listening at ${controlSocketPath()}`
+          : `runs a private app-server though \`config server\` is shared (no Codex app-server is listening at ${controlSocketPath()} — the replacement will report that)`;
+      } else if (kind === "private" && preference === "auto" && sharedAvailable) {
         serverWhy = `runs a private app-server though Codex's shared one is listening at ${controlSocketPath()}`;
       } else if (kind === "shared" && preference === "private") {
         serverWhy = "is attached to Codex's shared app-server though `config server` is private";
@@ -133,11 +139,14 @@ export async function handlePeer(args: string[]): Promise<void> {
     // broker in every mode: with peer messaging it registers the peer, and
     // without it the broker still needs starting — on the app-server the
     // setting names — which nothing else does until the first run.
-    if (capability.ok || serverWhy || !brokerLive) {
+    // A broker stopped above (`why`) is replaced whatever the reason: one
+    // that served a peer though messaging is now off still needs to run.
+    if (capability.ok || why || !brokerLive) {
       // Spawning the broker starts the peer with it; the connection itself is
       // only the vehicle and closes right away.
       const client = await ensureConnection(cwd);
       if (serverWhy) console.log(`Broker restarted on a ${client.server.kind} app-server.`);
+      else if (why && !capability.ok) console.log(`Broker restarted on a ${client.server.kind} app-server, without a peer.`);
       else if (!brokerLive && !capability.ok) console.log(`Broker started on a ${client.server.kind} app-server.`);
       await client.close();
     }

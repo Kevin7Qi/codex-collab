@@ -4,11 +4,11 @@ import { spawn as childSpawn, spawnSync } from "node:child_process";
 import { openSync, closeSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { updateThreadStatus, generateRunId, loadRun, updateRun, runLogRelPath } from "../threads";
-import { runTurnWithGoalFollow } from "../turns";
+import { ThreadBusyError, runTurnWithGoalFollow } from "../turns";
 import { goalNeedsAttention, setThreadGoal, readThreadGoal, pauseThreadGoal, isGoalFeatureUnavailable, GOAL_COLLAB_ASK_NOTE } from "../goals";
 import type { RunGoalState, ThreadGoal } from "../types";
 import { config, loadTemplateWithMeta, interpolateTemplate, type SandboxMode } from "../config";
-import { wrapBrokerBusy, isBrokerBusyError } from "../broker";
+import { isBrokerBusyError, wrapBrokerBusy } from "../broker";
 import { shellQuote } from "../approvals";
 import {
   die,
@@ -33,6 +33,7 @@ import {
   setActiveThreadId,
   setActiveShortId,
   setActiveTurnId,
+  setActiveTurnOwnership,
   setActiveWsPaths,
   setActiveRunId,
   consumeInjectedRunId,
@@ -314,6 +315,18 @@ export async function handleRun(args: string[]): Promise<void> {
     let goalSetupError: Error | null = null;
 
     try {
+      // A goal is set on the thread once its first turn runs — but a resumed
+      // thread on a shared app-server may already be mid-turn under another
+      // client, in which case the prompt would be folded into that turn and
+      // the goal set on their work. Refuse up front; thrown here, the run
+      // record is finalized as failed like any other launch failure.
+      if (options.goal !== null && options.resumeId && client.server.kind === "shared") {
+        const read = await client.request<{ thread?: { turns?: Array<{ status?: unknown }> } }>("thread/read", { threadId, includeTurns: true }).catch(() => null);
+        if (read?.thread?.turns?.some((t) => t.status === "inProgress")) {
+          throw new ThreadBusyError("Cannot set a goal on this thread: another client of the shared app-server is running a turn on it. Wait for that turn to finish, or drop --goal to add to it.");
+        }
+      }
+
       let existingGoal: ThreadGoal | null = null;
       if (options.goal !== null) {
         try {
@@ -327,8 +340,9 @@ export async function handleRun(args: string[]): Promise<void> {
         }
       }
 
+      let joinedTurn = false;
       const setGoalOnceRunning = (): void => {
-        if (options.goal === null || goalSetup !== null) return;
+        if (options.goal === null || goalSetup !== null || joinedTurn) return;
         // The objective is re-injected into every continuation turn — the
         // durable slot for channel awareness on long goals (the collab
         // template itself rides only the first prompt).
@@ -371,8 +385,29 @@ export async function handleRun(args: string[]): Promise<void> {
           }),
           timeoutMs: options.timeout * 1000,
           killSignalsDir: ws.killSignalsDir,
+          onJoinedTurn: () => {
+            // Another client's turn absorbed the prompt: Ctrl-C, `kill` and
+            // the goal wrapper must all leave it — and its goal — alone.
+            joinedTurn = true;
+            setActiveTurnOwnership("joined");
+            if (options.goal !== null && goalSetup === null && goalSetupError === null) {
+              // The objective was never installed, and that turn's goal, if
+              // any, is the other client's to keep: a goal-scoped run that
+              // merely joined is not the run that was asked for.
+              goalSetupError = new Error(
+                "The goal was not set: the prompt was folded into a turn another client of the shared app-server " +
+                "had just started on this thread. Retry once that turn finishes to run under your goal.",
+              );
+            }
+            try {
+              updateRun(ws.stateDir, runId, { joined: true });
+            } catch (e) {
+              console.error(`[codex] Warning: could not record the joined turn: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          },
           onTurnId: (id) => {
             setActiveTurnId(id);
+            if (!joinedTurn) setActiveTurnOwnership("own");
             // Advance past "starting" — the detach parent's signal that the
             // turn is actually running (turn/start responded), and useful
             // state for `threads`/`follow` regardless of detach.
@@ -443,7 +478,7 @@ export async function handleRun(args: string[]): Promise<void> {
       const exit = recordTerminalRunState(ws, threadId, runId, result, "Turn", options.contentOnly, finalGoal);
       // A completed run whose goal ended blocked/limited still needs the
       // user — that outcome outranks the last turn's clean status.
-      if (exit === EXIT_CODES.ok && finalGoal && goalNeedsAttention(finalGoal.status)) {
+      if (exit === EXIT_CODES.ok && !joinedTurn && finalGoal && goalNeedsAttention(finalGoal.status)) {
         progress(`Goal needs attention (${finalGoal.status}) — steer with: codex-collab run --resume ${shortId} "..."`);
         return EXIT_CODES.goalBlocked;
       }
@@ -475,24 +510,23 @@ export async function handleRun(args: string[]): Promise<void> {
         }
       }
       e = wrapBrokerBusy(e);
-      // A broker-busy error here is about to be retried by withClient over a
-      // direct connection, re-creating this SAME record (sticky runId).
-      // Persisting the transient failure would flash `running → failed →
-      // running` at observers: a `follow --watch` attached in that window
-      // renders the failure, marks the runId seen, and never shows the real
-      // execution. If the retry also fails, its (non-busy) error lands here
-      // again and is recorded; if the process dies in between, the record
-      // parks in "starting" where the detach parent and pruneRuns handle it.
-      if (!isBrokerBusyError(e)) {
-        // Snapshot before recordRunFailure clears it: a turn that died with
-        // an approval still pending (classically: --timeout while blocked on
-        // approval) exits with its own code so callers know to answer the
-        // approval rather than treat this as a turn failure.
-        if (hasPendingApproval(ws.stateDir, runId)) {
-          tagExitCode(e, EXIT_CODES.approvalPending);
-        }
-        recordRunFailure(ws, threadId, runId, e);
+      // Every failure is final here — a broker-busy one included, now that
+      // withClient no longer retries it on a private connection — so every
+      // failure is recorded. A record left "running" would count as a live
+      // run and block `peer up` from replacing the broker.
+      // Snapshot before recordRunFailure clears it: a turn that died with
+      // an approval still pending (classically: --timeout while blocked on
+      // approval) exits with its own code so callers know to answer the
+      // approval rather than treat this as a turn failure.
+      if (hasPendingApproval(ws.stateDir, runId)) {
+        tagExitCode(e, EXIT_CODES.approvalPending);
       }
+      // Refused as busy: the thread is running for the invocation that
+      // owns it, and `kill` must still find it running — only this
+      // invocation failed.
+      recordRunFailure(ws, threadId, runId, e, {
+        threadLive: isBrokerBusyError(e) || (e as { threadLive?: unknown } | null)?.threadLive === true,
+      });
       throw e;
     } finally {
       // Disarm the ask channel BEFORE the run record goes terminal — its
@@ -504,6 +538,7 @@ export async function handleRun(args: string[]): Promise<void> {
       setActiveThreadId(undefined);
       setActiveShortId(undefined);
       setActiveTurnId(undefined);
+      setActiveTurnOwnership("unknown");
       setActiveWsPaths(undefined);
       setActiveRunId(undefined);
       removePidFile(ws.pidsDir, shortId);
