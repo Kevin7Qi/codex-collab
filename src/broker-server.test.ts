@@ -299,7 +299,7 @@ process.stdin.on("data", (chunk) => {
         // broker client ever claimed) — what a shared app-server sends every
         // subscribed client when the Codex app or a TUI is the one running
         // the turn. The method param picks the request kind. Reports whether the
-        // broker answered within half a second.
+        // broker answered within the wait (generous: CI runners are slow).
         const reqId = "foreign-" + (approvalIdCounter++);
         let answer = null;
         pendingServerRequests.set(reqId, (m) => { answer = m; });
@@ -311,7 +311,7 @@ process.stdin.on("data", (chunk) => {
         setTimeout(() => {
           pendingServerRequests.delete(reqId);
           respond({ id: msg.id, result: { answered: answer !== null, answer } });
-        }, 500);
+        }, 1500);
         break;
       }
 
@@ -2276,7 +2276,9 @@ setInterval(() => {}, 1000);
     test("a request of any kind for a thread nobody here owns gets no answer, while our own thread's still gets method-not-found", async () => {
       const sockPath = join(tempDir, "broker.sock");
       const endpoint = endpointFor(sockPath);
-      const mockDir = createMockCodex(tempDir);
+      // The turn must still be ours when the probe lands: a completion 10 ms
+      // after the start would release the claim first on a slow runner.
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
       const proc = spawnBroker(endpoint, mockDir);
       await waitForSocket(sockPath);
       try {

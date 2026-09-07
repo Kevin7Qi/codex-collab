@@ -70,7 +70,9 @@ describe.skipIf(onWindows)("shared-server: WebSocket client", () => {
     try {
       const started = Date.now();
       const err = await connectShared({ socketPath, connectTimeout: 3000, requestTimeout: 30_000 }).catch((e: unknown) => e) as Error;
-      expect(err.message).toContain("closed the connection");
+      // Whichever the kernel reports first — the hang-up, or the write it
+      // broke (EPIPE / ECONNRESET) — the failure is immediate.
+      expect(err.message).toMatch(/closed the connection|EPIPE|ECONNRESET/);
       expect(Date.now() - started).toBeLessThan(1500);
     } finally {
       server.close();
