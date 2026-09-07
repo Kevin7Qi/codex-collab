@@ -142,9 +142,9 @@ Claude Code 会依据发送方声明的权限类别对入站对等消息设卡�
 
 Codex 支持在每台机器上运行一个共享的多客户端 app-server。`codex app-server daemon start` 将其绑定在 `~/.codex/app-server-control/app-server-control.sock`；`codex` 终端界面和 Codex 桌面应用（通过 SSH 连接的 Linux 主机）会自动接入该 server。Mac 上桌面应用运行的是独立的私有 server，无法被外部接入。
 
-当该 socket 可用时，codex-collab 的工作区 broker 会接入共享 app-server，而非自行启动私有实例。共享 server 上的一切构成统一空间：codex-collab 发起的回合会实时呈现在同一 server 上的 Codex 应用或终端界面中，`threads --discover` 会标注其他客户端打开或正在运行的会话，`run --resume <id>` 可加入这些会话。向正在运行回合的会话发送提示时，提示会并入当前回合而非另起一个，该回合仍归原客户端所有：其审批提示由用户当前查看的客户端响应，codex-collab 不会代为应答。codex-collab 在空闲会话上发起的回合则一如既往由其自行处理。`health` 显示 broker 当前连接的 server 类型。Windows 上不可用。
+当该 socket 可用时，codex-collab 的工作区 broker 会接入共享 app-server，而非自行启动私有实例。共享 server 上的一切构成统一空间：codex-collab 发起的回合会实时呈现在同一 server 上的 Codex 应用或终端界面中，`threads --discover` 会标注其他客户端打开或正在运行的会话，`run --resume <id>` 可加入这些会话。向正在运行回合的会话发送提示时，提示会并入当前回合而非另起一个，该回合仍归原客户端所有：其审批提示由用户当前查看的客户端响应，codex-collab 不会代为应答。若提示携带了覆盖参数（`-m`、`-s`、`--approval`、`--dir`）或 `--goal`，codex-collab 会拒绝发送——这些设置无法应用于他方回合。`codex` 终端界面会拒绝其监视的会话上的所有动态工具调用，因此对 Claude 的 consult 问询在 Claude 作答前即被拒绝；codex-collab 随后将 Claude 的回答作为注入消息送入运行中的回合。codex-collab 在空闲会话上发起的回合则一如既往由其自行处理。`health` 显示 broker 当前连接的 server 类型。Windows 上不可用。
 
-在没有共享 server 的情况下，Codex 0.145+ 对每个会话仅允许一个写入进程。在 Codex 应用或 `codex` 终端会话中打开的会话无法被 codex-collab 接管，直到对方释放——此时以退出码 8 报告，并注明持有者。broker 使用过的会话，会在 broker 放手约七分钟后（0.153.4）释放——命令行运行的会话在回合结束时放手，消息对话的会话则在其对话节点闲置 30 分钟后退休时放手。共享同一 app-server 可彻底消除此冲突。
+在没有共享 server 的情况下，Codex 0.145+ 对每个会话仅允许一个写入进程。在 Codex 应用或 `codex` 终端会话中打开的会话无法被 codex-collab 接管，直到对方释放——此时以退出码 8 报告，消息列出可能持有该会话的进程类型（Codex 应用、`codex` 终端会话或 app-server daemon），但无法判断实际持有者。broker 使用过的会话，会在 broker 放手约七分钟后（0.153.4）释放——命令行运行的会话在回合结束时放手，消息对话的会话则在其对话节点闲置 30 分钟后退休时放手。共享同一 app-server 可彻底消除此冲突。
 
 ## CLI 命令
 
@@ -309,7 +309,7 @@ codex-collab config --unset             # 取消所有设置
 
 `mode` 决定 codex-collab 与 Claude 的协作方式：`auto`（默认）在平台支持时采用对等消息通信，否则退回命令行路径；`peer` 强制使用对等消息；`cli` 则彻底关闭对等机制——不注册代理节点、不生成会话地址、不提供 consult 工具——一切交互均经由命令行完成。对等消息需要 macOS 或 Linux 且 Claude Code 版本不低于 2.1.224；在 Windows 或更早版本下，`auto` 会自行退回命令行路径，无需额外配置。broker 在启动时读取该模式，并在重启前保持原有的对等节点状态，因此修改模式后需在工作区内执行 `codex-collab peer up` 以使其生效——仅在没有回合运行时才会替换 broker。
 
-`server` 控制 broker 连接 app-server 的方式：`auto`（默认）在共享 app-server 的控制 socket 可用时接入，否则启动私有 server；`shared` 强制使用共享 server，不可用时报错；`private` 始终启动私有 server。broker 在启动时读取该配置，因此修改后需在对应工作区中执行 `codex-collab peer up` 使之生效——broker 仅在无回合运行时才会被替换。
+`server` 控制 broker 连接 app-server 的方式：`auto`（默认）在共享 app-server 的控制 socket 可用时接入，否则启动私有 server；`shared` 强制使用共享 server，不可用时报错；`private` 始终启动私有 server。broker 在启动时读取该配置，因此修改后需在对应工作区中执行 `codex-collab peer up` 使之生效——broker 仅在无回合运行时才会被替换。环境变量 `CODEX_COLLAB_SERVER`（取值 `auto`、`shared`、`private`）可在单次调用中覆盖该配置；`CODEX_COLLAB_SERVER_SOCKET` 可覆盖 Codex 控制 socket 的路径（默认 `~/.codex/app-server-control/app-server-control.sock`，若设置了 `$CODEX_HOME` 则位于其下）。
 
 优先级: `CLI 参数 > 配置文件 > 自动检测`
 
