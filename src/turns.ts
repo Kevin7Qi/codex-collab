@@ -403,10 +403,27 @@ async function startOrJoinTurn(
     if (client.isBrokered && (decided === null || typeof decided === "string")) {
       absorbedBy = decided;
     } else {
-      const facts = await readThreadFacts(
+      let facts = await readThreadFacts(
         (m, p) => client.request(m, p), params.threadId, inputTexts((params as { input?: unknown }).input),
       );
+      // A failed read is no evidence of ownership. Keep requests held
+      // while retrying briefly; a turn/started naming our accepted id
+      // can establish ownership even when the read remains unavailable.
+      for (let attempt = 1; !facts.readable && !observed().started.includes(response.turn.id) && attempt < 3; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        if (observed().started.includes(response.turn.id)) break;
+        facts = await readThreadFacts(
+          (m, p) => client.request(m, p), params.threadId, inputTexts((params as { input?: unknown }).input),
+        );
+      }
       const seen = observed();
+      if (!facts.readable && !seen.started.includes(response.turn.id)) {
+        throw new ThreadBusyError(
+          "Could not determine turn ownership on the shared app-server: the thread could not be read. " +
+          "The prompt was submitted and may be running in another client's turn. " +
+          "Check the thread before retrying; its turn and goal were left untouched.",
+        );
+      }
       const completedSince = seen.completed.slice(before.completed.length);
       // A turn of ours that was seen starting, or reported running, is ours
       // whatever else happened: it may have finished already, with another
@@ -1316,7 +1333,9 @@ async function executeTurn(
         durationMs: Date.now() - startTime,
       };
     }
-    if (stopId !== null && !joinedTurn()) {
+    // An ownership read that failed after submission leaves only an
+    // unverified submission id. Do not mutate the thread on that failure.
+    if (stopId !== null && !joinedTurn() && !(e instanceof ThreadBusyError)) {
       if (ownedTurn()) await runBeforeInterruptHook(opts);
       await tryInterruptTurn(client, reviewSubthreadId ?? threadId, stopId);
     }
@@ -1385,14 +1404,20 @@ function declineUnhandledRequests(
       const p = params as { threadId?: unknown; turnId?: unknown } | null | undefined;
       const forThread = p?.threadId;
       if (forThread !== threadId && forThread !== subthread()) return NO_RESPONSE;
-      const own = turn();
-      if (own !== null && typeof p?.turnId === "string" && p.turnId !== own) return NO_RESPONSE;
       // A dynamic tool belongs to whoever declared it on the thread — the
       // broker's `consult`, say, on a thread the peer created — not to the
       // connection running the turn; this one implements none.
       if (method === "item/tool/call") return NO_RESPONSE;
     }
     if (!(await ours())) return NO_RESPONSE;
+    // Ownership may have been unknown above. Read the settled turn id
+    // now, or a foreign question held during start could be declined as
+    // ours merely because both requests name the same thread.
+    if (client.server.kind === "shared") {
+      const own = turn();
+      const p = params as { turnId?: unknown } | null | undefined;
+      if (own !== null && typeof p?.turnId === "string" && p.turnId !== own) return NO_RESPONSE;
+    }
     const err = new Error(`Method not found: ${method}`) as Error & { code: number };
     err.code = -32601;
     throw err;

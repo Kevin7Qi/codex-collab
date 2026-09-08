@@ -2311,6 +2311,120 @@ describe("shared app-server: joining is refused with overrides, and revalidated 
   });
 });
 
+describe("shared app-server: ownership reconciliation failures", () => {
+  test("an unreadable submission never owns or pauses another client's goal", async () => {
+    let reads = 0;
+    let owned = false;
+    const calls: string[] = [];
+    const { client } = buildMockClient((method) => {
+      calls.push(method);
+      if (method === "thread/read") {
+        if (++reads === 1) return { thread: { turns: [] } };
+        throw new Error("temporary read failure");
+      }
+      if (method === "turn/start") return inProgressTurn("submission-1");
+      if (method === "thread/goal/get" || method === "thread/goal/set") {
+        return { goal: { objective: "another client's goal", status: "active", tokenBudget: null, tokensUsed: 0 } };
+      }
+      if (method === "turn/interrupt") return {};
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    client.server = { kind: "shared", socketPath: "/s" };
+    const failure = await runTurnWithGoalFollow(client, "thr-1", [{ type: "text", text: "x" }], {
+      dispatcher: new EventDispatcher(join(TEST_LOG_DIR, "unreadable-goal.log"), () => {}),
+      approvalHandler: autoApproveHandler, timeoutMs: 1000, killSignalsDir: TEST_KILL_DIR,
+      onTurnOwned: () => { owned = true; },
+    }).catch((e: unknown) => e) as Error & { threadLive?: boolean };
+    expect(owned).toBe(false);
+    expect(calls).not.toContain("thread/goal/set");
+    expect(calls).not.toContain("turn/interrupt");
+    expect(failure.threadLive).toBe(true);
+    expect(failure.message).toContain("ownership");
+  });
+
+  test("a failed ownership read is retried and can settle as a join", async () => {
+    let reads = 0;
+    let joined = false;
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "thread/read") {
+        if (++reads === 1) return { thread: { turns: [] } };
+        if (reads === 2) throw new Error("temporary read failure");
+        setTimeout(() => emit("turn/completed", completedTurn("theirs-1")), 10);
+        return { thread: { turns: [{ id: "theirs-1", status: "inProgress" }] } };
+      }
+      if (method === "turn/start") return inProgressTurn("submission-1");
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    client.server = { kind: "shared", socketPath: "/s" };
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "x" }], {
+      dispatcher: new EventDispatcher(join(TEST_LOG_DIR, "retry-ownership.log"), () => {}),
+      approvalHandler: autoApproveHandler, timeoutMs: 1000, killSignalsDir: TEST_KILL_DIR,
+      onJoinedTurn: () => { joined = true; },
+    });
+    expect(result.status).toBe("completed");
+    expect(joined).toBe(true);
+    expect(reads).toBe(3);
+  });
+
+  test("a turn announced during a failed read is still positively ours", async () => {
+    let reads = 0;
+    let owned = false;
+    const { client, emit } = buildMockClient((method) => {
+      if (method === "thread/read") {
+        if (++reads === 1) return { thread: { turns: [] } };
+        emit("turn/started", { threadId: "thr-1", turn: inProgressTurn("ours-1").turn });
+        setTimeout(() => emit("turn/completed", completedTurn("ours-1")), 10);
+        throw new Error("temporary read failure");
+      }
+      if (method === "turn/start") return inProgressTurn("ours-1");
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    client.server = { kind: "shared", socketPath: "/s" };
+    const result = await runTurn(client, "thr-1", [{ type: "text", text: "x" }], {
+      dispatcher: new EventDispatcher(join(TEST_LOG_DIR, "observed-ownership.log"), () => {}),
+      approvalHandler: autoApproveHandler, timeoutMs: 1000, killSignalsDir: TEST_KILL_DIR,
+      onTurnOwned: () => { owned = true; },
+    });
+    expect(result.status).toBe("completed");
+    expect(owned).toBe(true);
+    expect(reads).toBe(2);
+  });
+
+  test("foreign questions held before ownership settles are scoped again afterward", async () => {
+    let releaseRead!: () => void;
+    let readPending!: () => void;
+    const pending = new Promise<void>((resolve) => { readPending = resolve; });
+    let reads = 0;
+    const { client, emit, anyRequest } = buildMockClient((method) => {
+      if (method === "thread/read") {
+        if (++reads === 1) return { thread: { turns: [] } };
+        return new Promise((resolve) => {
+          releaseRead = () => resolve({ thread: { turns: [{ id: "ours-1", status: "inProgress" }] } });
+          readPending();
+        });
+      }
+      if (method === "turn/start") return inProgressTurn("ours-1");
+      throw new Error(`Unexpected method: ${method}`);
+    });
+    client.server = { kind: "shared", socketPath: "/s" };
+    const run = runTurn(client, "thr-1", [{ type: "text", text: "x" }], {
+      dispatcher: new EventDispatcher(join(TEST_LOG_DIR, "held-foreign-question.log"), () => {}),
+      approvalHandler: autoApproveHandler, timeoutMs: 1000, killSignalsDir: TEST_KILL_DIR,
+    });
+    await pending;
+    const question = anyRequest("item/tool/requestUserInput", { threadId: "thr-1", turnId: "theirs-1" }).catch((e: unknown) => e);
+    const ownQuestion = anyRequest("item/tool/requestUserInput", { threadId: "thr-1", turnId: "ours-1" }).catch((e: unknown) => e);
+    await Promise.resolve(); // both requests enter while the turn id is unknown
+    releaseRead();
+    const foreignResult = await question;
+    const ownResult = await ownQuestion;
+    emit("turn/completed", completedTurn("ours-1"));
+    await run;
+    expect(foreignResult).toBe(NO_RESPONSE);
+    expect((ownResult as Error & { code?: number }).code).toBe(-32601);
+  });
+});
+
 describe("shared app-server: a completion seen before the submission is an earlier turn's", () => {
   test("our turn, reported running by the follow-up read, stays ours", async () => {
     const calls: string[] = [];
