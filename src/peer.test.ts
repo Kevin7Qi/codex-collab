@@ -470,7 +470,13 @@ describe.skipIf(onWindows)("claim release on turn-start failure", () => {
       claimThread: (threadId) => { claimed.add(threadId); return true; },
       releaseThread: (threadId) => { released.push(threadId); },
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
 
@@ -546,7 +552,13 @@ describe.skipIf(onWindows)("liveness scan", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
 
@@ -611,7 +623,13 @@ describe.skipIf(onWindows)("inbound serialization", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
 
@@ -678,7 +696,13 @@ describe.skipIf(onWindows)("inbound serialization across senders", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -733,6 +757,11 @@ describe.skipIf(onWindows)("topic routing", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true, // stay mid-turn: no turn/start, just injection
       log: () => {},
     };
@@ -801,7 +830,13 @@ describe.skipIf(onWindows)("topic routing", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true,
+      turnIsForeign: () => false,
       log: () => {},
     };
 
@@ -887,6 +922,11 @@ describe.skipIf(onWindows)("delivery honesty", () => {
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false, // idle → the peer starts (and owns) a turn
       log: () => {},
     };
@@ -952,7 +992,13 @@ describe.skipIf(onWindows)("delivery honesty", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
 
@@ -1008,7 +1054,13 @@ describe.skipIf(onWindows)("delivery honesty", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
 
@@ -1081,6 +1133,11 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true, // injection only — turns are not the subject here
       log: () => {},
     };
@@ -1154,6 +1211,11 @@ describe.skipIf(onWindows)("conversation resilience", () => {
         claimThread: () => true,
         releaseThread: () => {},
         interruptThread: async () => true,
+        ensureSubscribed: async () => null,
+        releaseThreadSubscription: () => {},
+        activeExternalTurn: async () => null,
+        joinTurn: async () => { throw new Error("no external turn"); },
+        turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
         threadHasTurn: () => true, // injection only — turns are not the subject
         log: () => {},
       };
@@ -1191,6 +1253,11 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true, // the thread start is the subject, not the turn
       log: () => {},
     };
@@ -1224,6 +1291,11 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false, // idle
       log: () => {},
     };
@@ -1257,7 +1329,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1302,7 +1380,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1345,7 +1429,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1385,7 +1475,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1425,7 +1521,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1472,7 +1574,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1513,7 +1621,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1586,7 +1700,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       // re-enters the peer synchronously, from inside that path's own call.
       releaseThread: (threadId) => { claimed = false; peer.onThreadTurnEnded(threadId); },
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => claimed,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1638,7 +1758,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1711,7 +1837,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
       releaseThread: () => { hasTurn = false; },
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1804,7 +1936,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
       releaseThread: () => { hasTurn = false; },
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1851,7 +1989,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: (_t, owner) => { owners.push(owner); hasTurn = true; return true; },
       releaseThread: () => { hasTurn = false; },
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -1883,6 +2027,11 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true, // injection only
       log: () => {},
     };
@@ -1922,6 +2071,7 @@ describe.skipIf(onWindows)("conversation resilience", () => {
 
   test("conversation addresses come back after a broker restart", async () => {
     const { dir, send, cleanup } = harness();
+    const rejoined: Array<{ threadId: string; onlyIfLoaded: boolean | undefined }> = [];
     const host: PeerHost = {
       cwd: dir,
       stateDir: dir,
@@ -1932,7 +2082,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async (threadId, _params, opts) => { rejoined.push({ threadId, onlyIfLoaded: opts?.onlyIfLoaded }); return null; },
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const first = createPeer(host);
@@ -1950,6 +2106,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       // The same address is listening again — a session holding it from
       // before the restart is not left talking to a dead socket.
       expect(readdirSync(dir).some((f) => f === socketName)).toBe(true);
+      // And the thread is still known as one the peer created: on a shared
+      // server it keeps its subscription (and its consult tool) after the
+      // restart, as before it.
+      expect(second.keepsThreadLoaded("thread-X")).toBe(true);
+      // …and was rejoined at startup, if the server still holds it — never
+      // resumed otherwise, which would take its writer lock.
+      expect(rejoined).toContainEqual({ threadId: "thread-X", onlyIfLoaded: true });
     } finally {
       second.stop();
       cleanup();
@@ -1968,7 +2131,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const first = createPeer(host);
@@ -2009,7 +2178,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2060,7 +2235,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2114,7 +2295,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => hasTurn,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2156,7 +2343,13 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => false,
+      turnIsForeign: () => false,
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2186,6 +2379,11 @@ describe.skipIf(onWindows)("conversation resilience", () => {
       claimThread: () => true,
       releaseThread: () => {},
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       threadHasTurn: () => true, // injection only
       log: () => {},
     };
@@ -2679,7 +2877,13 @@ describe.skipIf(onWindows)("turn deadlines", () => {
       // Idle until the peer claims the thread — the deadline asks the host
       // whether a turn still runs before it acts.
       threadHasTurn: (threadId) => owners.has(threadId),
+      turnIsForeign: () => false,
       interruptThread: async (threadId) => { interrupted.push(threadId); return true; },
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2750,7 +2954,13 @@ describe.skipIf(onWindows)("turn deadlines", () => {
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: (threadId) => { owners.delete(threadId); },
       threadHasTurn: (threadId) => owners.has(threadId),
+      turnIsForeign: () => false,
       interruptThread: async (threadId) => { interrupted.push(threadId); return true; },
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2812,7 +3022,13 @@ describe.skipIf(onWindows)("registry status", () => {
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: (threadId) => { owners.delete(threadId); },
       threadHasTurn: (threadId) => owners.has(threadId),
+      turnIsForeign: () => false,
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2906,7 +3122,13 @@ describe.skipIf(onWindows)("turn lifecycle edges", () => {
       claimThread: (threadId, owner) => { owners.set(threadId, owner); return true; },
       releaseThread: (threadId) => { owners.delete(threadId); },
       threadHasTurn: (threadId) => (opts.threadHasTurn ? opts.threadHasTurn(threadId, owners) : owners.has(threadId)),
+      turnIsForeign: () => false,
       interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
       log: () => {},
     };
     const peer = createPeer(host);
@@ -2973,13 +3195,34 @@ describe.skipIf(onWindows)("turn lifecycle edges", () => {
       // announces a continuation. Nothing else tells the peer.
       t.owners.get("thread-1")!.onNotification("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
       expect(t.peer.debugState()).toMatchObject({ activeRuns: 1, deadlines: 1 });
-      expect(listRuns(t.dir).filter((r) => r.status === "running")).toHaveLength(1);
+      const continuation = listRuns(t.dir).filter((r) => r.status === "running");
+      expect(continuation).toHaveLength(1);
+      // The server already started it: `kill` must treat it as a running
+      // turn of ours, not as a start still waiting for its answer.
+      expect(continuation[0].phase).toBe("running");
 
       t.complete("thread-1", "continuation done");
       expect(t.peer.debugState()).toMatchObject({ activeRuns: 0, deadlines: 0 });
       expect(listRuns(t.dir).filter((r) => r.status === "running")).toHaveLength(0);
       await new Promise((r) => setTimeout(r, SETTLE_MS));
       expect(t.lines).toHaveLength(1); // continuations do not spam the sender
+    } finally {
+      t.tearDown();
+    }
+  });
+
+  test("a consult another client settled first is answered by injection when the answer arrives", async () => {
+    const t = setUp();
+    try {
+      await t.send("do the thing");
+      await waitFor(() => t.owners.has("thread-1"));
+      const call = t.peer.handleToolCall({ threadId: "thread-1", tool: "consult", arguments: { question: "which?" } });
+      await waitFor(() => t.lines.some((l) => l.includes("[consult]")));
+      // A TUI observing the thread declined the call before Claude answered.
+      t.peer.onRequestResolvedElsewhere("thread-1");
+      await t.send("the second one");
+      await call;
+      await waitFor(() => t.requests.some((r) => r.method === "thread/inject_items" && JSON.stringify(r.params).includes("[consult answer] the second one")));
     } finally {
       t.tearDown();
     }
@@ -3031,4 +3274,598 @@ describe.skipIf(onWindows)("turn lifecycle edges", () => {
       t.tearDown();
     }
   });
+});
+
+describe.skipIf(onWindows)("shared app-server: subscriptions and held threads", () => {
+  /** Bind a listening socket at `path` collecting delivered envelope lines. */
+  function inboxAt(path: string): { lines: string[]; close: () => void } {
+    const lines: string[] = [];
+    const server = net.createServer((sock) => {
+      sock.setEncoding("utf8");
+      let buf = "";
+      sock.on("data", (c: string) => {
+        buf += c;
+        let i: number;
+        while ((i = buf.indexOf("\n")) !== -1) {
+          const l = buf.slice(0, i).trim();
+          buf = buf.slice(i + 1);
+          if (l) lines.push(l);
+        }
+      });
+    });
+    server.listen(path);
+    return { lines, close: () => server.close() };
+  }
+
+  function isolated(): { dir: string; restore: () => void } {
+    const dir = mkdtempSync(join(tmpdir(), "peer-shared-"));
+    const prev = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    return {
+      dir,
+      restore: () => {
+        if (prev === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+        else process.env.CODEX_COLLAB_SESSIONS_DIR = prev;
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  test("a turn re-subscribes first; a conversation the peer started is kept loaded, an adopted one is not", async () => {
+    const { dir, restore } = isolated();
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const calls: string[] = [];
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        calls.push(method);
+        if (method === "thread/start") return { thread: { id: "thread-P" } };
+        if (method === "model/list") return { data: [], nextCursor: null };
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      interruptThread: async () => true,
+      ensureSubscribed: async (threadId) => { calls.push(`ensureSubscribed:${threadId}`); return null; },
+      releaseThreadSubscription: (threadId) => { calls.push(`releaseSubscription:${threadId}`); },
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
+      threadHasTurn: () => false,
+      turnIsForeign: () => false,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      expect(peer.active).toBe(true);
+      await sendLine(dir, buildEnvelope({ text: "topic: kept\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => calls.includes("turn/start"));
+      // The re-subscription precedes the turn.
+      expect(calls.indexOf("ensureSubscribed:thread-P")).toBeGreaterThan(-1);
+      expect(calls.indexOf("ensureSubscribed:thread-P")).toBeLessThan(calls.indexOf("turn/start"));
+      // Started here, thread peer alive → kept loaded (its consult tool lives only while loaded).
+      expect(peer.keepsThreadLoaded("thread-P")).toBe(true);
+      // Adopted from the CLI → never had the tool → not kept.
+      peer.adoptThread("thread-C", "workspace-write");
+      await new Promise((r) => setTimeout(r, 2300)); // adoption settles on a short delay
+      expect(peer.ownsThread("thread-C")).toBe(true);
+      expect(peer.keepsThreadLoaded("thread-C")).toBe(false);
+    } finally {
+      peer.stop();
+      restore();
+    }
+  }, 20_000);
+
+  test("a thread held by another Codex process is explained to the sender, and the conversation survives", async () => {
+    const { dir, restore } = isolated();
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const inbox = inboxAt(senderSock);
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-H" } };
+        if (method === "model/list") return { data: [], nextCursor: null };
+        if (method === "turn/start") throw new Error("JSON-RPC error -32600: thread thread-H already has an active writer");
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
+      threadHasTurn: () => false,
+      turnIsForeign: () => false,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await sendLine(dir, buildEnvelope({ text: "topic: held\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => inbox.lines.some((l) => parseEnvelope(l)?.text.includes("open for writing in another Codex process")));
+      const notice = inbox.lines.map((l) => parseEnvelope(l)?.text ?? "").find((t) => t.includes("open for writing"))!;
+      expect(notice).toContain("nothing was lost");
+      expect(notice).not.toContain("JSON-RPC");
+      expect(peer.ownsThread("thread-H")).toBe(true);
+    } finally {
+      inbox.close();
+      peer.stop();
+      restore();
+    }
+  }, 20_000);
+});
+
+describe.skipIf(onWindows)("model defaults for conversations", () => {
+  test("a message's own effort is applied but never cached as the workspace default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-defaults-"));
+    const prev = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const threadStarts: Array<Record<string, unknown>> = [];
+    let listCalls = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string, params?: Record<string, unknown>) => {
+        if (method === "model/list") {
+          listCalls++;
+          return { data: [{ id: "gpt-best", isDefault: true, upgrade: null, supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "xhigh" }] }], nextCursor: null };
+        }
+        if (method === "thread/start") { threadStarts.push(params ?? {}); return { thread: { id: `thread-${threadStarts.length}` } }; }
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => null,
+      joinTurn: async () => { throw new Error("no external turn"); },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
+      threadHasTurn: () => false,
+      turnIsForeign: () => false,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await sendLine(dir, buildEnvelope({ text: "topic: first\neffort: low\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => threadStarts.length === 1);
+      await sendLine(dir, buildEnvelope({ text: "topic: second\n\nhello again", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => threadStarts.length === 2);
+      const effortOf = (p: Record<string, unknown>) => (p.config as { model_reasoning_effort?: string } | undefined)?.model_reasoning_effort;
+      // Both run on the resolved model — the CLI's choice — and the second
+      // conversation gets the model's own default effort, not the first
+      // message's `effort: low`.
+      expect(threadStarts[0].model).toBe("gpt-best");
+      expect(effortOf(threadStarts[0])).toBe("low");
+      expect(threadStarts[1].model).toBe("gpt-best");
+      expect(effortOf(threadStarts[1])).toBe("xhigh");
+      expect(listCalls).toBe(1); // cached for the second conversation
+    } finally {
+      peer.stop();
+      if (prev === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+
+describe.skipIf(onWindows)("shared app-server: a message for a thread another client is running", () => {
+  test("the message is steered into that turn; no turn is started and the run is recorded as joined", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "peer-join-"));
+    const prev = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const calls: string[] = [];
+    let joinedWith: { expected: string; input: unknown[] } | null = null;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        calls.push(method);
+        if (method === "thread/start") return { thread: { id: "thread-J" } };
+        // The join checks the thread's sandbox by rejoining; same as the
+        // conversation's default, so the join is allowed.
+        if (method === "thread/resume") return { thread: { id: "thread-J" }, sandbox: { type: "workspaceWrite" } };
+        if (method === "model/list") return { data: [], nextCursor: null };
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      // The first message creates the thread (no external turn yet); the
+      // second finds the Codex app mid-turn on it.
+      activeExternalTurn: async () => (calls.includes("thread/start") && calls.filter((c) => c === "turn/start").length >= 1 ? "ext-7" : null),
+      joinTurn: async (_threadId, expected, input) => { joinedWith = { expected, input }; calls.push("turn/steer"); return expected; },
+      turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
+      threadHasTurn: () => false,
+      turnIsForeign: () => false,
+      log: () => {},
+    };
+    const peer = createPeer(host);
+    try {
+      await sendLine(dir, buildEnvelope({ text: "topic: shared\n\nfirst", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => calls.includes("turn/start"));
+      // Pretend that first turn ended (the fake never completes it); the next
+      // message meets an external turn and joins it.
+      peer.onThreadTurnEnded("thread-J");
+      await sendLine(dir, buildEnvelope({ text: "topic: shared\n\nsecond", ourSocketPath: senderSock, ourName: "test-sender" }));
+      await waitFor(() => calls.includes("turn/steer"));
+      expect(calls.filter((c) => c === "turn/start")).toHaveLength(1);
+      expect(joinedWith!.expected).toBe("ext-7");
+      expect(JSON.stringify(joinedWith!.input)).toContain("second");
+      const joinedRuns = listRuns(dir).filter((r) => r.joined === true);
+      expect(joinedRuns).toHaveLength(1);
+    } finally {
+      peer.stop();
+      if (prev === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
+describe.skipIf(onWindows)("shared app-server: joining respects the conversation's sandbox, and a joined wait can be cancelled", () => {
+  function harness(dir: string, effectiveSandbox: string, verdict: { ownSeen: boolean; absorbedBy: string | null } = { ownSeen: true, absorbedBy: null }) {
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const calls: string[] = [];
+    let turnsStarted = 0;
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        calls.push(method);
+        if (method === "thread/start") return { thread: { id: "thread-S" } };
+        if (method === "thread/resume") return { thread: { id: "thread-S" }, sandbox: { type: effectiveSandbox } };
+        if (method === "model/list") return { data: [], nextCursor: null };
+        if (method === "turn/start") turnsStarted++;
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => {},
+      interruptThread: async () => true,
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      activeExternalTurn: async () => (turnsStarted >= 1 ? "ext-9" : null),
+      joinTurn: async (_t, expected) => { calls.push("turn/steer"); return expected; },
+      turnStarted: async (_t, _id, beforeReplay) => { await beforeReplay?.(verdict); return verdict; },
+      threadHasTurn: () => false,
+      turnIsForeign: () => false,
+      log: () => {},
+    };
+    return { host, calls, senderSock };
+  }
+
+  async function withIsolation(fn: (dir: string) => Promise<void>): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), "peer-sbx-"));
+    const prev = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    try { await fn(dir); } finally {
+      if (prev === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a turn running under a broader sandbox than the conversation's is not joined, and the sender is told", async () => {
+    await withIsolation(async (dir) => {
+      const { host, calls, senderSock } = harness(dir, "dangerFullAccess");
+      const inbox = (() => {
+        const lines: string[] = [];
+        const server = net.createServer((sock) => { sock.setEncoding("utf8"); let buf = ""; sock.on("data", (c: string) => { buf += c; let i: number; while ((i = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (l) lines.push(l); } }); });
+        server.listen(senderSock);
+        return { lines, close: () => server.close() };
+      })();
+      const peer = createPeer(host);
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: sbx\nsandbox: read-only\n\nfirst", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/start"));
+        peer.onThreadTurnEnded("thread-S");
+        await sendLine(dir, buildEnvelope({ text: "topic: sbx\n\nsecond", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => inbox.lines.some((l) => parseEnvelope(l)?.text.includes("broader sandbox")));
+        expect(calls).not.toContain("turn/steer");
+        expect(calls.filter((c) => c === "turn/start")).toHaveLength(1); // nothing started beside the running turn
+      } finally {
+        inbox.close();
+        peer.stop();
+      }
+    });
+  }, 20_000);
+
+  test("a message absorbed into a turn under a broader sandbox is recorded truthfully, and the sender is told", async () => {
+    await withIsolation(async (dir) => {
+      const { host, calls, senderSock } = harness(dir, "dangerFullAccess", { ownSeen: false, absorbedBy: "ext-9" });
+      const lines: string[] = [];
+      const server = net.createServer((sock) => { sock.setEncoding("utf8"); let buf = ""; sock.on("data", (c: string) => { buf += c; let i: number; while ((i = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (l) lines.push(l); } }); });
+      server.listen(senderSock);
+      const peer = createPeer(host);
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: abs\nsandbox: read-only\n\nfirst", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/start"));
+        await waitFor(() => lines.some((l) => parseEnvelope(l)?.text.includes("broader sandbox")));
+        expect(calls).not.toContain("turn/steer");
+        expect(listRuns(dir).filter((r) => r.joined === true)).toHaveLength(1);
+      } finally {
+        server.close();
+        peer.stop();
+      }
+    });
+  }, 20_000);
+
+  test("a joined wait can be cancelled: the run closes as interrupted and the turn is left alone", async () => {
+    await withIsolation(async (dir) => {
+      const { host, calls, senderSock } = harness(dir, "readOnly");
+      const peer = createPeer(host);
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: c\nsandbox: read-only\n\nfirst", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/start"));
+        peer.onThreadTurnEnded("thread-S");
+        await sendLine(dir, buildEnvelope({ text: "topic: c\n\nsecond", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/steer"));
+        expect(peer.cancelJoinedWait("thread-S")).toBe(true);
+        expect(peer.cancelJoinedWait("thread-S")).toBe(false); // already ended
+        const latest = listRuns(dir).find((r) => r.joined === true);
+        expect(latest?.status).toBe("interrupted");
+        expect(calls).not.toContain("turn/interrupt");
+      } finally {
+        peer.stop();
+      }
+    });
+  }, 20_000);
+});
+
+describe.skipIf(onWindows)("shared app-server: settling a start", () => {
+  function harness(dir: string, opts: { ownSeen: boolean; running: string | null; startGate?: () => Promise<void> }) {
+    const senderSock = join(dir, "sender.sock");
+    registerTestSender(join(dir, "sessions"), senderSock);
+    const calls: string[] = [];
+    const startedWith: Array<string | null> = [];
+    const hooksGiven: boolean[] = [];
+    const host: PeerHost = {
+      cwd: dir,
+      stateDir: dir,
+      request: async (method: string) => {
+        calls.push(method);
+        if (method === "thread/start") return { thread: { id: "thread-T" } };
+        if (method === "thread/resume") return { thread: { id: "thread-T" }, sandbox: { type: "workspaceWrite" } };
+        if (method === "model/list") return { data: [], nextCursor: null };
+        if (method === "turn/start") { await opts.startGate?.(); return { turn: { id: "sub-1" } }; }
+        return {};
+      },
+      claimThread: () => true,
+      releaseThread: () => { calls.push("release"); },
+      interruptThread: async () => { calls.push("turn/interrupt"); return true; },
+      ensureSubscribed: async () => null,
+      releaseThreadSubscription: () => {},
+      // Idle before the start; afterwards the thread reports `opts.running`.
+      activeExternalTurn: async () => (calls.includes("turn/start") ? opts.running : null),
+      joinTurn: async (_t, expected) => { calls.push("turn/steer"); return expected; },
+      // The broker decides asynchronously (it may read the thread first).
+      turnStarted: async (_t, id, beforeReplay) => {
+        startedWith.push(id);
+        hooksGiven.push(typeof beforeReplay === "function");
+        const verdict = { ownSeen: opts.ownSeen, absorbedBy: opts.ownSeen ? null : opts.running };
+        await beforeReplay?.(verdict);
+        return verdict;
+      },
+      threadHasTurn: () => false,
+      turnIsForeign: () => false,
+      log: () => {},
+    };
+    return { host, calls, startedWith, hooksGiven, senderSock };
+  }
+
+  async function withIsolation(fn: (dir: string) => Promise<void>): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), "peer-settle-"));
+    const prev = process.env.CODEX_COLLAB_SESSIONS_DIR;
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(dir, "sessions");
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    try { await fn(dir); } finally {
+      if (prev === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+      else process.env.CODEX_COLLAB_SESSIONS_DIR = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a turn of ours seen starting stays ours even when a continuation runs by the time the thread is read", async () => {
+    await withIsolation(async (dir) => {
+      // The broker saw `sub-1` start, so it never asks the thread (which
+      // now runs `turn-2`, a goal continuation, say): the turn is ours.
+      const { host, calls, senderSock } = harness(dir, { ownSeen: true, running: "turn-2" });
+      const peer = createPeer(host);
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: own\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/start"));
+        await waitFor(() => listRuns(dir)[0]?.phase === "running");
+        expect(listRuns(dir).filter((r) => r.joined === true)).toHaveLength(0);
+        expect(listRuns(dir)[0]?.phase).toBe("running");
+      } finally {
+        peer.stop();
+      }
+    });
+  }, 20_000);
+
+  test("a start never seen starting, with another turn running, was absorbed: recorded as joined", async () => {
+    await withIsolation(async (dir) => {
+      const { host, senderSock } = harness(dir, { ownSeen: false, running: "ext-3" });
+      const peer = createPeer(host);
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: absorbed\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => listRuns(dir).some((r) => r.joined === true));
+      } finally {
+        peer.stop();
+      }
+    });
+  }, 20_000);
+
+  test("a message for a turn another client runs under a broader sandbox is not injected, and the sender is told", async () => {
+    await withIsolation(async (dir) => {
+      const senderSock = join(dir, "sender.sock");
+      registerTestSender(join(dir, "sessions"), senderSock);
+      const calls: string[] = [];
+      const host: PeerHost = {
+        cwd: dir,
+        stateDir: dir,
+        request: async (method: string) => {
+          calls.push(method);
+          if (method === "thread/start") return { thread: { id: "thread-F" } };
+          if (method === "thread/resume") return { thread: { id: "thread-F" }, sandbox: { type: "dangerFullAccess" } };
+          if (method === "model/list") return { data: [], nextCursor: null };
+          return {};
+        },
+        claimThread: () => true,
+        releaseThread: () => {},
+        interruptThread: async () => true,
+        ensureSubscribed: async () => null,
+        releaseThreadSubscription: () => {},
+        activeExternalTurn: async () => null,
+        joinTurn: async (_t, expected) => expected,
+        turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
+        // After the first turn, a CLI run's claim only JOINED a turn the
+        // desktop app runs on this thread.
+        threadHasTurn: () => calls.includes("turn/start"),
+        turnIsForeign: () => calls.includes("turn/start"),
+        log: () => {},
+      };
+      const lines: string[] = [];
+      const server = net.createServer((sock) => { sock.setEncoding("utf8"); let buf = ""; sock.on("data", (c: string) => { buf += c; let i: number; while ((i = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (l) lines.push(l); } }); });
+      server.listen(senderSock);
+      const peer = createPeer(host);
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: inj\nsandbox: read-only\n\nfirst", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/start"));
+        peer.onThreadTurnEnded("thread-F");
+        await sendLine(dir, buildEnvelope({ text: "topic: inj\n\nsecond", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => lines.some((l) => parseEnvelope(l)?.text.includes("broader sandbox")));
+        expect(calls).not.toContain("thread/inject_items");
+      } finally {
+        server.close();
+        peer.stop();
+      }
+    });
+  }, 20_000);
+
+  test("a quiesced peer takes in nothing new: the sender is told, and no turn starts", async () => {
+    await withIsolation(async (dir) => {
+      const { host, calls, senderSock } = harness(dir, { ownSeen: true, running: null });
+      const lines: string[] = [];
+      const server = net.createServer((sock) => { sock.setEncoding("utf8"); let buf = ""; sock.on("data", (c: string) => { buf += c; let i: number; while ((i = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (l) lines.push(l); } }); });
+      server.listen(senderSock);
+      const peer = createPeer(host);
+      try {
+        peer.quiesce();
+        await sendLine(dir, buildEnvelope({ text: "topic: late\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => lines.some((l) => parseEnvelope(l)?.text.includes("shutting down")));
+        expect(calls).not.toContain("turn/start");
+      } finally {
+        server.close();
+        peer.stop();
+      }
+    });
+  }, 20_000);
+
+  test("a kill while the steer is in flight cancels the wait instead of starting a replacement turn", async () => {
+    await withIsolation(async (dir) => {
+      const senderSock = join(dir, "sender.sock");
+      registerTestSender(join(dir, "sessions"), senderSock);
+      const calls: string[] = [];
+      let peerRef: ReturnType<typeof createPeer> | null = null;
+      let reads = 0;
+      const host: PeerHost = {
+        cwd: dir,
+        stateDir: dir,
+        request: async (method: string) => {
+          calls.push(method);
+          if (method === "thread/start") return { thread: { id: "thread-K" } };
+          if (method === "thread/resume") return { thread: { id: "thread-K" }, sandbox: { type: "workspaceWrite" } };
+          if (method === "model/list") return { data: [], nextCursor: null };
+          return {};
+        },
+        claimThread: () => true,
+        releaseThread: () => { calls.push("release"); },
+        // As the broker: a claim that only joined a turn has nothing to stop.
+        interruptThread: async () => { if (calls.includes("turn/steer")) return false; calls.push("turn/interrupt"); return true; },
+        ensureSubscribed: async () => null,
+        releaseThreadSubscription: () => {},
+        // Another client's turn runs when the second message arrives, and
+        // is over by the time a failed steer would look again.
+        activeExternalTurn: async () => (calls.includes("turn/start") && ++reads === 1 ? "ext-5" : null),
+        // The kill lands while the steer is out.
+        joinTurn: async () => { calls.push("turn/steer"); peerRef!.cancelJoinedWait("thread-K"); return "ext-5"; },
+        turnStarted: () => ({ ownSeen: true, absorbedBy: null }),
+        threadHasTurn: () => false,
+        turnIsForeign: () => false,
+        log: () => {},
+      };
+      const lines: string[] = [];
+      const server = net.createServer((sock) => { sock.setEncoding("utf8"); let buf = ""; sock.on("data", (c: string) => { buf += c; let i: number; while ((i = buf.indexOf("\n")) !== -1) { const l = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (l) lines.push(l); } }); });
+      server.listen(senderSock);
+      const peer = createPeer(host);
+      peerRef = peer;
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: k\n\nfirst", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/start"));
+        peer.onThreadTurnEnded("thread-K");
+        await sendLine(dir, buildEnvelope({ text: "topic: k\n\nsecond", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/steer"));
+        await waitFor(() => listRuns(dir).some((r) => r.status === "interrupted"));
+        // The cancelled message is not resubmitted as a turn of our own.
+        expect(calls.filter((c) => c === "turn/start")).toHaveLength(1);
+        expect(calls).not.toContain("turn/interrupt");
+        // The sender is told the message IS in that turn — not that it never
+        // went, which would invite sending it again.
+        await waitFor(() => lines.some((l) => parseEnvelope(l)?.text.includes("delivered into a turn another client is running")));
+        expect(lines.some((l) => parseEnvelope(l)?.text.includes("before its turn started"))).toBe(false);
+      } finally {
+        server.close();
+        peer.stop();
+      }
+    });
+  }, 20_000);
+
+  test("a kill while the start is in flight stops the turn the server accepted", async () => {
+    await withIsolation(async (dir) => {
+      let openGate: () => void = () => {};
+      const gate = new Promise<void>((r) => { openGate = r; });
+      const { host, calls, startedWith, hooksGiven, senderSock } = harness(dir, { ownSeen: true, running: null, startGate: () => gate });
+      const peer = createPeer(host);
+      try {
+        await sendLine(dir, buildEnvelope({ text: "topic: killed\n\nhello", ourSocketPath: senderSock, ourName: "test-sender" }));
+        await waitFor(() => calls.includes("turn/start"));
+        // `kill` lands while turn/start is unanswered: the wait is cancelled…
+        expect(peer.cancelJoinedWait("thread-T")).toBe(true);
+        // …and once the server answers with a turn of ours, the broker learns
+        // its id before the claim is released, so the release interrupts it.
+        openGate();
+        await waitFor(() => calls.includes("release"));
+        expect(startedWith).toEqual(["sub-1"]);
+        // The cancel path settles with the same care as an uncancelled start:
+        // the sandbox an absorbing turn runs under is verified before any
+        // held reply is let through.
+        expect(hooksGiven).toEqual([true]);
+        // Stopped the way `kill` stops a turn (goal paused first, in the
+        // broker's hook), then released.
+        expect(calls.indexOf("turn/interrupt")).toBeGreaterThan(calls.indexOf("turn/start"));
+        expect(calls.indexOf("release")).toBeGreaterThan(calls.indexOf("turn/interrupt"));
+        expect(listRuns(dir)[0]?.status).toBe("interrupted");
+      } finally {
+        peer.stop();
+      }
+    });
+  }, 20_000);
 });

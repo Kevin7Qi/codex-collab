@@ -29,6 +29,8 @@ codex-collab health
 | `src/broker.ts` | Shared app-server lifecycle (connection pooling) |
 | `src/peer.ts` | Native peer messaging (Claude session-registry entries, messaging sockets, consult bridge, per-thread peers) |
 | `src/broker-client.ts` | Socket-based client for connecting to the broker server |
+| `src/shared-server.ts` | Attach to Codex's shared app-server over its control socket (WebSocket client, attach/spawn decision) |
+| `src/models.ts` | Model and effort defaults shared by the CLI and the peer |
 | `src/broker-server.ts` | Detached broker server process (multiplexes JSON-RPC between clients and app-server) |
 | `src/process.ts` | Process spawn/lifecycle utilities |
 | `src/lock.ts` | Advisory file locks (sync/async, single-winner stale breaking) |
@@ -43,10 +45,11 @@ codex-collab health
 
 ## Architecture Notes
 
-- Communicates with Codex via `codex app-server` JSON-RPC protocol over stdio
+- Communicates with Codex via the `codex app-server` JSON-RPC protocol: over Codex's control socket (`$CODEX_HOME/app-server-control/app-server-control.sock`, WebSocket) when a shared app-server is running, else over stdio to a private child (`config server auto|shared|private`)
+- Codex 0.145+ allows one writer per thread (flock in `~/.codex/thread-writer-locks/`), released only when the holding process unloads the thread or exits. The broker unsubscribes idle threads it does not keep; Codex unloads an unsubscribed idle thread after a delay (observed ~7 min on 0.153.4 — `-c thread_unload_delay_secs` did not shorten it) and releases the lock then. A thread held by another process is reported as exit code 8
 - Per-workspace state under `~/.codex-collab/workspaces/{slug}-{hash}/` (threads, logs, runs, approvals, kill signals, PIDs)
 - User defaults stored in `~/.codex-collab/config.json` (model, reasoning, sandbox, approval, timeout)
-- Broker manages a shared app-server per workspace via Unix socket / named pipe with thread-scoped routing: parallel runs on different threads multiplex over the one app-server; only same-thread contention (or an unavailable broker) falls back to a direct connection
+- Broker manages one app-server connection per workspace via Unix socket / named pipe with thread-scoped routing: parallel runs on different threads multiplex over it; same-thread contention is refused (-32001) — a second app-server could no longer take the thread anyway — and only an unavailable broker falls back to a direct connection
 - Short IDs are 8-char hex, support prefix resolution
 - Run ledger tracks per-invocation state (status, timing, output) under `runs/`
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running

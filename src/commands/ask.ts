@@ -55,7 +55,13 @@ export async function handleAsk(args: string[]): Promise<void> {
   try {
     writeQuestion(mailboxDir, record);
   } catch (e) {
-    die(`Could not post question (mailbox ${mailboxDir}): ${e instanceof Error ? e.message : String(e)}`);
+    const code = (e as NodeJS.ErrnoException).code;
+    // Inside a read-only Codex sandbox the mailbox cannot be created at
+    // all; say so, since "EPERM" alone reads as a broken install.
+    const why = code === "EPERM" || code === "EACCES"
+      ? " — the sandbox this command runs in cannot write to temp space (a read-only sandbox blocks the ask channel; the run must use workspace-write)"
+      : "";
+    die(`Could not post question (mailbox ${mailboxDir}): ${e instanceof Error ? e.message : String(e)}${why}`);
   }
 
   // First line is the attribution marker the turn owner parses from the

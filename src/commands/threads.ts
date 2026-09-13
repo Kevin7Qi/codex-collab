@@ -77,14 +77,39 @@ export function applyDiscoverLimit(options: {
  *  sources which are implementation details of the Codex runtime. */
 const DISCOVERY_SOURCE_KINDS = ["cli", "vscode", "exec", "appServer"];
 
-async function discoverThreads(client: AppServerClient, ws: WorkspacePaths, cwd: string): Promise<number> {
+/** What the app-server says a thread is doing right now. On a shared
+ *  app-server this covers threads other clients — the Codex app, a `codex`
+ *  session — are working in, which is exactly what a caller looking for
+ *  "the thread the user is in" needs. */
+export type ServerThreadState = "active" | "loaded" | "not loaded";
+
+export function serverThreadState(status: Thread["status"] | undefined): ServerThreadState {
+  if (status?.type === "active") return "active";
+  if (status?.type === "idle") return "loaded";
+  return "not loaded";
+}
+
+/** Listing suffix for a thread's server state; nothing for the common case. */
+export function serverStateNote(state: ServerThreadState | undefined): string {
+  if (state === "active") return "  [active on the app-server]";
+  if (state === "loaded") return "  [open on the app-server]";
+  return "";
+}
+
+async function discoverThreads(
+  client: AppServerClient,
+  ws: WorkspacePaths,
+  cwd: string,
+): Promise<{ discovered: number; states: Map<string, ServerThreadState> }> {
   const workspaceRoot = resolveWorkspaceDir(cwd);
   const serverThreads = await fetchAllPages<Thread>(client, "thread/list", {
     cwd: workspaceRoot,
     limit: 50,
     sourceKinds: DISCOVERY_SOURCE_KINDS,
   });
-  if (serverThreads.length === 0) return 0;
+  const states = new Map<string, ServerThreadState>();
+  for (const thread of serverThreads) states.set(thread.id, serverThreadState(thread.status));
+  if (serverThreads.length === 0) return { discovered: 0, states };
 
   const mapping = loadThreadIndex(ws.stateDir);
   const knownThreadIds = new Set(Object.values(mapping).map(e => e.threadId));
@@ -107,7 +132,7 @@ async function discoverThreads(client: AppServerClient, ws: WorkspacePaths, cwd:
     discovered++;
   }
 
-  return discovered;
+  return { discovered, states };
 }
 
 // ---------------------------------------------------------------------------
@@ -119,12 +144,14 @@ export async function handleThreads(args: string[]): Promise<void> {
   const ws = getWorkspacePaths(options.dir);
 
   // If --discover, query the app-server and merge server-side threads
+  let serverStates = new Map<string, ServerThreadState>();
   if (options.discover) {
     try {
       await withClient(async (client) => {
-        const count = await discoverThreads(client, ws, options.dir);
-        if (count > 0 && !options.json) {
-          progress(`Discovered ${count} thread(s) from server`);
+        const { discovered, states } = await discoverThreads(client, ws, options.dir);
+        serverStates = states;
+        if (discovered > 0 && !options.json) {
+          progress(`Discovered ${discovered} thread(s) from server`);
         }
       }, options.dir);
     } catch (e) {
@@ -202,6 +229,7 @@ export async function handleThreads(args: string[]): Promise<void> {
       createdAt: e.createdAt,
       updatedAt: e.updatedAt ?? e.createdAt,
       goal: goalByThread.get(e.threadId) ?? null,
+      ...(options.discover ? { serverState: serverStates.get(e.threadId) ?? "not loaded" } : {}),
     }));
     console.log(JSON.stringify(enriched, null, 2));
   } else {
@@ -217,8 +245,9 @@ export async function handleThreads(args: string[]): Promise<void> {
       const preview = e.preview ? ` ${e.preview.slice(0, 50)}` : "";
       const goal = goalByThread.get(e.threadId);
       const goalNote = goal ? `  [goal ${goal.status}: ${formatGoalTokens(goal)}]` : "";
+      const serverNote = serverStateNote(serverStates.get(e.threadId));
       console.log(
-        `  ${e.shortId}  ${status.padEnd(12)} ${age.padEnd(8)} ${e.cwd ?? ""}${model}${preview}${goalNote}`,
+        `  ${e.shortId}  ${status.padEnd(12)} ${age.padEnd(8)} ${e.cwd ?? ""}${model}${preview}${goalNote}${serverNote}`,
       );
     }
   }

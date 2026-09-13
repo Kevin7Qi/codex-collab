@@ -1,6 +1,6 @@
 // src/commands/kill.ts — kill command handler
 
-import { getLatestRun, loadThreadIndex, updateRun, updateThreadStatus } from "../threads";
+import { getLatestRun, listRunsForThread, loadThreadIndex, updateRun, updateThreadStatus } from "../threads";
 import { writeFileSync } from "fs";
 import { join } from "path";
 import { pauseThreadGoal, clearThreadGoal, isGoalFeatureUnavailable } from "../goals";
@@ -16,6 +16,7 @@ import {
   readPidFile,
   removePidFile,
   getWorkspacePaths,
+  isThreadProcessAlive,
 } from "./shared";
 
 /** Read the thread goal with a few retries: a live goal-following run owns
@@ -65,6 +66,26 @@ export async function handleKill(args: string[]): Promise<void> {
     }
   }
 
+  // A run that JOINED another client's turn on a shared app-server owns
+  // nothing on the server: the signal file stops its wait, and that is all
+  // a kill may do — the turn, and any goal on the thread, are theirs.
+  // The run that is RUNNING, not merely the newest record: an invocation
+  // refused as busy leaves a newer, failed record beside the live one.
+  const activeRunOf = (id: string) => listRunsForThread(ws.stateDir, id).find((r) => r.status === "running") ?? getLatestRun(ws.stateDir, id);
+  const latestRun = shortId ? activeRunOf(shortId) : null;
+  const joinedRecord = threadRunning && latestRun?.status === "running" && latestRun.joined === true;
+  // A run still starting has not learned whose turn it is waiting on: on a
+  // shared app-server the thread's active turn may be another client's.
+  // Its own process reacts to the signal file; the server is left alone.
+  // Both of these hold only while that process is alive: a run whose
+  // process died mid-start left whatever it started to the broker's
+  // orphan recovery (or, on a private server, to the interrupt below).
+  const runAlive = !!shortId && isThreadProcessAlive(ws.pidsDir, shortId);
+  // A joined turn is another client's whether or not our process lives.
+  const joined = joinedRecord;
+  const startingRecord = threadRunning && latestRun?.status === "running" && latestRun.phase === "starting" && !joined;
+  const starting = startingRecord && runAlive;
+
   // Write kill signal file so the running process can detect the kill.
   // Tag with the target run's PID; falls back to "*" (wildcard — matches
   // any active run on this thread) when no PID file is available. Skipped
@@ -93,6 +114,78 @@ export async function handleKill(args: string[]): Promise<void> {
   // run will still die, so fall through to report that.
   let serverInterrupted = false;
   let goalStopped = false;
+  if (startingRecord && !runAlive) {
+    // The run's process died before its start settled. On a shared server
+    // whatever it started is not known to be ours — the broker's orphan
+    // recovery handles it — so the server is left alone; on a private one
+    // every turn is ours, and the interrupt below is right.
+    let shared = false;
+    try {
+      shared = await withClient(async (client) => client.server.kind === "shared", options.dir);
+    } catch { /* unreachable server: nothing to interrupt anyway */ }
+    if (shared) {
+      if (shortId) {
+        updateThreadStatus(ws.stateDir, threadId, "interrupted");
+        removePidFile(ws.pidsDir, shortId);
+      }
+      progress("The run's process is gone. Nothing on the server was touched, since the turn it was starting may be another client's; a turn of ours is the broker's to recover.");
+      return;
+    }
+  }
+  if (starting) {
+    // A CLI run polls the signal file; a peer's attempt is cancelled in the
+    // broker. Neither touches the server: the turn may be another client's.
+    let cancelled = false;
+    try {
+      cancelled = await withClient(async (client) => {
+        if (!client.isBrokered) return false;
+        const r = await client.request<{ cancelled?: boolean }>("broker/cancelJoined", { threadId });
+        return r?.cancelled === true;
+      }, options.dir);
+    } catch { /* no broker to reach: the signal file is all there is */ }
+    // The attempt may have settled between the ledger read and the cancel:
+    // a peer run now running under a turn of its own reacts to no signal
+    // file, so it is stopped like any other run, below. (A CLI run keeps
+    // its "starting" phase until its own process advances it, and that
+    // process polls the file.)
+    const now = !cancelled && shortId ? activeRunOf(shortId) : null;
+    const startedMeanwhile = now?.status === "running" && now.phase !== "starting" && now.joined !== true;
+    if (!startedMeanwhile) {
+      progress(
+        cancelled || killSignalWritten
+          ? "The run is still starting; it was told to stop and will not go on. Nothing on the server was touched, since the turn may be another client's."
+          : "The run is still starting and could not be signalled; nothing on the server was touched.",
+      );
+      return;
+    }
+    progress("The run started while the kill was on its way; stopping its turn.");
+  }
+  if (joined) {
+    // A CLI run polls the signal file written above; a peer's wait lives in
+    // the broker and is cancelled there. Neither touches the turn. Both are
+    // tried — the record does not say which kind of run joined.
+    let cancelled = false;
+    try {
+      cancelled = await withClient(async (client) => {
+        if (!client.isBrokered) return false;
+        const r = await client.request<{ cancelled?: boolean }>("broker/cancelJoined", { threadId });
+        return r?.cancelled === true;
+      }, options.dir);
+    } catch (e) {
+      console.error(`[codex] Warning: could not reach the broker to stop a peer wait: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    progress(
+      cancelled || killSignalWritten
+        ? "Stopped waiting: the turn belongs to another client of the shared app-server and continues there."
+        : "The turn belongs to another client of the shared app-server; nothing here to stop.",
+    );
+    if (!runAlive && shortId) {
+      // Nobody is waiting any more: the ledger must not say "running".
+      updateThreadStatus(ws.stateDir, threadId, "interrupted");
+      removePidFile(ws.pidsDir, shortId);
+    }
+    return;
+  }
   try {
     await withClient(async (client) => {
       // Goal FIRST, interrupt second: with an active goal, `turn/interrupt`

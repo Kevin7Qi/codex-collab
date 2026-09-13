@@ -11,7 +11,7 @@ import {
   type ApprovalPolicy,
   type ApprovalMode,
 } from "../config";
-import { type AppServerClient, connectDirectWithRetry } from "../client";
+import type { AppServerClient } from "../client";
 import { ensureConnection, getCurrentSessionId, isBrokerBusyError } from "../broker";
 import {
   registerThread,
@@ -32,6 +32,7 @@ import {
 } from "../threads";
 import type { PendingApproval, RunGoalState } from "../types";
 import { RpcError, TurnTimeoutError } from "../types";
+import { resolveModelDefaults } from "../models";
 import { EventDispatcher } from "../events";
 import {
   autoApproveHandler,
@@ -200,6 +201,10 @@ export const EXIT_CODES = {
    *  limit). The goal persists on the thread — steer with a resume turn, or
    *  abandon it with `kill --clear`. */
   goalBlocked: 7,
+  /** The thread is open for writing in another Codex process (the Codex
+   *  app, a `codex` session, a daemon) — Codex allows one writer per
+   *  thread. Intact and retryable once that process leaves it idle. */
+  threadHeld: 8,
 } as const;
 
 /** Errors can carry an explicit exit code (set where the context to classify
@@ -580,6 +585,10 @@ export interface UserConfig {
   approval?: ApprovalMode;
   timeout?: number;
   memory?: boolean;
+  /** Collaboration mode; read by the broker (see peer.ts). */
+  mode?: string;
+  /** Which app-server to run on; read at broker start (see shared-server.ts). */
+  server?: string;
 }
 
 export function loadUserConfig(): UserConfig {
@@ -675,6 +684,12 @@ export let activeThreadId: string | undefined;
 export let activeReviewThreadId: string | undefined;
 export let activeShortId: string | undefined;
 export let activeTurnId: string | undefined;
+/** Whose turn the active run is waiting on. "unknown" from the moment a
+ *  thread is active until the start settles; "joined" when it turned out to
+ *  be another client's turn on a shared app-server. Shutdown pauses a goal
+ *  or interrupts a turn only for "own" — never for one we merely joined,
+ *  and never while we do not yet know. */
+export let activeTurnOwnership: "unknown" | "own" | "joined" = "unknown";
 export let activeWsPaths: WorkspacePaths | undefined;
 export let activeRunId: string | undefined;
 export let shuttingDown = false;
@@ -684,6 +699,7 @@ export function setActiveThreadId(id: string | undefined): void { activeThreadId
 export function setActiveReviewThreadId(id: string | undefined): void { activeReviewThreadId = id; }
 export function setActiveShortId(id: string | undefined): void { activeShortId = id; }
 export function setActiveTurnId(id: string | undefined): void { activeTurnId = id; }
+export function setActiveTurnOwnership(value: "unknown" | "own" | "joined"): void { activeTurnOwnership = value; }
 export function setActiveWsPaths(ws: WorkspacePaths | undefined): void { activeWsPaths = ws; }
 export function setActiveRunId(id: string | undefined): void { activeRunId = id; }
 export function setShuttingDown(val: boolean): void { shuttingDown = val; }
@@ -724,39 +740,21 @@ async function safeCloseClient(client: AppServerClient): Promise<void> {
   }
 }
 
-/** Connect to app server, run fn, then close the client (even on error).
+/** Run `fn` with a client, closing it afterwards.
  *
- *  For streaming callers, transparently retries once via `connectDirect`
- *  when fn throws a BROKER_BUSY error. The broker's busy state is set when
- *  another invocation owns the shared stream; the initial check in
- *  `ensureConnection` is one-shot, so two callers can both pass it before
- *  either has actually claimed the stream — only the racing loser sees
- *  BROKER_BUSY on its first stream-owning RPC (`thread/start` etc.).
- *  Auto-falling back to a direct connection mirrors the documented
- *  parallel-execution behavior. */
+ *  A BROKER_BUSY error from `fn` (another invocation owns the thread) is
+ *  final. It used to trigger a retry on a private direct connection, back
+ *  when that could take the thread over; since Codex enforces one writer per
+ *  thread, a second app-server resuming a thread the broker's server holds
+ *  is refused outright, and on a shared server the "retry" would merely
+ *  inject the prompt into the running turn. Either way the honest answer
+ *  is the broker's: the thread is busy. */
 export async function withClient<T>(fn: (client: AppServerClient) => Promise<T>, cwd?: string, streaming = false): Promise<T> {
   const workingDir = cwd ?? process.cwd();
-  let client = await ensureConnection(workingDir, streaming);
+  const client = await ensureConnection(workingDir, streaming);
   activeClient = client;
   try {
-    try {
-      return await fn(client);
-    } catch (e) {
-      if (!streaming || !isBrokerBusyError(e)) throw e;
-      // Lost the busy race after handshake — drop the broker client and
-      // retry via direct connection. The first attempt's side effects
-      // (e.g. a failed RunRecord recorded by the command's own catch
-      // handler) remain, like a user-observable "started, then retried"
-      // sequence.
-      console.error("[broker] Broker became busy after handshake — retrying with direct connection.");
-      await safeCloseClient(client);
-      // Retrying variant: this spawns an app-server while the busy broker's
-      // is still live, which is exactly when they contend for codex's sqlite
-      // state — the one path that most needs the second attempt.
-      client = await connectDirectWithRetry({ cwd: workingDir });
-      activeClient = client;
-      return await fn(client);
-    }
+    return await fn(client);
   } finally {
     await safeCloseClient(client);
     activeClient = undefined;
@@ -812,61 +810,7 @@ export function armQuestionChannel(
 // Model auto-selection
 // ---------------------------------------------------------------------------
 
-/** Fetch all pages of a paginated endpoint. */
-export async function fetchAllPages<T>(
-  client: AppServerClient,
-  method: string,
-  baseParams?: Record<string, unknown>,
-): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | undefined;
-  do {
-    const params: Record<string, unknown> = { ...baseParams };
-    if (cursor) params.cursor = cursor;
-    const page = await client.request<{ data: T[]; nextCursor: string | null }>(method, params);
-    items.push(...page.data);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
-  return items;
-}
-
-/** Pick the best model by following the upgrade chain from the server default,
- *  then preferring a -codex variant if one exists at the latest generation. */
-export function pickBestModel(models: Model[]): string | undefined {
-  const byId = new Map(models.map(m => [m.id, m]));
-
-  // Start from the server's default model
-  let current = models.find(m => m.isDefault);
-  if (!current) return undefined;
-
-  // Follow the upgrade chain to the latest generation
-  const visited = new Set<string>();
-  while (current.upgrade && !visited.has(current.id)) {
-    visited.add(current.id);
-    const next = byId.get(current.upgrade);
-    if (!next) break; // upgrade target not in the list
-    current = next;
-  }
-
-  // Prefer -codex variant if available at this generation
-  if (!current.id.endsWith("-codex")) {
-    const codexVariant = byId.get(current.id + "-codex");
-    if (codexVariant && codexVariant.upgrade === null) return codexVariant.id;
-  }
-
-  return current.id;
-}
-
-/** Pick the highest reasoning effort a model supports, capped at the
- *  auto-select ceiling. */
-function pickAutoEffort(supported: Array<{ reasoningEffort: string }>): ReasoningEffort | undefined {
-  const available = new Set(supported.map(s => s.reasoningEffort));
-  const ceiling = config.reasoningEfforts.indexOf(config.autoEffortCeiling);
-  for (let i = ceiling; i >= 0; i--) {
-    if (available.has(config.reasoningEfforts[i])) return config.reasoningEfforts[i];
-  }
-  return undefined;
-}
+export { fetchAllPages, pickBestModel } from "../models";
 
 /** Auto-resolve model and/or reasoning effort when not set by CLI or config. */
 export async function resolveDefaults(client: AppServerClient, opts: Options): Promise<void> {
@@ -879,28 +823,23 @@ export async function resolveDefaults(client: AppServerClient, opts: Options): P
   const needReasoning = !isSet("reasoning");
   if (!needModel && !needReasoning) return;
 
-  let models: Model[];
+  let resolved: { model?: string; effort?: string } | null;
   try {
-    models = await fetchAllPages<Model>(client, "model/list", { includeHidden: true });
+    resolved = await resolveModelDefaults(client, {
+      model: needModel ? undefined : opts.model,
+      effort: needReasoning ? undefined : opts.reasoning,
+    });
   } catch (e) {
     console.error(`[codex] Warning: could not fetch model list (${e instanceof Error ? e.message : String(e)}). Model and reasoning will be determined by the server.`);
     return;
   }
-  if (models.length === 0) {
+  if (resolved === null) {
     console.error(`[codex] Warning: server returned no models. Model and reasoning will be determined by the server.`);
     return;
   }
 
-  if (needModel) {
-    opts.model = pickBestModel(models);
-  }
-
-  if (needReasoning) {
-    const modelData = models.find(m => m.id === opts.model);
-    if (modelData?.supportedReasoningEfforts?.length) {
-      opts.reasoning = pickAutoEffort(modelData.supportedReasoningEfforts);
-    }
-  }
+  if (needModel) opts.model = resolved.model;
+  if (needReasoning && resolved.effort) opts.reasoning = resolved.effort as ReasoningEffort;
 }
 
 // ---------------------------------------------------------------------------
@@ -926,6 +865,46 @@ export function consumeInjectedRunId(): string | null {
     stickyInjectedRunId = /^[a-zA-Z0-9_-]+$/.test(fromEnv) ? fromEnv : null;
   }
   return stickyInjectedRunId ?? null;
+}
+
+/** Codex refuses to resume a thread another app-server process holds open
+ *  for writing (one writer per thread, since 0.145). */
+export function isThreadHeldError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /\balready has an active writer\b/i.test(msg);
+}
+
+export const THREAD_HELD_RETRIES = 3;
+export const THREAD_HELD_RETRY_DELAY_MS = 1500;
+
+/** thread/resume, retried briefly when the thread is held elsewhere — a
+ *  `codex` session that just exited, or a thread the server is still
+ *  closing, frees up within seconds — then explained: the raw message names
+ *  a full thread id and nothing else, and the remedy is not obvious. */
+export async function resumeUnlessHeld(
+  client: AppServerClient,
+  resumeParams: Record<string, unknown>,
+  shortId: string,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<ThreadStartResponse> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+    } catch (e) {
+      if (!isThreadHeldError(e)) throw e;
+      if (attempt < THREAD_HELD_RETRIES) {
+        await sleep(THREAD_HELD_RETRY_DELAY_MS);
+        continue;
+      }
+      const held = new Error(
+        `Thread ${shortId} is open for writing in another Codex process — the Codex app, a \`codex\` session, or an app-server daemon. ` +
+        `Codex allows one writer per thread. Close it there, or wait several minutes after it goes idle for the thread to be unloaded, then retry. ` +
+        `(Running codex-collab on the same app-server as that process avoids this: see 'codex-collab health'.)`,
+      );
+      tagExitCode(held, EXIT_CODES.threadHeld);
+      throw held;
+    }
+  }
 }
 
 /** Start or resume a thread, returning threadId, shortId, runId, and effective config. */
@@ -1013,7 +992,7 @@ export async function startOrResumeThread(
       if (opts.explicit.has("sandbox")) resumeParams.sandbox = opts.sandbox;
       // Forced overrides from caller (e.g., review forces sandbox to read-only)
       if (extraStartParams) Object.assign(resumeParams, extraStartParams);
-      effective = await client.request<ThreadStartResponse>("thread/resume", resumeParams);
+      effective = await resumeUnlessHeld(client, resumeParams, shortId);
       // Ensure the thread is in our local index (may not be if it was created externally)
       if (!findShortId(ws.stateDir, threadId)) {
         shortId = registerThread(ws.stateDir, threadId, {
@@ -1353,11 +1332,16 @@ export function recordRunFailure(
   threadId: string,
   runId: string,
   error: unknown,
+  /** The thread itself is still running for someone else (this invocation
+   *  was refused as busy): record only this invocation's failure. */
+  opts: { threadLive?: boolean } = {},
 ): void {
-  try {
-    updateThreadStatus(ws.stateDir, threadId, "failed");
-  } catch (e) {
-    console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+  if (!opts.threadLive) {
+    try {
+      updateThreadStatus(ws.stateDir, threadId, "failed");
+    } catch (e) {
+      console.error(`[codex] Warning: could not update thread status for ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
   try {
     updateRun(ws.stateDir, runId, {

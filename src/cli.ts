@@ -5,7 +5,7 @@
 import { config } from "./config";
 import type { AppServerClient } from "./client";
 import { updateThreadStatus, updateRun } from "./threads";
-import { tryInterruptTurn } from "./turns";
+import { awaitPendingStart, tryInterruptTurn } from "./turns";
 import { pauseThreadGoal, readThreadGoal } from "./goals";
 import {
   activeClient,
@@ -13,6 +13,7 @@ import {
   activeReviewThreadId,
   activeShortId,
   activeTurnId,
+  activeTurnOwnership,
   activeWsPaths,
   activeRunId,
   shuttingDown,
@@ -70,8 +71,31 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
   // An active GOAL must be paused before the interrupt: interrupt alone
   // makes the server start a fresh continuation turn, so Ctrl-C would
   // leave the goal burning tokens headless after this process exits.
-  const interruptThreadId = activeReviewThreadId ?? activeThreadId;
-  if (activeClient && activeThreadId && !activeReviewThreadId) {
+  // Only a turn of our OWN gets its goal paused and gets interrupted. A
+  // joined turn is another client's, and while ownership is still unknown
+  // (Ctrl-C during the start) the thread may be running theirs too.
+  let ownership = activeTurnOwnership;
+  let turnToStop = activeTurnId;
+  let reviewThread = activeReviewThreadId;
+  if (ownership === "unknown" && activeClient && activeThreadId) {
+    // The start is still out: wait (briefly) for whose turn it became, so
+    // a turn of ours is stopped — its goal paused first — rather than left
+    // running for nobody, and another client's left alone.
+    const late = await awaitPendingStart(activeThreadId, 5000);
+    if (late) {
+      ownership = late.joined ? "joined" : "own";
+      if (!late.joined) {
+        turnToStop = late.turnId;
+        reviewThread = late.reviewThreadId ?? reviewThread;
+      }
+    }
+  }
+  const interruptThreadId = reviewThread ?? activeThreadId;
+  const ownTurn = ownership === "own";
+  if (ownership === "joined") {
+    console.error("[codex] The turn belongs to another client of the shared app-server; it continues there.");
+  }
+  if (activeClient && activeThreadId && !reviewThread && ownTurn) {
     try {
       // Fail closed: skip the pause only when the read POSITIVELY says no
       // active goal. A transient read failure must still attempt the pause —
@@ -87,8 +111,8 @@ async function handleShutdownSignal(exitCode: number): Promise<void> {
       console.error(`[codex] Warning: could not check/pause goal during shutdown: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-  if (activeClient && interruptThreadId && activeTurnId) {
-    await tryInterruptTurn(activeClient, interruptThreadId, activeTurnId);
+  if (activeClient && interruptThreadId && turnToStop && ownTurn) {
+    await tryInterruptTurn(activeClient, interruptThreadId, turnToStop);
   }
 
   try {

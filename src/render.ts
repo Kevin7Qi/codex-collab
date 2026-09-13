@@ -116,9 +116,20 @@ function clip(text: string, width: number, used: number): string {
   return text.length > room ? text.slice(0, room - 1) + "…" : text;
 }
 
+/** The clock shown beside each entry: the entry's UTC timestamp rendered in
+ *  the viewer's local time. The log stores UTC (correct and portable); the
+ *  display used to lift HH:MM:SS straight out of the ISO string, which read
+ *  as local time and was hours off for anyone east or west of UTC. */
+export function localClock(ts: string, now: Date = new Date(ts)): string {
+  const d = Number.isNaN(now.getTime()) ? null : now;
+  if (!d) return ts.slice(11, 19);
+  const two = (n: number): string => String(n).padStart(2, "0");
+  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+}
+
 function timePrefix(ts: string | null, color: boolean): string {
   if (!ts) return "         ";
-  return style(ts.slice(11, 19), [ANSI.dim], color) + " ";
+  return style(localClock(ts), [ANSI.dim], color) + " ";
 }
 
 /**

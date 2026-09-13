@@ -4,6 +4,7 @@ import { config, listTemplates, resolveStateDir } from "../config";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
+import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
 import type { Model, AccountRead } from "../types";
 import {
@@ -31,6 +32,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     timeout:   { validate: v => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds, 1-${MAX_TIMEOUT_SECONDS} (e.g. 3600)` },
     memory:    { validate: v => v === "true" || v === "false", hint: "true, false (let Codex memory learn from created threads)" },
     mode:      { validate: v => (COLLAB_MODES as readonly string[]).includes(v), hint: `${COLLAB_MODES.join(", ")} (auto: peer messaging where supported, CLI otherwise)` },
+    server:    { validate: v => (SERVER_PREFERENCES as readonly string[]).includes(v), hint: `${SERVER_PREFERENCES.join(", ")} (auto: attach to Codex's own app-server when its socket answers, else run a private one)` },
   };
 
   const cfg = loadUserConfig();
@@ -98,6 +100,10 @@ export async function handleConfig(args: string[]): Promise<void> {
     // peer (or its lack of one) until it restarts, so the setting alone
     // changes nothing visible for that workspace.
     console.log("Brokers already running keep their current peer state until they restart — `codex-collab peer up` applies the mode to this workspace's broker.");
+  }
+  if (key === "server") {
+    // Same lifecycle: a broker chooses its app-server once, when it starts.
+    console.log("Brokers already running keep the app-server they started on — `codex-collab peer up` restarts this workspace's broker so the setting applies.");
   }
 }
 
@@ -197,6 +203,35 @@ export function describePeer(dir: string): string {
     : `broker running (pid ${state.pid}) but its registry entry is missing — 'codex-collab peer up'`;
 }
 
+/** One line naming the app-server a connection reached, and — when it is a
+ *  private child — whether Codex's shared server was available instead.
+ *  The point is to make the topology visible: whether the Codex app or the
+ *  TUI will see codex-collab's turns live depends on nothing else. */
+export function describeServer(
+  server: { kind: string; socketPath?: string; pid?: number },
+  env: NodeJS.ProcessEnv = process.env,
+  socketExists: (path: string) => boolean = existsSync,
+  platform: string = process.platform,
+  /** Whether the connection described runs through the workspace broker
+   *  (which keeps the server it started on) or is this invocation's own. */
+  brokered = true,
+): string {
+  const { preference, reason } = serverPreference(env);
+  if (server.kind === "shared") {
+    return `shared — Codex's own app-server at ${server.socketPath ?? controlSocketPath(env)} (${reason}); its other clients see codex-collab's turns live`;
+  }
+  const pid = server.pid !== undefined ? ` (pid ${server.pid})` : "";
+  if (!attachSupported(platform)) return `private app-server${pid} — attaching to Codex's shared server is not available on Windows`;
+  if (preference === "private") return `private app-server${pid} (${reason})`;
+  const socket = controlSocketPath(env);
+  if (!socketExists(socket)) {
+    return `private app-server${pid} — no Codex app-server is listening at ${socket} ('codex app-server daemon start' shares one; the TUI attaches to it too)`;
+  }
+  return brokered
+    ? `private app-server${pid} — Codex's socket at ${socket} exists but the broker keeps the server it started on (\`codex-collab peer up\` to restart on the shared one)`
+    : `private app-server${pid} — Codex's socket at ${socket} exists but this invocation did not attach (under \`auto\`, tried the socket and fell back)`;
+}
+
 export async function handleHealth(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
   const findCmd = process.platform === "win32" ? "where" : "which";
@@ -214,6 +249,7 @@ export async function handleHealth(args: string[]): Promise<void> {
   try {
     account = await withClient(async (client) => {
       console.log(`  app-server: OK (${client.userAgent})`);
+      console.log(`  server: ${describeServer(client.server, process.env, existsSync, process.platform, client.isBrokered)}`);
       // A failure here must not fail the whole check: older codex builds may
       // not know account/read, and a busy broker or transient RPC error is
       // not evidence that the user is logged out.

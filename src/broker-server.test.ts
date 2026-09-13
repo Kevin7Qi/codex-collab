@@ -14,7 +14,7 @@ import net from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { basename, delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Subprocess } from "bun";
+import type { FileSink, Subprocess } from "bun";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -128,6 +128,9 @@ function envWithPathPrefix(dir: string): Record<string, string> {
     env[k] = v;
   }
   env.PATH = `${dir}${delimiter}${inherited}`;
+  // Hermetic: a developer running Codex's app-server daemon must not have
+  // the broker under test attach to it instead of the mock on PATH.
+  env.CODEX_COLLAB_SERVER = "private";
   return env;
 }
 
@@ -138,6 +141,24 @@ function createMockCodex(dir: string, opts?: {
   sendTurnCompleted?: boolean;
   /** If true, send an approval request after turn/start */
   sendApproval?: boolean;
+  /** Emit an approval request for the turn BEFORE the turn/start response,
+   *  which then follows 200 ms later — an approval racing its own start. */
+  approvalBeforeResponse?: boolean;
+  /** The method of that early request (default: a command approval). */
+  earlyRequestMethod?: string;
+  /** `thread/read` reports another client's turn in progress and turn/start
+   *  announces nothing: the start was absorbed into that turn. */
+  absorbedStart?: boolean;
+  /** A predecessor turn's completion lands right after the submission, and
+   *  our turn starts and finishes 100 ms later — all before the response. */
+  predecessorCompletion?: boolean;
+  /** A predecessor's completion lands while the broker's post-start
+   *  `thread/read` is out, and that read reports OUR turn in progress; our
+   *  turn is announced (and finished) only 500 ms after the start. */
+  predecessorDuringRead?: boolean;
+  /** `thread/read` fails; our turn is announced 300 ms after the start,
+   *  asks an approval 50 ms later, and finishes at 700 ms. */
+  undecidedThenOwn?: boolean;
   /** Delay in ms before sending turn/completed (after response) */
   turnCompletedDelay?: number;
   /** If true, write the turn/completed notification BEFORE the turn/start
@@ -189,6 +210,12 @@ function createMockCodex(dir: string, opts?: {
   const turnDelay = opts?.turnDelay ?? 0;
   const sendTurnCompleted = opts?.sendTurnCompleted ?? true;
   const sendApproval = opts?.sendApproval ?? false;
+  const approvalBeforeResponse = opts?.approvalBeforeResponse ?? false;
+  const earlyRequestMethod = opts?.earlyRequestMethod ?? "item/commandExecution/requestApproval";
+  const absorbedStart = opts?.absorbedStart ?? false;
+  const predecessorCompletion = opts?.predecessorCompletion ?? false;
+  const predecessorDuringRead = opts?.predecessorDuringRead ?? false;
+  const undecidedThenOwn = opts?.undecidedThenOwn ?? false;
   const turnCompletedDelay = opts?.turnCompletedDelay ?? 10;
   const completeBeforeResponse = opts?.completeBeforeResponse ?? false;
   const reviewDelay = opts?.reviewDelay ?? 0;
@@ -216,6 +243,11 @@ function respond(obj) { process.stdout.write(JSON.stringify(obj) + "\\n"); }
 let buffer = "";
 let approvalIdCounter = 1;
 let turnCounter = 0;
+// Bookkeeping the hygiene tests read back through mock/state.
+const unsubscribed = [];
+const calls = [];
+const approvalAnswers = [];
+const pendingServerRequests = new Map();
 process.stdin.setEncoding("utf-8");
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -230,7 +262,64 @@ process.stdin.on("data", (chunk) => {
     // Notification — no id
     if (msg.id === undefined) continue;
 
+    // A response to one of this mock's own server requests (an approval
+    // it emitted): hand it to whoever is waiting, never treat it as a call.
+    if (msg.method === undefined) {
+      const waiter = pendingServerRequests.get(String(msg.id));
+      if (waiter) { pendingServerRequests.delete(String(msg.id)); waiter(msg); }
+      continue;
+    }
+
+    calls.push(msg.method);
     switch (msg.method) {
+      case "thread/resume":
+        respond({ id: msg.id, result: {
+          thread: { id: msg.params?.threadId || "thread-001", preview: "", modelProvider: "openai",
+            createdAt: Date.now(), updatedAt: Date.now(), status: { type: "idle" }, path: null, cwd: "/tmp",
+            cliVersion: "0.1.0", source: "mock", name: null, agentNickname: null, agentRole: null, gitInfo: null, turns: [] },
+          model: "gpt-5.3-codex", modelProvider: "openai", cwd: "/tmp", approvalPolicy: "never", sandbox: null,
+        }});
+        break;
+
+      case "thread/unsubscribe":
+        unsubscribed.push(msg.params?.threadId);
+        respond({ id: msg.id, result: { status: "unsubscribed" } });
+        break;
+
+      case "thread/loaded/list":
+        respond({ id: msg.id, result: { data: [], nextCursor: null } });
+        break;
+
+      case "mock/state":
+        respond({ id: msg.id, result: { unsubscribed: [...unsubscribed], calls: [...calls], approvalAnswers: [...approvalAnswers] } });
+        break;
+
+      case "mock/foreignApproval": {
+        // A server request for a thread the caller names (default: one no
+        // broker client ever claimed) — what a shared app-server sends every
+        // subscribed client when the Codex app or a TUI is the one running
+        // the turn. The method param picks the request kind. Reports whether the
+        // broker answered within the wait (generous: CI runners are slow).
+        const reqId = "foreign-" + (approvalIdCounter++);
+        let answer = null;
+        pendingServerRequests.set(reqId, (m) => { answer = m; });
+        respond({
+          id: reqId,
+          method: msg.params?.method ?? "item/commandExecution/requestApproval",
+          params: { threadId: msg.params?.threadId ?? "foreign-001", turnId: "turn-f", itemId: "item-f", command: "rm -rf /", cwd: "/tmp" },
+        });
+        setTimeout(() => {
+          pendingServerRequests.delete(reqId);
+          respond({ id: msg.id, result: { answered: answer !== null, answer } });
+        }, 1500);
+        break;
+      }
+
+      case "turn/steer":
+        // Joining a running turn: the answer names the turn that is running.
+        respond({ id: msg.id, result: { turnId: "turn-active" } });
+        break;
+
       case "initialize":
         respond({ id: msg.id, result: { userAgent: "mock-codex/0.1.0" } });
         break;
@@ -321,6 +410,45 @@ process.stdin.on("data", (chunk) => {
           },
         });
         ` : ""}
+        ${undecidedThenOwn ? `
+        setTimeout(() => {
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "inProgress", error: null } } });
+          setTimeout(() => {
+            const lateId = "approval-" + (approvalIdCounter++);
+            pendingServerRequests.set(lateId, (m) => { approvalAnswers.push(m.result ?? m.error ?? null); });
+            respond({ id: lateId, method: "item/commandExecution/requestApproval", params: { threadId: threadId, turnId: "turn-001", itemId: "item-late", command: "echo late", cwd: "/tmp" } });
+          }, 50);
+          setTimeout(() => {
+            respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+          }, 400);
+        }, 300);
+        ` : ""}
+        ${predecessorDuringRead ? `
+        setTimeout(() => {
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "inProgress", error: null } } });
+          respond({ method: "item/agentMessage/delta", params: { threadId: threadId, turnId: "turn-001", itemId: "m1", delta: "own output" } });
+          respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+        }, 500);
+        ` : ""}
+        ${predecessorCompletion ? `
+        respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-000", items: [], status: "completed", error: null } } });
+        setTimeout(() => {
+          respond({ method: "turn/started", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "inProgress", error: null } } });
+          respond({ method: "item/agentMessage/delta", params: { threadId: threadId, turnId: "turn-001", itemId: "m1", delta: "own output" } });
+          respond({ method: "turn/completed", params: { threadId: threadId, turn: { id: "turn-001", items: [], status: "completed", error: null } } });
+        }, 100);
+        ` : ""}
+        ${approvalBeforeResponse ? `
+        {
+          const earlyId = "approval-" + (approvalIdCounter++);
+          pendingServerRequests.set(earlyId, (m) => { approvalAnswers.push(m.result ?? m.error ?? null); });
+          respond({
+            id: earlyId,
+            method: ${JSON.stringify(earlyRequestMethod)},
+            params: { threadId: threadId, turnId: "turn-001", itemId: "item-early", command: "echo early", cwd: "/tmp" },
+          });
+        }
+        ` : ""}
         setTimeout(() => {
           respond({ id: msg.id, result: {
             turn: { id: "turn-001", items: [], status: "inProgress", error: null },
@@ -402,7 +530,7 @@ process.stdin.on("data", (chunk) => {
             });
           }, ${turnCompletedDelay});
           ` : ""}
-        }, ${turnDelay});
+        }, ${approvalBeforeResponse ? 200 : turnDelay});
         break;
       }
 
@@ -456,13 +584,28 @@ process.stdin.on("data", (chunk) => {
         break;
 
       case "thread/read":
+        ${undecidedThenOwn ? `
+        respond({ id: msg.id, error: { code: -32000, message: "simulated read failure" } });
+        break;
+        ` : ""}
+        ${predecessorDuringRead ? `
+        respond({ method: "turn/completed", params: { threadId: msg.params?.threadId || "thread-001", turn: { id: "turn-000", items: [], status: "completed", error: null } } });
+        setTimeout(() => respond({ id: msg.id, result: { thread: {
+          id: msg.params?.threadId || "thread-001", preview: "", modelProvider: "openai", createdAt: Date.now(), updatedAt: Date.now(),
+          status: { type: "active" }, path: null, cwd: "/tmp", cliVersion: "0.1.0", source: "mock", name: null,
+          agentNickname: null, agentRole: null, gitInfo: null,
+          turns: [{ id: "turn-001", status: "inProgress", items: [], error: null }],
+        }}}), 100);
+        break;
+        ` : ""}
         respond({ id: msg.id, result: {
           thread: {
             id: msg.params?.threadId || "thread-001", preview: "",
             modelProvider: "openai", createdAt: Date.now(), updatedAt: Date.now(),
             status: { type: "idle" }, path: null, cwd: "/tmp",
             cliVersion: "0.1.0", source: "mock", name: null,
-            agentNickname: null, agentRole: null, gitInfo: null, turns: [],
+            agentNickname: null, agentRole: null, gitInfo: null,
+            turns: ${absorbedStart ? '[{ id: "theirs-1", status: "inProgress", items: [], error: null }]' : '[]'},
           },
         }});
         break;
@@ -492,6 +635,68 @@ process.stdin.on("error", () => process.exit(1));
   return dir; // The dir to prepend to PATH
 }
 
+/**
+ * Serve the mock app-server over a unix-socket WebSocket, the way Codex's
+ * shared app-server listens on its control socket: each connection gets its
+ * own mock child, JSON lines bridged both ways. Lets a broker attach to the
+ * mock as a SHARED server (`CODEX_COLLAB_SERVER=shared` plus the socket
+ * override), so the shared-only routing paths run against real framing.
+ */
+function serveMockOverSocket(mockCodexDir: string, socketPath: string): { stop: () => void } {
+  const childOf = new Map<object, Subprocess>();
+  const server = Bun.serve({
+    unix: socketPath,
+    fetch(req, srv) {
+      if (srv.upgrade(req)) return undefined as unknown as Response;
+      return new Response("not a websocket", { status: 400 });
+    },
+    websocket: {
+      open(ws) {
+        const child = Bun.spawn([join(mockCodexDir, "codex"), "app-server"], {
+          stdin: "pipe", stdout: "pipe", stderr: "inherit", env: envWithPathPrefix(mockCodexDir),
+        });
+        childOf.set(ws, child);
+        spawnedProcesses.push(child);
+        void (async () => {
+          const reader = child.stdout.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value);
+            let i: number;
+            while ((i = buf.indexOf("\n")) !== -1) {
+              const line = buf.slice(0, i).trim();
+              buf = buf.slice(i + 1);
+              if (line) { try { ws.send(line); } catch { /* client gone */ } }
+            }
+          }
+        })();
+      },
+      message(ws, raw) {
+        const child = childOf.get(ws);
+        if (!child) return;
+        const stdin = child.stdin as FileSink;
+        stdin.write(String(raw) + "\n");
+        stdin.flush();
+      },
+      close(ws) {
+        const child = childOf.get(ws);
+        childOf.delete(ws);
+        if (child) { try { (child.stdin as FileSink).end(); } catch { /* already closed */ } child.kill(); }
+      },
+    },
+  });
+  return {
+    stop: () => {
+      server.stop(true);
+      for (const child of childOf.values()) child.kill();
+      childOf.clear();
+    },
+  };
+}
+
 /** Spawn broker-server as a subprocess with the mock codex on PATH. */
 function spawnBroker(
   endpoint: string,
@@ -499,6 +704,7 @@ function spawnBroker(
   opts?: {
     idleTimeout?: number;
     cwd?: string;
+    env?: Record<string, string>;
   },
 ): Subprocess {
   const brokerPath = join(import.meta.dir, "broker-server.ts");
@@ -515,7 +721,7 @@ function spawnBroker(
     // Peer off: these tests exercise routing, and an active peer would
     // write into the developer's REAL Claude session registry and keep the
     // broker resident past its idle timeout while any real session lives.
-    env: { ...envWithPathPrefix(mockCodexDir), CODEX_COLLAB_PEER: "off" },
+    env: { ...envWithPathPrefix(mockCodexDir), CODEX_COLLAB_PEER: "off", ...(opts?.env ?? {}) },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -1775,6 +1981,427 @@ setInterval(() => {}, 1000);
 
   // ── Approval forwarding ───────────────────────────────────────────────────
 
+  describe("shared app-server hygiene", () => {
+    test.skipIf(process.platform === "win32")("an approval that outruns its own turn/start answer is held for the claim, then forwarded", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { approvalBeforeResponse: true, sendTurnCompleted: false });
+      // Attached as a SHARED server: a claim settles only when its start
+      // answers, and an approval arriving before that must wait, not vanish.
+      const codexSock = join(tempDir, "cx.sock");
+      const fake = serveMockOverSocket(mockDir, codexSock);
+      const proc = spawnBroker(endpoint, mockDir, { env: { CODEX_COLLAB_SERVER: "shared", CODEX_COLLAB_SERVER_SOCKET: codexSock } });
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connect(sockPath);
+        const init = (await client.request("initialize", {
+          clientInfo: { name: "test", title: null, version: "0.0.1" },
+          capabilities: { experimentalApi: false },
+        })) as { server?: { kind?: string } };
+        client.send({ method: "initialized" });
+        expect(init.server?.kind).toBe("shared");
+        client.onRequest((msg) => {
+          if (msg.method === "item/commandExecution/requestApproval") client.send({ id: msg.id, result: { decision: "accept" } });
+        });
+        await client.request("thread/start", { cwd: tempDir });
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        await waitFor(() => client.messages.some((m) => m.method === "item/commandExecution/requestApproval"), 3000);
+        let answers: unknown[] = [];
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+          answers = ((await client.request("mock/state")) as { approvalAnswers: unknown[] }).approvalAnswers;
+          if (answers.length > 0) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(answers).toEqual([{ decision: "accept" }]);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+        fake.stop();
+      }
+    }, 15_000);
+
+    test.skipIf(process.platform === "win32")("a start absorbed into another client's running turn leaves that turn's question to its owner", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      // The question arrives before the start answers; the start was
+      // absorbed into a turn another client is running (thread/read says
+      // so, and no turn of ours is ever announced).
+      const mockDir = createMockCodex(tempDir, {
+        approvalBeforeResponse: true, earlyRequestMethod: "item/tool/requestUserInput", absorbedStart: true, sendTurnCompleted: false,
+      });
+      const codexSock = join(tempDir, "cx.sock");
+      const fake = serveMockOverSocket(mockDir, codexSock);
+      const proc = spawnBroker(endpoint, mockDir, { env: { CODEX_COLLAB_SERVER: "shared", CODEX_COLLAB_SERVER_SOCKET: codexSock } });
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        client.onRequest((msg) => {
+          if (msg.method === "item/tool/requestUserInput") client.send({ id: msg.id, result: { answers: {} } });
+        });
+        await client.request("thread/start", { cwd: tempDir });
+        const answer = (await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] })) as { absorbedBy?: unknown };
+        expect(answer.absorbedBy).toBe("theirs-1"); // the broker's verdict rides on the answer
+        await new Promise((r) => setTimeout(r, 800));
+        const state = (await client.request("mock/state")) as { approvalAnswers: unknown[]; calls: string[] };
+        // Neither declined by the broker nor forwarded to a client that
+        // never owned the turn.
+        expect(state.approvalAnswers).toEqual([]);
+        expect(client.messages.some((m) => m.method === "item/tool/requestUserInput")).toBe(false);
+        expect(state.calls).toContain("thread/read");
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+        fake.stop();
+      }
+    }, 15_000);
+
+    test.skipIf(process.platform === "win32")("a start that fails after a turn was announced owns nothing on a shared server: no interrupt, thread released", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      // The mock announces turn-001, then fails the request. On a shared
+      // server that announcement could be another client's turn.
+      const mockDir = createMockCodex(tempDir, { startedThenError: true });
+      const codexSock = join(tempDir, "cx.sock");
+      const fake = serveMockOverSocket(mockDir, codexSock);
+      const proc = spawnBroker(endpoint, mockDir, { env: { CODEX_COLLAB_SERVER: "shared", CODEX_COLLAB_SERVER_SOCKET: codexSock } });
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        await client.request("thread/start", { cwd: tempDir });
+        const failed = await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] }).catch((e: unknown) => e) as Error;
+        expect(failed.message).toContain("simulated request failure");
+        await new Promise((r) => setTimeout(r, 300));
+        expect(existsSync(join(mockDir, "interrupts.log"))).toBe(false);
+        // The claim is gone: a new start on the thread goes through.
+        const again = (await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "again" }] })) as { turn: { id: string } };
+        expect(again.turn.id).toBe("turn-002");
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+        fake.stop();
+      }
+    }, 15_000);
+
+    test("an interrupt from a client whose claim only joined a turn is refused, never retargeted onto it", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false, activeTurnId: "turn-active" });
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        await client.request("thread/start", { cwd: tempDir });
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        await client.request("broker/joined", { threadId: "thread-001", turnId: "turn-active" });
+        // A stale id the server would answer with "expected active turn id …
+        // but found turn-active" — which must not be retargeted.
+        const err = await client.request("turn/interrupt", { threadId: "thread-001", turnId: "turn-001" }).catch((e: unknown) => e) as Error;
+        expect(err.message).toContain("belongs to another client");
+        await new Promise((r) => setTimeout(r, 100));
+        expect(existsSync(join(mockDir, "interrupts.log"))).toBe(false);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    }, 15_000);
+
+    test.skipIf(process.platform === "win32")("shutdown waits for a start in flight to settle, then stops the turn it accepted", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { turnDelay: 300, sendTurnCompleted: false });
+      const codexSock = join(tempDir, "cx.sock");
+      const fake = serveMockOverSocket(mockDir, codexSock);
+      const proc = spawnBroker(endpoint, mockDir, { env: { CODEX_COLLAB_SERVER: "shared", CODEX_COLLAB_SERVER_SOCKET: codexSock } });
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        await client.request("thread/start", { cwd: tempDir });
+        const start = client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] }).catch(() => undefined);
+        await new Promise((r) => setTimeout(r, 50)); // the start is out, unanswered
+        const other = await TestClient.connectAndInit(sockPath);
+        await other.request("broker/shutdown", {}).catch(() => undefined);
+        await proc.exited;
+        await start;
+        // The shared server outlives the broker: the turn our start became
+        // was stopped, not left running for nobody.
+        const log = existsSync(join(mockDir, "interrupts.log")) ? readFileSync(join(mockDir, "interrupts.log"), "utf8") : "";
+        expect(log).toContain("turn-001");
+      } finally {
+        proc.kill();
+        fake.stop();
+      }
+    }, 15_000);
+
+    test.skipIf(process.platform === "win32")("a predecessor's completion held before our turn appears does not end the claim: our turn's own story still arrives", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { predecessorCompletion: true, turnDelay: 250, sendTurnCompleted: false });
+      const codexSock = join(tempDir, "cx.sock");
+      const fake = serveMockOverSocket(mockDir, codexSock);
+      const proc = spawnBroker(endpoint, mockDir, { env: { CODEX_COLLAB_SERVER: "shared", CODEX_COLLAB_SERVER_SOCKET: codexSock } });
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+        await client.request("thread/start", { cwd: tempDir });
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed" && (n.params as { turn?: { id?: string } }).turn?.id === "turn-001"), 3000);
+        expect(notifications.some((n) => n.method === "item/agentMessage/delta")).toBe(true);
+        // The claim ended with OUR turn, not the predecessor's: the thread is free again.
+        const again = (await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "again" }] })) as { turn: { id: string } };
+        expect(again.turn.id).toBe("turn-001");
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+        fake.stop();
+      }
+    }, 15_000);
+
+    test.skipIf(process.platform === "win32")("a predecessor's completion landing during the ownership read does not outrank the thread reporting our turn", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { predecessorDuringRead: true, sendTurnCompleted: false });
+      const codexSock = join(tempDir, "cx.sock");
+      const fake = serveMockOverSocket(mockDir, codexSock);
+      const proc = spawnBroker(endpoint, mockDir, { env: { CODEX_COLLAB_SERVER: "shared", CODEX_COLLAB_SERVER_SOCKET: codexSock } });
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+        await client.request("thread/start", { cwd: tempDir });
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed" && (n.params as { turn?: { id?: string } }).turn?.id === "turn-001"), 4000);
+        expect(notifications.some((n) => n.method === "item/agentMessage/delta")).toBe(true);
+        const again = (await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "again" }] })) as { turn: { id: string } };
+        expect(again.turn.id).toBe("turn-001");
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+        fake.stop();
+      }
+    }, 15_000);
+
+    test.skipIf(process.platform === "win32")("a start the server would not be read after keeps settling until the turn announces itself, then answers for it", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { undecidedThenOwn: true, sendTurnCompleted: false });
+      const codexSock = join(tempDir, "cx.sock");
+      const fake = serveMockOverSocket(mockDir, codexSock);
+      const proc = spawnBroker(endpoint, mockDir, { env: { CODEX_COLLAB_SERVER: "shared", CODEX_COLLAB_SERVER_SOCKET: codexSock } });
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+        client.onRequest((msg) => {
+          if (msg.method === "item/commandExecution/requestApproval") client.send({ id: msg.id, result: { decision: "accept" } });
+        });
+        await client.request("thread/start", { cwd: tempDir });
+        const answer = (await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] })) as { absorbedBy?: unknown };
+        expect("absorbedBy" in answer).toBe(false); // undecided: no verdict to ride on
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed" && (n.params as { turn?: { id?: string } }).turn?.id === "turn-001"), 4000);
+        // Our turn's announcement settled the claim: its approval was ours to answer.
+        const state = (await client.request("mock/state")) as { approvalAnswers: unknown[] };
+        expect(state.approvalAnswers).toEqual([{ decision: "accept" }]);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+        fake.stop();
+      }
+    }, 15_000);
+
+    test("an interrupt from any connection naming a turn a claim only joined is refused", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false, activeTurnId: "turn-active" });
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const owner = await TestClient.connectAndInit(sockPath);
+        await owner.request("thread/start", { cwd: tempDir });
+        await owner.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        await owner.request("broker/joined", { threadId: "thread-001", turnId: "turn-active" });
+        // `kill` arrives on its own connection, naming the joined turn.
+        const killer = await TestClient.connectAndInit(sockPath);
+        const err = await killer.request("turn/interrupt", { threadId: "thread-001", turnId: "turn-active" }).catch((e: unknown) => e) as Error;
+        expect(err.message).toContain("belongs to another client");
+        await new Promise((r) => setTimeout(r, 100));
+        expect(existsSync(join(mockDir, "interrupts.log"))).toBe(false);
+        await killer.close();
+        await owner.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    }, 15_000);
+
+    test("a thread is unsubscribed once its turn ends and nothing here needs it", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: true });
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+        await client.request("thread/start", { cwd: tempDir });
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed"), 5000);
+        // The release is deferred behind the peer hook; poll the mock's ledger.
+        let released: string[] = [];
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+          released = ((await client.request("mock/state")) as { unsubscribed: string[] }).unsubscribed;
+          if (released.includes("thread-001")) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(released).toContain("thread-001");
+        // The subscription is a per-connection fact, not a claim: the
+        // thread is free for a new turn, which resubscribes on resume.
+        await client.request("thread/resume", { threadId: "thread-001" }).catch(() => undefined);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("a request of any kind for a thread nobody here owns gets no answer, while our own thread's still gets method-not-found", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      // The turn must still be ours when the probe lands: a completion 10 ms
+      // after the start would release the claim first on a slow runner.
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: false });
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const foreign = (await client.request("mock/foreignApproval", { method: "item/tool/requestUserInput" })) as { answered: boolean };
+        expect(foreign.answered).toBe(false);
+        // A thread this client claimed: the old answer stands, so the server
+        // treats an unhandled question as declined and the turn moves on.
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "hi" }] });
+        const ours = (await client.request("mock/foreignApproval", { method: "item/tool/requestUserInput", threadId: "thread-001" })) as { answered: boolean; answer: { error?: { code?: number } } };
+        expect(ours.answered).toBe(true);
+        expect(ours.answer.error?.code).toBe(-32601);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("a turn joined with turn/steer routes its events here but leaves its approvals to the client that owns it", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir);
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const joined = (await client.request("turn/steer", { threadId: "thread-001", expectedTurnId: "turn-active", input: [{ type: "text", text: "and this" }] })) as { turnId: string };
+        expect(joined.turnId).toBe("turn-active");
+        const outcome = (await client.request("mock/foreignApproval", { threadId: "thread-001" })) as { answered: boolean };
+        expect(outcome.answered).toBe(false);
+        expect(client.messages.some((m) => m.method === "item/commandExecution/requestApproval")).toBe(false);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("a client that joined a turn and then disconnected leaves that turn running and its claim released", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir);
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const joiner = await TestClient.connectAndInit(sockPath);
+        await joiner.request("turn/steer", { threadId: "thread-001", expectedTurnId: "turn-active", input: [{ type: "text", text: "x" }] });
+        await joiner.close(); // gone mid-turn — for an owned turn this arms the orphan watchdog and interrupts
+        const other = await TestClient.connectAndInit(sockPath);
+        // The claim is gone at once: a new turn on the thread is not refused as busy …
+        let started = false;
+        for (let i = 0; i < 50 && !started; i++) {
+          try { await other.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "next" }] }); started = true; } catch { await new Promise((r) => setTimeout(r, 100)); }
+        }
+        expect(started).toBe(true);
+        // … and nothing was interrupted.
+        expect(existsSync(join(mockDir, "interrupts.log"))).toBe(false);
+        await other.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("a turn on a thread the broker released is re-subscribed before it starts", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir, { sendTurnCompleted: true });
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const notifications = collectNotifications(client);
+        await client.request("thread/start", { cwd: tempDir });
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "one" }] });
+        await waitFor(() => notifications.some((n) => n.method === "turn/completed"), 5000);
+        // Idle release lands a tick later; wait for the unsubscribe to reach the mock.
+        for (let i = 0; i < 60; i++) {
+          if (((await client.request("mock/state")) as { unsubscribed: string[] }).unsubscribed.includes("thread-001")) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        const before = ((await client.request("mock/state")) as { calls: string[] }).calls;
+        expect(before).not.toContain("thread/resume");
+        // A second turn without an explicit resume (the failed-steer fallback
+        // shape). By the time turn/start answers, the broker has already
+        // re-subscribed — the resume precedes the start in the mock's ledger.
+        await client.request("turn/start", { threadId: "thread-001", input: [{ type: "text", text: "two" }] });
+        const calls = ((await client.request("mock/state")) as { calls: string[] }).calls;
+        const lastResume = calls.lastIndexOf("thread/resume");
+        const lastStart = calls.lastIndexOf("turn/start");
+        expect(lastResume).toBeGreaterThan(-1);
+        expect(lastResume).toBeLessThan(lastStart);
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+
+    test("an approval for a thread nobody here owns is left for its owner to answer", async () => {
+      const sockPath = join(tempDir, "broker.sock");
+      const endpoint = endpointFor(sockPath);
+      const mockDir = createMockCodex(tempDir);
+      const proc = spawnBroker(endpoint, mockDir);
+      await waitForSocket(sockPath);
+      try {
+        const client = await TestClient.connectAndInit(sockPath);
+        const outcome = (await client.request("mock/foreignApproval")) as { answered: boolean; answer: unknown };
+        // Neither answered upstream nor forwarded to a client that never
+        // claimed the thread.
+        expect(outcome.answered).toBe(false);
+        expect(client.messages.some((m) => m.method === "item/commandExecution/requestApproval")).toBe(false);
+        // The broker is still healthy afterwards.
+        expect(await client.request("thread/start", { cwd: tempDir })).toBeDefined();
+        await client.close();
+      } finally {
+        proc.kill();
+        await proc.exited;
+      }
+    });
+  });
+
   describe("approval forwarding", () => {
     test("client receives forwarded approval request and responds — round-trip", async () => {
 
@@ -2492,7 +3119,7 @@ setInterval(() => {}, 1000);
         await new Promise((r) => setTimeout(r, 50));
         await client1.close();
 
-        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        await waitFor(() => { try { return readFileSync(interruptLog, "utf-8").includes("\n"); } catch { return false; } }, 5000, 50); // a complete line, not merely the file
         const interrupts = readFileSync(interruptLog, "utf-8")
           .trim()
           .split("\n")
@@ -2532,7 +3159,7 @@ setInterval(() => {}, 1000);
         await new Promise((r) => setTimeout(r, 100));
         await client1.close();
 
-        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        await waitFor(() => { try { return readFileSync(interruptLog, "utf-8").includes("\n"); } catch { return false; } }, 5000, 50); // a complete line, not merely the file
         const interrupts = readFileSync(interruptLog, "utf-8")
           .trim()
           .split("\n")
@@ -2629,7 +3256,7 @@ setInterval(() => {}, 1000);
         expect(failed).toBe(true);
 
         // The abandoned turn is interrupted rather than left to run on.
-        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        await waitFor(() => { try { return readFileSync(interruptLog, "utf-8").includes("\n"); } catch { return false; } }, 5000, 50); // a complete line, not merely the file
         const interrupts = readFileSync(interruptLog, "utf-8")
           .trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
         expect(interrupts.some((i) => i.turnId === "turn-001")).toBe(true);
@@ -2726,7 +3353,7 @@ setInterval(() => {}, 1000);
         expect(failed).toBe(true);
 
         // It reached the stale id only — the active turn was never touched.
-        await waitFor(() => existsSync(interruptLog), 5000, 50);
+        await waitFor(() => { try { return readFileSync(interruptLog, "utf-8").includes("\n"); } catch { return false; } }, 5000, 50); // a complete line, not merely the file
         const ids = readFileSync(interruptLog, "utf-8").trim().split("\n")
           .filter(Boolean).map((l) => JSON.parse(l).turnId);
         expect(ids).toContain("turn-001");

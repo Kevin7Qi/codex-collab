@@ -11,6 +11,7 @@ import { peerCapability, peerNameFor, sessionsDir } from "../peer";
 import { listRuns } from "../threads";
 import { ensureConnection, isBrokerAlive, isBrokerBusyError, loadBrokerState } from "../broker";
 import { connectToBroker } from "../broker-client";
+import { attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 
 export interface PeerState {
   pid: number;
@@ -78,6 +79,33 @@ export async function handlePeer(args: string[]): Promise<void> {
     } else if (brokerLive && !capability.ok && state && isAlive(state.pid)) {
       why = `still serves a peer though peer messaging is off (${capability.reason})`;
     }
+    // The app-server is chosen at startup too. A broker that started
+    // before Codex's shared server came up, or before `config server`
+    // changed, keeps the one it has; `peer up` is the documented way to
+    // move it, so compare what it runs on with what the setting says now.
+    let serverWhy: string | null = null;
+    if (brokerLive && !why && broker?.endpoint) {
+      const { preference } = serverPreference();
+      let kind: string | null = null;
+      try {
+        const probe = await connectToBroker({ endpoint: broker.endpoint });
+        kind = probe.server.kind;
+        await probe.close().catch(() => undefined);
+      } catch { /* went away between the probe and now */ }
+      const sharedAvailable = attachSupported() && existsSync(controlSocketPath());
+      if (kind === "private" && preference === "shared") {
+        // `shared` forbids the private server the broker is on — replace it
+        // either way; without a socket the replacement fails and says so.
+        serverWhy = sharedAvailable
+          ? `runs a private app-server though \`config server\` is shared and Codex's is listening at ${controlSocketPath()}`
+          : `runs a private app-server though \`config server\` is shared (no Codex app-server is listening at ${controlSocketPath()} — the replacement will report that)`;
+      } else if (kind === "private" && preference === "auto" && sharedAvailable) {
+        serverWhy = `runs a private app-server though Codex's shared one is listening at ${controlSocketPath()}`;
+      } else if (kind === "shared" && preference === "private") {
+        serverWhy = "is attached to Codex's shared app-server though `config server` is private";
+      }
+      if (serverWhy) why = serverWhy;
+    }
     if (why && broker) {
       const running = listRuns(stateDir).filter((r) => r.status === "running");
       if (running.length > 0) {
@@ -85,7 +113,7 @@ export async function handlePeer(args: string[]): Promise<void> {
         console.error(`Wait for ${running.length === 1 ? "it" : "them"} to finish, or stop ${running.length === 1 ? "it" : "them"} with \`codex-collab kill\`, then run \`codex-collab peer up\` again.`);
         process.exit(1);
       }
-      console.log(`Broker is running and ${why} — stopping it${capability.ok ? " so a new one can register the peer" : ""}.`);
+      console.log(`Broker is running and ${why} — stopping it${serverWhy ? " so its replacement starts on the right app-server" : capability.ok ? " so a new one can register the peer" : ""}.`);
       try {
         const client = await connectToBroker({ endpoint: broker.endpoint! });
         try {
@@ -107,10 +135,19 @@ export async function handlePeer(args: string[]): Promise<void> {
         await new Promise((r) => setTimeout(r, 100));
       }
     }
-    if (capability.ok) {
+    // `peer up` is the documented way to start or restart the workspace
+    // broker in every mode: with peer messaging it registers the peer, and
+    // without it the broker still needs starting — on the app-server the
+    // setting names — which nothing else does until the first run.
+    // A broker stopped above (`why`) is replaced whatever the reason: one
+    // that served a peer though messaging is now off still needs to run.
+    if (capability.ok || why || !brokerLive) {
       // Spawning the broker starts the peer with it; the connection itself is
       // only the vehicle and closes right away.
       const client = await ensureConnection(cwd);
+      if (serverWhy) console.log(`Broker restarted on a ${client.server.kind} app-server.`);
+      else if (why && !capability.ok) console.log(`Broker restarted on a ${client.server.kind} app-server, without a peer.`);
+      else if (!brokerLive && !capability.ok) console.log(`Broker started on a ${client.server.kind} app-server.`);
       await client.close();
     }
     // Fall through to status so `peer up` reports what it achieved.

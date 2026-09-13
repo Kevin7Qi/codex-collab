@@ -44,7 +44,8 @@ import {
   pruneRuns,
 } from "./threads";
 import { EventDispatcher } from "./events";
-import { config, resolveModel, resolveWorkspaceDir, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
+import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
+import { resolveModelDefaults } from "./models";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -67,11 +68,53 @@ export interface PeerHost {
   releaseThread(threadId: string): void;
   /** True when a turn is running (or starting) on the thread. */
   threadHasTurn(threadId: string): boolean;
+  /** The turn on `threadId` is not one of ours to speak into freely: the
+   *  claim only joined another client's turn, or has yet to learn whose
+   *  turn it stands for. A message for it is checked against the sandbox
+   *  that turn runs under, like a join. */
+  turnIsForeign?(threadId: string): boolean;
   /** Stop the peer-owned turn running on the thread (pausing an active goal
    *  first, as `kill` does). Resolves false when no peer turn runs there —
    *  nothing to stop — and rejects when the turn's id is not known yet. On
    *  true, the turn's own turn/completed follows. */
   interruptThread(threadId: string): Promise<boolean>;
+  /** Make sure the broker's connection is subscribed to the thread before
+   *  a turn starts on it — a turn on an unsubscribed thread runs with no
+   *  events reaching us. `resumeParams` is applied only when the server
+   *  has unloaded the thread (a rejoin keeps a loaded thread as it is).
+   *  Resolves to the server's thread/resume answer, or null when nothing
+   *  had to be done. */
+  ensureSubscribed(
+    threadId: string,
+    resumeParams: Record<string, unknown>,
+    /** Rejoin only if the server still holds the thread loaded. */
+    opts?: { onlyIfLoaded?: boolean },
+  ): Promise<Record<string, unknown> | null>;
+  /** The peer no longer keeps the thread loaded (its thread peer retired):
+   *  let the broker drop the subscription if nothing else needs it. */
+  releaseThreadSubscription(threadId: string): void;
+  /** On a shared app-server, the id of a turn another client is running on
+   *  the thread right now; null when idle, or on a private server. */
+  activeExternalTurn(threadId: string): Promise<string | null>;
+  /** Steer `input` into that turn instead of starting one. The broker
+   *  marks the peer's claim joined — the turn stays the other client's —
+   *  and resolves to the joined turn's id. Rejects if the turn is gone. */
+  joinTurn(threadId: string, expectedTurnId: string, input: unknown[]): Promise<string>;
+  /** The peer's turn/start succeeded. The broker settles the claim from
+   *  what it held meanwhile and, when that decides nothing, from the turn
+   *  the thread reports: our turn was seen starting (`ownSeen`), or the
+   *  input was absorbed into another client's turn (`absorbedBy`, adopted
+   *  as a join). Until it answers, the claim keeps settling. */
+  turnStarted(
+    threadId: string,
+    turnId: string | null,
+    /** Runs with the verdict before any held event — and the reply it may
+     *  carry — is let through. */
+    beforeReplay?: (verdict: { ownSeen: boolean; absorbedBy: string | null }) => Promise<void> | void,
+  ): Promise<{ ownSeen: boolean; absorbedBy: string | null }> | { ownSeen: boolean; absorbedBy: string | null };
+  /** turn/start was answered, but another client's turn had started in
+   *  between and absorbed the input: the claim stands for THAT turn, as a
+   *  join. */
   log(line: string): void;
 }
 
@@ -111,6 +154,13 @@ export interface Conversation {
   /** "auto" when the conversation runs under Guardian review. Stored so a
    *  recreated thread (unrecoverable-thread recovery) keeps the setting. */
   approval?: string;
+  /** Who created the thread. A conversation the peer started declared the
+   *  consult tool on it, and that tool survives only while the thread stays
+   *  loaded — so the peer keeps such threads subscribed until their thread
+   *  peer retires. A CLI-started (adopted) thread never had it. Absent on
+   *  records from before this field, which reads as "cli": after a broker
+   *  restart the tool is gone from a resumed thread anyway. */
+  origin?: "peer" | "cli";
   /** Last inbound/outbound activity, for thread-peer retirement. */
   lastActivity: number;
   /** reply path → when THAT sender last spoke to this conversation. The
@@ -184,6 +234,14 @@ interface PendingConsult {
   asked: Set<string>;
   resolve: (answer: string | null) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Another client of a shared server answered the tool call first (a
+   *  TUI observing the thread declines every dynamic tool call): Codex has
+   *  gone on without the answer, which reaches it as an injected message
+   *  instead when it arrives. */
+  resolvedElsewhere?: boolean;
+  /** The server's id for the tool call, to tell its settlement from any
+   *  other request's on the thread. */
+  requestId: string | null;
 }
 
 /** Consult answers carry judgment, not permission — fail-open like the ask
@@ -425,6 +483,37 @@ export function extractTopic(text: string): { topic: string | null; body: string
 export function threadIsGone(detail: string): boolean {
   return /\bnot found\b/i.test(detail) || /\bis archived\b/i.test(detail);
 }
+
+/** Codex (0.145+) lets one process write a thread at a time; a resume of a
+ *  thread another app-server holds — the Codex app's, a `codex` session's,
+ *  a daemon's — is refused with this wording. Not a lost thread: it is
+ *  intact, merely in use elsewhere, and free again a minute or so after
+ *  that process leaves it idle. */
+export function threadHeldElsewhere(detail: string): boolean {
+  return /\balready has an active writer\b/i.test(detail);
+}
+
+/** A `kill` cancelled a peer turn that was still starting. */
+class StartCancelled extends Error {
+  constructor() {
+    super("start cancelled");
+    this.name = "StartCancelled";
+  }
+}
+
+/** A message that could not be delivered into another client's running
+ *  turn; the message text is for the sender, verbatim. */
+export class JoinRefused extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JoinRefused";
+  }
+}
+
+/** What a sender is told when its conversation's thread is held elsewhere. */
+export const THREAD_HELD_NOTICE =
+  "[codex-collab] This conversation's thread is open for writing in another Codex process (the Codex app, a `codex` session, or an app-server daemon). " +
+  "Close it there, or wait several minutes after it goes idle for the thread to be unloaded, then send your message again — nothing was lost.";
 
 /** The workspace half of every peer address this broker registers. The
  *  session registry is shared across workspaces and the name IS the
@@ -699,6 +788,13 @@ export interface Peer {
    *  tools were declared by the peer, so their calls belong to it no matter
    *  who runs the current turn. */
   ownsThread(threadId: string): boolean;
+  /** Whether this peer created `threadId` — and so declared its consult
+   *  tool, which is this peer's alone to implement. */
+  declaresConsultOn(threadId: string): boolean;
+  /** True while the peer wants the thread to stay loaded on the app-server:
+   *  a conversation it started, whose thread peer has not retired. The
+   *  broker leaves such threads subscribed when their turns end. */
+  keepsThreadLoaded(threadId: string): boolean;
   /** A CLI turn on this thread carried a sandbox override. Codex keeps a
    *  per-turn override for the turns that follow, so the conversation's
    *  recorded sandbox — the basis of the `from-mode` it attests — must
@@ -711,10 +807,21 @@ export interface Peer {
    *  irreversibly different, kinds of thread. */
   adoptThread(threadId: string, sandbox?: string): void;
   /** Handle a dynamic tool call routed from the broker. */
-  handleToolCall(params: Record<string, unknown>): Promise<Record<string, unknown>>;
+  handleToolCall(params: Record<string, unknown>, requestId?: string | null): Promise<Record<string, unknown>>;
+  /** `kill` on a conversation whose message joined another client's turn:
+   *  close the run as interrupted and stop waiting for that turn's reply.
+   *  The turn itself is untouched. True when there was such a wait. */
+  cancelJoinedWait(threadId: string): boolean;
+  /** The broker is shutting down: take in nothing new and submit no more
+   *  turns, while whatever is in flight settles. */
+  quiesce(): void;
   /** A turn ended on the thread (broker lifecycle tracking). Lets the peer
    *  wake a thread whose mid-turn message the departed turn never read. */
   onThreadTurnEnded(threadId: string): void;
+  /** A request of the thread's was answered by another client of a shared
+   *  server first (a TUI observing the thread declines dynamic tool calls):
+   *  a consult still out is delivered by injection when answered. */
+  onRequestResolvedElsewhere(threadId: string, requestId?: string | null): void;
   /** Counts of the per-thread bookkeeping, for tests. These maps are keyed
    *  by thread and cleaned on release; a count that grows across completed
    *  conversations is a leak, which is otherwise invisible from outside. */
@@ -931,6 +1038,9 @@ export function createPeer(host: PeerHost): Peer {
   let server: net.Server | null = null;
   let active = false;
   let stopped = false;
+  /** Set while the broker shuts down: nothing new is taken in or
+   *  submitted, so no turn can start after the stops were decided. */
+  let stopping = false;
   let sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   // ── Persistence (best-effort; a lost map only means a fresh thread) ──
@@ -954,6 +1064,10 @@ export function createPeer(host: PeerHost): Peer {
             effort: typeof c.effort === "string" ? c.effort : undefined,
             timeout: typeof c.timeout === "number" && c.timeout > 0 ? c.timeout : undefined,
             approval: typeof c.approval === "string" ? c.approval : undefined,
+            // A thread the peer created keeps declaring its consult tool
+            // across a broker restart on a shared server: the origin decides
+            // whether its subscription is kept, so it must come back too.
+            origin: c.origin === "peer" || c.origin === "cli" ? c.origin : undefined,
             lastActivity: typeof c.lastActivity === "number" ? c.lastActivity : Date.now(),
             // Older files carry a single timestamp (or none): credit it to
             // the counterpart they recorded, so a restart onto this build
@@ -1217,6 +1331,8 @@ export function createPeer(host: PeerHost): Peer {
     try { unlinkSync(tp.socketPath); } catch { /* none */ }
     try { unlinkSync(tp.entryPath); } catch { /* none */ }
     try { tp.holder.kill(); } catch { /* already dead */ }
+    // Nothing keeps the thread loaded now; the next message re-subscribes.
+    host.releaseThreadSubscription(threadId);
   }
 
   /** Sweep idle thread peers. The conversation record survives — the next
@@ -1278,6 +1394,7 @@ export function createPeer(host: PeerHost): Peer {
         // The sandbox the CLI actually asked for, so this conversation
         // attests its own from-mode rather than the workspace default.
         sandbox,
+        origin: "cli",
         lastActivity: Date.now(),
         lastInboundBy: {},
       });
@@ -1293,7 +1410,7 @@ export function createPeer(host: PeerHost): Peer {
    *  start, mirroring what the CLI writes so `progress`, `output`, `follow`
    *  and `threads` status answer the same questions for a messaged
    *  conversation. Best-effort: a ledger failure must never stop the turn. */
-  function beginRun(threadId: string, shortId: string, prompt: string, model?: string): string | null {
+  function beginRun(threadId: string, shortId: string, prompt: string, model?: string, phase: "starting" | "running" = "starting"): string | null {
     try {
       const runId = generateRunId();
       const logFile = runLogRelPath(shortId, runId);
@@ -1306,7 +1423,7 @@ export function createPeer(host: PeerHost): Peer {
         threadId,
         shortId,
         kind: "task",
-        phase: "running",
+        phase,
         status: "running",
         pid: process.pid,
         sessionId: null,
@@ -1402,7 +1519,9 @@ export function createPeer(host: PeerHost): Peer {
           // deadline covers it. Open one and cap it like any peer turn.
           const conv = threadConversations.get(threadId);
           if (conv) {
-            const runId = beginRun(threadId, conv.shortId ?? threadId.replace(/-/g, "").slice(-8), "(goal continuation)", conv.model);
+            // Already running: the server started it, and `kill` must be
+            // able to pause and stop it like any turn of ours.
+            const runId = beginRun(threadId, conv.shortId ?? threadId.replace(/-/g, "").slice(-8), "(goal continuation)", conv.model, "running");
             runningPeerTurns.add(threadId);
             refreshStatus(threadId);
             armDeadline(conv, runId);
@@ -1416,6 +1535,7 @@ export function createPeer(host: PeerHost): Peer {
           // There is no turn/failed notification — failure and interruption
           // arrive as turn/completed with turn.status set accordingly.
           clearDeadline(threadId); // the turn is over, run record or not
+          joinedTurns.delete(threadId);
           const texts = replyBuffers.get(threadId);
           replyBuffers.delete(threadId);
           runningPeerTurns.delete(threadId);
@@ -1506,11 +1626,21 @@ export function createPeer(host: PeerHost): Peer {
       developerInstructions: PEER_DEVELOPER_INSTRUCTIONS,
       dynamicTools: PEER_DYNAMIC_TOOLS,
     };
-    const model = conversationModel(headers.model, userConfig.model);
+    let model = conversationModel(headers.model, userConfig.model);
+    let effort = headers.effort ?? userConfig.reasoning;
+    // Nothing named a model or an effort: pick them the way the CLI does
+    // (see resolveDefaults) — the server default walked up its upgrade
+    // chain, and the strongest effort under the ceiling. A prompt typed at
+    // a terminal and the same prompt arriving as a message must not run on
+    // different models. On failure the server chooses, as before.
+    if (model === undefined || effort === undefined) {
+      const defaults = await workspaceModelDefaults(model, effort);
+      model ??= defaults?.model;
+      effort ??= defaults?.effort;
+    }
     if (model) params.model = model;
     // Reasoning effort reaches a thread only through `config` — thread/start
     // carries no top-level field for it.
-    const effort = headers.effort ?? userConfig.reasoning;
     if (effort) params.config = { model_reasoning_effort: effort };
     const result = await host.request("thread/start", params) as {
       thread: { id: string };
@@ -1552,6 +1682,40 @@ export function createPeer(host: PeerHost): Peer {
       effort,
       approval: headers.approval === "auto" ? "auto" : undefined,
     };
+  }
+
+  /** The model list is paginated and a broker lives for hours; one fetch
+   *  per new conversation would add a round-trip to every first message.
+   *  Cached for a while — long enough to matter, short enough that a model
+   *  released today is picked up today. */
+  const MODEL_DEFAULTS_TTL_MS = 60 * 60 * 1000;
+  let modelDefaultsCache: { at: number; forModel: string | undefined; value: { model?: string; effort?: string } | null } | null = null;
+  async function workspaceModelDefaults(
+    presetModel: string | undefined,
+    presetEffort: string | undefined,
+  ): Promise<{ model?: string; effort?: string } | null> {
+    // What is cached is derived from the model alone — the best model, and
+    // the effort that model gets by default — keyed on the preset model,
+    // since one model's default effort is not another's. A message's own
+    // `effort:` is applied on top, never stored: cached, it would become
+    // every later conversation's default for an hour.
+    let derived: { model?: string; effort?: string } | null;
+    if (modelDefaultsCache && modelDefaultsCache.forModel === presetModel && Date.now() - modelDefaultsCache.at < MODEL_DEFAULTS_TTL_MS) {
+      derived = modelDefaultsCache.value;
+    } else {
+      try {
+        derived = await resolveModelDefaults(
+          { request: <T,>(method: string, params?: unknown) => host.request(method, params as Record<string, unknown>) as Promise<T> },
+          { model: presetModel, effort: undefined },
+        );
+        // An empty answer is not a default worth an hour: ask again next time.
+        if (derived !== null) modelDefaultsCache = { at: Date.now(), forModel: presetModel, value: derived };
+      } catch (e) {
+        host.log(`peer: could not resolve model defaults (${e instanceof Error ? e.message : String(e)}) — the server chooses`);
+        return null;
+      }
+    }
+    return derived ? { model: derived.model, effort: presetEffort ?? derived.effort } : null;
   }
 
   /** Minimal user-defaults read (model/sandbox). commands/shared.ts owns the
@@ -1639,6 +1803,7 @@ export function createPeer(host: PeerHost): Peer {
       conv.model = model;
       conv.effort = effort;
       conv.approval = approval;
+      conv.origin = "peer"; // a fresh thread/start declared the consult tool again
       // Keep the conversation's name across a thread restart: its name is
       // its ADDRESS, and a recreated thread is still the same conversation.
       if (!conv.label) conv.label = threadPeerLabel(deliveryText, shortId, suffix);
@@ -1695,7 +1860,11 @@ export function createPeer(host: PeerHost): Peer {
         // thread/start — say, an invalid `model:` header — or an
         // unrecoverable thread) reads as Codex silently thinking forever.
         // The message stays unmarked in the dedupe set, so a retry retries.
-        deliverTo(msg.replyPath, `[codex-collab] Your message could not be processed: ${detail}`, boundThreadId);
+        deliverTo(
+          msg.replyPath,
+          threadHeldElsewhere(detail) ? THREAD_HELD_NOTICE : `[codex-collab] Your message could not be processed: ${detail}`,
+          boundThreadId,
+        );
       });
     for (const k of keys) inboundQueues.set(k, next);
     void next.finally(() => {
@@ -1747,6 +1916,10 @@ export function createPeer(host: PeerHost): Peer {
   }
 
   async function handleInbound(msg: InboundMessage, boundThreadId: string | null = null): Promise<void> {
+    if (stopping || stopped) {
+      deliverTo(msg.replyPath, "[codex-collab] The Codex broker is shutting down; send your message again in a moment.", boundThreadId);
+      return;
+    }
     if (seenMsgIds.has(msg.msgId)) return;
 
     if (!senderIsRegistered(msg.replyPath)) {
@@ -1814,7 +1987,7 @@ export function createPeer(host: PeerHost): Peer {
         // The address may still be unreadable (a topic of only emoji, say);
         // routing does not depend on it.
         const label = (topic ? topicPeerLabel(topic, suffix) : "") || threadPeerLabel(deliveryText, shortId, suffix);
-        conv = { threadId, shortId, label, topicKey: topicRoute || undefined, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, timeout: headers.timeout, approval, lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
+        conv = { threadId, shortId, label, topicKey: topicRoute || undefined, replyPath: msg.replyPath, fromName: msg.fromName, sandbox, model, effort, timeout: headers.timeout, approval, origin: "peer", lastActivity: Date.now(), lastInboundBy: { [msg.replyPath]: Date.now() } };
         threadConversations.set(threadId, conv);
         if (topicRoute) byTopic.set(topicRoute, conv);
         createThreadPeer(threadId, shortId, label);
@@ -1876,6 +2049,16 @@ export function createPeer(host: PeerHost): Peer {
     // an instruction it can carry out twice.
     let running = host.threadHasTurn(conv.threadId);
     let replaced = false;
+
+    if (running && host.turnIsForeign?.(conv.threadId)) {
+      // Injection would put the message into another client's turn — under
+      // whatever sandbox that turn runs. The same rules as a join apply.
+      const { refused } = await verifyForeignSandbox(conv, "refuse-broader");
+      if (refused) {
+        deliverTo(conv.replyPath, `[codex-collab] ${refused}`, conv.threadId);
+        return;
+      }
+    }
 
     if (running) {
       try {
@@ -1946,6 +2129,87 @@ export function createPeer(host: PeerHost): Peer {
   /** Claim the thread and start a peer-owned turn for a delivered message.
    *  Returns false when the claim was lost to a concurrent turn/start.
    *  `nudge` overrides the standard wake-up prompt. */
+  /** Threads whose current peer run rides a turn another client owns. */
+  const joinedTurns = new Set<string>();
+  /** Threads whose peer turn is still starting: subscription, discovery
+   *  and steering in flight, ownership unknown. A `kill` meanwhile cancels
+   *  the attempt (see cancelJoinedWait) and startPeerTurn stops at its
+   *  next step. */
+  const settlingTurns = new Set<string>();
+  const cancelledStarts = new Set<string>();
+
+  /** The sandbox the thread runs under right now, from a bare rejoin (a
+   *  loaded thread answers with its effective config; overrides are not
+   *  sent, so nothing changes). Null when it cannot be read. */
+  /** A message is about to enter, or has entered, a turn another client
+   *  runs: verify the sandbox that turn runs under against the
+   *  conversation's — refuse (or, when the message is already in, adopt
+   *  and tell) a broader one, record a narrower or equal one, and never
+   *  let an unverifiable one pass. The conversation's sandbox is what the
+   *  reply's from-mode attests, and the receiver gates on it. */
+  async function verifyForeignSandbox(
+    conv: Conversation,
+    policy: "refuse-broader" | "adopt-broader",
+  ): Promise<{ refused: string | null; widened: SandboxMode | null }> {
+    const effective = await currentSandbox(conv.threadId);
+    if (!effective) {
+      return {
+        refused: "Another client is running a turn on this thread and the sandbox it runs under could not be verified, so your message was not delivered into it. Send it again once that turn ends, or start a new topic.",
+        widened: null,
+      };
+    }
+    const broader = !!conv.sandbox && sandboxRank(effective) > sandboxRank(conv.sandbox);
+    if (broader && policy === "refuse-broader") {
+      return {
+        refused: `Another client is running this thread under a broader sandbox (${effective}) than this conversation's (${conv.sandbox}), so your message was not delivered into that turn. Send it again once that turn ends, or start a new topic.`,
+        widened: null,
+      };
+    }
+    if (effective !== conv.sandbox) {
+      conv.sandbox = effective;
+      saveConversations();
+    }
+    return { refused: null, widened: broader ? effective : null };
+  }
+
+  async function currentSandbox(threadId: string): Promise<SandboxMode | null> {
+    try {
+      const result = await host.request("thread/resume", { threadId }) as { sandbox?: unknown };
+      return sandboxModeOf(result.sandbox) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function sandboxRank(mode: string): number {
+    return mode === "danger-full-access" ? 2 : mode === "workspace-write" ? 1 : 0;
+  }
+
+  /** A `kill` on a joined wait: the run closes as interrupted, the sender
+   *  hears that the wait stopped, and the other client's turn goes on. */
+  function cancelJoinedWait(threadId: string): boolean {
+    if (settlingTurns.has(threadId)) {
+      // Still starting: the attempt notices at its next step and unwinds
+      // itself; nothing on the server has been claimed for this run yet.
+      cancelledStarts.add(threadId);
+      settlingTurns.delete(threadId);
+      return true;
+    }
+    if (!joinedTurns.has(threadId)) return false;
+    joinedTurns.delete(threadId);
+    clearDeadline(threadId);
+    const audience = turnAudience.get(threadId) ?? new Set<string>();
+    turnAudience.delete(threadId);
+    replyBuffers.delete(threadId);
+    runningPeerTurns.delete(threadId);
+    finishRun(threadId, "interrupted", "", "Stopped waiting on a turn another client is running");
+    refreshStatus(threadId);
+    for (const to of audience) {
+      deliverTo(to, "[codex-collab] Stopped waiting: the turn belongs to another client of the shared app-server and continues there.", threadId);
+    }
+    return true;
+  }
+
   /** "45-second" below two minutes, "20-minute" from there: a 30-second
    *  limit described as one minute misreports what happened. */
   function describeLimit(limitSec: number): string {
@@ -2034,11 +2298,102 @@ export function createPeer(host: PeerHost): Peer {
       conv.model,
     );
     refreshStatus(conv.threadId);
+    settlingTurns.add(conv.threadId);
+    cancelledStarts.delete(conv.threadId);
+    /** A `kill` landed while this start was in flight: unwind quietly. */
+    const cancelled = (): boolean => cancelledStarts.has(conv.threadId) || stopping;
+    /** Where the message is, should the attempt be cancelled: nowhere yet,
+     *  in a turn of ours the server accepted, or in another client's turn. */
+    let delivered: "none" | "own" | "joined" = "none";
+    /** Runs with the broker's verdict before any held event — and the
+     *  reply it may carry — is let through: an absorbed message is in
+     *  another client's turn, under that turn's sandbox, which the reply
+     *  will attest. Recorded first; the sender told when it widened. */
+    const absorbedSandboxHook = async ({ absorbedBy }: { absorbedBy: string | null }): Promise<void> => {
+      if (!absorbedBy) return;
+      delivered = "joined";
+      const { refused, widened } = await verifyForeignSandbox(conv, "adopt-broader");
+      if (refused) {
+        // Fail closed: the reply's from-mode is an attestation the
+        // receiver gates on, never made on a stale record. The wait ends
+        // without the reply; the turn, another client's, runs on.
+        throw new JoinRefused(
+          "Another client's turn absorbed your message, and the sandbox it runs under could not be verified, so its reply was not delivered. Send your message again once that turn ends, or start a new topic.",
+        );
+      }
+      if (widened) {
+        deliverTo(
+          conv.replyPath,
+          `[codex-collab] Your message was folded into a turn another client had just started on this thread, which runs under a broader sandbox (${widened}) than this conversation ran under. The reply will attest that mode.`,
+          conv.threadId,
+        );
+      }
+    };
     try {
+      // A thread whose turn ended was released (unsubscribed) unless the
+      // peer kept it; events of a turn on an unsubscribed thread never
+      // reach us, so subscribe again first. Unloaded threads come back with
+      // the resume instructions, which say the consult tool is gone.
+      await host.ensureSubscribed(conv.threadId, { developerInstructions: PEER_RESUME_INSTRUCTIONS });
+      if (cancelled()) throw new StartCancelled();
+      const input = [{
+        type: "text",
+        text: buildDelegation(
+          `[message from ${conv.fromName || "a Claude peer"}]\n\n`
+          + (nudge ? `${nudge}\n\n${runPrompt}` : runPrompt),
+        ),
+      }];
+      // On a shared app-server the thread may be mid-turn under the Codex
+      // app or a TUI — nothing here claimed it, so threadHasTurn said no.
+      // The message joins that turn rather than starting one; the reply
+      // arrives with its completion, and the turn stays theirs: no
+      // deadline, no interrupt, and `kill` only stops the wait.
+      let external = await host.activeExternalTurn(conv.threadId);
+      if (cancelled()) throw new StartCancelled();
+      if (external) {
+        // The other client's turn runs under the thread's current sandbox,
+        // which may not be this conversation's. Broader than recorded means
+        // the sender's work would run with permissions it never asked for
+        // (and be attested as narrower): refuse. Equal or narrower is
+        // adopted, so the attestation stays truthful.
+        for (let attempt = 0; external && attempt < 3; attempt++) {
+          // Verified for THIS target: a replacement turn (the loop below
+          // moves to one) may run under a different sandbox.
+          const { refused } = await verifyForeignSandbox(conv, "refuse-broader");
+          if (cancelled()) throw new StartCancelled();
+          if (refused) throw new JoinRefused(refused);
+          try {
+            const joinedId = await host.joinTurn(conv.threadId, external, input);
+            delivered = "joined";
+            if (cancelled()) throw new StartCancelled(); // the claim is joined: released without an interrupt
+            if (runId) {
+              try { updateRun(host.stateDir, runId, { joined: true, phase: "running" }); } catch { /* ledger is best-effort */ }
+            }
+            settlingTurns.delete(conv.threadId);
+            joinedTurns.add(conv.threadId);
+            host.log(`peer: joined turn ${joinedId} on ${conv.threadId}, which another client is running`);
+            return "started";
+          } catch (e) {
+            if (e instanceof StartCancelled || e instanceof JoinRefused) throw e;
+            // Rolled over (a goal continuation, say): read again and join
+            // the turn now running. The same turn refusing the steer, or
+            // turns outpacing the reads, means the thread is not ours to
+            // start on either — a turn/start would be folded in unobserved.
+            const again = await host.activeExternalTurn(conv.threadId);
+            if (cancelled()) throw new StartCancelled();
+            if (again === external) {
+              throw new JoinRefused(`Another client is running a turn on this thread and it could not be joined (${e instanceof Error ? e.message : String(e)}). Send your message again once it finishes.`);
+            }
+            external = again;
+          }
+        }
+        if (external) throw new JoinRefused("Another client keeps starting turns on this thread faster than they can be joined. Send your message again in a moment.");
+      }
+      if (cancelled()) throw new StartCancelled(); // nothing submitted yet: nothing to stop
       // Every peer-started turn restates the conversation's model/effort:
       // turn/start accepts both, which is what makes a continuation
       // message's `model:`/`effort:` update actually take effect.
-      await host.request("turn/start", {
+      const started = await host.request("turn/start", {
         threadId: conv.threadId,
         ...(conv.model ? { model: conv.model } : {}),
         ...(conv.effort ? { effort: conv.effort } : {}),
@@ -2047,14 +2402,47 @@ export function createPeer(host: PeerHost): Peer {
         // run — and attest — the sandbox it records.
         ...(conv.sandbox ? { sandboxPolicy: sandboxPolicyFor(conv.sandbox as SandboxMode) } : {}),
         // Turn input is the only channel the Codex app renders.
-        input: [{
-          type: "text",
-          text: buildDelegation(
-            `[message from ${conv.fromName || "a Claude peer"}]\n\n`
-            + (nudge ? `${nudge}\n\n${runPrompt}` : runPrompt),
-          ),
-        }],
-      });
+        input,
+      }) as { turn?: { id?: unknown } };
+      const startedId = typeof started.turn?.id === "string" ? started.turn.id : null;
+      if (cancelled()) {
+        // A `kill` landed while the start was in flight and the server has
+        // accepted a turn: hand the broker its id, then unwind — the
+        // release path interrupts a turn of ours that was announced, and
+        // leaves alone one that turns out to be another client's. The
+        // verdict decides that, with the same care for what the held
+        // reply attests as an uncancelled start.
+        delivered = "own";
+        try {
+          await host.turnStarted(conv.threadId, startedId, absorbedSandboxHook);
+        } catch (e) {
+          if (!(e instanceof JoinRefused)) throw e;
+        }
+        throw new StartCancelled();
+      }
+      // Between the read and the start, another client may have started a
+      // turn that absorbed this input (the response then names a
+      // submission the events never carry). The broker settles the claim:
+      // a turn of ours seen starting is ours whatever runs now (a goal
+      // continuation, say); otherwise the thread's active turn tells, and
+      // if it is not ours this was a join after all.
+      delivered = "own";
+      const verdict = await host.turnStarted(conv.threadId, startedId, absorbedSandboxHook);
+      if (cancelled()) throw new StartCancelled(); // the claim knows the turn: released accordingly
+      const absorbedBy = verdict.absorbedBy;
+      if (absorbedBy) {
+        settlingTurns.delete(conv.threadId);
+        joinedTurns.add(conv.threadId);
+        if (runId) {
+          try { updateRun(host.stateDir, runId, { joined: true, phase: "running" }); } catch { /* ledger is best-effort */ }
+        }
+        host.log(`peer: the message on ${conv.threadId} was absorbed by turn ${absorbedBy}, which another client started meanwhile`);
+        return "started";
+      }
+      settlingTurns.delete(conv.threadId);
+      if (runId) {
+        try { updateRun(host.stateDir, runId, { phase: "running" }); } catch { /* ledger is best-effort */ }
+      }
       // turn/completed can land before this response for a fast turn; its
       // handler has then consumed the buffer, and a deadline armed now would
       // outlive the turn it was meant for.
@@ -2067,11 +2455,37 @@ export function createPeer(host: PeerHost): Peer {
       // that turn's fresh reply buffer and run record must not be destroyed
       // by this failure path. (The hook is also deferred a tick on the
       // broker side; this ordering holds even if that ever changes.)
+      settlingTurns.delete(conv.threadId);
       replyBuffers.delete(conv.threadId);
+      const audience = turnAudience.get(conv.threadId) ?? new Set(recipients);
       turnAudience.delete(conv.threadId);
-      finishRun(conv.threadId, "failed", "", detail, runId);
+      finishRun(
+        conv.threadId,
+        e instanceof StartCancelled ? "interrupted" : "failed",
+        "",
+        e instanceof StartCancelled
+          ? (delivered === "joined" ? "Stopped waiting on another client's turn" : "Stopped before the turn started")
+          : detail,
+        runId,
+      );
       runningPeerTurns.delete(conv.threadId);
       refreshStatus(conv.threadId);
+      if (e instanceof StartCancelled) {
+        // The server may have accepted a turn of ours meanwhile: stop it
+        // the way `kill` would — its goal paused first, or the interrupt
+        // would spawn a continuation — before the claim is let go.
+        const stopped = await host.interruptThread(conv.threadId).catch(() => false);
+        host.releaseThread(conv.threadId);
+        // Say where the message is: one already in another client's turn
+        // must not be taken for undelivered and sent again.
+        const notice = delivered === "joined"
+          ? "[codex-collab] Stopped waiting: your message was delivered into a turn another client is running on this thread. That turn continues there; its reply is not relayed here."
+          : stopped
+            ? "[codex-collab] Stopped: the turn was interrupted as it started."
+            : "[codex-collab] Stopped: the message was cancelled before its turn started.";
+        for (const to of audience) deliverTo(to, notice, conv.threadId);
+        return "failed";
+      }
       // The claim MUST be released: no turn started, so no turn/completed
       // will ever free it, and an internal owner never disconnects — a
       // leaked claim blocks the thread (and idle shutdown) for the broker's
@@ -2082,7 +2496,13 @@ export function createPeer(host: PeerHost): Peer {
       // the sender is told anything. Every other failure is final here.
       if (threadIsGone(detail)) return "thread-gone";
       for (const to of recipients) {
-        deliverTo(to, `[codex-collab] Could not start a turn: ${detail}`, conv.threadId);
+        deliverTo(
+          to,
+          e instanceof JoinRefused ? `[codex-collab] ${detail}`
+            : threadHeldElsewhere(detail) ? THREAD_HELD_NOTICE
+            : `[codex-collab] Could not start a turn: ${detail}`,
+          conv.threadId,
+        );
       }
       return "failed";
     }
@@ -2096,6 +2516,17 @@ export function createPeer(host: PeerHost): Peer {
    *  answer. */
   /** Resolve a consult whose turn is over: the tool call it answers is
    *  gone, and an entry left pending would eat the sender's next message. */
+  /** A request of the thread's was answered by another client first. If a
+   *  consult is out on it, Codex has moved on without the answer. */
+  function onRequestResolvedElsewhere(threadId: string, requestId: string | null = null): void {
+    const pending = pendingConsults.get(threadId);
+    if (!pending) return;
+    // Only this call's settlement counts: an approval or a question on the
+    // thread answered elsewhere says nothing about the consult.
+    if (pending.requestId !== null && requestId !== null && pending.requestId !== requestId) return;
+    pending.resolvedElsewhere = true;
+  }
+
   function settleConsult(threadId: string): void {
     const pending = pendingConsults.get(threadId);
     if (!pending) return;
@@ -2109,7 +2540,7 @@ export function createPeer(host: PeerHost): Peer {
     if (!conv || conv.sandbox === sandbox) return;
     conv.sandbox = sandbox;
     saveConversations();
-    host.log(`peer: conversation on ${threadId} now runs ${sandbox} (CLI override)`);
+    host.log(`peer: conversation on ${threadId} now runs ${sandbox}`);
   }
 
   function onThreadTurnEnded(threadId: string): void {
@@ -2161,7 +2592,7 @@ export function createPeer(host: PeerHost): Peer {
 
   // ── Consult bridge ──
 
-  async function handleToolCall(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async function handleToolCall(params: Record<string, unknown>, requestId: string | null = null): Promise<Record<string, unknown>> {
     const threadId = typeof params.threadId === "string" ? params.threadId : "";
     const tool = typeof params.tool === "string" ? params.tool : "";
     const args = params.arguments as { question?: unknown } | undefined;
@@ -2191,14 +2622,28 @@ export function createPeer(host: PeerHost): Peer {
       threadId,
     );
 
+    let pending!: PendingConsult;
     const answer = await new Promise<string | null>((resolve) => {
       const timer = setTimeout(() => {
         pendingConsults.delete(threadId);
         resolve(null);
       }, CONSULT_TIMEOUT_MS);
       timer.unref?.();
-      pendingConsults.set(threadId, { threadId, asked, resolve, timer });
+      pending = { threadId, asked, resolve, timer, requestId };
+      pendingConsults.set(threadId, pending);
     });
+
+    if (answer !== null && pending.resolvedElsewhere) {
+      // The call was settled by another client before this answer came:
+      // the turn runs on without it. Injection is the channel no observer
+      // can decline — the turn reads it at its next sampling point.
+      try {
+        await injectPeerMessage(threadId, conv.fromName, `[consult answer] ${answer}`);
+        host.log(`peer: consult on ${threadId} was settled by another client first; the answer was injected instead`);
+      } catch (e) {
+        host.log(`peer: consult answer for ${threadId} could not be injected after another client settled the call: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
 
     return answer === null
       ? failOpen("No answer arrived in time — proceed on your own best judgment.")
@@ -2258,6 +2703,18 @@ export function createPeer(host: PeerHost): Peer {
     }
     try {
       loadConversations();
+
+      // A shared app-server may have kept a conversation loaded for the
+      // desktop client across this broker's restart, its consult tool with
+      // it: rejoin those, so a consult raised there reaches this peer again
+      // before anyone messages it. Nothing that is not loaded is resumed —
+      // that would take its writer lock.
+      for (const conv of threadConversations.values()) {
+        if (conv.origin !== "peer") continue;
+        void host.ensureSubscribed(conv.threadId, { developerInstructions: PEER_RESUME_INSTRUCTIONS }, { onlyIfLoaded: true })
+          .then((r) => { if (r) host.log(`peer: rejoined ${conv.threadId}, still loaded on the app-server`); })
+          .catch((e) => host.log(`peer: could not rejoin ${conv.threadId}: ${e instanceof Error ? e.message : String(e)}`));
+      }
 
       // Socket first, registry second: the entry advertises the socket, so
       // the socket must exist before anyone can read the advertisement.
@@ -2321,8 +2778,15 @@ export function createPeer(host: PeerHost): Peer {
     }
   }
 
+  /** The broker is shutting down: refuse new messages and let no start
+   *  still deciding submit a turn. Turns in flight settle as usual. */
+  function quiesce(): void {
+    stopping = true;
+  }
+
   function stop(): void {
     if (stopped) return;
+    stopping = true;
     // Before anything is torn down: every conversation with a turn in flight
     // or a message still owed an answer is about to lose it — no turn
     // survives the broker, and pending wakes are in-memory only. Silence
@@ -2376,6 +2840,12 @@ export function createPeer(host: PeerHost): Peer {
   return {
     get active() { return active; },
     ownsThread: (threadId: string) => threadConversations.has(threadId),
+    declaresConsultOn: (threadId: string) => threadConversations.get(threadId)?.origin === "peer",
+    keepsThreadLoaded: (threadId: string) =>
+      threadConversations.get(threadId)?.origin === "peer" && threadPeers.has(threadId),
+    cancelJoinedWait,
+    quiesce,
+    onRequestResolvedElsewhere,
     noteThreadSandbox,
     adoptThread,
     handleToolCall,

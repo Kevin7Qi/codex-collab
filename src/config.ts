@@ -19,6 +19,13 @@ const MODEL_ALIASES: Record<string, string> = {
   spark: "gpt-5.3-codex-spark",
 };
 
+/** Every alias and the model id it stands for. Exported for the contract
+ *  test that checks each target still exists on the server: an alias
+ *  resolves cleanly to a retired model forever, and no unit test can tell. */
+export function modelAliasTargets(): Readonly<Record<string, string>> {
+  return { ...MODEL_ALIASES };
+}
+
 // ─── Effort levels ──────────────────────────────────────────────────────────
 
 // The full effort enum the app server accepts, ascending. Not every model

@@ -21,11 +21,30 @@ import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { connectDirect } from "../src/client";
+import { modelAliasTargets } from "../src/config";
+import { fetchAllPages } from "../src/models";
+import type { Model } from "../src/types";
 import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS, procStartOf, buildRegistryEntry, sniffRegistryVersion } from "../src/peer";
 
 const ENABLED = process.env.CODEX_COLLAB_CONTRACTS === "1";
 
 describe.skipIf(!ENABLED)("codex app-server contracts", () => {
+  test("every MODEL_ALIASES target is a model the server still lists", async () => {
+    const client = await connectDirect();
+    try {
+      const models = await fetchAllPages<Model>(client, "model/list", { includeHidden: true });
+      const ids = new Set(models.map((m) => m.id));
+      for (const [alias, target] of Object.entries(modelAliasTargets())) {
+        // A retired target would make `-m <alias>` fail on every turn, and
+        // no unit test can notice — only the live list can.
+        expect(ids.has(target), `alias "${alias}" points at "${target}", which model/list no longer returns`).toBe(true);
+      }
+    } finally {
+      await client.close();
+    }
+  }, 60_000);
+
+
   test("thread/start accepts dynamicTools + developerInstructions; inject_items accepts a peer-authored agent_message", async () => {
     const client = await connectDirect();
     let threadId: string | null = null;

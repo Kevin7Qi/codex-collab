@@ -32,12 +32,18 @@ sandbox: read-only
 Review the login flow and tell me what you would change.
 ```
 
-Each conversation appears as its own entry in `ListAgents` under its name. Reply to a message's `from` address to continue that specific conversation; a message to a busy conversation is delivered into the running turn and answered when it ends. Messaging is asynchronous: after sending, end your turn — do not poll, sleep, or block waiting for a reply. The reply arrives on its own as a cross-session message that wakes your session, even if you are busy with other work when it lands. A reply that lands mid-turn is folded into your context and is not shown to the user: relay its substance, or `codex-collab output <id> --last` so it appears in the transcript.
+Each conversation appears as its own entry in `ListAgents` under its name. Reply to a message's `from` address to continue that specific conversation; a message to a busy conversation is delivered into the running turn and answered when it ends. Messaging is asynchronous: after sending, end your turn — do not poll, sleep, or block waiting for a reply. The reply arrives on its own as a cross-session message that wakes your session, even if you are busy with other work when it lands. A reply that lands mid-turn is folded into your context and renders in the Claude Code terminal, but not on remote views of the session (phone, web). Relaying its substance is normally enough; `codex-collab output <id> --last` is only needed when the transcript itself must carry the verbatim text — for a remote reader, or a reply held back by the receiver's `crossSessionInbound` setting.
 
 Messaged conversations write the same run records as CLI runs, so `codex-collab progress <id>`, `output`, `follow` and `kill` work on them; the `<id>` is the short ID in the conversation's address (`peer-<id>.sock`), and `codex-collab threads` lists them alongside CLI runs. A turn that exceeds its limit is stopped and reported as a timeout, so silence means Codex is still working — use `progress` to see what it is doing, not to wait. Codex may send a `[consult]` message mid-task when it needs your judgment; reply to that address to answer. If you don't, Codex proceeds on its own after a timeout.
 
 If `peer up` reports messaging unavailable (Windows, or an older Claude Code), the CLI handles everything.
 <!-- /MODE:peer -->
+
+## Codex's Own App-Server
+
+When Codex runs a shared app-server (`codex app-server daemon start`, bound at `~/.codex/app-server-control/app-server-control.sock`), the workspace broker attaches to it instead of spawning a private one. `config server` controls this: `auto` (default) attaches when the socket answers and falls back to a private server otherwise; `shared` insists on the shared server and fails without one; `private` never attaches. The environment variable `CODEX_COLLAB_SERVER` overrides the setting for one invocation; `CODEX_COLLAB_SERVER_SOCKET` overrides the control-socket path. The setting is read when a broker starts; `codex-collab peer up` restarts the workspace broker so a change applies. `health` prints which server the broker is on.
+
+Everything on a shared server is one space: turns you start render live in the Codex app or terminal UI, `threads --discover` marks threads other clients have open or running, and `run --resume <id>` joins such a thread. A prompt sent to a thread whose turn is already running is folded into that turn, and that turn stays the other client's: its approvals are answered where the user is looking, never by codex-collab. If the prompt carries overrides (`-m`, `-s`, `--approval`, `--dir`) or `--goal`, codex-collab refuses — those settings cannot apply to someone else's turn. The `codex` terminal UI declines every dynamic tool call on a thread it watches, which means a mid-turn consult to you is declined before you can answer; codex-collab delivers your answer into the running turn as an injected message. A turn you start on an idle thread is yours as usual. Without a shared server, Codex allows one writer per thread; a thread held elsewhere is refused with exit code 8 and a message listing the kinds of process that can hold it, though it cannot tell which one actually does. A thread the broker has used frees up about seven minutes (Codex 0.153.4) after the broker lets go of it — at turn end for a CLI run, when its thread peer retires (30 idle minutes) for a messaged conversation.
 
 ## Run Command
 
@@ -269,6 +275,12 @@ codex-collab delete <id>                # Archive thread (recoverable via `codex
 codex-collab delete <id> --purge        # Permanently delete server-side instead — NOT recoverable; needs explicit user intent
 codex-collab clean                      # Delete old logs, stale mappings, old question files
 codex-collab approve <id> | decline <id> # Answer a pending approval
+<!-- MODE:peer -->
+codex-collab peer [up]                  # Peer status; `peer up` starts or restarts the workspace broker (and its peer)
+<!-- /MODE:peer -->
+<!-- MODE:cli -->
+codex-collab peer up                    # Start or restart the workspace broker (applies a changed `config server`)
+<!-- /MODE:cli -->
 <!-- MODE:cli -->
 codex-collab answer <id> "text"         # Answer a pending ask-channel question (see The Ask Channel)
 codex-collab questions [id]             # List pending questions (with an ID: show its full text)
@@ -276,7 +288,7 @@ codex-collab next [--timeout <sec>]     # Block until a question/approval needs 
                                         # (exit 0 = event, 10 = workspace idle, 3 = timeout)
 codex-collab ask "q" [--timeout <sec>]  # (invoked BY CODEX mid-turn, not by you) post a question, wait, fail open
 <!-- /MODE:cli -->
-codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, mode, reasoning, sandbox, approval, timeout, memory)
+codex-collab config [key] [value] [--unset] # Show/set/unset persistent defaults (model, mode, server, reasoning, sandbox, approval, timeout, memory)
 codex-collab skill sync [--yes]         # Regenerate installed SKILL.md — diff first, --yes applies (see Staying Up to Date)
 codex-collab update [--check|--skip|--yes] # Check for / install a newer release (see Staying Up to Date)
 codex-collab models | templates | health | version
@@ -307,7 +319,7 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 | `--ref <hash>` | Commit ref for --mode commit |
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 | `--all` | List all threads with no display limit (threads command) |
-| `--discover` | Query Codex server for threads not in local index (threads command) |
+| `--discover` | Query Codex server for threads not in local index (threads command); marks threads open or active on the app-server |
 | `--json` | JSON output (threads, peek commands) |
 | `--full` | Include all item types in peek output (default shows messages only) |
 | `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
@@ -322,7 +334,7 @@ Note: `jobs` still works as a deprecated alias for `threads`.
 
 ### Exit codes (run, review)
 
-`0` completed · `1` failed · `3` timed out (an active goal is paused, resumable) · `4` interrupted (kill) · `5` died blocked on an approval — the request is void, so don't try to answer it; resume with a longer `--timeout` or `--approval auto` · `6` broker busy and fallback unavailable — transient, retry · `7` goal ended blocked or usage/budget-limited — Codex needs steering: resume the thread with guidance, or `kill --clear` to abandon the goal. For backgrounded runs, branch on the exit code instead of text-sniffing the output.
+`0` completed · `1` failed · `3` timed out (an active goal is paused, resumable) · `4` interrupted (kill) · `5` died blocked on an approval — the request is void, so don't try to answer it; resume with a longer `--timeout` or `--approval auto` · `6` broker busy and fallback unavailable — transient, retry · `7` goal ended blocked or usage/budget-limited — Codex needs steering: resume the thread with guidance, or `kill --clear` to abandon the goal · `8` thread held by another process (Codex app, terminal session) — wait for it to release, or close it there; nothing is lost. For backgrounded runs, branch on the exit code instead of text-sniffing the output.
 
 ## Goal Mode
 

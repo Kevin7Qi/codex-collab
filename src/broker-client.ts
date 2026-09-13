@@ -11,6 +11,7 @@
 
 import net from "node:net";
 import type { AppServerClient } from "./client";
+import type { ServerInfo } from "./shared-server";
 import { config } from "./config";
 import { parseEndpoint } from "./broker";
 import { createRpcEndpoint } from "./rpc";
@@ -115,8 +116,11 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
   // Perform initialize handshake with the broker
   let userAgent: string;
   let brokerBusy = false;
+  // A broker predating server reporting answers without `server`; it can
+  // only ever have spawned a private app-server.
+  let server: ServerInfo = { kind: "private" };
   try {
-    const result = await endpoint.request<{ userAgent: string; busy?: boolean }>("initialize", {
+    const result = await endpoint.request<{ userAgent: string; busy?: boolean; server?: ServerInfo }>("initialize", {
       clientInfo: {
         name: config.clientName,
         title: null,
@@ -132,6 +136,7 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     });
     brokerBusy = result.busy === true;
     userAgent = result.userAgent;
+    if (result.server && (result.server.kind === "shared" || result.server.kind === "private")) server = result.server;
     endpoint.notify("initialized");
   } catch (e) {
     await close();
@@ -144,11 +149,13 @@ export async function connectToBroker(opts: BrokerClientOptions): Promise<AppSer
     on: endpoint.on,
     onAny: endpoint.onAny,
     onRequest: endpoint.onRequest,
+    onAnyRequest: endpoint.onAnyRequest,
     respond: endpoint.respond,
     onClose: endpoint.onClose,
     close,
     userAgent,
     brokerBusy,
     isBrokered: true,
+    server,
   };
 }

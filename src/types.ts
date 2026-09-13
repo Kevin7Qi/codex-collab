@@ -69,7 +69,8 @@ export interface Thread {
   modelProvider: string;
   createdAt: number;
   updatedAt: number;
-  // status is only populated on thread/read, not on thread/list
+  // Populated on thread/read; thread/list carries it from Codex 0.153 on
+  // (idle/active/notLoaded), which `threads --discover` shows.
   status?: ThreadStatus;
   path: string | null;
   cwd: string;
@@ -147,7 +148,13 @@ export type CodexErrorInfo =
 
 /** Error carrying a JSON-RPC error code for protocol-level error forwarding. */
 export class RpcError extends Error {
-  constructor(message: string, public readonly rpcCode: number) {
+  /**
+   * @param message  Display form, "JSON-RPC error <code>: <detail>".
+   * @param rpcCode  The wire code.
+   * @param detail   The server's own message, un-prefixed — what a relay
+   *                 (the broker) forwards, so the prefix is applied once.
+   */
+  constructor(message: string, public readonly rpcCode: number, public readonly detail?: string) {
     super(message);
     this.name = "RpcError";
   }
@@ -639,6 +646,10 @@ export interface RunRecord {
    *  goal was seen during this run; survives completion so post-mortems can
    *  say how the goal ended and what it cost. */
   goal?: RunGoalState | null;
+  /** The turn this run waited on was another client's, joined on a shared
+   *  app-server (`run --resume` into a running turn). Stopping the run
+   *  stops the wait, never that turn. */
+  joined?: boolean;
 }
 
 /** Observer-facing goal snapshot on the run record. `turns` counts the turns
