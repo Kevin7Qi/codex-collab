@@ -396,7 +396,9 @@ describe("CLI skill render --codex", () => {
     expect(codex.stdout).not.toContain("<!-- TEMPLATES -->");
     const claude = run("skill", "render");
     expect(claude.stdout).not.toBe(codex.stdout);
-    expect(claude.stdout).toContain("ListAgents");
+    // Common to both render modes (the peer-only block is absent without a
+    // capable claude on PATH, and always on Windows).
+    expect(claude.stdout).toContain("name: codex-collab");
   });
 });
 
@@ -478,9 +480,11 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
 describe("health: the Codex-side lines", () => {
   it("describeCodexSkill: installed and current, stale, or missing", async () => {
     const { describeCodexSkill } = await import("./commands/config");
-    expect(describeCodexSkill(true, "/h/.codex/skills/claude-collab")).toBe("/h/.codex/skills/claude-collab/SKILL.md (up to date)");
-    expect(describeCodexSkill(false, "/h/.codex/skills/claude-collab")).toContain("out of date — run 'codex-collab skill sync'");
-    expect(describeCodexSkill(null, "/h/.codex/skills/claude-collab")).toContain("not installed — 'codex-collab skill sync' installs it at /h/.codex/skills/claude-collab/SKILL.md");
+    const dir = join("/h", ".codex", "skills", "claude-collab");
+    const file = join(dir, "SKILL.md"); // platform separators, as the line prints them
+    expect(describeCodexSkill(true, dir)).toBe(`${file} (up to date)`);
+    expect(describeCodexSkill(false, dir)).toContain("out of date — run 'codex-collab skill sync'");
+    expect(describeCodexSkill(null, dir)).toContain(`not installed — 'codex-collab skill sync' installs it at ${file}`);
   });
 
   it("describeCodexRule: off says Codex asks; on reports the file's state", async () => {
