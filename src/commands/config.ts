@@ -27,6 +27,34 @@ function applyCodexRuleOrDie(on: boolean): void {
     die(`Could not ${on ? "write" : "remove"} ${codexRulesInstallPath()}: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
+
+/** Apply the rule change and record the setting as one step. The setting
+ *  is what `health` and `skill sync` go by, so a rule the config does not
+ *  claim — or the absence of one it does — must not outlive a failed save:
+ *  the change is undone before the failure is reported. */
+function setCodexRuleAndSave(cfg: UserConfig, on: boolean): void {
+  const hadRule = existsSync(codexRulesInstallPath());
+  applyCodexRuleOrDie(on);
+  try {
+    saveUserConfigOrThrow(cfg);
+  } catch (e) {
+    let undone: string;
+    try {
+      if (on) {
+        removeCodexRules();
+        undone = "the rule was removed again";
+      } else if (hadRule) {
+        installCodexRules();
+        undone = "the rule was put back";
+      } else {
+        undone = "no rule was in place";
+      }
+    } catch (u) {
+      undone = `and the rule could not be ${on ? "removed again" : "put back"}: ${u instanceof Error ? u.message : String(u)}`;
+    }
+    die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)} — ${undone}.`);
+  }
+}
 import type { Model, AccountRead } from "../types";
 import {
   die,
@@ -35,6 +63,8 @@ import {
   fetchAllPages,
   loadUserConfig,
   saveUserConfig,
+  saveUserConfigOrThrow,
+  type UserConfig,
   MAX_TIMEOUT_SECONDS,
 } from "./shared";
 
@@ -64,8 +94,8 @@ export async function handleConfig(args: string[]): Promise<void> {
   // No args -> show current config, or --unset to clear all
   if (positional.length === 0) {
     if (options.explicit.has("unset")) {
-      if ((cfg as Record<string, unknown>)["codex-rule"] === "on") applyCodexRuleOrDie(false);
-      saveUserConfig({});
+      if ((cfg as Record<string, unknown>)["codex-rule"] === "on") setCodexRuleAndSave({}, false);
+      else saveUserConfig({});
       console.log("All config values cleared. Using auto-detected defaults.");
       return;
     }
@@ -91,9 +121,9 @@ export async function handleConfig(args: string[]): Promise<void> {
 
   // Unset
   if (options.explicit.has("unset")) {
-    if (key === "codex-rule") applyCodexRuleOrDie(false);
     delete (cfg as Record<string, unknown>)[key];
-    saveUserConfig(cfg);
+    if (key === "codex-rule") setCodexRuleAndSave(cfg, false);
+    else saveUserConfig(cfg);
     console.log(`Unset ${key} (will use auto-detected default)`);
     return;
   }
@@ -117,17 +147,13 @@ export async function handleConfig(args: string[]): Promise<void> {
     die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
   }
 
-  if (key === "codex-rule") {
-    if (value === "on" && process.platform === "win32") {
-      die("codex-rule is unavailable on Windows: Claude Code's cross-session messaging, which `codex-collab send` rides on, does not exist there.");
-    }
-    // Written (or removed) before the setting is saved, so a failure never
-    // leaves the config claiming a rule that is not there.
-    applyCodexRuleOrDie(value === "on");
+  if (key === "codex-rule" && value === "on" && process.platform === "win32") {
+    die("codex-rule is unavailable on Windows: Claude Code's cross-session messaging, which `codex-collab send` rides on, does not exist there.");
   }
   (cfg as Record<string, unknown>)[key] =
     key === "timeout" || key === "linger" ? Number(value) : key === "memory" ? value === "true" : value;
-  saveUserConfig(cfg);
+  if (key === "codex-rule") setCodexRuleAndSave(cfg, value === "on");
+  else saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
   if (key === "mode") {
     // The mode is read when a broker starts. One already running keeps its

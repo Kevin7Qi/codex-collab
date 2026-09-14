@@ -652,11 +652,17 @@ export function loadUserConfig(): UserConfig {
 
 export function saveUserConfig(cfg: UserConfig): void {
   try {
-    mkdirSync(dirname(config.configFile), { recursive: true, mode: 0o700 });
-    writeFileSync(config.configFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+    saveUserConfigOrThrow(cfg);
   } catch (e) {
     die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/** The same write, throwing instead of exiting — for a caller that has
+ *  something to undo when the setting cannot be recorded. */
+export function saveUserConfigOrThrow(cfg: UserConfig): void {
+  mkdirSync(dirname(config.configFile), { recursive: true, mode: 0o700 });
+  writeFileSync(config.configFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
 }
 
 /** Apply user config to parsed options — only for fields not set via CLI flags.

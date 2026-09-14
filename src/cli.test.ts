@@ -414,7 +414,7 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
   const rulesPath = join(dirs, "codex-rules", "codex-collab.rules");
   afterAll(() => rmSync(dirs, { recursive: true, force: true }));
 
-  function cli(...args: string[]): { stdout: string; stderr: string; exitCode: number } {
+  function cliIn(env: { home: string; rules: string }, ...args: string[]): { stdout: string; stderr: string; exitCode: number } {
     const result = spawnSync("bun", ["run", CLI, ...args], {
       encoding: "utf-8",
       cwd: import.meta.dir + "/..",
@@ -422,15 +422,16 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
       timeout: 10_000,
       env: {
         ...process.env,
-        HOME: home,
+        HOME: env.home,
         CODEX_COLLAB_NO_UPDATE_CHECK: "1",
         CODEX_COLLAB_SKILL_DIR: claudeDir,
         CODEX_COLLAB_CODEX_SKILL_DIR: codexDir,
-        CODEX_COLLAB_CODEX_RULES_PATH: rulesPath,
+        CODEX_COLLAB_CODEX_RULES_PATH: env.rules,
       },
     });
     return { stdout: (result.stdout ?? "") as string, stderr: (result.stderr ?? "") as string, exitCode: result.status ?? 1 };
   }
+  const cli = (...args: string[]) => cliIn({ home, rules: rulesPath }, ...args);
 
   it("sync creates a missing Codex skill only with consent, and never writes the rule unasked", () => {
     mkdirSync(claudeDir, { recursive: true });
@@ -468,6 +469,27 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     expect(existsSync(rulesPath)).toBe(true);
     expect(cli("config", "codex-rule", "--unset").exitCode).toBe(0);
     expect(existsSync(rulesPath)).toBe(false);
+  });
+
+  it("a rule the config cannot record is undone, and one it cannot forget is put back", () => {
+    // ~/.codex-collab is a file here, so the config can never be saved.
+    const stuck = join(dirs, "home-unsaveable");
+    mkdirSync(stuck, { recursive: true });
+    writeFileSync(join(stuck, ".codex-collab"), "not a directory\n");
+    const rules = join(dirs, "codex-rules-unsaveable", "codex-collab.rules");
+    const on = cliIn({ home: stuck, rules }, "config", "codex-rule", "on");
+    expect(on.exitCode).toBe(1);
+    expect(on.stderr).toContain("Could not save config");
+    expect(on.stderr).toContain("the rule was removed again");
+    expect(existsSync(rules)).toBe(false);
+    // The reverse: a rule in place that `off` removed is restored when the
+    // setting cannot be saved, so Codex keeps the behaviour the config claims.
+    mkdirSync(join(dirs, "codex-rules-unsaveable"), { recursive: true });
+    writeFileSync(rules, cli("skill", "render", "--rules").stdout);
+    const off = cliIn({ home: stuck, rules }, "config", "codex-rule", "off");
+    expect(off.exitCode).toBe(1);
+    expect(off.stderr).toContain("the rule was put back");
+    expect(existsSync(rules)).toBe(true);
   });
 
   it("--codex and --rules are refused on sync", () => {
