@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
 import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
+import { DEFAULT_SPAWN_LINGER_SEC } from "../claude-sessions";
 import type { Model, AccountRead } from "../types";
 import {
   die,
@@ -33,6 +34,8 @@ export async function handleConfig(args: string[]): Promise<void> {
     memory:    { validate: v => v === "true" || v === "false", hint: "true, false (let Codex memory learn from created threads)" },
     mode:      { validate: v => (COLLAB_MODES as readonly string[]).includes(v), hint: `${COLLAB_MODES.join(", ")} (auto: peer messaging where supported, CLI otherwise)` },
     server:    { validate: v => (SERVER_PREFERENCES as readonly string[]).includes(v), hint: `${SERVER_PREFERENCES.join(", ")} (auto: attach to Codex's own app-server when its socket answers, else run a private one)` },
+    spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
+    linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
   };
 
   const cfg = loadUserConfig();
@@ -92,7 +95,7 @@ export async function handleConfig(args: string[]): Promise<void> {
   }
 
   (cfg as Record<string, unknown>)[key] =
-    key === "timeout" ? Number(value) : key === "memory" ? value === "true" : value;
+    key === "timeout" || key === "linger" ? Number(value) : key === "memory" ? value === "true" : value;
   saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
   if (key === "mode") {

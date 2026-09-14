@@ -193,6 +193,16 @@ Commands:
                           registry entry, socket — or start one with 'up'
                           (peer messaging is off entirely under
                           'config mode cli', and unavailable on Windows)
+  peers [--all]           (for Codex) List the Claude Code sessions live in
+                          this workspace — the ones 'send' can reach
+                          (--all: every workspace; --json)
+  send [<peer>] "message" (for Codex, outside its sandbox) Message a Claude
+                          Code session and print its reply; --to <peer> names
+                          it (a unique prefix will do), --timeout <sec> bounds
+                          the wait (default 600),
+                          --no-wait sends a one-way note. With no session
+                          live, starts one in the background (config spawn
+                          off, or --no-spawn, disables that)
   version                 Print version
 
 Options:
@@ -297,6 +307,7 @@ const VALUE_FLAGS = new Set([
   "--template",
   "--goal",
   "--budget",
+  "--to",
 ]);
 
 // Boolean flags recognized by commands/shared.ts parseOptions. Combined with
@@ -319,6 +330,8 @@ const BOOLEAN_FLAGS = new Set([
   "--session",
   "--yes",
   "--check",
+  "--no-wait",
+  "--no-spawn",
   "--skip",
 ]);
 
@@ -390,7 +403,7 @@ async function main() {
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
-    "peer",
+    "peer", "peers", "send", "reap-claude",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -466,6 +479,14 @@ async function main() {
       return (await import("./commands/peek")).handlePeek(rest);
     case "peer":
       return (await import("./commands/peer")).handlePeer(rest);
+    case "peers":
+      return (await import("./commands/peers")).handlePeers(rest);
+    case "send":
+      return (await import("./commands/send")).handleSend(rest);
+    case "reap-claude":
+      // Private: the detached reaper `send` starts for a Claude session it
+      // spawned (see claude-sessions.ts). Not in --help.
+      return (await import("./commands/peers")).handleReapClaude(rest);
     case "version":
       return printVersion();
   }

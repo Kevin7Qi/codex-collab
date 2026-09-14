@@ -126,6 +126,14 @@ export interface Options {
   dir: string;
   contentOnly: boolean;
   json: boolean;
+  /** send: the Claude session to message, by name (see `peers`). */
+  to: string | null;
+  /** send: deliver and return without waiting for a reply. */
+  noWait: boolean;
+  /** send: never start a Claude session when none is live. */
+  noSpawn: boolean;
+  /** peers: every workspace, not only this one (also lifts `threads`' limit). */
+  all: boolean;
   timeout: number;
   limit: number;
   reviewMode: string | null;
@@ -308,6 +316,10 @@ export function defaultOptions(): Options {
     session: false,
     contentOnly: false,
     json: false,
+    to: null,
+    noWait: false,
+    noSpawn: false,
+    all: false,
     timeout: config.defaultTimeout,
     limit: config.threadsListLimit,
     reviewMode: null,
@@ -537,6 +549,7 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       }
       options.resumeId = argv[++i];
     } else if (arg === "--all") {
+      options.all = true;
       options.limit = Infinity;
       options.explicit.add("limit");
     } else if (arg === "--discover") {
@@ -551,6 +564,16 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.template = argv[++i];
     } else if (arg === "--unset") {
       options.explicit.add("unset");
+    } else if (arg === "--to") {
+      if (!hasFlagValue(argv, i)) {
+        console.error("Error: --to requires a session name (see `codex-collab peers`)");
+        process.exit(1);
+      }
+      options.to = argv[++i];
+    } else if (arg === "--no-wait") {
+      options.noWait = true;
+    } else if (arg === "--no-spawn") {
+      options.noSpawn = true;
     } else if (arg === "--yes") {
       options.yes = true;
     } else if (arg === "--check") {
@@ -589,6 +612,10 @@ export interface UserConfig {
   mode?: string;
   /** Which app-server to run on; read at broker start (see shared-server.ts). */
   server?: string;
+  /** Whether a Codex `send` with no live Claude session starts one (on|off). */
+  spawn?: string;
+  /** Seconds a started Claude session may idle before it is stopped. */
+  linger?: number;
 }
 
 export function loadUserConfig(): UserConfig {

@@ -44,7 +44,7 @@ import {
   pruneRuns,
 } from "./threads";
 import { EventDispatcher } from "./events";
-import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
+import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode, mailboxRoot } from "./config";
 import { resolveModelDefaults } from "./models";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -356,7 +356,11 @@ export function sniffRegistryVersion(): string {
 export function isCodexCollabSocket(socketPath: unknown): boolean {
   if (typeof socketPath !== "string" || socketPath.length === 0) return false;
   const root = config.dataDir;
-  return socketPath === root || socketPath.startsWith(root + sep);
+  if (socketPath === root || socketPath.startsWith(root + sep)) return true;
+  // A `send` in flight registers a socket under the temp root (short
+  // enough for any home directory); it is a Codex session's, not Claude's.
+  const tmpRoot = mailboxRoot();
+  return socketPath.startsWith(tmpRoot + sep);
 }
 
 export function peerNameFor(cwd: string): string {
