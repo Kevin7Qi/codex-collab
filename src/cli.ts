@@ -180,10 +180,14 @@ Commands:
   clean                   Delete old logs and stale mappings
   delete <id> [--purge]   Archive thread (recoverable) and delete local files;
                           --purge permanently deletes it server-side instead
-  skill sync [--yes]      Regenerate the installed SKILL.md if stale — shows
-                          the diff and asks before writing (--yes: apply
-                          without prompting; skill render: print the
-                          generated SKILL.md to stdout, used by installers)
+  skill sync [--yes]      Regenerate the installed skill files if stale —
+                          Claude's SKILL.md and the Codex-side one — shows
+                          the diffs and asks before writing (--yes: apply
+                          without prompting)
+  skill render [--codex|--rules]
+                          Print the generated SKILL.md to stdout (--codex:
+                          the Codex-side skill; --rules: the opt-in Codex
+                          exec-policy rule); used by the installers
   update                  Check GitHub for a newer release and show its
                           changelog; with consent (prompt or --yes) download,
                           build, and reinstall (--check: report only;
@@ -332,6 +336,8 @@ const BOOLEAN_FLAGS = new Set([
   "--check",
   "--no-wait",
   "--no-spawn",
+  "--codex",
+  "--rules",
   "--skip",
 ]);
 

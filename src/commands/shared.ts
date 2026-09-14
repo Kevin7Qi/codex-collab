@@ -134,6 +134,10 @@ export interface Options {
   noSpawn: boolean;
   /** peers: every workspace, not only this one (also lifts `threads`' limit). */
   all: boolean;
+  /** skill render: the Codex-side skill instead of Claude's. */
+  codex: boolean;
+  /** skill render: the opt-in Codex exec-policy rule. */
+  rules: boolean;
   timeout: number;
   limit: number;
   reviewMode: string | null;
@@ -320,6 +324,8 @@ export function defaultOptions(): Options {
     noWait: false,
     noSpawn: false,
     all: false,
+    codex: false,
+    rules: false,
     timeout: config.defaultTimeout,
     limit: config.threadsListLimit,
     reviewMode: null,
@@ -574,6 +580,10 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.noWait = true;
     } else if (arg === "--no-spawn") {
       options.noSpawn = true;
+    } else if (arg === "--codex") {
+      options.codex = true;
+    } else if (arg === "--rules") {
+      options.rules = true;
     } else if (arg === "--yes") {
       options.yes = true;
     } else if (arg === "--check") {
@@ -616,6 +626,8 @@ export interface UserConfig {
   spawn?: string;
   /** Seconds a started Claude session may idle before it is stopped. */
   linger?: number;
+  /** Opt-in Codex exec-policy rule for `send` (on|off; see skill.ts). */
+  "codex-rule"?: string;
 }
 
 export function loadUserConfig(): UserConfig {

@@ -3,6 +3,8 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$HOME/.claude/skills/codex-collab"
+CODEX_SKILL_DIR="${CODEX_COLLAB_CODEX_SKILL_DIR:-${CODEX_HOME:-$HOME/.codex}/skills/claude-collab}"
+CODEX_RULES_FILE="${CODEX_COLLAB_CODEX_RULES_PATH:-${CODEX_HOME:-$HOME/.codex}/rules/codex-collab.rules}"
 BIN_DIR="$HOME/.local/bin"
 
 usage() {
@@ -68,12 +70,72 @@ generate_skill_md() {
   mv "$out_tmp" "$out"
 }
 
+# The Codex-side skill: what a Codex session reads to learn that
+# `codex-collab peers` / `send` reach the Claude Code sessions in its
+# workspace. Same renderer, `--codex`.
+generate_codex_skill_md() {
+  local entry="$1" out="$2" out_tmp
+  # Render OUTSIDE Codex's skills directory: a failed render (set -e) must
+  # not leave a stray file where Codex scans for skills.
+  out_tmp="$(mktemp)"
+  bun "$entry" skill render --codex > "$out_tmp"
+  mkdir -p "$(dirname "$out")"
+  mv "$out_tmp" "$out"
+}
+
+# The opt-in Codex exec-policy rule (`codex-collab config codex-rule on`):
+# refreshed on reinstall for a user who turned it on; offered once, on an
+# interactive install, to a user who has not decided (either answer is
+# recorded, so a reinstall does not ask again); never written otherwise.
+offer_or_refresh_codex_rule() {
+  local entry="$1" setting out_tmp answer
+  setting="$(bun "$entry" config codex-rule 2>/dev/null || true)"
+  case "$setting" in
+    *": on")
+      out_tmp="$(mktemp)"
+      bun "$entry" skill render --rules > "$out_tmp"
+      mkdir -p "$(dirname "$CODEX_RULES_FILE")"
+      mv "$out_tmp" "$CODEX_RULES_FILE"
+      echo "Refreshed Codex rule at $CODEX_RULES_FILE (config codex-rule is on)"
+      ;;
+    *"not set"*)
+      # Only a person at a terminal is asked: an agent's shell (Claude Code's
+      # Bash tool, Codex's exec) has no TTY and gets the hint instead. A
+      # terminal nobody answers within a minute is treated the same way —
+      # the key stays unset, so a later interactive install asks again.
+      if [ -t 0 ] && [ -t 1 ]; then
+        echo ""
+        echo "Codex asks (its approval flow) before each \`codex-collab send\`, which reaches a Claude Code"
+        echo "session outside Codex's sandbox. Experimental: an exec-policy rule at $CODEX_RULES_FILE"
+        echo "lets any Codex session run \`send\` without asking. Change later: codex-collab config codex-rule on|off"
+        answer=""
+        if read -r -t 60 -p "Let Codex run \`codex-collab send\` without asking? [y/N] " answer; then
+          case "$answer" in
+            [yY]*) bun "$entry" config codex-rule on ;;
+            *)     bun "$entry" config codex-rule off ;;
+          esac
+        else
+          echo ""
+          echo "No answer — left unset; run \`codex-collab config codex-rule on\` to let Codex send without asking"
+        fi
+      else
+        echo "Codex asks before each \`send\`; run \`codex-collab config codex-rule on\` to let it send without asking"
+      fi
+      ;;
+    *)
+      echo "Codex asks before each \`send\` (config codex-rule is off)"
+      ;;
+  esac
+}
+
 if [ "$MODE" = "dev" ]; then
   echo "$INSTALL_ACTION dev install at $SKILL_DIR (symlinks)..."
 
   # Generate SKILL.md with template table (can't inject into a symlink)
   mkdir -p "$SKILL_DIR/scripts"
   generate_skill_md "$REPO_DIR/src/cli.ts" "$SKILL_DIR/SKILL.md"
+  generate_codex_skill_md "$REPO_DIR/src/cli.ts" "$CODEX_SKILL_DIR/SKILL.md"
+  CLI_ENTRY="$REPO_DIR/src/cli.ts"
   ln -sf "$REPO_DIR/src/cli.ts" "$SKILL_DIR/scripts/codex-collab"
   ln -sf "$REPO_DIR/src/broker-server.ts" "$SKILL_DIR/scripts/broker-server"
   ln -sf "$REPO_DIR/LICENSE" "$SKILL_DIR/LICENSE.txt"
@@ -82,6 +144,7 @@ if [ "$MODE" = "dev" ]; then
   mkdir -p "$BIN_DIR"
   ln -sf "$REPO_DIR/src/cli.ts" "$BIN_DIR/codex-collab"
   echo "$INSTALL_DONE dev skill at $SKILL_DIR"
+  echo "$INSTALL_DONE Codex skill at $CODEX_SKILL_DIR"
   echo "Linked binary shim to $BIN_DIR/codex-collab"
 
 else
@@ -121,12 +184,20 @@ else
   cp -r "$REPO_DIR/skill/codex-collab" "$SKILL_DIR"
   echo "$INSTALL_DONE skill at $SKILL_DIR"
 
+  # Codex's copy: rendered by the installed binary into Codex's skills dir
+  generate_codex_skill_md "$SKILL_DIR/scripts/codex-collab" "$CODEX_SKILL_DIR/SKILL.md"
+  echo "$INSTALL_DONE Codex skill at $CODEX_SKILL_DIR"
+  CLI_ENTRY="$SKILL_DIR/scripts/codex-collab"
+
   # Symlink binary from installed skill
   mkdir -p "$BIN_DIR"
   ln -sf "$SKILL_DIR/scripts/codex-collab" "$BIN_DIR/codex-collab"
   chmod +x "$SKILL_DIR/scripts/codex-collab"
   echo "Linked binary shim to $BIN_DIR/codex-collab"
 fi
+
+# The Codex rule: refresh it, or ask once (see offer_or_refresh_codex_rule)
+offer_or_refresh_codex_rule "$CLI_ENTRY"
 
 # Verify PATH and run health check
 echo ""

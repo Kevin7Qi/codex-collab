@@ -2,7 +2,7 @@
 
 import { describe, it, expect, setDefaultTimeout, afterAll } from "bun:test";
 import { spawnSync } from "child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import pkg from "../package.json";
@@ -380,5 +380,116 @@ describe("CLI questions <id>", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// skill render --codex
+// ---------------------------------------------------------------------------
+
+describe("CLI skill render --codex", () => {
+  it("prints the Codex-side skill, distinct from Claude's", () => {
+    const codex = run("skill", "render", "--codex");
+    expect(codex.exitCode).toBe(0);
+    expect(codex.stdout).toContain("name: claude-collab");
+    expect(codex.stdout).toContain("codex-collab send");
+    expect(codex.stdout).not.toContain("<!-- TEMPLATES -->");
+    const claude = run("skill", "render");
+    expect(claude.stdout).not.toBe(codex.stdout);
+    expect(claude.stdout).toContain("ListAgents");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// skill sync and the opt-in Codex rule
+// ---------------------------------------------------------------------------
+
+describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-rule", () => {
+  const dirs = mkdtempSync(join(tmpdir(), "codex-collab-sync-"));
+  const home = join(dirs, "home");
+  const claudeDir = join(dirs, "claude-skill");
+  const codexDir = join(dirs, "codex-skill");
+  const rulesPath = join(dirs, "codex-rules", "codex-collab.rules");
+  afterAll(() => rmSync(dirs, { recursive: true, force: true }));
+
+  function cli(...args: string[]): { stdout: string; stderr: string; exitCode: number } {
+    const result = spawnSync("bun", ["run", CLI, ...args], {
+      encoding: "utf-8",
+      cwd: import.meta.dir + "/..",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 10_000,
+      env: {
+        ...process.env,
+        HOME: home,
+        CODEX_COLLAB_NO_UPDATE_CHECK: "1",
+        CODEX_COLLAB_SKILL_DIR: claudeDir,
+        CODEX_COLLAB_CODEX_SKILL_DIR: codexDir,
+        CODEX_COLLAB_CODEX_RULES_PATH: rulesPath,
+      },
+    });
+    return { stdout: (result.stdout ?? "") as string, stderr: (result.stderr ?? "") as string, exitCode: result.status ?? 1 };
+  }
+
+  it("sync creates a missing Codex skill only with consent, and never writes the rule unasked", () => {
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(join(claudeDir, "SKILL.md"), cli("skill", "render").stdout);
+    const dry = cli("skill", "sync");
+    expect(dry.exitCode).toBe(1);
+    expect(dry.stdout).toContain(`Codex SKILL.md is not installed — it will be created at ${join(codexDir, "SKILL.md")}`);
+    expect(dry.stderr).toContain("Not applied");
+    expect(existsSync(join(codexDir, "SKILL.md"))).toBe(false);
+    const applied = cli("skill", "sync", "--yes");
+    expect(applied.exitCode).toBe(0);
+    expect(readFileSync(join(codexDir, "SKILL.md"), "utf-8")).toBe(cli("skill", "render", "--codex").stdout);
+    const again = cli("skill", "sync");
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toContain("already up to date");
+    expect(existsSync(rulesPath)).toBe(false);
+  });
+
+  it("config codex-rule on writes the rule, sync keeps it current, off removes it", () => {
+    const on = cli("config", "codex-rule", "on");
+    expect(on.exitCode).toBe(0);
+    expect(on.stdout).toContain(`Wrote ${rulesPath}`);
+    expect(readFileSync(rulesPath, "utf-8")).toBe(cli("skill", "render", "--rules").stdout);
+    writeFileSync(rulesPath, "stale\n");
+    expect(cli("skill", "sync").stdout).toContain(`Codex rule at ${rulesPath}`);
+    expect(cli("skill", "sync", "--yes").exitCode).toBe(0);
+    expect(readFileSync(rulesPath, "utf-8")).toBe(cli("skill", "render", "--rules").stdout);
+    const off = cli("config", "codex-rule", "off");
+    expect(off.exitCode).toBe(0);
+    expect(off.stdout).toContain(`Removed ${rulesPath}`);
+    expect(existsSync(rulesPath)).toBe(false);
+    expect(cli("skill", "sync").stdout).toContain("already up to date");
+    // --unset removes it too.
+    cli("config", "codex-rule", "on");
+    expect(existsSync(rulesPath)).toBe(true);
+    expect(cli("config", "codex-rule", "--unset").exitCode).toBe(0);
+    expect(existsSync(rulesPath)).toBe(false);
+  });
+
+  it("--codex and --rules are refused on sync", () => {
+    const r = cli("skill", "sync", "--rules");
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("apply to `skill render`");
+  });
+});
+
+describe("health: the Codex-side lines", () => {
+  it("describeCodexSkill: installed and current, stale, or missing", async () => {
+    const { describeCodexSkill } = await import("./commands/config");
+    expect(describeCodexSkill(true, "/h/.codex/skills/claude-collab")).toBe("/h/.codex/skills/claude-collab/SKILL.md (up to date)");
+    expect(describeCodexSkill(false, "/h/.codex/skills/claude-collab")).toContain("out of date — run 'codex-collab skill sync'");
+    expect(describeCodexSkill(null, "/h/.codex/skills/claude-collab")).toContain("not installed — 'codex-collab skill sync' installs it at /h/.codex/skills/claude-collab/SKILL.md");
+  });
+
+  it("describeCodexRule: off says Codex asks; on reports the file's state", async () => {
+    const { describeCodexRule } = await import("./commands/config");
+    const path = "/h/.codex/rules/codex-collab.rules";
+    expect(describeCodexRule(false, null, path)).toContain("off — Codex asks before each `codex-collab send`");
+    expect(describeCodexRule(false, true, path)).toContain("codex-collab config codex-rule on");
+    expect(describeCodexRule(true, true, path)).toBe("on (/h/.codex/rules/codex-collab.rules) — Codex runs `codex-collab send` without asking");
+    expect(describeCodexRule(true, false, path)).toContain("out of date — run 'codex-collab skill sync'");
+    expect(describeCodexRule(true, null, path)).toContain("is missing — run 'codex-collab skill sync'");
   });
 });

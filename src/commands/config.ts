@@ -7,6 +7,26 @@ import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveC
 import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
 import { DEFAULT_SPAWN_LINGER_SEC } from "../claude-sessions";
+import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
+
+/** `config codex-rule on|off` is applied as it is set: the setting IS the
+ *  consent to write (or remove) the Codex exec-policy rule. */
+function applyCodexRule(on: boolean): void {
+  if (on) {
+    const path = installCodexRules();
+    console.log(`Wrote ${path} — Codex runs \`codex-collab send\` without asking, outside its sandbox (new Codex sessions pick it up).`);
+  } else if (removeCodexRules()) {
+    console.log(`Removed ${codexRulesInstallPath()} — Codex asks again before running \`codex-collab send\` outside its sandbox.`);
+  }
+}
+
+function applyCodexRuleOrDie(on: boolean): void {
+  try {
+    applyCodexRule(on);
+  } catch (e) {
+    die(`Could not ${on ? "write" : "remove"} ${codexRulesInstallPath()}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 import type { Model, AccountRead } from "../types";
 import {
   die,
@@ -35,6 +55,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     mode:      { validate: v => (COLLAB_MODES as readonly string[]).includes(v), hint: `${COLLAB_MODES.join(", ")} (auto: peer messaging where supported, CLI otherwise)` },
     server:    { validate: v => (SERVER_PREFERENCES as readonly string[]).includes(v), hint: `${SERVER_PREFERENCES.join(", ")} (auto: attach to Codex's own app-server when its socket answers, else run a private one)` },
     spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
+    "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` without asking, outside its sandbox; default off)" },
     linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
   };
 
@@ -43,6 +64,7 @@ export async function handleConfig(args: string[]): Promise<void> {
   // No args -> show current config, or --unset to clear all
   if (positional.length === 0) {
     if (options.explicit.has("unset")) {
+      if ((cfg as Record<string, unknown>)["codex-rule"] === "on") applyCodexRuleOrDie(false);
       saveUserConfig({});
       console.log("All config values cleared. Using auto-detected defaults.");
       return;
@@ -69,6 +91,7 @@ export async function handleConfig(args: string[]): Promise<void> {
 
   // Unset
   if (options.explicit.has("unset")) {
+    if (key === "codex-rule") applyCodexRuleOrDie(false);
     delete (cfg as Record<string, unknown>)[key];
     saveUserConfig(cfg);
     console.log(`Unset ${key} (will use auto-detected default)`);
@@ -94,6 +117,14 @@ export async function handleConfig(args: string[]): Promise<void> {
     die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
   }
 
+  if (key === "codex-rule") {
+    if (value === "on" && process.platform === "win32") {
+      die("codex-rule is unavailable on Windows: Claude Code's cross-session messaging, which `codex-collab send` rides on, does not exist there.");
+    }
+    // Written (or removed) before the setting is saved, so a failure never
+    // leaves the config claiming a rule that is not there.
+    applyCodexRuleOrDie(value === "on");
+  }
   (cfg as Record<string, unknown>)[key] =
     key === "timeout" || key === "linger" ? Number(value) : key === "memory" ? value === "true" : value;
   saveUserConfig(cfg);
@@ -235,6 +266,24 @@ export function describeServer(
     : `private app-server${pid} — Codex's socket at ${socket} exists but this invocation did not attach (under \`auto\`, tried the socket and fell back)`;
 }
 
+/** One line on the Codex-side skill: where it is, and whether it is
+ *  current (`inSync` null: not installed). */
+export function describeCodexSkill(inSync: boolean | null, dir: string): string {
+  const file = join(dir, "SKILL.md");
+  if (inSync === null) return `not installed — 'codex-collab skill sync' installs it at ${file}`;
+  if (!inSync) return `${file} (out of date — run 'codex-collab skill sync')`;
+  return `${file} (up to date)`;
+}
+
+/** One line on the opt-in exec-policy rule: on and current, on but the
+ *  file drifted or vanished, or off (Codex asks before each `send`). */
+export function describeCodexRule(enabled: boolean, inSync: boolean | null, path: string): string {
+  if (!enabled) return "off — Codex asks before each `codex-collab send` ('codex-collab config codex-rule on' lets it send without asking)";
+  if (inSync === null) return `on, but ${path} is missing — run 'codex-collab skill sync'`;
+  if (!inSync) return `on, but ${path} is out of date — run 'codex-collab skill sync'`;
+  return `on (${path}) — Codex runs \`codex-collab send\` without asking`;
+}
+
 export async function handleHealth(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
   const findCmd = process.platform === "win32" ? "where" : "which";
@@ -270,6 +319,13 @@ export async function handleHealth(args: string[]): Promise<void> {
   const auth = describeAuth(account);
   console.log(`  account: ${auth.detail}`);
   console.log(`  peer: ${describePeer(options.dir)}`);
+  // Codex's side of the channel: whether a Codex session in this workspace
+  // can find `peers`/`send`, and whether it may run `send` without asking.
+  // Not on Windows, where neither exists.
+  if (process.platform !== "win32") {
+    console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
+    console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
+  }
 
   // Missing auth is reported, never fatal. This command's exit code answers
   // "is the installation sound?" — install.sh runs it as its own final check,

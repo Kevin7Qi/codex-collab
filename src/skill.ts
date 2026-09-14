@@ -8,13 +8,133 @@
 
 import { homedir } from "os";
 import { join } from "path";
-import { readFileSync } from "fs";
-import { listTemplates, type TemplateMeta } from "./config";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { config, listTemplates, type TemplateMeta } from "./config";
 import { readConfiguredMode, resolveCollabMode } from "./peer";
 import skillSource from "../SKILL.md" with { type: "text" };
+import codexSkillSource from "../codex-skill/SKILL.md" with { type: "text" };
 
 /** The SKILL.md source embedded at build time (placeholder not yet expanded). */
 export const SKILL_SOURCE: string = skillSource;
+
+/** The Codex-side skill, embedded the same way: what a Codex session reads
+ *  to learn that `peers` and `send` reach the Claude Code sessions in its
+ *  workspace. Installed under Codex's skills directory, not Claude's. */
+export const CODEX_SKILL_SOURCE: string = codexSkillSource;
+
+/** Directory Codex loads its copy of the skill from: `$CODEX_HOME/skills/
+ *  claude-collab`, `~/.codex/skills/claude-collab` by default — named for
+ *  the party it reaches, as Claude's `codex-collab` skill is. */
+export function codexSkillInstallDir(): string {
+  const override = process.env.CODEX_COLLAB_CODEX_SKILL_DIR;
+  if (override) return override;
+  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+  return join(codexHome, "skills", "claude-collab");
+}
+
+/** The Codex skill this binary would install right now. No placeholders:
+ *  it describes two commands and their costs, nothing machine-specific. */
+export function expectedCodexSkillMd(): string {
+  return CODEX_SKILL_SOURCE.replace(/\r\n/g, "\n");
+}
+
+/** Installed Codex SKILL.md content, or null if missing/unreadable. */
+export function installedCodexSkillMd(dir: string = codexSkillInstallDir()): string | null {
+  try {
+    return readFileSync(join(dir, "SKILL.md"), "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+// ─── Codex exec-policy rule (opt-in) ────────────────────────────────────────
+
+/** The exec-policy rule that makes `send` seamless from Codex's side. Codex
+ *  runs an explicitly allowed command prefix with no approval prompt AND
+ *  outside its sandbox (an exec-policy `allow` implies full trust —
+ *  verified on 0.153.4), which is what `send` needs to reach a local socket.
+ *  Only `send`: `peers` works inside the sandbox. Opt-in (`config codex-rule
+ *  on`), because it lets any Codex session message the user's Claude
+ *  sessions, and start one, without asking. */
+export const CODEX_RULES_SOURCE: string = [
+  "# codex-collab: lets a Codex session run `codex-collab send` without an",
+  "# approval prompt and outside its sandbox, which blocks the local socket",
+  "# `send` needs. Written by `codex-collab config codex-rule on`; removed by",
+  "# `codex-collab config codex-rule off`.",
+  'prefix_rule(pattern=["codex-collab", "send"], decision="allow")',
+  "",
+].join("\n");
+
+/** Where the rule lives: `$CODEX_HOME/rules/codex-collab.rules` (Codex reads
+ *  every `*.rules` file in that directory). */
+export function codexRulesInstallPath(): string {
+  const override = process.env.CODEX_COLLAB_CODEX_RULES_PATH;
+  if (override) return override;
+  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
+  return join(codexHome, "rules", "codex-collab.rules");
+}
+
+export function expectedCodexRules(): string {
+  return CODEX_RULES_SOURCE;
+}
+
+/** Installed rule file content, or null if missing/unreadable. */
+export function installedCodexRules(path: string = codexRulesInstallPath()): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/** True iff the installed rule matches; null when none is installed. */
+export function codexRulesInSync(path: string = codexRulesInstallPath()): boolean | null {
+  const installed = installedCodexRules(path);
+  if (installed === null) return null;
+  return normalizeNewlines(installed) === normalizeNewlines(expectedCodexRules());
+}
+
+/** Whether the user opted in (`config codex-rule on`). Read straight from
+ *  the config file: this module sits below the command layer. */
+export function codexRuleEnabled(): boolean {
+  try {
+    const cfg = JSON.parse(readFileSync(config.configFile, "utf-8")) as Record<string, unknown> | null;
+    return cfg?.["codex-rule"] === "on";
+  } catch {
+    return false;
+  }
+}
+
+/** Write the rule (write-then-rename; the temp name does not end in
+ *  `.rules`, so Codex never reads a half-written file). Returns the path. */
+export function installCodexRules(path: string = codexRulesInstallPath()): string {
+  const dir = join(path, "..");
+  mkdirSync(dir, { recursive: true });
+  const tmp = join(dir, `.codex-collab.rules.tmp-${process.pid}`);
+  try {
+    writeFileSync(tmp, CODEX_RULES_SOURCE);
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+  return path;
+}
+
+/** Remove the rule; false when there was none. */
+export function removeCodexRules(path: string = codexRulesInstallPath()): boolean {
+  if (!existsSync(path)) return false;
+  rmSync(path, { force: true });
+  return true;
+}
+
+/** True iff the installed Codex skill matches what this binary generates;
+ *  null when none is installed. */
+export function codexSkillInSync(dir: string = codexSkillInstallDir()): boolean | null {
+  const installed = installedCodexSkillMd(dir);
+  if (installed === null) return null;
+  return normalizeNewlines(installed) === normalizeNewlines(expectedCodexSkillMd());
+}
 
 /** Placeholder line in the SKILL.md source replaced by the template table. */
 export const TEMPLATES_PLACEHOLDER = "<!-- TEMPLATES -->";

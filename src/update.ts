@@ -11,7 +11,7 @@
 import { join, dirname } from "path";
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { config } from "./config";
-import { skillInSync } from "./skill";
+import { codexRuleEnabled, codexRulesInSync, codexSkillInSync, skillInSync } from "./skill";
 import pkg from "../package.json";
 
 /** "owner/repo" parsed from package.json's repository URL. */
@@ -136,7 +136,7 @@ export async function maybeNotifyUpdates(allowRemoteFetch = true): Promise<void>
   // free; disabling it too would leave the skill silently stale for anyone
   // (or any CI) that sets the var.
   try {
-    if (skillInSync() === false) {
+    if (skillInSync() === false || codexSkillInSync() === false || (codexRuleEnabled() && codexRulesInSync() !== true)) {
       console.error(
         "[codex-collab] Installed skill file is out of date — run 'codex-collab skill sync' to review and apply the update.",
       );
