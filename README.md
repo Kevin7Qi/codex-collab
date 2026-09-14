@@ -122,34 +122,6 @@ codex-collab run "large refactor" --detach --approval auto
 codex-collab follow --watch
 ```
 
-## Native Peer Messaging
-
-On macOS/Linux with a messaging-capable Claude Code, the workspace broker registers Codex in Claude Code's session registry:
-
-```bash
-codex-collab peer up      # start the broker + peer; `peer` alone shows status
-```
-
-From then on, any Claude session's `ListAgents` shows a `codex(myproject-a1b2c3)` peer — message it and Codex picks up the task, replying as a peer message when done. Each conversation also appears as its own peer. A `topic:` first line selects one — `topic: auth refactor` continues the conversation named `codex(auth-refactor-a1b2c3)` or starts it if new, so several conversations can run in parallel and you switch between them by topic (the line is stripped before Codex sees the message). Further header lines set the conversation's `model:`, `effort:`, `timeout:` (seconds per turn; an overdue turn is stopped and the sender told), `sandbox:` and `approval:`. With no topic line you continue your most recent conversation, and an unnamed conversation takes its name from the message text plus the thread's short ID. Replies come from that conversation's address, and replying to it continues that conversation.
-
-Mid-task, Codex can ask its Claude peer a question through a `collab.consult` tool call; the question arrives as a `[consult]` message, and the next reply from that session is delivered back into Codex's running turn. Consults are fail-open: unanswered questions time out and Codex proceeds on its own judgment.
-
-The channel works in the other direction: from Codex's own sessions — the `codex` terminal UI, the Codex app, `codex exec` — Codex can reach the Claude Code sessions in the same workspace. `codex-collab peers` lists them (name, idle or busy, interactive or background, whether codex-collab started the session), and `codex-collab send` delivers a message to one by name and waits for its reply (default 600 seconds, `--timeout` to change), printing the reply into Codex's context. When exactly one session is live the name may be omitted; with several live and no name, `send` refuses and prints the list. `send -` reads the message from stdin. `--no-wait` delivers a one-way note; no reply can reach a sender that is not waiting. No reply within the deadline is not an error — the command exits 0 and Codex proceeds on its own judgment, as with the ask channel. For the duration of the exchange the sender registers as a transient peer, `codex(<thread>-<hash>)`, in Claude Code's session registry, and Claude replies with `SendMessage` to that address; as with the broker's messages, a session running with `bypassPermissions` holds them unless its `crossSessionInbound` setting is `accept`. The mechanism is direct: `send` delivers to the session's socket and receives on its own, no broker needed, nothing to start beforehand.
-
-Codex's sandbox blocks unix sockets, so `send` must run outside it — inside a sandbox it refuses immediately and points to `codex-collab config codex-rule on`; without the rule, Codex's normal approval flow asks each time. `peers` works inside the sandbox. When no Claude session is live in the workspace, `send` starts a background one: `claude --bg` in `dontAsk` permission mode, named `claude(<workspace>-<hash>)`, with the repository but none of the user's conversation; a detached reaper stops it after 30 idle minutes by default. `config spawn off` or `--no-spawn` disables the auto-start; `config linger` sets the idle time. `install.sh` installs a Codex-side skill, `claude-collab`, to `~/.codex/skills/claude-collab/` (or under `$CODEX_HOME`) alongside the Claude skill; `codex-collab skill sync` keeps both current. On Windows, Claude Code messaging does not exist: `send` refuses, `peers` says so, and the Windows installer does not install the Codex skill.
-
-Claude Code gates inbound peer messages on the sender's attested permission class. A conversation attests `bypass` only when it runs with `sandbox: danger-full-access`, otherwise `prompting` — so a Claude session running with `bypassPermissions` holds Codex's replies for review unless its `crossSessionInbound` setting is `accept`. A held reply is still readable with `codex-collab output <id> --last`. A CLI turn on a messaged conversation with an explicit `-s` changes the sandbox that conversation runs and attests from then on, since Codex keeps a per-turn override for the turns that follow.
-
-The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before (`CODEX_COLLAB_PEER=on` insists on the peer for one invocation, as `config mode peer` does persistently). The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
-
-## Codex's App-Server
-
-Codex can run one shared, multi-client app-server per machine. `codex app-server daemon start` binds it at `~/.codex/app-server-control/app-server-control.sock`; the `codex` terminal UI and the Codex desktop app (on Linux hosts it reaches over SSH) attach to it automatically. On a Mac the desktop app runs a private server of its own that nothing can join.
-
-When that socket answers, codex-collab's workspace broker attaches to it instead of spawning a private `codex app-server`. Everything on a shared server is one space: turns codex-collab starts render live in the Codex app or terminal UI, `threads --discover` marks threads other clients have open or running, and `run --resume <id>` joins such a thread. A prompt sent to a thread whose turn is already running is folded into that turn rather than starting a second one, and that turn stays the other client's: its approvals are answered where the user is looking, never by codex-collab. If the prompt carries overrides (`-m`, `-s`, `--approval`, `--dir`) or `--goal`, codex-collab refuses instead — those settings cannot apply to someone else's turn. The `codex` terminal UI declines every dynamic tool call on a thread it watches, which means a mid-turn consult to Claude is declined before Claude can answer; codex-collab delivers Claude's answer into the running turn as an injected message. A turn codex-collab starts on an idle thread is its own, as always. `health` prints which server the broker is on. Not available on Windows.
-
-Without a shared server, Codex 0.145+ allows one writer per thread. A thread open in the Codex app or a `codex` session cannot be resumed by codex-collab until that process lets go — reported as exit code 8 with a message listing the kinds of process that can hold a thread, though it cannot tell which one actually does. A thread the broker has used frees up about seven minutes (0.153.4) after the broker lets go of it — at turn end for a CLI run, when its thread peer retires after 30 idle minutes for a messaged conversation. Sharing one app-server removes the conflict entirely.
-
 ## CLI Commands
 
 | Command | Description |
@@ -283,6 +255,7 @@ Without a shared server, Codex 0.145+ allows one writer per thread. A thread ope
 | `5` | Died blocked on an approval — the request is void; resume with a longer `--timeout`, or use `--approval auto` |
 | `6` | Broker busy and fallback unavailable — transient, retry |
 | `7` | Goal ended blocked or usage/budget-limited — steer with `run --resume`, or abandon with `kill --clear` |
+| `8` | Thread held by another Codex process (the app or a terminal session) — wait or close it there; nothing is lost |
 
 `next`: `0` event delivered (printed in full on stdout) · `3` `--timeout` elapsed with no event · `10` workspace idle (nothing running, nothing pending).
 
@@ -292,6 +265,26 @@ Without a shared server, Codex 0.145+ allows one writer per thread. A thread ope
 <summary>Goal mode</summary>
 
 With `goals = true` in `~/.codex/config.toml`, a goal — created by Codex mid-turn, or explicitly with `run "first-turn prompt" --goal "objective" [--budget <tokens>]` — makes the server keep starting continuation turns until the objective is done, and a `run` follows the whole goal in one run record and log; its exit code reflects the goal's end. The objective is re-injected into every continuation turn; one too big to state in a sentence can point at a spec or plan file in the repo. `threads` shows each thread's latest goal state (`[goal active: 45k/100k tokens]`).
+
+</details>
+
+## Peer messaging
+
+Claude sessions and Codex sessions in a workspace can message each other. macOS and Linux with Claude Code 2.1.224 or newer; on Windows, use the CLI instead.
+
+```bash
+codex-collab peer up      # start the broker + peer; `peer` alone shows status
+```
+
+<details><summary>From Claude: message Codex</summary>
+
+After `peer up`, `ListAgents` shows `codex(myproject-a1b2c3)` — message it and Codex does the task, replying as a peer message. A first line `topic: <name>` starts or continues a named conversation, so several can run in parallel. Further first lines set `model:`, `effort:`, `timeout:`, `sandbox:`, `approval:`. Mid-task, Codex can ask Claude a question; unanswered, it proceeds on its own.
+
+</details>
+
+<details><summary>From Codex: message Claude</summary>
+
+From Codex's own sessions, `codex-collab peers` lists the Claude Code sessions in the workspace and `codex-collab send <name> "message"` messages one, waiting for its reply (default 600 s; no reply exits 0). With none live, `send` starts a background session that stops after 30 idle minutes (`config spawn`, `config linger`). Codex asks before each `send` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
 
 </details>
 
@@ -322,13 +315,13 @@ codex-collab config --unset
 
 Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `codex-rule`
 
-The `mode` key controls how codex-collab communicates with Claude: `auto` (the default) uses peer messaging when the platform supports it and falls back to the CLI path otherwise, `peer` insists on peer messaging, and `cli` disables peer mechanisms entirely — no agent-registry entry, no per-conversation addresses, no consult tool — routing everything through the command line. Peer messaging requires macOS or Linux with Claude Code 2.1.224 or newer; on Windows or older versions, `auto` falls back to the CLI path automatically without any configuration. A broker reads the mode when it starts and keeps its peer state until it restarts, so after changing the mode run `codex-collab peer up` in the workspace to apply it — the broker is replaced only when no turn is running.
+`mode`: `auto` (default) uses peer messaging where the platform supports it and the CLI path otherwise; `peer` insists on it; `cli` turns it off entirely. A change applies when the workspace broker restarts: `codex-collab peer up`.
 
-The `server` key controls how the broker connects to the Codex app-server: `auto` (the default) attaches to the shared app-server when its control socket answers and falls back to a private server otherwise, `shared` insists on the shared server and fails if there is none, and `private` always spawns a private server. A broker reads the key when it starts, so after changing it run `codex-collab peer up` in the workspace to apply — the broker is replaced only when no turn is running. The environment variable `CODEX_COLLAB_SERVER` (`auto`, `shared`, `private`) overrides the key for one invocation. `CODEX_COLLAB_SERVER_SOCKET` overrides the path of Codex's control socket (default `~/.codex/app-server-control/app-server-control.sock`, or under `$CODEX_HOME` if set).
+`server`: `auto` (default) attaches to Codex's shared app-server when one is running (`codex app-server daemon start`) and runs a private one otherwise; `shared` insists on it; `private` never attaches. `health` shows which one is in use. A change applies at `codex-collab peer up`; `CODEX_COLLAB_SERVER` overrides it for one invocation.
 
-The `spawn` key controls whether `codex-collab send` starts a background Claude Code session when none is live in the workspace: `on` (the default) starts one, `off` never does. `--no-spawn` overrides per invocation. The `linger` key sets how long (in seconds) a spawned session idles before it is stopped (default 1800); Claude Code's own idle timeout (roughly one hour) is the backstop.
+`spawn` controls whether `send` starts a background Claude Code session when none is live: `on` (default) or `off`; `--no-spawn` overrides per call. `linger` sets how many seconds a spawned session may idle before it is stopped (default 1800).
 
-**Experimental.** The `codex-rule` key (`on` / `off`, default `off`) installs an exec-policy rule at `~/.codex/rules/codex-collab.rules` (`$CODEX_HOME/rules/` if set) that allows the `codex-collab send` command prefix; Codex then runs `send` outside its sandbox without an approval prompt. `off` or `--unset` removes the file. While the key is on, `skill sync` and reinstalls keep the rule current. The trade-off: any Codex session — including one driven by content it read — can message the user's Claude Code sessions and start a background one without asking. On an interactive terminal, `install.sh` asks once whether to enable it and records the answer, so reinstalls do not ask again; a non-interactive install leaves the key untouched and prints a hint. Not available on Windows.
+**Experimental.** `codex-rule` (`on` / `off`, default `off`): `on` lets Codex run `codex-collab send` without asking each time; `off` or `--unset` turns it back off; the installer asks once on an interactive terminal and records the answer. With the rule on, any Codex session — including one steered by content it read — can message your Claude Code sessions and start one without asking. Not available on Windows.
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 
