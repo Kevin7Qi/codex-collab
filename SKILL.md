@@ -39,6 +39,8 @@ Messaged conversations write the same run records as CLI runs, so `codex-collab 
 If `peer up` reports messaging unavailable (Windows, or an older Claude Code), the CLI handles everything.
 <!-- /MODE:peer -->
 
+Codex can also reach you directly: `codex-collab send` from a Codex session registers a transient `codex(<thread>-<hash>)` peer and delivers a message to your session. The peer exists only for the duration of the exchange; the message names the Codex thread and whether the sender is waiting. Reply with `SendMessage` to that address; the sender prints your reply and continues. When the message says the sender is not waiting, treat it as a one-way note — no reply can reach it. If `send` found no Claude session in the workspace, it started a background one — a `claude(<workspace>-<hash>)` session with the repository but none of the user's conversation, running in `dontAsk` permission mode, that stops after 30 idle minutes by default (`config linger`).
+
 ## Codex's Own App-Server
 
 When Codex runs a shared app-server (`codex app-server daemon start`, bound at `~/.codex/app-server-control/app-server-control.sock`), the workspace broker attaches to it instead of spawning a private one. `config server` controls this: `auto` (default) attaches when the socket answers and falls back to a private server otherwise; `shared` insists on the shared server and fails without one; `private` never attaches. The environment variable `CODEX_COLLAB_SERVER` overrides the setting for one invocation; `CODEX_COLLAB_SERVER_SOCKET` overrides the control-socket path. The setting is read when a broker starts; `codex-collab peer up` restarts the workspace broker so a change applies. `health` prints which server the broker is on.

@@ -134,6 +134,10 @@ From then on, any Claude session's `ListAgents` shows a `codex(myproject-a1b2c3)
 
 Mid-task, Codex can ask its Claude peer a question through a `collab.consult` tool call; the question arrives as a `[consult]` message, and the next reply from that session is delivered back into Codex's running turn. Consults are fail-open: unanswered questions time out and Codex proceeds on its own judgment.
 
+The channel works in the other direction: from Codex's own sessions — the `codex` terminal UI, the Codex app, `codex exec` — Codex can reach the Claude Code sessions in the same workspace. `codex-collab peers` lists them (name, idle or busy, interactive or background, whether codex-collab started the session), and `codex-collab send` delivers a message to one by name and waits for its reply (default 600 seconds, `--timeout` to change), printing the reply into Codex's context. When exactly one session is live the name may be omitted; with several live and no name, `send` refuses and prints the list. `send -` reads the message from stdin. `--no-wait` delivers a one-way note; no reply can reach a sender that is not waiting. No reply within the deadline is not an error — the command exits 0 and Codex proceeds on its own judgment, as with the ask channel. For the duration of the exchange the sender registers as a transient peer, `codex(<thread>-<hash>)`, in Claude Code's session registry, and Claude replies with `SendMessage` to that address; as with the broker's messages, a session running with `bypassPermissions` holds them unless its `crossSessionInbound` setting is `accept`. The mechanism is direct: `send` delivers to the session's socket and receives on its own, no broker needed, nothing to start beforehand.
+
+Codex's sandbox blocks unix sockets, so `send` must run outside it — inside a sandbox it refuses immediately and points to `codex-collab config codex-rule on`; without the rule, Codex's normal approval flow asks each time. `peers` works inside the sandbox. When no Claude session is live in the workspace, `send` starts a background one: `claude --bg` in `dontAsk` permission mode, named `claude(<workspace>-<hash>)`, with the repository but none of the user's conversation; a detached reaper stops it after 30 idle minutes by default. `config spawn off` or `--no-spawn` disables the auto-start; `config linger` sets the idle time. `install.sh` installs a Codex-side skill, `claude-collab`, to `~/.codex/skills/claude-collab/` (or under `$CODEX_HOME`) alongside the Claude skill; `codex-collab skill sync` keeps both current. On Windows, Claude Code messaging does not exist: `send` refuses, `peers` says so, and the Windows installer does not install the Codex skill.
+
 Claude Code gates inbound peer messages on the sender's attested permission class. A conversation attests `bypass` only when it runs with `sandbox: danger-full-access`, otherwise `prompting` — so a Claude session running with `bypassPermissions` holds Codex's replies for review unless its `crossSessionInbound` setting is `accept`. A held reply is still readable with `codex-collab output <id> --last`. A CLI turn on a messaged conversation with an explicit `-s` changes the sandbox that conversation runs and attests from then on, since Codex keeps a per-turn override for the turns that follow.
 
 The peer degrades cleanly: on Windows, without a session registry, or with `CODEX_COLLAB_PEER=off`, everything below works exactly as before (`CODEX_COLLAB_PEER=on` insists on the peer for one invocation, as `config mode peer` does persistently). The broker stays resident while any Claude session is running and retires on its usual idle timeout once the last one exits.
@@ -157,6 +161,8 @@ Without a shared server, Codex 0.145+ allows one writer per thread. A thread ope
 | `output <id> [--last]` | Full log for a thread (`--last`: only the latest turn's output) |
 | `kill <id> [--clear]` | Stop a running thread. An active goal is paused first; `--clear` abandons it |
 | `peer [up]` | Show the native-messaging peer's status; `peer up` starts the broker (and with it the peer) |
+| `peers [--all] [--json]` | List the Claude Code sessions live in this workspace |
+| `send [<peer>] "message"` | Deliver a message to a named Claude session and wait for the reply (`--no-wait` for fire-and-forget; `send -` reads from stdin) |
 
 <details>
 <summary>Questions and approvals</summary>
@@ -194,7 +200,7 @@ Without a shared server, Codex 0.145+ allows one writer per thread. A thread ope
 | `clean` | Delete old logs and stale mappings |
 | `skill sync [--yes]` | Regenerate the installed SKILL.md when it drifts from the binary or template set. Prints the diff, applies only on confirmation |
 | `update` | Check for a newer release and install it with confirmation. See [Upgrading](#upgrading) |
-| `health` | Check dependencies and authentication, and name the app-server the broker runs on |
+| `health` | Check dependencies and authentication, name the app-server the broker runs on, and report Codex-side skill and exec-policy status |
 | `version` | Print version (also `-v`/`--version` before a command) |
 
 </details>
@@ -314,11 +320,15 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`
+Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `codex-rule`
 
 The `mode` key controls how codex-collab communicates with Claude: `auto` (the default) uses peer messaging when the platform supports it and falls back to the CLI path otherwise, `peer` insists on peer messaging, and `cli` disables peer mechanisms entirely — no agent-registry entry, no per-conversation addresses, no consult tool — routing everything through the command line. Peer messaging requires macOS or Linux with Claude Code 2.1.224 or newer; on Windows or older versions, `auto` falls back to the CLI path automatically without any configuration. A broker reads the mode when it starts and keeps its peer state until it restarts, so after changing the mode run `codex-collab peer up` in the workspace to apply it — the broker is replaced only when no turn is running.
 
 The `server` key controls how the broker connects to the Codex app-server: `auto` (the default) attaches to the shared app-server when its control socket answers and falls back to a private server otherwise, `shared` insists on the shared server and fails if there is none, and `private` always spawns a private server. A broker reads the key when it starts, so after changing it run `codex-collab peer up` in the workspace to apply — the broker is replaced only when no turn is running. The environment variable `CODEX_COLLAB_SERVER` (`auto`, `shared`, `private`) overrides the key for one invocation. `CODEX_COLLAB_SERVER_SOCKET` overrides the path of Codex's control socket (default `~/.codex/app-server-control/app-server-control.sock`, or under `$CODEX_HOME` if set).
+
+The `spawn` key controls whether `codex-collab send` starts a background Claude Code session when none is live in the workspace: `on` (the default) starts one, `off` never does. `--no-spawn` overrides per invocation. The `linger` key sets how long (in seconds) a spawned session idles before it is stopped (default 1800); Claude Code's own idle timeout (roughly one hour) is the backstop.
+
+**Experimental.** The `codex-rule` key (`on` / `off`, default `off`) installs an exec-policy rule at `~/.codex/rules/codex-collab.rules` (`$CODEX_HOME/rules/` if set) that allows the `codex-collab send` command prefix; Codex then runs `send` outside its sandbox without an approval prompt. `off` or `--unset` removes the file. While the key is on, `skill sync` and reinstalls keep the rule current. The trade-off: any Codex session — including one driven by content it read — can message the user's Claude Code sessions and start a background one without asking. On an interactive terminal, `install.sh` asks once whether to enable it and records the answer, so reinstalls do not ask again; a non-interactive install leaves the key untouched and prints a hint. Not available on Windows.
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 
