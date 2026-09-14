@@ -10,6 +10,7 @@ CLI tool for Claude + Codex collaboration via the Codex app server JSON-RPC prot
 ./install.sh --dev    # symlink for live iteration
 bun run src/cli.ts --help
 codex-collab health
+bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) — before every push
 ```
 
 ## Key Files
