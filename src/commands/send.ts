@@ -31,7 +31,11 @@ import {
   workspaceSuffix,
 } from "../peer";
 import {
+  CLAUDE_EFFORTS,
   DEFAULT_SPAWN_LINGER_SEC,
+  describeModelChoice,
+  isClaudeEffort,
+  isModelName,
   listClaudeSessions,
   resolveSession,
   spawnClaudeSession,
@@ -147,6 +151,18 @@ export function splitTarget(
   return { targetName: null, message: positional.join(" ") };
 }
 
+/** What to tell Codex when it chose a model or effort for a session that
+ *  was already running: the choice is made at start and cannot change after.
+ *  null when what it asked for is what the session runs on anyway. */
+export function choiceNotAppliedNote(target: ClaudeSession, askedModel?: string, askedEffort?: string): string | null {
+  if (!target.spawned) {
+    return `${target.name} is the user's own session and runs on what they chose: --model and --effort apply only to a session \`send\` starts, so yours did not apply.`;
+  }
+  const { model, effort } = target.spawned;
+  if ((askedModel === undefined || askedModel === model) && (askedEffort === undefined || askedEffort === effort)) return null;
+  return `${target.name} is already running on ${describeModelChoice(model, effort)}: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`;
+}
+
 export async function handleSend(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
   const cwd = options.dir;
@@ -166,6 +182,15 @@ export async function handleSend(args: string[]): Promise<void> {
     );
   }
 
+  // What a session started here should run on, if Codex says: `-m` and
+  // `-r`/`--effort`, the same flags `run` takes for Codex's models. Only
+  // explicit flags count — the configured `model`/`reasoning` are Codex's.
+  const askedModel = options.explicit.has("model") && options.model ? options.model : undefined;
+  const askedEffort = options.explicit.has("reasoning") ? String(options.reasoning) : undefined;
+  if (askedEffort !== undefined && !isClaudeEffort(askedEffort)) {
+    die(`Invalid effort for a Claude Code session: ${askedEffort}\nValid: ${CLAUDE_EFFORTS.join(", ")} (\`codex-collab models --claude\` lists the models)`);
+  }
+
   const sessions = listClaudeSessions({ cwd, stateDir });
   const { targetName, message: rawMessage } = splitTarget(positional, options.to, sessions);
   let message = rawMessage;
@@ -175,11 +200,12 @@ export async function handleSend(args: string[]): Promise<void> {
   }
   message = sanitizeForTerminal(message).trim();
   if (!message) {
-    die('No message provided\nUsage: codex-collab send [<peer>] "message" [--to <peer>] [--timeout <sec>] [--no-wait]');
+    die('No message provided\nUsage: codex-collab send [<peer>] "message" [--to <peer>] [--timeout <sec>] [--no-wait] [--model <model>] [--effort <level>]');
   }
 
   // ── Whom to send to ──
   let target: ClaudeSession;
+  let startedHere = false;
   const notes: string[] = [];
   if (targetName) {
     const { session, ambiguous } = resolveSession(sessions, targetName);
@@ -211,6 +237,18 @@ export async function handleSend(args: string[]): Promise<void> {
         console.error(`[codex] Warning: ignoring invalid linger in config: ${cfg.linger}`);
       }
     }
+    // Flag, then the user's configured default, then nothing — which leaves
+    // the session on the user's Claude Code default.
+    let model = askedModel;
+    if (model === undefined && cfg["spawn-model"] !== undefined) {
+      if (isModelName(cfg["spawn-model"])) model = cfg["spawn-model"];
+      else console.error(`[codex] Warning: ignoring invalid spawn-model in config: ${cfg["spawn-model"]}`);
+    }
+    let effort = askedEffort;
+    if (effort === undefined && cfg["spawn-effort"] !== undefined) {
+      if (isClaudeEffort(cfg["spawn-effort"])) effort = cfg["spawn-effort"];
+      else console.error(`[codex] Warning: ignoring invalid spawn-effort in config: ${cfg["spawn-effort"]}`);
+    }
     // One spawn per workspace at a time: two sends racing here would each
     // start a session under the same name. The second waits, then finds the
     // first's session live and uses it.
@@ -235,15 +273,24 @@ export async function handleSend(args: string[]): Promise<void> {
       } else {
         console.log("No Claude Code session is live in this workspace — starting one in the background…");
         try {
-          target = await spawnClaudeSession({ cwd, stateDir, lingerSec });
+          target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort });
         } catch (e) {
           die((e instanceof Error ? e.message : String(e)) + sandboxHint());
         }
-        notes.push(`Started ${target.name} (a background Claude Code session; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
+        startedHere = true;
+        notes.push(`Started ${target.name} (a background Claude Code session on ${describeModelChoice(model, effort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
       }
     } finally {
       release();
     }
+  }
+
+  // A model or effort Codex chose applies only to a session started just
+  // now. Where it could not apply, say so: Codex should know what it is
+  // actually talking to before it weighs the reply.
+  if (!startedHere && (askedModel !== undefined || askedEffort !== undefined)) {
+    const note = choiceNotAppliedNote(target, askedModel, askedEffort);
+    if (note) notes.push(note);
   }
 
   // ── Our own address for the reply ──

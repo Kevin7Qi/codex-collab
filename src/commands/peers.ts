@@ -6,7 +6,7 @@
 // reads.
 
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { listClaudeSessions, readSpawnedSessions, runReaper, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { describeModelChoice, listClaudeSessions, readSpawnedSessions, runReaper, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { formatDuration, loadUserConfig, parseOptions } from "./shared";
 
 function idleFor(session: ClaudeSession, now: number): string | null {
@@ -25,6 +25,9 @@ export function formatSessions(sessions: ClaudeSession[], now = Date.now()): str
     if (!s.verified && mixed) notes.push("unverified: its process cannot be checked from here");
     if (s.spawned) {
       notes.push("started by codex-collab");
+      // What a started session runs on is fixed when it starts, so it is
+      // what a Codex session needs to see before sending it harder work.
+      if (s.spawned.model || s.spawned.effort) notes.push(describeModelChoice(s.spawned.model, s.spawned.effort));
       const idle = idleFor(s, now);
       if (idle) notes.push(`idle ${idle}`);
       notes.push(`stops after ${formatDuration(s.spawned.lingerSec * 1000)} idle`);
@@ -73,7 +76,7 @@ export async function handlePeers(args: string[]): Promise<void> {
       cwd: s.cwd,
       pid: s.pid,
       verified: s.verified,
-      spawned: s.spawned ? { id: s.spawned.id, startedAt: s.spawned.startedAt, lingerSec: s.spawned.lingerSec } : null,
+      spawned: s.spawned ? { id: s.spawned.id, startedAt: s.spawned.startedAt, lingerSec: s.spawned.lingerSec, model: s.spawned.model ?? null, effort: s.spawned.effort ?? null } : null,
     })), null, 2));
     return;
   }

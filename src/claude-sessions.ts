@@ -62,6 +62,10 @@ export interface SpawnedSession {
    *  same pid that differs is another process, never ours to stop. */
   procStart?: string;
   sessionId?: string | null;
+  /** The model and effort it was started with; absent means the user's
+   *  Claude Code default. Fixed for the session's life. */
+  model?: string;
+  effort?: string;
 }
 
 /** Default idle linger for a spawned session (seconds). Claude Code stops
@@ -350,6 +354,40 @@ export const SPAWN_PERMISSION_MODE = "auto";
  *  checkout do. */
 export const SPAWN_SETTINGS = { worktree: { bgIsolation: "none" } } as const;
 
+/** The models a started session can run on, as the aliases `claude --model`
+ *  takes. An alias always means the latest model of its tier, so nothing
+ *  here names a version; a full model name is accepted as well. Claude Code
+ *  has no command that lists its models, which is why the list lives here —
+ *  it is what `codex-collab models --claude` prints, so a Codex session can
+ *  weigh cost against the task before it starts a session. Most capable
+ *  first. */
+export const CLAUDE_MODEL_TIERS: ReadonlyArray<{ alias: string; description: string }> = [
+  { alias: "fable", description: "Most capable, most expensive: hard design problems, deep debugging, long multi-step work" },
+  { alias: "opus", description: "Strong general model: substantial implementation and careful review" },
+  { alias: "sonnet", description: "Balanced everyday model: routine coding, reviews, explanations" },
+  { alias: "haiku", description: "Fastest and cheapest: lookups, summaries, simple questions" },
+];
+
+/** The effort levels `claude --effort` takes, lowest first. */
+export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type ClaudeEffort = typeof CLAUDE_EFFORTS[number];
+
+export function isClaudeEffort(value: unknown): value is ClaudeEffort {
+  return typeof value === "string" && (CLAUDE_EFFORTS as readonly string[]).includes(value);
+}
+
+/** A model name safe to hand to `claude --model`: an alias or a full name. */
+export function isModelName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && !/[^a-zA-Z0-9._\-\/:\[\]]/.test(value);
+}
+
+/** How a session's model and effort read in a listing or a notice: what was
+ *  asked for, and the user's Claude Code default for whatever was not. */
+export function describeModelChoice(model?: string, effort?: string): string {
+  if (!model && !effort) return "the user's Claude Code default model and effort";
+  return `${model ?? "default model"}, ${effort ? `${effort} effort` : "default effort"}`;
+}
+
 /** How long to wait for a started session to register a socket. Claude
  *  Code binds it during startup, well before the first turn ends. */
 export const SPAWN_REGISTER_TIMEOUT_MS = 45_000;
@@ -358,6 +396,10 @@ export interface SpawnClaudeOptions {
   cwd: string;
   stateDir: string;
   lingerSec?: number;
+  /** `claude --model` / `--effort` for the new session. Left out, the
+   *  session runs on the user's Claude Code default. */
+  model?: string;
+  effort?: string;
   /** Test seam: the claude binary. */
   claudeBin?: string;
   /** Test seam: how the reaper is started. */
@@ -373,11 +415,18 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   const name = spawnedSessionName(opts.cwd);
   const lingerSec = opts.lingerSec ?? DEFAULT_SPAWN_LINGER_SEC;
   const bin = opts.claudeBin ?? "claude";
+  // The model and effort are the caller's to choose, because the user pays
+  // for them: a lookup has no need of the most capable model thinking hard.
+  // Whatever is not chosen stays Claude Code's own default.
+  const choice = [
+    ...(opts.model ? ["--model", opts.model] : []),
+    ...(opts.effort ? ["--effort", opts.effort] : []),
+  ];
   let announced: string;
   try {
     announced = execFileSync(
       bin,
-      ["--bg", "-n", name, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), spawnedSessionBrief(wsRoot)],
+      ["--bg", "-n", name, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), ...choice, spawnedSessionBrief(wsRoot)],
       { cwd: wsRoot, env: spawnEnv(), encoding: "utf-8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (e) {
@@ -408,7 +457,7 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   // it against later entries, and a start time computed here could be in the
   // other representation (see procIdentity) — every entry would then read
   // as someone else's, and the session would be forgotten, never stopped.
-  const record: SpawnedSession = { id, pid: session.pid, name, startedAt: new Date().toISOString(), lingerSec, procStart: session.procStart ?? undefined, sessionId: session.sessionId };
+  const record: SpawnedSession = { id, pid: session.pid, name, startedAt: new Date().toISOString(), lingerSec, procStart: session.procStart ?? undefined, sessionId: session.sessionId, model: opts.model, effort: opts.effort };
   recordSpawnedSession(opts.stateDir, record);
   (opts.startReaper ?? startReaper)(record, opts.cwd);
   return { ...session, spawned: record };

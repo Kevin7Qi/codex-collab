@@ -161,7 +161,9 @@ Commands:
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server
   config [key] [value]    Show or set persistent defaults
-  models                  List available models
+  models [--claude]       List available Codex models (--claude: the Claude
+                          models and efforts a session 'send' starts can
+                          run on)
   templates               List available prompt templates
   ask "question"          (for Codex, mid-turn) Post a question to the
                           collaborator and wait for the answer; --timeout <sec>
@@ -206,7 +208,11 @@ Commands:
                           the wait (default 600),
                           --no-wait sends a one-way note. With no session
                           live, starts one in the background (config spawn
-                          off, or --no-spawn, disables that)
+                          off, or --no-spawn, disables that) — on the model
+                          and effort given with -m <model> and -r/--effort
+                          <level>, else config spawn-model / spawn-effort,
+                          else your Claude Code default ('models --claude'
+                          lists the choices)
   version                 Print version
 
 Options:
@@ -297,7 +303,7 @@ const rawArgs = process.argv.slice(2);
 // validation happens in commands/shared.ts parseOptions. Keep in sync with
 // the value-taking branches there.
 const VALUE_FLAGS = new Set([
-  "-r", "--reasoning",
+  "-r", "--reasoning", "--effort",
   "-m", "--model",
   "-s", "--sandbox",
   "--approval",
@@ -338,6 +344,7 @@ const BOOLEAN_FLAGS = new Set([
   "--no-spawn",
   "--codex",
   "--rules",
+  "--claude",
   "--skip",
 ]);
 

@@ -14,8 +14,13 @@ import { buildRegistryEntry, procIdentity, procStartOf, procStartTicksOf } from 
 import { config, mailboxRoot } from "./config";
 import {
   CLAUDE_CHILD_MARKERS,
+  CLAUDE_EFFORTS,
+  CLAUDE_MODEL_TIERS,
   CODEX_COMMAND_MARKERS,
   DEFAULT_SPAWN_LINGER_SEC,
+  describeModelChoice,
+  isClaudeEffort,
+  isModelName,
   forgetSpawnedSession,
   listClaudeSessions,
   parseBackgroundId,
@@ -304,6 +309,20 @@ describeUnix("spawn helpers", () => {
   test("parseBackgroundId reads claude --bg's announcement", () => {
     expect(parseBackgroundId("Starting background service…\nbackgrounded · f1c306d5 · codex-probe\n  claude agents")).toBe("f1c306d5");
     expect(parseBackgroundId("something else")).toBeNull();
+  });
+
+  test("a model is a name `claude --model` can take, an effort one of Claude's levels, and a choice reads plainly", () => {
+    for (const ok of ["haiku", "claude-opus-5", "claude-opus-5[1m]", "us.anthropic.claude-sonnet-5:0"]) expect(isModelName(ok)).toBe(true);
+    for (const bad of ["", "rm -rf /", "opus;ls", "$(x)", 5, undefined]) expect(isModelName(bad)).toBe(false);
+    expect(CLAUDE_EFFORTS.every(isClaudeEffort)).toBe(true);
+    // Codex's levels that Claude has no name for.
+    for (const bad of ["none", "minimal", "ultra", "", undefined]) expect(isClaudeEffort(bad)).toBe(false);
+    expect(describeModelChoice()).toBe("the user's Claude Code default model and effort");
+    expect(describeModelChoice("opus", "high")).toBe("opus, high effort");
+    expect(describeModelChoice("haiku")).toBe("haiku, default effort");
+    expect(describeModelChoice(undefined, "low")).toBe("default model, low effort");
+    // Most capable first, by alias: nothing here names a version.
+    expect(CLAUDE_MODEL_TIERS.map((t) => t.alias)).toEqual(["fable", "opus", "sonnet", "haiku"]);
   });
 
   test("spawnedSessionName mirrors the front door's shape", () => {

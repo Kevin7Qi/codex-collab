@@ -450,6 +450,35 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     expect(existsSync(rulesPath)).toBe(false);
   });
 
+  it("models --claude lists what a started session can run on, and config spawn-model / spawn-effort set its default", () => {
+    // Needs no app-server: a Codex session runs it inside its sandbox.
+    const listed = cli("models", "--claude");
+    expect(listed.exitCode).toBe(0);
+    for (const alias of ["fable", "opus", "sonnet", "haiku"]) expect(listed.stdout).toMatch(new RegExp(`^  ${alias} +\\S`, "m"));
+    expect(listed.stdout).toContain("Effort, lowest first: low, medium, high, xhigh, max");
+    expect(listed.stdout).toContain("With nothing chosen, a started session runs on: the user's Claude Code default model and effort");
+
+    expect(cli("config", "spawn-model", "sonnet").exitCode).toBe(0);
+    expect(cli("config", "spawn-effort", "medium").exitCode).toBe(0);
+    expect(cli("models", "--claude").stdout).toContain("With nothing chosen, a started session runs on: sonnet, medium effort");
+    // A full model name is as good as an alias; an effort must be Claude's.
+    expect(cli("config", "spawn-model", "claude-opus-5[1m]").exitCode).toBe(0);
+    const badEffort = cli("config", "spawn-effort", "ultra");
+    expect(badEffort.exitCode).toBe(1);
+    expect(badEffort.stderr).toContain("low, medium, high, xhigh, max");
+    expect(cli("config", "spawn-model", "rm -rf /").exitCode).toBe(1);
+    // Specific versions are the user's to offer; the aliases name none.
+    expect(listed.stdout).not.toContain("Specific versions the user also offers");
+    expect(cli("config", "spawn-models", "claude-opus-4-6, claude-sonnet-4-6").exitCode).toBe(0);
+    expect(cli("models", "--claude").stdout).toMatch(/Specific versions the user also offers:\n  claude-opus-4-6\n  claude-sonnet-4-6\n/);
+    expect(cli("config", "spawn-models", "claude-opus-4-6,rm -rf /").exitCode).toBe(1);
+    expect(cli("config", "spawn-models", "--unset").exitCode).toBe(0);
+    // Unset: back to the user's Claude Code default.
+    expect(cli("config", "spawn-model", "--unset").exitCode).toBe(0);
+    expect(cli("config", "spawn-effort", "--unset").exitCode).toBe(0);
+    expect(cli("models", "--claude").stdout).toContain("the user's Claude Code default model and effort");
+  });
+
   it("config codex-rule on writes the rule, sync keeps it current, off removes it", () => {
     const on = cli("config", "codex-rule", "on");
     expect(on.exitCode).toBe(0);

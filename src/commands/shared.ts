@@ -138,6 +138,8 @@ export interface Options {
   codex: boolean;
   /** skill render: the opt-in Codex exec-policy rule. */
   rules: boolean;
+  /** models: the Claude models a started session can run on, not Codex's. */
+  claude: boolean;
   timeout: number;
   limit: number;
   reviewMode: string | null;
@@ -326,6 +328,7 @@ export function defaultOptions(): Options {
     all: false,
     codex: false,
     rules: false,
+    claude: false,
     timeout: config.defaultTimeout,
     limit: config.threadsListLimit,
     reviewMode: null,
@@ -391,7 +394,9 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
 
     if (arg === "-h" || arg === "--help") {
       options.help = true;
-    } else if (arg === "-r" || arg === "--reasoning") {
+    } else if (arg === "-r" || arg === "--reasoning" || arg === "--effort") {
+      // `--effort` is the same flag under the name the `claude` CLI uses —
+      // what `send` passes to a session it starts.
       if (!hasFlagValue(argv, i)) {
         console.error("Error: --reasoning requires a value");
         process.exit(1);
@@ -584,6 +589,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.codex = true;
     } else if (arg === "--rules") {
       options.rules = true;
+    } else if (arg === "--claude") {
+      options.claude = true;
     } else if (arg === "--yes") {
       options.yes = true;
     } else if (arg === "--check") {
@@ -626,6 +633,13 @@ export interface UserConfig {
   spawn?: string;
   /** Seconds a started Claude session may idle before it is stopped. */
   linger?: number;
+  /** Model and effort a started Claude session runs on when `send` names
+   *  none; unset, the user's Claude Code default. */
+  "spawn-model"?: string;
+  "spawn-effort"?: string;
+  /** Full model names `models --claude` offers besides the tier aliases,
+   *  comma-separated. */
+  "spawn-models"?: string;
   /** Opt-in Codex exec-policy rule for `send` (on|off; see skill.ts). */
   "codex-rule"?: string;
 }

@@ -191,6 +191,7 @@ function writeFakeClaude(binDir: string, socketPath: string): void {
 case "$1" in
   --bg)
     echo bg >> "${binDir}/bg.log"
+    for a in "$@"; do printf '%s\\n' "$a"; done > "${binDir}/args.log"
     echo "backgrounded · cafe0001 · $3"
     sleep 300 </dev/null >/dev/null 2>&1 &
     pid=$!
@@ -477,10 +478,15 @@ describeUnix("send", () => {
       const r = await runCli(["send", "are you there?"], { PATH: `${binDir}:${process.env.PATH}` });
       expect(r.code).toBe(0);
       expect(r.stdout).toContain("No Claude Code session is live in this workspace — starting one in the background…");
-      expect(r.stdout).toContain(`Started ${fake.name} (a background Claude Code session; it stops after 2s idle).`);
+      expect(r.stdout).toContain(`Started ${fake.name} (a background Claude Code session on the user's Claude Code default model and effort; it stops after 2s idle).`);
       expect(r.stdout).toContain(`REPLY FROM ${fake.name}`);
       expect(r.stdout).toContain("  spawned says: are you there?");
       expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
+      // Nothing chosen, nothing passed: the session is left on the user's
+      // own Claude Code default rather than on one picked for them.
+      const args = readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+      expect(args).not.toContain("--model");
+      expect(args).not.toContain("--effort");
       // The detached reaper stops it once it has idled for the linger —
       // through `claude stop`, then a signal when that did not take — and
       // forgets it.
@@ -493,6 +499,67 @@ describeUnix("send", () => {
       removeConfig();
       killFakeSleepers(binDir);
     }
+  });
+
+  test("the model and effort Codex chooses reach the session it starts, ahead of the configured default", async () => {
+    const binDir = join(TEST_HOME, "bin-spawn-choice");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    // The user's default for started sessions; the flags outrank it.
+    writeConfig({ linger: 60, "spawn-model": "haiku", "spawn-effort": "low" });
+    try {
+      const r = await runCli(["send", "design question", "--model", "opus", "--effort", "high"], { PATH: `${binDir}:${process.env.PATH}` });
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(`Started ${fake.name} (a background Claude Code session on opus, high effort; it stops after`);
+      const args = readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+      expect(args[args.indexOf("--model") + 1]).toBe("opus");
+      expect(args[args.indexOf("--effort") + 1]).toBe("high");
+      expect(spawnedRecords()).toContainEqual(expect.objectContaining({ model: "opus", effort: "high" }));
+      // The session is live now, and what it runs on is fixed: `peers` shows
+      // it, and a different choice on a later send is reported, not dropped.
+      const listed = await runCli(["peers"]);
+      expect(listed.stdout).toContain("started by codex-collab · opus, high effort");
+      const again = await runCli(["send", "quick lookup", "-m", "haiku", "-r", "low"], { PATH: `${binDir}:${process.env.PATH}` });
+      expect(again.code).toBe(0);
+      expect(again.stdout).toContain(`${fake.name} is already running on opus, high effort: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`);
+      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("with no flags, a started session runs on the configured spawn-model and spawn-effort", async () => {
+    const binDir = join(TEST_HOME, "bin-spawn-config");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 60, "spawn-model": "haiku", "spawn-effort": "low" });
+    try {
+      const r = await runCli(["send", "quick lookup"], { PATH: `${binDir}:${process.env.PATH}` });
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("a background Claude Code session on haiku, low effort;");
+      const args = readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+      expect(args[args.indexOf("--model") + 1]).toBe("haiku");
+      expect(args[args.indexOf("--effort") + 1]).toBe("low");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a choice of model cannot change the user's own session, and send says so; an effort Claude has no level for is refused", async () => {
+    const fake = startFake("fake-claude");
+    registerFake(fake);
+    const r = await runCli(["send", "hello", "--model", "haiku"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("fake-claude is the user's own session and runs on what they chose: --model and --effort apply only to a session `send` starts, so yours did not apply.");
+    expect(r.stdout).toContain("REPLY FROM fake-claude");
+    // `ultra` is a Codex reasoning level; `claude --effort` has none by that name.
+    const bad = await runCli(["send", "hello", "--effort", "ultra"]);
+    expect(bad.code).toBe(1);
+    expect(bad.stderr).toContain("Invalid effort for a Claude Code session: ultra");
+    expect(bad.stderr).toContain("low, medium, high, xhigh, max");
+    expect(fake.received).toHaveLength(1);
   });
 
   test("two sends racing with no session live start one session between them", async () => {

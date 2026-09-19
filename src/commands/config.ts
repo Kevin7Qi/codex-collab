@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
 import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
-import { DEFAULT_SPAWN_LINGER_SEC } from "../claude-sessions";
+import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_LINGER_SEC, describeModelChoice, isClaudeEffort, isModelName } from "../claude-sessions";
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
@@ -87,6 +87,9 @@ export async function handleConfig(args: string[]): Promise<void> {
     spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
     "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` without asking, outside its sandbox; default off)" },
     linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
+    "spawn-model":  { validate: isModelName, hint: `the model a started Claude Code session runs on when \`send\` names none: ${CLAUDE_MODEL_TIERS.map((t) => t.alias).join(", ")}, or a full model name (default: your Claude Code default; see \`codex-collab models --claude\`)` },
+    "spawn-models": { validate: v => v.split(",").every((name) => isModelName(name.trim())), hint: "comma-separated full model names to offer a Codex session besides the aliases, e.g. claude-opus-4-6,claude-sonnet-4-6 (shown by `codex-collab models --claude`; any model name works with `send --model` whether listed or not)" },
+    "spawn-effort": { validate: isClaudeEffort, hint: `the effort a started Claude Code session runs at when \`send\` names none: ${CLAUDE_EFFORTS.join(", ")} (default: your Claude Code default)` },
   };
 
   const cfg = loadUserConfig();
@@ -171,10 +174,44 @@ export async function handleConfig(args: string[]): Promise<void> {
 // models
 // ---------------------------------------------------------------------------
 
+/** `models --claude`: what a Claude Code session `send` starts can run on —
+ *  for a Codex session choosing `--model` / `--effort`, which is a choice
+ *  about the user's money as much as about capability. Reads nothing but the
+ *  user config, so it works inside Codex's sandbox. Exported for tests. */
+export function formatClaudeModels(cfg: UserConfig): string {
+  const width = Math.max(...CLAUDE_MODEL_TIERS.map((t) => t.alias.length));
+  const model = typeof cfg["spawn-model"] === "string" ? cfg["spawn-model"] : undefined;
+  const effort = typeof cfg["spawn-effort"] === "string" ? cfg["spawn-effort"] : undefined;
+  // Specific versions are the user's to offer (`config spawn-models`): a
+  // list kept here would name models that age and retire.
+  const extra = typeof cfg["spawn-models"] === "string"
+    ? cfg["spawn-models"].split(",").map((name) => name.trim()).filter(isModelName)
+    : [];
+  return [
+    "Models for a Claude Code session that `codex-collab send` starts (most capable first):",
+    ...CLAUDE_MODEL_TIERS.map((t) => `  ${t.alias.padEnd(width)}  ${t.description}`),
+    ...(extra.length ? ["", "Specific versions the user also offers:", ...extra.map((name) => `  ${name}`)] : []),
+    "",
+    "An alias always means the latest model of its tier; a full model name works as well.",
+    `Effort, lowest first: ${CLAUDE_EFFORTS.join(", ")}`,
+    "",
+    `With nothing chosen, a started session runs on: ${describeModelChoice(model, effort)}`,
+    "  per message:  codex-collab send \"…\" --model <model> --effort <level>",
+    "  the default:  codex-collab config spawn-model <model> · codex-collab config spawn-effort <level>",
+    "",
+    "The choice is made when `send` starts a session and holds for that session's life. A session that is",
+    "already live keeps what it runs on — the user's own sessions are theirs to set.",
+  ].join("\n");
+}
+
 export async function handleModels(args: string[]): Promise<void> {
   // Parse for -d/--dir support and so unknown flags error like every other
   // command instead of being silently ignored.
   const { options } = parseOptions(args);
+  if (options.claude) {
+    console.log(formatClaudeModels(loadUserConfig()));
+    return;
+  }
   const allModels = await withClient((client) =>
     fetchAllPages<Model>(client, "model/list", { includeHidden: true }),
   options.dir);
