@@ -277,6 +277,9 @@ export function spawnedSessionBrief(wsRoot: string): string {
     "Codex sessions message you through codex-collab; each message says which Codex thread it comes from and whether that session is waiting for a reply.",
     "Answer by replying to the sender with SendMessage — the reply is what the Codex session receives.",
     "Read the workspace as needed. Do not change files unless a message asks you to.",
+    // Whatever Claude Code's settings decide about where a background
+    // session's edits land, the Codex session only knows what the reply says.
+    "When you do change files, say in your reply where the changes are: the path, the branch, and the commit if you made one.",
     "You will be stopped after a while with no messages. Reply now with one line saying you are ready, then wait.",
   ].join(" ");
 }
@@ -324,6 +327,29 @@ export function parseBackgroundId(output: string): string | null {
   return m ? m[1] : null;
 }
 
+/** The permission mode a started session runs in. Nobody is attached to it,
+ *  so it must never wait on a prompt — and it exists for Codex to hand work
+ *  to, which `dontAsk` (deny whatever would prompt: every edit, most
+ *  commands) reduced to reading and answering. In `auto` Claude Code's
+ *  classifier reviews each action in a person's place, so delegated work
+ *  runs with a safety check and without a prompt. Where auto mode is
+ *  unavailable to the session (a setting turns it off, or the model lacks
+ *  it) Claude Code starts it in Manual instead: an action that needs
+ *  approval then waits on a prompt nobody sees, and `send`'s timeout is
+ *  what ends the wait. */
+export const SPAWN_PERMISSION_MODE = "auto";
+
+/** Settings a started session runs with, passed to that session alone
+ *  (`claude --settings`) — the user's settings files are never touched.
+ *
+ *  Left to its default, Claude Code has a background session isolate its
+ *  edits in a git worktree of its own. A session started for Codex is there
+ *  to work WITH it, in the tree they share: edits parked on a branch
+ *  somewhere else are work Codex cannot see or build on. So that isolation
+ *  is off for it, and the two coordinate as any two sessions in one
+ *  checkout do. */
+export const SPAWN_SETTINGS = { worktree: { bgIsolation: "none" } } as const;
+
 /** How long to wait for a started session to register a socket. Claude
  *  Code binds it during startup, well before the first turn ends. */
 export const SPAWN_REGISTER_TIMEOUT_MS = 45_000;
@@ -351,7 +377,7 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   try {
     announced = execFileSync(
       bin,
-      ["--bg", "-n", name, "--permission-mode", "dontAsk", spawnedSessionBrief(wsRoot)],
+      ["--bg", "-n", name, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), spawnedSessionBrief(wsRoot)],
       { cwd: wsRoot, env: spawnEnv(), encoding: "utf-8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (e) {

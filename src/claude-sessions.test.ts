@@ -333,9 +333,11 @@ describeUnix("spawn helpers", () => {
 
 /** A fake `claude` on PATH: `--bg` announces an id and registers a live
  *  entry (backed by a sleeper it starts); `stop <id>` records the call. */
-function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean }): { bin: string; stopLog: string; pidFile: string } {
+function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean }): { bin: string; stopLog: string; pidFile: string; argsLog: string } {
   const stopLog = join(dir, "stop.log");
   const pidFile = join(dir, "sleeper.pid");
+  // One argument per line, as `--bg` received them.
+  const argsLog = join(dir, "args.log");
   const bin = join(dir, "claude");
   // `ticks`: the start time as Claude Code records it on Linux — field 22
   // of /proc/<pid>/stat, counted from the last ")" as the reader does.
@@ -356,6 +358,7 @@ case "$1" in
   --bg)
     name="$3"
     cwd="$(pwd)"
+    for a in "$@"; do printf '%s\\n' "$a"; done > "${argsLog}"
     echo "Starting background service…"
     echo "backgrounded · deadbeef · $name"${registerBlock}
     ;;
@@ -365,7 +368,7 @@ case "$1" in
 esac
 `);
   chmodSync(bin, 0o755);
-  return { bin, stopLog, pidFile };
+  return { bin, stopLog, pidFile, argsLog };
 }
 
 function killSleeper(pidFile: string): void {
@@ -394,6 +397,15 @@ describeUnix("spawnClaudeSession", () => {
       expect(reaped[0].session.id).toBe("deadbeef");
       // The workspace's listing now shows it as ours.
       expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned?.id).toBe("deadbeef");
+      // Started to do work: a mode that lets it act with nobody attached,
+      // and — for this session alone — edits in the tree it shares with
+      // Codex rather than parked in a worktree of its own.
+      const args = readFileSync(fake.argsLog, "utf-8").trimEnd().split("\n");
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("auto");
+      expect(JSON.parse(args[args.indexOf("--settings") + 1])).toEqual({ worktree: { bgIsolation: "none" } });
+      // The name stays where `claude -n` reads it, and the brief comes last.
+      expect(args.slice(0, 3)).toEqual(["--bg", "-n", spawnedSessionName(wsA)]);
+      expect(args[args.length - 1]).toContain("started by codex-collab");
     } finally {
       killSleeper(fake.pidFile);
     }
