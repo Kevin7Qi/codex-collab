@@ -313,13 +313,13 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `codex-rule`
+Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `spawn-model`, `spawn-effort`, `spawn-models`, `codex-rule`
 
 `mode`: `auto` (default) uses peer messaging where the platform supports it and the CLI path otherwise; `peer` insists on it; `cli` turns it off entirely. A change applies when the workspace broker restarts: `codex-collab peer up`.
 
 `server`: `auto` (default) attaches to Codex's shared app-server when one is running (`codex app-server daemon start`) and runs a private one otherwise; `shared` insists on it; `private` never attaches. `health` shows which one is in use. A change applies at `codex-collab peer up`; `CODEX_COLLAB_SERVER` overrides it for one invocation.
 
-`spawn` controls whether `send` starts a background Claude Code session when none is live: `on` (default) or `off`; `--no-spawn` overrides per call. `linger` sets how many seconds a spawned session may idle before it is stopped (default 1800).
+`spawn` controls whether `send` starts a background Claude Code session when none is live: `on` (default) or `off`; `--no-spawn` overrides per call. `linger` sets how many seconds a spawned session may idle before it is stopped (default 1800). `spawn-model` and `spawn-effort` set what a spawned session runs on when Codex names nothing; unset, that is your Claude Code default. Codex chooses per message with `send --model <model> --effort <level>`, and `codex-collab models --claude` lists the choices: the tier aliases (`fable`, `opus`, `sonnet`, `haiku`, each the latest model of its tier), plus any specific versions you name in `spawn-models` (comma-separated full model names, e.g. `claude-opus-4-6`). Any model name works with `--model` whether listed or not. A spawned session runs in Claude Code's `auto` permission mode and edits the working tree it shares with Codex.
 
 **Experimental.** `codex-rule` (`on` / `off`, default `off`): `on` lets Codex run `codex-collab send` without asking each time; `off` or `--unset` turns it back off; the installer asks once on an interactive terminal and records the answer. With the rule on, any Codex session — including one steered by content it read — can message your Claude Code sessions and start one without asking. Not available on Windows.
 

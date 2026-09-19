@@ -306,13 +306,13 @@ codex-collab config model --unset       # 取消单个设置（恢复自动检�
 codex-collab config --unset             # 取消所有设置
 ```
 
-可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`codex-rule`
+可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`spawn-model`、`spawn-effort`、`spawn-models`、`codex-rule`
 
 `mode` 控制 codex-collab 与 Claude 的通信方式：`auto`（默认）在平台支持时采用跨会话消息，否则走命令行路径；`peer` 强制使用跨会话消息；`cli` 则完全关闭该机制。修改后执行 `codex-collab peer up` 使之生效。
 
 `server` 控制 broker 连接 Codex app-server 的方式：`auto`（默认）在共享 app-server 运行时（`codex app-server daemon start`）接入，否则启动私有实例；`shared` 强制使用共享 server；`private` 始终启动私有实例。`health` 显示当前连接的类型。修改后执行 `codex-collab peer up` 使之生效；`CODEX_COLLAB_SERVER` 可在单次调用中覆盖此设置。
 
-`spawn` 控制 `send` 在工作区内无 Claude 会话存活时是否自动启动后台会话：`on`（默认）启动、`off` 不启动；`--no-spawn` 可逐次覆盖。`linger` 设置自动启动的会话空闲多少秒后停止（默认 1800）。
+`spawn` 控制 `send` 在工作区内无 Claude 会话存活时是否自动启动后台会话：`on`（默认）启动、`off` 不启动；`--no-spawn` 可逐次覆盖。`linger` 设置自动启动的会话空闲多少秒后停止（默认 1800）。`spawn-model` 与 `spawn-effort` 设置 Codex 未指定时自动启动的会话所用的模型与推理强度；未设置时沿用你的 Claude Code 默认值。Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定，`codex-collab models --claude` 列出可选项：各档位别名（`fable`、`opus`、`sonnet`、`haiku`，始终指向该档位的最新模型），以及你在 `spawn-models` 中列出的具体版本（逗号分隔的完整模型名，如 `claude-opus-4-6`）。无论是否列出，任何模型名都可用于 `--model`。自动启动的会话以 Claude Code 的 `auto` 权限模式运行，并直接在与 Codex 共享的工作区中编辑。
 
 **实验性功能。** `codex-rule`（`on` / `off`，默认 `off`）：`on` 允许 Codex 执行 `codex-collab send` 时无需逐次审批；`off` 或 `--unset` 恢复原状；安装脚本在交互式终端中询问一次并记录选择。启用后，任何 Codex 会话——包括受其所读取内容引导的会话——均可在无需确认的情况下向 Claude Code 会话发送消息并启动后台会话。Windows 上不可用。
 
