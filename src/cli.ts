@@ -207,8 +207,11 @@ Commands:
                           it (a unique prefix will do), --timeout <sec> bounds
                           the wait (default 600),
                           --no-wait sends a one-way note. With no session
-                          live, starts one in the background (config spawn
-                          off, or --no-spawn, disables that) — on the model
+                          live, resumes the one it last stopped, with its
+                          conversation (config spawn-resume; --fresh starts
+                          a new one), else starts one in the background
+                          (config spawn off, or --no-spawn, disables both)
+                          — on the model
                           and effort given with -m <model> and -r/--effort
                           <level>, else config spawn-model / spawn-effort,
                           else your Claude Code default ('models --claude'
@@ -342,6 +345,7 @@ const BOOLEAN_FLAGS = new Set([
   "--check",
   "--no-wait",
   "--no-spawn",
+  "--fresh",
   "--codex",
   "--rules",
   "--claude",

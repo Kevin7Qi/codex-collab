@@ -33,18 +33,24 @@ import {
 import {
   CLAUDE_EFFORTS,
   DEFAULT_SPAWN_LINGER_SEC,
+  DEFAULT_SPAWN_RESUME_SEC,
   describeModelChoice,
+  forgetSpawnedSession,
   isClaudeEffort,
   isModelName,
   listClaudeSessions,
+  markSpawnedSessionStopped,
   resolveSession,
+  resumableSession,
+  sessionStatusNow,
   spawnClaudeSession,
+  stopClaudeSession,
   transientSessionId,
   type ClaudeSession,
 } from "../claude-sessions";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
-import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions } from "./shared";
+import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
 /** Default reply deadline (seconds) — the same order as the ask channel's. */
 export const DEFAULT_SEND_TIMEOUT_SEC = 600;
@@ -151,6 +157,36 @@ export function splitTarget(
   return { targetName: null, message: positional.join(" ") };
 }
 
+/** Watch a started session for the one state it cannot leave by itself:
+ *  `waiting`, at a prompt, with nobody attached. Resolves "blocked" once the
+ *  registry has said so on several looks in a row (a prompt a hook or the
+ *  classifier answers is gone again within a moment). */
+export function watchForBlocked(pid: number, opts: { pollMs?: number; looks?: number } = {}): { blocked: Promise<"blocked">; stop(): void } {
+  const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_BLOCKED_POLL_MS) || 2000);
+  const looks = opts.looks ?? 5;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const blocked = new Promise<"blocked">((resolve) => {
+    let seen = 0;
+    timer = setInterval(() => {
+      seen = sessionStatusNow(pid) === "waiting" ? seen + 1 : 0;
+      if (seen >= looks) resolve("blocked");
+    }, pollMs);
+  });
+  return { blocked, stop() { if (timer) clearInterval(timer); } };
+}
+
+/** How long after it was stopped a started session is still resumed:
+ *  `config spawn-resume` in seconds, `off` for never, else the default. */
+export function resumeWindowSec(cfg: UserConfig): number {
+  const v = cfg["spawn-resume"];
+  if (v === undefined) return DEFAULT_SPAWN_RESUME_SEC;
+  if (v === "off") return 0;
+  const n = Number(v);
+  if (Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS) return n;
+  console.error(`[codex] Warning: ignoring invalid spawn-resume in config: ${v}`);
+  return DEFAULT_SPAWN_RESUME_SEC;
+}
+
 /** What to tell Codex when it chose a model or effort for a session that
  *  was already running: the choice is made at start and cannot change after.
  *  null when what it asked for is what the session runs on anyway. */
@@ -200,7 +236,7 @@ export async function handleSend(args: string[]): Promise<void> {
   }
   message = sanitizeForTerminal(message).trim();
   if (!message) {
-    die('No message provided\nUsage: codex-collab send [<peer>] "message" [--to <peer>] [--timeout <sec>] [--no-wait] [--model <model>] [--effort <level>]');
+    die('No message provided\nUsage: codex-collab send [<peer>] "message" [--to <peer>] [--timeout <sec>] [--no-wait] [--model <model>] [--effort <level>] [--fresh]');
   }
 
   // ── Whom to send to ──
@@ -271,14 +307,40 @@ export async function handleSend(args: string[]): Promise<void> {
         target = again[0];
         notes.push(`Sending to ${target.name} — a background Claude Code session started for this workspace just now.`);
       } else {
-        console.log("No Claude Code session is live in this workspace — starting one in the background…");
-        try {
-          target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort });
-        } catch (e) {
-          die((e instanceof Error ? e.message : String(e)) + sandboxHint());
+        // A session stopped for idling still has its conversation: pick it
+        // up again rather than explain everything to a new one. `--fresh`,
+        // or a resume that fails (the conversation was removed, or has aged
+        // out of Claude Code's own history), starts a new session instead.
+        const stopped = options.fresh ? null : resumableSession(stateDir, resumeWindowSec(cfg));
+        let resumed: ClaudeSession | null = null;
+        if (stopped) {
+          const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
+          console.log(`No Claude Code session is live in this workspace — resuming ${stopped.name}, stopped ${ago} ago, with its conversation so far…`);
+          // What it ran on before holds unless Codex now says otherwise: a
+          // resumed session is a new process, so a new choice can apply.
+          const resumeModel = askedModel ?? stopped.model ?? model;
+          const resumeEffort = askedEffort ?? stopped.effort ?? effort;
+          try {
+            resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model: resumeModel, effort: resumeEffort, resume: stopped });
+            notes.push(`Resumed ${resumed.name} (its conversation so far is intact; on ${describeModelChoice(resumeModel, resumeEffort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
+          } catch (e) {
+            console.log(`Could not resume it (${(e instanceof Error ? e.message : String(e)).split("\n")[0]}) — starting a new session instead.`);
+            forgetSpawnedSession(stateDir, stopped.id);
+          }
+        } else {
+          console.log("No Claude Code session is live in this workspace — starting one in the background…");
+        }
+        if (resumed) {
+          target = resumed;
+        } else {
+          try {
+            target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort });
+          } catch (e) {
+            die((e instanceof Error ? e.message : String(e)) + sandboxHint());
+          }
+          notes.push(`Started ${target.name} (a background Claude Code session on ${describeModelChoice(model, effort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
         }
         startedHere = true;
-        notes.push(`Started ${target.name} (a background Claude Code session on ${describeModelChoice(model, effort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
       }
     } finally {
       release();
@@ -423,19 +485,38 @@ export async function handleSend(args: string[]): Promise<void> {
   }
   console.log(`Sent to ${target.name}.${busy} Waiting up to ${formatDuration(timeoutSec * 1000)} for its reply…`);
 
+  // A session codex-collab started has nobody attached. If it stops at a
+  // prompt no reply will ever come — and it does stop at one when it is not
+  // in auto mode after all: Claude Code falls back to asking where that mode
+  // is unavailable to the session, which depends on the model. Watching for
+  // it turns a whole timeout of silence into an answer Codex can act on.
+  const watch = target.spawned ? watchForBlocked(target.pid) : null;
   const answer = await Promise.race([
     reply,
     new Promise<null>((r) => setTimeout(r, timeoutSec * 1000)),
+    ...(watch ? [watch.blocked] : []),
   ]);
+  watch?.stop();
   const elapsed = formatDuration(Math.max(1000, Date.now() - sentAt));
   console.log("");
-  if (answer) {
+  if (answer === "blocked" && target.spawned) {
+    const ranOn = describeModelChoice(target.spawned.model, target.spawned.effort);
+    console.log(`NO REPLY from ${target.name}: it has stopped at a prompt (a permission request, most likely), and nobody is attached to answer it.`);
+    console.log(`It was started in \`auto\` permission mode, where nothing prompts; Claude Code asks like this when that mode is not available to the session, which depends on the model. This one runs on ${ranOn}.`);
+    // Left as it is it would sit at that prompt until the reaper came, and
+    // swallow every message sent meanwhile. Stopped, it can be resumed.
+    stopClaudeSession(target.spawned);
+    markSpawnedSessionStopped(stateDir, target.spawned.id);
+    console.log("It has been stopped. Send again with a model that has auto mode (`codex-collab models --claude` lists the choices; `--model sonnet` or above): the conversation resumes on it.");
+  } else if (answer && answer !== "blocked") {
     console.log(`REPLY FROM ${target.name} (after ${elapsed}):`);
     // Indented so no reply line sits at column 0, the way `ask` prints answers.
     for (const l of sanitizeForTerminal(answer.text).trimEnd().split("\n")) console.log(`  ${l}`);
   } else {
     console.log(`NO REPLY from ${target.name} within ${formatDuration(timeoutSec * 1000)}. Proceed on your own judgment.`);
-    console.log("It may still be working on your message; a later reply cannot reach this command.");
+    console.log(sessionStatusNow(target.pid) === "waiting"
+      ? "It is waiting at a prompt in its own terminal — a permission request or a question only its user can answer there."
+      : "It may still be working on your message; a later reply cannot reach this command.");
     console.log("(A Claude Code session running with bypassPermissions holds peer messages for its user to approve unless its crossSessionInbound setting is accept.)");
   }
   cleanup();

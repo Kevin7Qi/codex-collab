@@ -6,7 +6,8 @@
 // reads.
 
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { describeModelChoice, listClaudeSessions, readSpawnedSessions, runReaper, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { describeModelChoice, listClaudeSessions, readSpawnedSessions, resumableSession, runReaper, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { resumeWindowSec } from "./send";
 import { formatDuration, loadUserConfig, parseOptions } from "./shared";
 
 function idleFor(session: ClaudeSession, now: number): string | null {
@@ -86,7 +87,15 @@ export async function handlePeers(args: string[]): Promise<void> {
     const spawn = loadUserConfig().spawn !== "off";
     console.log(`No Claude Code session is live ${scope}.`);
     if (spawn && !options.all) {
-      console.log("`codex-collab send \"…\"` starts one in the background and messages it.");
+      // Whether `send` would start from nothing or pick a conversation up
+      // again decides how much a Codex session needs to explain.
+      const stopped = resumableSession(stateDir, resumeWindowSec(loadUserConfig()));
+      if (stopped) {
+        const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
+        console.log(`\`codex-collab send "…"\` resumes ${stopped.name}, stopped ${ago} ago, with its conversation so far (\`--fresh\` starts a new session instead).`);
+      } else {
+        console.log("`codex-collab send \"…\"` starts one in the background and messages it.");
+      }
     }
     if (!options.all) console.log("`codex-collab peers --all` lists sessions in other workspaces.");
     return;
@@ -121,7 +130,7 @@ export async function handleReapClaude(args: string[]): Promise<void> {
   // record is written before the reaper starts, so an id it does not know
   // is a hand-typed one — and the fallback signal in stopClaudeSession
   // would otherwise reach whatever idle session owns that pid.
-  const known: SpawnedSession | undefined = readSpawnedSessions(stateDir).find((s) => s.id === id && s.pid === pid);
+  const known: SpawnedSession | undefined = readSpawnedSessions(stateDir).find((s) => s.id === id && s.pid === pid && !s.stoppedAt);
   if (!known) {
     console.error(`No Claude Code session with id ${id} and pid ${pid} was started by codex-collab for this workspace — nothing to reap.`);
     process.exit(1);

@@ -473,6 +473,11 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     expect(cli("models", "--claude").stdout).toMatch(/Specific versions the user also offers:\n  claude-opus-4-6\n  claude-sonnet-4-6\n/);
     expect(cli("config", "spawn-models", "claude-opus-4-6,rm -rf /").exitCode).toBe(1);
     expect(cli("config", "spawn-models", "--unset").exitCode).toBe(0);
+    // How long a stopped session stays resumable: seconds, or off.
+    expect(cli("config", "spawn-resume", "3600").exitCode).toBe(0);
+    expect(cli("config", "spawn-resume", "off").exitCode).toBe(0);
+    for (const bad of ["soon", "0", "-5", "1.5"]) expect(cli("config", "spawn-resume", bad).exitCode).toBe(1);
+    expect(cli("config", "spawn-resume", "--unset").exitCode).toBe(0);
     // Unset: back to the user's Claude Code default.
     expect(cli("config", "spawn-model", "--unset").exitCode).toBe(0);
     expect(cli("config", "spawn-effort", "--unset").exitCode).toBe(0);

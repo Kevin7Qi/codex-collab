@@ -23,11 +23,14 @@ import {
   isModelName,
   forgetSpawnedSession,
   listClaudeSessions,
+  markSpawnedSessionStopped,
   parseBackgroundId,
   readSpawnedSessions,
   reaperVerdict,
   recordSpawnedSession,
   resolveSession,
+  resumableSession,
+  resumedSessionBrief,
   runReaper,
   spawnClaudeSession,
   spawnEnv,
@@ -305,6 +308,78 @@ describeUnix("spawned-session records", () => {
   });
 });
 
+describeUnix("stopped sessions and resuming", () => {
+  const rec = (id: string, extra: Partial<SpawnedSession> = {}): SpawnedSession =>
+    ({ id, pid: 4242, name: "claude(ws-a-x)", startedAt: "t", lingerSec: 60, sessionId: `sess-${id}`, ...extra });
+
+  test("a stopped session stays on record for a while, the latest only, and a running one supersedes it", () => {
+    const stateDir = join(root, "state-stopped");
+    const now = Date.parse("2026-09-19T12:00:00.000Z");
+    recordSpawnedSession(stateDir, rec("aaaa1111"));
+    expect(resumableSession(stateDir, 3600, now)).toBeNull(); // still running
+    markSpawnedSessionStopped(stateDir, "aaaa1111", new Date(now - 30 * 60_000));
+    expect(resumableSession(stateDir, 3600, now)?.id).toBe("aaaa1111");
+    // Outside the window, or with resuming off, it is left alone.
+    expect(resumableSession(stateDir, 600, now)).toBeNull();
+    expect(resumableSession(stateDir, 0, now)).toBeNull();
+    // A newer session, once stopped, replaces it: one to resume, not a history.
+    recordSpawnedSession(stateDir, rec("bbbb2222", { pid: 4343 }));
+    expect(readSpawnedSessions(stateDir).map((s) => s.id)).toEqual(["bbbb2222"]);
+    markSpawnedSessionStopped(stateDir, "bbbb2222", new Date(now - 60_000));
+    expect(resumableSession(stateDir, 3600, now)?.id).toBe("bbbb2222");
+    // Nothing to resume by: the record goes.
+    recordSpawnedSession(stateDir, rec("cccc3333", { pid: 4444, sessionId: null }));
+    markSpawnedSessionStopped(stateDir, "cccc3333");
+    expect(readSpawnedSessions(stateDir)).toEqual([]);
+    // Unknown ids and a workspace with no records are no-ops.
+    markSpawnedSessionStopped(stateDir, "nope");
+    markSpawnedSessionStopped(join(root, "state-never"), "nope");
+    expect(existsSync(join(root, "state-never"))).toBe(false);
+  });
+
+  test("a stopped record's pid never marks a live session as ours", () => {
+    clearRegistry();
+    register(`${sleeper.pid}.json`, { name: "someone-elses" });
+    const stateDir = join(root, "state-stale-pid");
+    // The pid a stopped session once had now belongs to another session.
+    recordSpawnedSession(stateDir, rec("dddd4444", { pid: sleeper.pid! }));
+    expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned?.id).toBe("dddd4444");
+    markSpawnedSessionStopped(stateDir, "dddd4444");
+    expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned).toBeNull();
+  });
+
+  test("resuming continues the recorded conversation: `claude --bg --resume <session-id>`, a brief that says so, and the stopped record replaced", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-resume");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: true });
+    const stateDir = join(root, "state-resume");
+    recordSpawnedSession(stateDir, rec("eeee5555", { model: "sonnet", effort: "low" }));
+    markSpawnedSessionStopped(stateDir, "eeee5555");
+    try {
+      const session = await spawnClaudeSession({
+        cwd: wsA, stateDir, lingerSec: 60, claudeBin: fake.bin, startReaper: () => {},
+        resume: resumableSession(stateDir, 3600)!, model: "sonnet", effort: "low",
+      });
+      const args = readFileSync(fake.argsLog, "utf-8").trimEnd().split("\n");
+      expect(args.slice(0, 3)).toEqual(["--bg", "-n", spawnedSessionName(wsA)]);
+      expect(args[args.indexOf("--resume") + 1]).toBe("sess-eeee5555");
+      // A resumed session is a new process: mode, settings and the choice of
+      // model are passed again, as for a new one.
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("auto");
+      expect(args).toContain("--settings");
+      expect(args[args.indexOf("--model") + 1]).toBe("sonnet");
+      expect(args[args.length - 1]).toBe(resumedSessionBrief());
+      expect(args[args.length - 1]).toContain("your conversation so far is intact");
+      // One record again: the running session, under its new job id.
+      expect(readSpawnedSessions(stateDir)).toEqual([expect.objectContaining({ id: "deadbeef", pid: session.pid, model: "sonnet" })]);
+      expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
+    } finally {
+      killSleeper(fake.pidFile);
+    }
+  });
+});
+
 describeUnix("spawn helpers", () => {
   test("parseBackgroundId reads claude --bg's announcement", () => {
     expect(parseBackgroundId("Starting background service…\nbackgrounded · f1c306d5 · codex-probe\n  claude agents")).toBe("f1c306d5");
@@ -418,10 +493,11 @@ describeUnix("spawnClaudeSession", () => {
       expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned?.id).toBe("deadbeef");
       // Started to do work: a mode that lets it act with nobody attached,
       // and — for this session alone — edits in the tree it shares with
-      // Codex rather than parked in a worktree of its own.
+      // Codex rather than parked in a worktree of its own, and compaction
+      // that runs by itself, since nobody is there to run it by hand.
       const args = readFileSync(fake.argsLog, "utf-8").trimEnd().split("\n");
       expect(args[args.indexOf("--permission-mode") + 1]).toBe("auto");
-      expect(JSON.parse(args[args.indexOf("--settings") + 1])).toEqual({ worktree: { bgIsolation: "none" } });
+      expect(JSON.parse(args[args.indexOf("--settings") + 1])).toEqual({ worktree: { bgIsolation: "none" }, autoCompactEnabled: true });
       // The name stays where `claude -n` reads it, and the brief comes last.
       expect(args.slice(0, 3)).toEqual(["--bg", "-n", spawnedSessionName(wsA)]);
       expect(args[args.length - 1]).toContain("started by codex-collab");
@@ -516,7 +592,12 @@ describeUnix("reaper", () => {
     register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, statusUpdatedAt: Date.now() - 5000 });
     expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
     expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\n");
-    expect(readSpawnedSessions(stateDir)).toEqual([]);
+    // Stopped, not forgotten: Claude Code keeps the conversation, and the
+    // record is what lets the next `send` resume it.
+    const [kept] = readSpawnedSessions(stateDir);
+    expect(kept).toEqual(expect.objectContaining({ id: "deadbeef", sessionId: session.sessionId }));
+    expect(Date.parse(kept.stoppedAt!)).toBeGreaterThan(Date.now() - 60_000);
+    expect(resumableSession(stateDir, 3600)?.id).toBe("deadbeef");
     await exited;
   });
 

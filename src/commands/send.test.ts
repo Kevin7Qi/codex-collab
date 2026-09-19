@@ -215,6 +215,18 @@ function killFakeSleepers(binDir: string): void {
   } catch { /* none started */ }
 }
 
+/** Spawn-path tests share one workspace, and a reaper an earlier test left
+ *  behind (polling every 500ms) still writes to its records when it finds
+ *  its session gone: it marks it stopped — which the next test's `send`
+ *  would then resume. Let such a reaper finish, then start from no records. */
+async function settleSpawnState(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 900));
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  try {
+    for (const d of readdirSync(root)) rmSync(join(root, d, "spawned-claude.json"), { force: true });
+  } catch { /* no state yet */ }
+}
+
 /** The CLI's spawned-session records, under the test HOME. */
 function spawnedRecords(): unknown[] {
   const root = join(TEST_HOME, ".codex-collab", "workspaces");
@@ -470,6 +482,7 @@ describeUnix("send", () => {
   });
 
   test("with no session live, one is started, messaged, and stopped again once idle", async () => {
+    await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-spawn");
     const fake = startFake(spawnedSessionName(WS), { reply: (t) => `spawned says: ${t.split("\n")[0]}` });
     writeFakeClaude(binDir, fake.socketPath);
@@ -489,12 +502,26 @@ describeUnix("send", () => {
       expect(args).not.toContain("--effort");
       // The detached reaper stops it once it has idled for the linger —
       // through `claude stop`, then a signal when that did not take — and
-      // forgets it.
+      // keeps its record, as stopped: the conversation is still Claude Code's.
       await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toBe("stop cafe0001\n");
-      await waitFor(() => spawnedRecords().length === 0, 15_000);
+      await waitFor(() => (spawnedRecords() as Array<{ stoppedAt?: string }>).some((r) => r.stoppedAt), 15_000);
       const sleeperPid = Number(readFileSync(join(binDir, "sleepers"), "utf-8").trim());
       await waitFor(() => { try { process.kill(sleeperPid, 0); return false; } catch { return true; } }, 15_000);
+      // Nobody is live now, and `peers` says what the next `send` will do.
+      for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+      const listed = await runCli(["peers"]);
+      expect(listed.stdout).toContain(`resumes ${fake.name}, stopped`);
+      expect(listed.stdout).toContain("with its conversation so far (`--fresh` starts a new session instead)");
+      // The next send picks the conversation up again instead of starting over.
+      const again = await runCli(["send", "still there?"], { PATH: `${binDir}:${process.env.PATH}` });
+      expect(again.code).toBe(0);
+      expect(again.stdout).toMatch(new RegExp(`No Claude Code session is live in this workspace — resuming ${fake.name.replace(/[()]/g, "\\$&")}, stopped \\S+ ago, with its conversation so far…`));
+      expect(again.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model and effort;`);
+      expect(again.stdout).toContain("  spawned says: still there?");
+      const resumeArgs = readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+      expect(resumeArgs[resumeArgs.indexOf("--resume") + 1]).toBe("s");
+      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\nbg\n");
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
@@ -502,6 +529,7 @@ describeUnix("send", () => {
   });
 
   test("the model and effort Codex chooses reach the session it starts, ahead of the configured default", async () => {
+    await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-spawn-choice");
     const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
     writeFakeClaude(binDir, fake.socketPath);
@@ -530,6 +558,7 @@ describeUnix("send", () => {
   });
 
   test("with no flags, a started session runs on the configured spawn-model and spawn-effort", async () => {
+    await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-spawn-config");
     const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
     writeFakeClaude(binDir, fake.socketPath);
@@ -562,7 +591,106 @@ describeUnix("send", () => {
     expect(fake.received).toHaveLength(1);
   });
 
+  test("a stopped session is left alone with --fresh, with resuming off, and once it is older than the window", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-fresh");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    const argsOf = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+    /** End the running fake session and leave its record stopped at `when`. */
+    const stopAt = async (when: Date) => {
+      killFakeSleepers(binDir);
+      for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+      await new Promise((r) => setTimeout(r, 900)); // its reaper sees it gone
+      const root = join(TEST_HOME, ".codex-collab", "workspaces");
+      for (const d of readdirSync(root)) {
+        const f = join(root, d, "spawned-claude.json");
+        if (!existsSync(f)) continue;
+        const records = JSON.parse(readFileSync(f, "utf-8")) as Array<Record<string, unknown>>;
+        writeFileSync(f, JSON.stringify(records.map((r) => ({ ...r, stoppedAt: when.toISOString() }))));
+      }
+    };
+    writeConfig({ linger: 60 });
+    try {
+      expect((await runCli(["send", "one"], env)).stdout).toContain(`Started ${fake.name}`);
+      // Codex wants a clean start: the stopped conversation is not resumed.
+      await stopAt(new Date());
+      const fresh = await runCli(["send", "two", "--fresh"], env);
+      expect(fresh.stdout).toContain("starting one in the background…");
+      expect(fresh.stdout).toContain(`Started ${fake.name}`);
+      expect(argsOf()).not.toContain("--resume");
+      // The user turned resuming off.
+      await stopAt(new Date());
+      writeConfig({ linger: 60, "spawn-resume": "off" });
+      expect((await runCli(["send", "three"], env)).stdout).toContain(`Started ${fake.name}`);
+      expect(argsOf()).not.toContain("--resume");
+      // Stopped longer ago than the window allows.
+      await stopAt(new Date(Date.now() - 2 * 3600_000));
+      writeConfig({ linger: 60, "spawn-resume": 3600 });
+      expect((await runCli(["send", "four"], env)).stdout).toContain(`Started ${fake.name}`);
+      expect(argsOf()).not.toContain("--resume");
+      // Within the window it is resumed — and a model Codex names now applies,
+      // since a resumed session is a new process.
+      await stopAt(new Date(Date.now() - 600_000));
+      const resumed = await runCli(["send", "five", "--model", "haiku"], env);
+      expect(resumed.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on haiku, default effort;`);
+      expect(resumed.stdout).not.toContain("did not apply");
+      expect(argsOf()[argsOf().indexOf("--resume") + 1]).toBe("s");
+      expect(argsOf()[argsOf().indexOf("--model") + 1]).toBe("haiku");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a started session that stops at a prompt is noticed, stopped and left resumable — not waited on until the timeout", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-blocked");
+    // Never replies: it is, as far as the registry says, sitting at a prompt.
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 60 });
+    try {
+      const started = Date.now();
+      const live = runCliLive(["send", "edit the file", "--model", "haiku", "--timeout", "60"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
+      await waitFor(() => fake.received.length === 1, 15_000);
+      // What Claude Code reports for a session asking a question nobody is
+      // attached to answer — as it does where auto mode is unavailable.
+      for (const f of readdirSync(REGISTRY)) {
+        const file = join(REGISTRY, f);
+        const entry = JSON.parse(readFileSync(file, "utf-8"));
+        if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, status: "waiting" }));
+      }
+      const r = await live.done;
+      expect(r.code).toBe(0);
+      expect(Date.now() - started).toBeLessThan(30_000);
+      expect(r.stdout).toContain(`NO REPLY from ${fake.name}: it has stopped at a prompt`);
+      expect(r.stdout).toContain("This one runs on haiku, default effort.");
+      expect(r.stdout).toContain("It has been stopped. Send again with a model that has auto mode");
+      expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001\n");
+      // Stopped, so resumable: the next send carries the conversation on.
+      expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", model: "haiku", stoppedAt: expect.any(String) }));
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a user's own session that is at a prompt is reported as such when the wait runs out, and is never stopped", async () => {
+    const fake = startFake("asking-claude", { reply: null });
+    registerFake(fake, { status: "waiting" });
+    const r = await runCli(["send", "hello", "--timeout", "1"], { CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("NO REPLY from asking-claude within 1s");
+    expect(r.stdout).toContain("It is waiting at a prompt in its own terminal");
+    expect(r.stdout).not.toContain("It has been stopped");
+    // Still registered: the user's session is theirs.
+    expect(existsSync(fake.entryPath)).toBe(true);
+  });
+
   test("two sends racing with no session live start one session between them", async () => {
+    await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-race");
     // Replies are held until both messages are in, so both sends are live
     // at once — the case in which one Codex thread needs two addresses.
@@ -583,7 +711,9 @@ describeUnix("send", () => {
       expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
       expect(ra.stdout + rb.stdout).toContain("  ok: first");
       expect(ra.stdout + rb.stdout).toContain("  ok: second");
-      await waitFor(() => spawnedRecords().length === 0, 15_000);
+      // One session, so one record — kept, as stopped, once the reaper is done.
+      await waitFor(() => (spawnedRecords() as Array<{ stoppedAt?: string }>).some((r) => r.stoppedAt), 15_000);
+      expect(spawnedRecords()).toHaveLength(1);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);

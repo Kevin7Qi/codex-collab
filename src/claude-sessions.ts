@@ -27,9 +27,10 @@ import { acquireLockSync } from "./lock";
 export interface ClaudeSession {
   pid: number;
   name: string;
-  /** `idle` or `busy` as the session last reported; `unknown` for entries
-   *  that carry no status. */
-  status: "idle" | "busy" | "unknown";
+  /** `idle` or `busy` as the session last reported; `waiting` when it has
+   *  stopped at a prompt only a person can answer (a permission request, a
+   *  question); `unknown` for entries that carry no status. */
+  status: "idle" | "busy" | "waiting" | "unknown";
   /** Registry kind: interactive, bg, daemon… Background sessions
    *  (`claude --bg`) report `bg`. */
   kind: string;
@@ -66,7 +67,16 @@ export interface SpawnedSession {
    *  Claude Code default. Fixed for the session's life. */
   model?: string;
   effort?: string;
+  /** Set once the session has been stopped (or found gone). Claude Code
+   *  keeps a stopped session's conversation, so the record is kept too: it
+   *  is what lets the next `send` resume that conversation instead of
+   *  starting from nothing. Its `pid` means nothing any more. */
+  stoppedAt?: string;
 }
+
+/** How long a stopped session stays worth resuming (seconds), by default.
+ *  Long enough for work that spans days; `config spawn-resume` changes it. */
+export const DEFAULT_SPAWN_RESUME_SEC = 7 * 24 * 3600;
 
 /** Default idle linger for a spawned session (seconds). Claude Code stops
  *  an unattached background session itself after about an hour; this is
@@ -156,7 +166,7 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
     }
     const liveness = entryLiveness(entry);
     if (liveness === "dead") continue;
-    const status = entry.status === "idle" || entry.status === "busy" ? entry.status : "unknown";
+    const status = entry.status === "idle" || entry.status === "busy" || entry.status === "waiting" ? entry.status : "unknown";
     sessions.push({
       pid,
       name: typeof entry.name === "string" && entry.name ? entry.name : `claude (pid ${pid})`,
@@ -168,7 +178,9 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
       procStart: typeof entry.procStart === "string" ? entry.procStart : null,
       verified: liveness === "verified",
       statusUpdatedAt: typeof entry.statusUpdatedAt === "number" ? entry.statusUpdatedAt : null,
-      spawned: spawned.find((s) => s.pid === pid) ?? null,
+      // A stopped record's pid is history: the number may be another
+      // session's by now.
+      spawned: spawned.find((s) => s.pid === pid && !s.stoppedAt) ?? null,
     });
   }
   // Interactive sessions first, then by name: the one the user is looking
@@ -176,6 +188,15 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
   // and any prefix resolution predictable.
   sessions.sort((a, b) => Number(a.kind === "bg") - Number(b.kind === "bg") || a.name.localeCompare(b.name));
   return sessions;
+}
+
+/** What the registry says a session is doing right now, or null when its
+ *  entry is gone. `send` watches this while it waits: a session nobody is
+ *  attached to that reports `waiting` will wait forever. */
+export function sessionStatusNow(pid: number): string | null {
+  const entry = readEntry(join(sessionsDir(), `${pid}.json`));
+  if (!entry || entry.pid !== pid) return null;
+  return typeof entry.status === "string" ? entry.status : "unknown";
 }
 
 /** Resolve a session by the name Codex gave: exact match first, then a
@@ -241,9 +262,36 @@ function withRecordsLock<T>(stateDir: string, fn: () => T): T {
 export function recordSpawnedSession(stateDir: string, session: SpawnedSession): void {
   mkdirSync(stateDir, { recursive: true });
   withRecordsLock(stateDir, () => {
-    const rest = readSpawnedSessions(stateDir).filter((s) => s.pid !== session.pid && s.id !== session.id);
+    // A session now running supersedes whatever was stopped before it: it
+    // is either that conversation resumed or the one chosen in its place,
+    // and a workspace has one started session to resume, not a history.
+    const rest = readSpawnedSessions(stateDir).filter((s) => !s.stoppedAt && s.pid !== session.pid && s.id !== session.id);
     writeSpawnedSessions(stateDir, [...rest, session]);
   });
+}
+
+/** Keep a stopped session's record, marked as stopped, so its conversation
+ *  can be resumed. Only the latest stopped session is kept. */
+export function markSpawnedSessionStopped(stateDir: string, id: string, when: Date = new Date()): void {
+  if (!existsSync(spawnedSessionsFile(stateDir))) return;
+  withRecordsLock(stateDir, () => {
+    const all = readSpawnedSessions(stateDir);
+    const mine = all.find((s) => s.id === id);
+    if (!mine) return;
+    const running = all.filter((s) => !s.stoppedAt && s.id !== id);
+    // Without a session id there is nothing to resume by.
+    writeSpawnedSessions(stateDir, mine.sessionId ? [...running, { ...mine, stoppedAt: when.toISOString() }] : running);
+  });
+}
+
+/** The stopped session the next `send` should resume, if any: the one this
+ *  workspace recorded, stopped no longer than `windowSec` ago. */
+export function resumableSession(stateDir: string, windowSec: number, now: number = Date.now()): SpawnedSession | null {
+  if (!(windowSec > 0)) return null;
+  const stopped = readSpawnedSessions(stateDir)
+    .filter((s) => s.stoppedAt && s.sessionId && now - Date.parse(s.stoppedAt) <= windowSec * 1000)
+    .sort((a, b) => Date.parse(b.stoppedAt!) - Date.parse(a.stoppedAt!));
+  return stopped[0] ?? null;
 }
 
 export function forgetSpawnedSession(stateDir: string, id: string): void {
@@ -283,8 +331,19 @@ export function spawnedSessionBrief(wsRoot: string): string {
     "Read the workspace as needed. Do not change files unless a message asks you to.",
     // Whatever Claude Code's settings decide about where a background
     // session's edits land, the Codex session only knows what the reply says.
-    "When you do change files, say in your reply where the changes are: the path, the branch, and the commit if you made one.",
+    "When you do change files, say in your reply where the changes are: the path, and the branch and commit where there is one.",
     "You will be stopped after a while with no messages. Reply now with one line saying you are ready, then wait.",
+  ].join(" ");
+}
+
+/** The first thing a RESUMED session is told: it has the conversation
+ *  already, brief included, so this only says what happened in between. */
+export function resumedSessionBrief(): string {
+  return [
+    "You were stopped by codex-collab after a while with no messages, and have now been resumed; your conversation so far is intact.",
+    "Codex sessions will message you as before, and you answer as before.",
+    "The workspace may have changed while you were stopped — look again before relying on what you saw earlier.",
+    "Reply now with one line saying you are ready, then wait.",
   ].join(" ");
 }
 
@@ -351,8 +410,16 @@ export const SPAWN_PERMISSION_MODE = "auto";
  *  to work WITH it, in the tree they share: edits parked on a branch
  *  somewhere else are work Codex cannot see or build on. So that isolation
  *  is off for it, and the two coordinate as any two sessions in one
- *  checkout do. */
-export const SPAWN_SETTINGS = { worktree: { bgIsolation: "none" } } as const;
+ *  checkout do.
+ *
+ *  Auto-compaction is on for it whatever the user's own setting says. A
+ *  person who compacts by hand is there to do it; nobody is attached to
+ *  this session, and it is meant to be resumed and to carry a long
+ *  collaboration — left alone, its context would fill until a turn failed,
+ *  and every resumed turn would pay to re-read all of it. Command-line
+ *  settings outrank the user's settings files for the one session they are
+ *  passed to, so the user's own sessions compact as they always have. */
+export const SPAWN_SETTINGS = { worktree: { bgIsolation: "none" }, autoCompactEnabled: true } as const;
 
 /** The models a started session can run on, as the aliases `claude --model`
  *  takes. An alias always means the latest model of its tier, so nothing
@@ -400,6 +467,9 @@ export interface SpawnClaudeOptions {
    *  session runs on the user's Claude Code default. */
   model?: string;
   effort?: string;
+  /** A stopped session (see `resumableSession`) to continue instead of
+   *  starting a new one: same conversation, new process. */
+  resume?: SpawnedSession;
   /** Test seam: the claude binary. */
   claudeBin?: string;
   /** Test seam: how the reaper is started. */
@@ -422,11 +492,17 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
     ...(opts.model ? ["--model", opts.model] : []),
     ...(opts.effort ? ["--effort", opts.effort] : []),
   ];
+  // Resuming: `claude --bg --resume <session-id>` continues that conversation
+  // in the background. Everything else is passed as for a new session — a
+  // resumed session is a new process, and takes its mode, settings, model
+  // and effort from this command line, not from the one it first ran with.
+  const resume = opts.resume?.sessionId ? ["--resume", opts.resume.sessionId] : [];
+  const brief = resume.length ? resumedSessionBrief() : spawnedSessionBrief(wsRoot);
   let announced: string;
   try {
     announced = execFileSync(
       bin,
-      ["--bg", "-n", name, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), ...choice, spawnedSessionBrief(wsRoot)],
+      ["--bg", "-n", name, ...resume, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), ...choice, brief],
       { cwd: wsRoot, env: spawnEnv(), encoding: "utf-8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (e) {
@@ -549,7 +625,10 @@ export async function runReaper(
     let verdict = reaperVerdict(readEntry(file), session.pid, session.lingerSec, Date.now(), identity);
     if (verdict === "wait" && Date.now() >= retireAt) verdict = "stop";
     if (verdict === "gone") {
-      forgetSpawnedSession(stateDir, session.id);
+      // Gone on its own — Claude Code stops an unattached session itself,
+      // and a person may have. Its conversation is kept all the same, so the
+      // record stays, as stopped: the next `send` can pick it up again.
+      markSpawnedSessionStopped(stateDir, session.id);
       return "gone";
     }
     if (verdict === "stop") {
@@ -560,7 +639,8 @@ export async function runReaper(
       if (isVerifiablyOurs(session)) {
         try { process.kill(session.pid, "SIGTERM"); } catch { /* gone meanwhile */ }
       }
-      forgetSpawnedSession(stateDir, session.id);
+      // `claude stop` keeps the conversation; keep the record that finds it.
+      markSpawnedSessionStopped(stateDir, session.id);
       return "stopped";
     }
     await new Promise((r) => setTimeout(r, pollMs));
