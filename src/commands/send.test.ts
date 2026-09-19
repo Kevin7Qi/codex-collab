@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
 import { codexThreadId, composeMessage, insideCodexSandbox, senderName, splitTarget } from "./send";
-import { formatSessions } from "./peers";
+import { formatSessions, unverifiedNotice } from "./peers";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
 const TEST_HOME = mkdtempSync(join(tmpdir(), "codex-collab-send-home-"));
@@ -287,13 +287,31 @@ describeUnix("send helpers", () => {
 describeUnix("peers", () => {
   test("formatSessions aligns columns and annotates spawned sessions", () => {
     const out = formatSessions([
-      { pid: 1, name: "Explore", status: "idle", kind: "interactive", cwd: "/", socketPath: "/s", sessionId: null, statusUpdatedAt: null, spawned: null },
-      { pid: 2, name: "claude(ws-abc123)", status: "idle", kind: "bg", cwd: "/", socketPath: "/s", sessionId: null, statusUpdatedAt: 1_000_000, spawned: { id: "x", pid: 2, name: "claude(ws-abc123)", startedAt: "t", lingerSec: 1800 } },
+      { pid: 1, name: "Explore", status: "idle", kind: "interactive", cwd: "/", socketPath: "/s", sessionId: null, procStart: null, verified: true, statusUpdatedAt: null, spawned: null },
+      { pid: 2, name: "claude(ws-abc123)", status: "idle", kind: "bg", cwd: "/", socketPath: "/s", sessionId: null, procStart: null, verified: true, statusUpdatedAt: 1_000_000, spawned: { id: "x", pid: 2, name: "claude(ws-abc123)", startedAt: "t", lingerSec: 1800 } },
     ], 1_000_000 + 4 * 60_000);
     const lines = out.split("\n");
     expect(lines[0]).toMatch(/^ {2}NAME +STATUS +KIND$/);
     expect(lines[1]).toMatch(/^ {2}Explore +idle +interactive$/);
     expect(lines[2]).toMatch(/^ {2}claude\(ws-abc123\) +idle +background +started by codex-collab · idle 4m 0s · stops after 30m 0s idle$/);
+  });
+
+  test("a session listed on its socket alone is marked on its row only where rows differ; when none could be checked, it is said once", () => {
+    const row = (name: string, verified: boolean) =>
+      ({ pid: 1, name, status: "idle" as const, kind: "interactive", cwd: "/", socketPath: "/s", sessionId: null, procStart: "236353382", verified, statusUpdatedAt: null, spawned: null });
+    // Mixed: the mark tells the rows apart, and no general notice is due.
+    const mixed = [row("Explore", true), row("Remote", false)];
+    const lines = formatSessions(mixed).split("\n");
+    expect(lines[1]).toMatch(/^ {2}Explore +idle +interactive$/);
+    expect(lines[2]).toMatch(/^ {2}Remote +idle +interactive +unverified: its process cannot be checked from here$/);
+    expect(unverifiedNotice(mixed)).toBeNull();
+    // From inside Codex's sandbox nothing can be checked: a mark on every
+    // row would say nothing, so the rows stay clean and one line explains.
+    const sandboxed = [row("Explore", false), row("Other", false)];
+    expect(formatSessions(sandboxed)).not.toContain("unverified");
+    expect(unverifiedNotice(sandboxed)).toMatch(/^Seen from inside a sandbox: .*`codex-collab send` checks again, outside the sandbox, before it delivers\.$/);
+    expect(unverifiedNotice([row("Explore", true)])).toBeNull();
+    expect(unverifiedNotice([])).toBeNull();
   });
 
   test("lists the live session in the workspace, and says when there is none", async () => {

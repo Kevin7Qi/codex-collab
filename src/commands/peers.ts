@@ -16,8 +16,13 @@ function idleFor(session: ClaudeSession, now: number): string | null {
 
 /** One line per session, columns aligned. Exported for tests. */
 export function formatSessions(sessions: ClaudeSession[], now = Date.now()): string {
+  // A row is marked only where the mark tells rows apart. From inside
+  // Codex's sandbox no process can be checked, so EVERY row would carry it —
+  // that case gets one line under the table instead (`unverifiedNotice`).
+  const mixed = sessions.some((s) => s.verified) && sessions.some((s) => !s.verified);
   const rows = sessions.map((s) => {
     const notes: string[] = [];
+    if (!s.verified && mixed) notes.push("unverified: its process cannot be checked from here");
     if (s.spawned) {
       notes.push("started by codex-collab");
       const idle = idleFor(s, now);
@@ -38,6 +43,17 @@ export function formatSessions(sessions: ClaudeSession[], now = Date.now()): str
   return [header, ...lines].join("\n");
 }
 
+/** Said once, under the table, when no listed session could be checked — the
+ *  normal view from inside Codex's sandbox (its own PID namespace from
+ *  0.154, no `ps` before that), where the listing rests on each session's
+ *  messaging socket being in place. Nothing is lost by it: `send` runs
+ *  outside the sandbox and checks the process before it delivers. null when
+ *  at least one session was verified (the rows say which were not). */
+export function unverifiedNotice(sessions: ClaudeSession[]): string | null {
+  if (sessions.length === 0 || sessions.some((s) => s.verified)) return null;
+  return "Seen from inside a sandbox: these sessions' processes cannot be checked from here, so each is listed because its messaging socket is in place. `codex-collab send` checks again, outside the sandbox, before it delivers.";
+}
+
 export async function handlePeers(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
   if (process.platform === "win32") {
@@ -56,6 +72,7 @@ export async function handlePeers(args: string[]): Promise<void> {
       kind: s.kind,
       cwd: s.cwd,
       pid: s.pid,
+      verified: s.verified,
       spawned: s.spawned ? { id: s.spawned.id, startedAt: s.spawned.startedAt, lingerSec: s.spawned.lingerSec } : null,
     })), null, 2));
     return;
@@ -74,6 +91,8 @@ export async function handlePeers(args: string[]): Promise<void> {
   console.log(`Claude Code sessions ${scope}:`);
   console.log(formatSessions(sessions));
   console.log("");
+  const notice = unverifiedNotice(sessions);
+  if (notice) console.log(notice);
   console.log('Message one and wait for its reply: codex-collab send <name> "…"');
 }
 

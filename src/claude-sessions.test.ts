@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { buildRegistryEntry, procStartOf } from "./peer";
+import { buildRegistryEntry, procIdentity, procStartOf, procStartTicksOf } from "./peer";
 import { config, mailboxRoot } from "./config";
 import {
   CLAUDE_CHILD_MARKERS,
@@ -28,6 +28,7 @@ import {
   spawnEnv,
   spawnedSessionBrief,
   spawnedSessionName,
+  setProcProbesForTests,
   setProcStartReaderForTests,
   type SpawnedSession,
 } from "./claude-sessions";
@@ -124,6 +125,51 @@ describeUnix("listClaudeSessions", () => {
     }
   });
 
+  test("a session Claude Code registered on Linux (start time in clock ticks) lists, and a recycled pid does not", () => {
+    clearRegistry();
+    // What Claude Code writes for its own sessions on Linux: field 22 of
+    // /proc/<pid>/stat, not `ps -o lstart=`. Probed through the seam so the
+    // case holds on a host with no /proc; `ps` must not even be consulted.
+    setProcProbesForTests({
+      ticksOf: (pid) => (pid === sleeper.pid ? "236353382" : null),
+      lstartOf: () => { throw new Error("ps must not decide a ticks entry"); },
+    });
+    try {
+      register(`${sleeper.pid}.json`, { procStart: "236353382" });
+      const [s] = listClaudeSessions({ cwd: wsA });
+      expect(s.name).toBe("live-a");
+      expect(s.verified).toBe(true);
+      expect(s.procStart).toBe("236353382");
+      // Same pid, another start time: the pid was recycled.
+      register(`${sleeper.pid}.json`, { procStart: "111" });
+      expect(listClaudeSessions({ cwd: wsA })).toEqual([]);
+    } finally {
+      setProcProbesForTests(null);
+    }
+  });
+
+  test("from another pid domain (Codex's sandbox from 0.154), a session lists on its socket, unverified", () => {
+    clearRegistry();
+    const socket = join(root, "foreign.sock");
+    writeFileSync(socket, "");
+    register(`${sleeper.pid}.json`, { messagingSocketPath: socket, pidDomain: "linux:m:pid:[4026531836]", procStart: "236353382" });
+    // In another PID namespace every host pid answers ESRCH — which must
+    // not be read as "the session is dead": the domain is checked first.
+    setProcProbesForTests({
+      ownDomain: () => "linux:m:pid:[4026533467]",
+      signal: () => { throw Object.assign(new Error("No such process"), { code: "ESRCH" }); },
+    });
+    try {
+      const [s] = listClaudeSessions({ cwd: wsA });
+      expect(s.name).toBe("live-a");
+      expect(s.verified).toBe(false);
+      rmSync(socket);
+      expect(listClaudeSessions({ cwd: wsA })).toEqual([]);
+    } finally {
+      setProcProbesForTests(null);
+    }
+  });
+
   test("entries that cannot be messaged are left out", () => {
     clearRegistry();
     // No socket: an older Claude Code, or a record of another kind.
@@ -171,9 +217,56 @@ describeUnix("listClaudeSessions", () => {
   });
 });
 
+describeUnix("process identity", () => {
+  test.skipIf(process.platform !== "linux")("procStartTicksOf counts fields from the last parenthesis, whatever the process is called", () => {
+    const stat = join(root, "stat-fixture");
+    // comm holds spaces AND parentheses; starttime (field 22) is 236353382.
+    writeFileSync(stat, "4242 (tmux: server (1) x) S 1 4242 4242 0 -1 4194560 100 0 0 0 5 3 0 0 20 0 1 0 236353382 8000000 300 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n");
+    expect(procStartTicksOf(4242, stat)).toBe("236353382");
+    writeFileSync(stat, "not a stat line");
+    expect(procStartTicksOf(4242, stat)).toBeNull();
+    expect(procStartTicksOf(4242, join(root, "no-such-stat"))).toBeNull();
+    // The real thing, for this very process.
+    expect(procStartTicksOf(process.pid)).toMatch(/^\d+$/);
+  });
+
+  test("procIdentity accepts either representation of the start time, and only an exact match", () => {
+    const pid = sleeper.pid!;
+    const alive = { signal: () => {} };
+    const ticks = { ...alive, ticksOf: () => "236353382", lstartOf: () => "Sat Sep 19 10:38:10 2026" };
+    expect(procIdentity({ pid, procStart: "236353382" }, ticks)).toBe("live");
+    expect(procIdentity({ pid, procStart: "236353383" }, ticks)).toBe("dead");
+    // codex-collab's own entries, and Claude Code's where there is no /proc.
+    expect(procIdentity({ pid, procStart: "Sat Sep 19 10:38:10 2026" }, ticks)).toBe("live");
+    expect(procIdentity({ pid, procStart: "Sat Sep 19 10:38:11 2026" }, ticks)).toBe("dead");
+    // No /proc (macOS): a ticks-shaped string can only be compared to lstart.
+    expect(procIdentity({ pid, procStart: "236353382" }, { ...alive, ticksOf: () => null, lstartOf: () => "Sat Sep 19 10:38:10 2026" })).toBe("dead");
+    // No start time on record: the pid answering is all there is.
+    expect(procIdentity({ pid }, alive)).toBe("live");
+    expect(procIdentity({ pid: "7" }, alive)).toBe("dead");
+  });
+
+  test("procIdentity: a gone pid is dead; one nothing can read, or from another domain, is unverifiable", () => {
+    const pid = sleeper.pid!;
+    const esrch = () => { throw Object.assign(new Error("No such process"), { code: "ESRCH" }); };
+    const eperm = () => { throw Object.assign(new Error("Operation not permitted"), { code: "EPERM" }); };
+    const noPs = () => { throw new Error("Operation not permitted"); };
+    expect(procIdentity({ pid, procStart: "x" }, { signal: esrch })).toBe("dead");
+    // Codex's sandbox up to 0.153.4: kill answers EPERM and ps cannot run.
+    expect(procIdentity({ pid, procStart: "x" }, { signal: eperm, ticksOf: () => null, lstartOf: noPs })).toBe("unverifiable");
+    // Another pid domain: ESRCH there says nothing, so it is never asked.
+    const foreign = { ownDomain: () => "linux:m:pid:[2]", signal: esrch };
+    expect(procIdentity({ pid, procStart: "1", pidDomain: "linux:m:pid:[1]" }, foreign)).toBe("unverifiable");
+    expect(procIdentity({ pid, procStart: "1", pidDomain: "linux:other-machine:pid:[2]" }, foreign)).toBe("unverifiable");
+    // The same domain, or a domain that cannot be told here: the usual checks.
+    expect(procIdentity({ pid, procStart: "1", pidDomain: "linux:m:pid:[2]" }, { ...foreign, signal: () => {}, ticksOf: () => "1" })).toBe("live");
+    expect(procIdentity({ pid, procStart: "1", pidDomain: "linux:m:pid:[1]" }, { ownDomain: () => null, signal: () => {}, ticksOf: () => "1" })).toBe("live");
+  });
+});
+
 describeUnix("resolveSession", () => {
   const sessions = ["Explore messaging", "explore-two", "claude(ws-a-abc123)"].map((name) => ({
-    pid: 1, name, status: "idle" as const, kind: "interactive", cwd: "/", socketPath: "/s", sessionId: null, statusUpdatedAt: null, spawned: null,
+    pid: 1, name, status: "idle" as const, kind: "interactive", cwd: "/", socketPath: "/s", sessionId: null, procStart: null, verified: true, statusUpdatedAt: null, spawned: null,
   }));
   test("exact name wins, a unique prefix resolves, an ambiguous one lists candidates", () => {
     expect(resolveSession(sessions, "explore-two").session?.name).toBe("explore-two");
@@ -240,16 +333,21 @@ describeUnix("spawn helpers", () => {
 
 /** A fake `claude` on PATH: `--bg` announces an id and registers a live
  *  entry (backed by a sleeper it starts); `stop <id>` records the call. */
-function installFakeClaude(dir: string, opts: { register: boolean }): { bin: string; stopLog: string; pidFile: string } {
+function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean }): { bin: string; stopLog: string; pidFile: string } {
   const stopLog = join(dir, "stop.log");
   const pidFile = join(dir, "sleeper.pid");
   const bin = join(dir, "claude");
+  // `ticks`: the start time as Claude Code records it on Linux — field 22
+  // of /proc/<pid>/stat, counted from the last ")" as the reader does.
+  const startLine = opts.ticks
+    ? `start=$(sed 's/.*) //' "/proc/$pid/stat" | cut -d' ' -f20)`
+    : `start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')`;
   const registerBlock = opts.register
     ? `
     sleep 300 </dev/null >/dev/null 2>&1 &
     pid=$!
     echo "$pid" > "${pidFile}"
-    start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')
+    ${startLine}
     printf '{"pid":%s,"sessionId":"s","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","entrypoint":"cli","messagingSocketPath":"/tmp/cc-socks/%s.sock","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
       "$pid" "$cwd" "$(date +%s)000" "$start" "$pid" "$name" "$(date +%s)000" "$(date +%s)000" > "$CODEX_COLLAB_SESSIONS_DIR/$pid.json"`
     : "";
@@ -296,6 +394,32 @@ describeUnix("spawnClaudeSession", () => {
       expect(reaped[0].session.id).toBe("deadbeef");
       // The workspace's listing now shows it as ours.
       expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned?.id).toBe("deadbeef");
+    } finally {
+      killSleeper(fake.pidFile);
+    }
+  });
+
+  test.skipIf(process.platform !== "linux")("a session that registers the way Claude Code does on Linux is found, and its recorded identity is the entry's own", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-ticks");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: true, ticks: true });
+    const stateDir = join(root, "state-spawn-ticks");
+    try {
+      // Before the two representations were reconciled this timed out: the
+      // entry's clock ticks never equalled `ps -o lstart=`.
+      const session = await spawnClaudeSession({
+        cwd: wsA, stateDir, lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000,
+      });
+      expect(session.verified).toBe(true);
+      const record = session.spawned!;
+      expect(record.procStart).toMatch(/^\d+$/);
+      // The reaper compares the record against the registry entry: recorded
+      // in any other representation, every look would read "gone" and the
+      // session would be forgotten without ever being stopped.
+      const entry = JSON.parse(readFileSync(join(registry, `${session.pid}.json`), "utf-8"));
+      expect(record.procStart).toBe(entry.procStart);
+      expect(reaperVerdict(entry, session.pid, 3600, Date.now(), { procStart: record.procStart, sessionId: record.sessionId })).toBe("wait");
     } finally {
       killSleeper(fake.pidFile);
     }
@@ -363,6 +487,42 @@ describeUnix("reaper", () => {
     expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\n");
     expect(readSpawnedSessions(stateDir)).toEqual([]);
     await exited;
+  });
+
+  test("a session listed on its socket alone is stopped by id, never signalled", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-foreign");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: false });
+    const stateDir = join(root, "state-reap-foreign");
+    // Stands in for whatever process owns this pid number in OUR domain: the
+    // session itself lives in another one, where the number means something
+    // else. It must survive the reaper.
+    const bystander = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const socket = join(root, "foreign-reap.sock");
+    writeFileSync(socket, "");
+    const session: SpawnedSession = {
+      id: "deadbeef", pid: bystander.pid!, name: "claude(ws-a-x)", startedAt: new Date().toISOString(), lingerSec: 1,
+      procStart: "236353382", sessionId: "00000000-0000-4000-8000-000000000001",
+    };
+    recordSpawnedSession(stateDir, session);
+    register(`${bystander.pid}.json`, {
+      pid: bystander.pid, procStart: "236353382", pidDomain: "linux:m:pid:[4026531836]",
+      messagingSocketPath: socket, statusUpdatedAt: Date.now() - 5000,
+    });
+    setProcProbesForTests({ ownDomain: () => "linux:m:pid:[4026533467]" });
+    try {
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
+      // Asked to stop by id — the one handle that means the same everywhere…
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\n");
+      // …and the fake only logs, so the entry is still there for the
+      // confirming look: no signal follows for a pid it cannot verify.
+      expect(() => process.kill(bystander.pid!, 0)).not.toThrow();
+    } finally {
+      setProcProbesForTests(null);
+      bystander.kill();
+    }
   });
 
   test("runReaper waits while the session is busy, and exits once it is gone", async () => {

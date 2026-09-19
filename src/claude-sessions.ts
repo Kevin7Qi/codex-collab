@@ -20,7 +20,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSyn
 import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveWorkspaceDir } from "./config";
-import { isCodexCollabSocket, procStartOf, sessionsDir, workspaceSuffix } from "./peer";
+import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./peer";
 import { acquireLockSync } from "./lock";
 
 /** A live Claude Code session as the registry describes it. */
@@ -36,6 +36,13 @@ export interface ClaudeSession {
   cwd: string;
   socketPath: string;
   sessionId: string | null;
+  /** The start time the session registered with, verbatim — clock ticks on
+   *  Linux, `ps -o lstart=` elsewhere. Its identity, with the pid. */
+  procStart: string | null;
+  /** False when the process could not be checked from here (another pid
+   *  domain, or a sandbox that forbids the check) and the session is listed
+   *  on the evidence of its messaging socket alone. */
+  verified: boolean;
   /** When the status last changed (ms since epoch), or null. */
   statusUpdatedAt: number | null;
   /** Set when codex-collab started this session for a Codex `send`. */
@@ -78,36 +85,35 @@ function readEntry(file: string): Record<string, unknown> | null {
   }
 }
 
-/** How a pid's start time is read. A seam for tests: Codex's sandbox
- *  forbids `ps`, which a test cannot reproduce. */
-let readProcStart: (pid: number) => string = procStartOf;
+/** How a process is probed. A seam for tests: Codex's sandbox forbids `ps`
+ *  and hides the host's pids, neither of which a test can reproduce. */
+let probes: ProcProbes = {};
 export function setProcStartReaderForTests(fn: ((pid: number) => string) | null): void {
-  readProcStart = fn ?? procStartOf;
+  probes = fn ? { ...probes, lstartOf: fn } : {};
+}
+export function setProcProbesForTests(p: ProcProbes | null): void {
+  probes = p ?? {};
 }
 
-/** True when the process the entry names is alive AND is the process that
- *  registered (a recycled pid fails the start-time check).
+/** How far an entry can be trusted: `verified` — the process it names is
+ *  alive AND is the one that registered (a recycled pid fails the start-time
+ *  check, see `procIdentity`); `socket` — the process cannot be checked from
+ *  here, and a messaging socket still in place is the evidence; `dead`.
  *
- *  Inside Codex's sandbox neither check is available: `ps` and `kill -0`
- *  both fail with EPERM (verified on 0.153.4, read-only and workspace-write
- *  alike), which made every session look dead to a sandboxed `peers`. When
- *  `ps` cannot run, a messaging socket still in place is the best evidence
- *  left — Claude Code removes it when the session exits. `send` runs
- *  outside the sandbox and gets the full check before it delivers. */
-function entryIsLive(pid: number, entry: Record<string, unknown>): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ESRCH") return false;
-  }
-  if (typeof entry.procStart === "string") {
-    let actual: string | null = null;
-    try { actual = readProcStart(pid); } catch { actual = null; }
-    if (actual !== null) return entry.procStart === actual;
-    const socket = entry.messagingSocketPath;
-    return typeof socket === "string" && existsSync(socket);
-  }
-  return true;
+ *  Inside Codex's sandbox the process check is unavailable: up to 0.153.4
+ *  `ps` and `kill -0` both fail with EPERM, and from 0.154 the sandbox is
+ *  its own PID namespace, where every host pid answers ESRCH — which made
+ *  every session look dead to a sandboxed `peers`. A socket still in place
+ *  is the best evidence left — Claude Code removes it when the session
+ *  exits. It is evidence enough to LIST a session and to try delivering to
+ *  it; it is never enough to signal its pid. `send` runs outside the
+ *  sandbox and gets the full check before it delivers. */
+function entryLiveness(entry: Record<string, unknown>): "verified" | "socket" | "dead" {
+  const identity = procIdentity(entry, probes);
+  if (identity === "live") return "verified";
+  if (identity === "dead") return "dead";
+  const socket = entry.messagingSocketPath;
+  return typeof socket === "string" && existsSync(socket) ? "socket" : "dead";
 }
 
 /** Live Claude Code sessions that bind a messaging socket. By default only
@@ -144,7 +150,8 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
       if (!cwd || !existsSync(cwd)) continue;
       if (resolveWorkspaceDir(cwd) !== ours) continue;
     }
-    if (!entryIsLive(pid, entry)) continue;
+    const liveness = entryLiveness(entry);
+    if (liveness === "dead") continue;
     const status = entry.status === "idle" || entry.status === "busy" ? entry.status : "unknown";
     sessions.push({
       pid,
@@ -154,6 +161,8 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
       cwd,
       socketPath,
       sessionId: typeof entry.sessionId === "string" ? entry.sessionId : null,
+      procStart: typeof entry.procStart === "string" ? entry.procStart : null,
+      verified: liveness === "verified",
       statusUpdatedAt: typeof entry.statusUpdatedAt === "number" ? entry.statusUpdatedAt : null,
       spawned: spawned.find((s) => s.pid === pid) ?? null,
     });
@@ -369,21 +378,37 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
     } catch { /* it may never have come up */ }
     throw new Error(`Started Claude Code session ${id} (${name}), but it did not register a messaging socket within ${Math.round((opts.registerTimeoutMs ?? SPAWN_REGISTER_TIMEOUT_MS) / 1000)}s; it was stopped again — \`claude logs ${id}\` shows what it did.`);
   }
-  let procStart: string | undefined;
-  try { procStart = procStartOf(session.pid); } catch { /* recorded without it */ }
-  const record: SpawnedSession = { id, pid: session.pid, name, startedAt: new Date().toISOString(), lingerSec, procStart, sessionId: session.sessionId };
+  // The identity is the registry entry's own, verbatim: the reaper compares
+  // it against later entries, and a start time computed here could be in the
+  // other representation (see procIdentity) — every entry would then read
+  // as someone else's, and the session would be forgotten, never stopped.
+  const record: SpawnedSession = { id, pid: session.pid, name, startedAt: new Date().toISOString(), lingerSec, procStart: session.procStart ?? undefined, sessionId: session.sessionId };
   recordSpawnedSession(opts.stateDir, record);
   (opts.startReaper ?? startReaper)(record, opts.cwd);
   return { ...session, spawned: record };
 }
 
+/** True when the registry still shows `session` — same pid, same identity —
+ *  and its process is verifiably the one that registered. The only ground
+ *  for signalling a pid: a session listed on socket evidence alone may sit
+ *  in another pid domain, where that number names some other process. */
+function isVerifiablyOurs(session: SpawnedSession): boolean {
+  const entry = readEntry(join(sessionsDir(), `${session.pid}.json`));
+  if (!entry || entry.pid !== session.pid) return false;
+  if (session.procStart && entry.procStart !== session.procStart) return false;
+  if (session.sessionId && entry.sessionId !== session.sessionId) return false;
+  return procIdentity(entry, probes) === "live";
+}
+
 /** Stop a session we started: `claude stop` keeps its conversation
- *  resumable; a plain signal is the fallback when the CLI is unavailable. */
+ *  resumable; a plain signal is the fallback when the CLI is unavailable —
+ *  and only for a process verified to be that session. */
 export function stopClaudeSession(session: SpawnedSession, claudeBin = "claude"): void {
   try {
     execFileSync(claudeBin, ["stop", session.id], { encoding: "utf-8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
     return;
   } catch { /* fall through to the signal */ }
+  if (!isVerifiablyOurs(session)) return;
   try {
     process.kill(session.pid, "SIGTERM");
   } catch { /* already gone */ }
@@ -422,7 +447,7 @@ export function reaperVerdict(
   // A session that registered later under a recycled pid is someone else's.
   if (identity.procStart && entry.procStart !== identity.procStart) return "gone";
   if (identity.sessionId && entry.sessionId !== identity.sessionId) return "gone";
-  if (!entryIsLive(pid, entry)) return "gone";
+  if (entryLiveness(entry) === "dead") return "gone";
   if (entry.status === "busy") return "wait";
   // Idle since its last status change; an entry that never reports one
   // is idle since it registered.
@@ -455,9 +480,9 @@ export async function runReaper(
     if (verdict === "stop") {
       stopClaudeSession(session, opts.claudeBin);
       // Confirm: `claude stop` can fail quietly. A session still registered
-      // under the same identity gets a signal.
+      // under the same identity, and verifiably that process, gets a signal.
       await new Promise((r) => setTimeout(r, Math.min(pollMs, 5000)));
-      if (reaperVerdict(readEntry(file), session.pid, 0, Date.now(), identity) !== "gone") {
+      if (isVerifiablyOurs(session)) {
         try { process.kill(session.pid, "SIGTERM"); } catch { /* gone meanwhile */ }
       }
       forgetSpawnedSession(stateDir, session.id);
