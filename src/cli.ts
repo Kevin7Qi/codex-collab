@@ -202,20 +202,28 @@ Commands:
   peers [--all]           (for Codex) List the Claude Code sessions live in
                           this workspace — the ones 'send' can reach
                           (--all: every workspace; --json)
-  send [<peer>] "message" (for Codex, outside its sandbox) Message a Claude
-                          Code session and print its reply; --to <peer> names
-                          it (a unique prefix will do), --timeout <sec> bounds
-                          the wait (default 600),
-                          --no-wait sends a one-way note. With no session
-                          live, resumes the one it last stopped, with its
-                          conversation (config spawn-resume; --fresh starts
-                          a new one), else starts one in the background
-                          (config spawn off, or --no-spawn, disables both)
-                          — on the model
-                          and effort given with -m <model> and -r/--effort
-                          <level>, else config spawn-model / spawn-effort,
-                          else your Claude Code default ('models --claude'
-                          lists the choices)
+  send [<peer>] "message" (for Codex, outside its sandbox) Hand a message to a
+                          Claude Code session as a task and print its reply;
+                          --to <peer> names the session (a unique prefix will
+                          do). --timeout <sec> bounds how long the COMMAND
+                          waits (default 600) — the task goes on, and a later
+                          reply is kept for 'task wait' / 'task result';
+                          --no-wait returns the task id once the message is
+                          delivered. With no session live, resumes the one it
+                          last stopped, with its conversation (config
+                          spawn-resume; --fresh starts a new one), else starts
+                          one in the background (config spawn off, or
+                          --no-spawn, disables both) — on the model and effort
+                          given with -m <model> and -r/--effort <level>, else
+                          config spawn-model / spawn-effort, else your Claude
+                          Code default ('models --claude' lists the choices)
+  task status <id>        (for Codex) Where a task stands: whom it went to,
+                          when, what that session is doing now (--json: the
+                          whole record). Works inside the sandbox, as do:
+  task wait <id>          Wait for a task's reply and print it (--timeout
+                          <sec>, default 600)
+  task result <id>        Print a task's reply if it is there; never waits
+  tasks [--all]           List the tasks sent from this workspace (--json)
   version                 Print version
 
 Options:
@@ -276,6 +284,13 @@ Goal mode: when a goal is active (goals = true in ~/.codex/config.toml) —
 created by Codex mid-turn or by you with run --goal — a run follows the
 server's continuation turns until the goal completes, is paused, or gets
 blocked: the run IS the goal, not just its first turn.
+
+Exit codes (send, task wait, task result):
+  0  the session replied   3  no reply yet — the task goes on, and its reply
+  1  it will never reply      is kept: 'task wait <id>' / 'task result <id>'
+     (undeliverable, the   5  a session codex-collab started stopped at a
+     session went away)       prompt nobody could answer; it was stopped, and
+                              the next send resumes its conversation
 
 Exit codes (next):
   0  event delivered           3  --timeout elapsed with no event
@@ -420,7 +435,7 @@ async function main() {
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
-    "peer", "peers", "send", "reap-claude",
+    "peer", "peers", "send", "task", "tasks", "reap-claude", "recv-task",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -500,10 +515,18 @@ async function main() {
       return (await import("./commands/peers")).handlePeers(rest);
     case "send":
       return (await import("./commands/send")).handleSend(rest);
+    case "task":
+      return (await import("./commands/task")).handleTask(rest);
+    case "tasks":
+      return (await import("./commands/task")).handleTasks(rest);
     case "reap-claude":
       // Private: the detached reaper `send` starts for a Claude session it
       // spawned (see claude-sessions.ts). Not in --help.
       return (await import("./commands/peers")).handleReapClaude(rest);
+    case "recv-task":
+      // Private: the detached receiver `send` starts for each task — it
+      // delivers the message and collects the reply (see commands/send.ts).
+      return (await import("./commands/send")).handleRecvTask(rest);
     case "version":
       return printVersion();
   }

@@ -10,10 +10,13 @@ Claude Code sessions in this workspace are peers you can work with: hand one a t
 ## Commands
 
     codex-collab peers                    # who is live here: name, idle or busy, kind
-    codex-collab send <name> "message"    # deliver to that session and wait for its reply
+    codex-collab send <name> "message"    # hand that session a task and wait for its reply
     codex-collab send "message"           # the only live session, or one started for you
+    codex-collab task wait <id>           # go on waiting for a task's reply
+    codex-collab task result <id>         # print a task's reply, if it has come
+    codex-collab task status <id>         # where a task stands
 
-`send` prints the reply in its output. `--timeout <sec>` bounds the wait (default 600); raise it for a task that takes longer. `--no-wait` hands the message off and returns at once, for work whose result you will pick up from the files or do not need back; no reply can reach you afterwards. `codex-collab send <name> -` reads a long message from stdin.
+Every `send` is a task with an id, shown when the message is delivered, and `send` prints the reply in its output. `--timeout <sec>` bounds how long the command waits (default 600). The task itself goes on past it, and a reply that comes later is kept under the id. `--no-wait` returns the id as soon as the message is delivered, for work you will collect later. `codex-collab send <name> -` reads a long message from stdin.
 
 ## Choosing a model
 
@@ -29,6 +32,9 @@ A session `send` starts runs on the user's default Claude model and effort unles
 ## Mechanics
 
 - `send` runs outside the sandbox, because it reaches the session over a local socket, which the sandbox blocks. Run it with escalated permissions; none are needed once the user has turned on `codex-collab config codex-rule on`. `peers` works inside the sandbox.
-- `send` blocks until the reply arrives or the timeout passes, which routinely takes tens of seconds to minutes while the session works. Keep waiting on the running command: a second `send` delivers the same message twice.
-- When the timeout passes with no reply, the command says so and exits 0. The session may still be working on your message; carry on, and mention the open item in your answer. (A session running with `bypassPermissions` holds peer messages for its user to approve unless its `crossSessionInbound` setting is `accept`.)
+- `send` blocks until the reply arrives or its timeout passes, which routinely takes tens of seconds to minutes while the session works. Keep waiting on the running command: a second `send` delivers the same message twice.
+- The outcome is one line, `task: <id>  status: <status>`, and the exit code says the same. 0: the session replied. 3: no reply yet, and the task goes on. Carry on with other work, then collect the reply with `codex-collab task wait <id>`, which waits, or `task result <id>`, which prints it if it is there. 5: a session `send` started stopped at a prompt nobody could answer; the output says how to send again. 1: the message could not be delivered, or the session went away before it replied.
+- To wait, run one command and let it block: `send`, or `codex-collab task wait <id>` for a task already sent (`--timeout <sec>`, default 600). Both return the moment the reply is there, so checking in between gains nothing. `task status <id>` is a single look, for when you want to know what the session is doing right now: `busy` is a turn in progress, `idle` a session that has ended its turn, `waiting` one stopped at a prompt.
+- A task's id outlives the command and your own context: `codex-collab tasks` lists the tasks sent from this workspace. `task` and `tasks` work inside the sandbox.
+- A user's session running in `bypassPermissions` mode runs every action without asking, so Claude Code does not hand it another session's message unchecked: yours is held until the user approves it in that session's terminal, unless they have set `crossSessionInbound` to `accept`. From your side a held message is a task that stays `running` with no reply. Tell the user, who can approve it there.
 - With no session live, `send` brings one up in the background for this workspace, named `claude(<workspace>-…)`; it stops after 30 idle minutes by default. If the one it started before was stopped within the past week, that session is resumed with its conversation intact, so what you worked out with it still stands and a long collaboration carries across its idle stops; `codex-collab peers` says when this is what `send` will do, and `--fresh` starts a new session instead. A new session starts from the working directory alone, with none of the user's conversation. It runs in Claude Code's `auto` permission mode and can edit files and run commands, each action reviewed by Claude Code's safety classifier, so work can be handed to it as to a live session.

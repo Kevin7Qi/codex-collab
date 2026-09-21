@@ -134,7 +134,9 @@ codex-collab follow --watch
 | `kill <id> [--clear]` | Stop a running thread. An active goal is paused first; `--clear` abandons it |
 | `peer [up]` | Show the native-messaging peer's status; `peer up` starts the broker (and with it the peer) |
 | `peers [--all] [--json]` | List the Claude Code sessions live in this workspace |
-| `send [<peer>] "message"` | Deliver a message to a named Claude session and wait for the reply (`--no-wait` for fire-and-forget; `send -` reads from stdin) |
+| `send [<peer>] "message"` | Hand a message to a named Claude session as a task and wait for the reply (`--no-wait` returns the task id once delivered; `send -` reads from stdin) |
+| `task status\|wait\|result <id>` | Where a task stands, wait for its reply, or print it — a reply that comes after `send` stopped waiting is kept |
+| `tasks` | List the tasks sent from this workspace |
 
 <details>
 <summary>Questions and approvals</summary>
@@ -284,7 +286,7 @@ After `peer up`, `ListAgents` shows `codex(myproject-a1b2c3)` — message it and
 
 <details><summary>From Codex: message Claude</summary>
 
-From Codex's own sessions, `codex-collab peers` lists the Claude Code sessions in the workspace and `codex-collab send <name> "message"` messages one, waiting for its reply (default 600 s; no reply exits 0). With none live, `send` starts a background session that stops after 30 idle minutes (`config spawn`, `config linger`). Codex asks before each `send` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
+From Codex's own sessions, `codex-collab peers` lists the Claude Code sessions in the workspace and `codex-collab send <name> "message"` hands one a message as a task and waits for its reply (default 600 s). The wait bounds the command only: a reply that comes later is kept, and `codex-collab task wait <id>` or `task result <id>` collects it (exit 0 replied, 3 still running, 5 stopped at a prompt, 1 failed). With none live, `send` starts a background session that stops after 30 idle minutes (`config spawn`, `config linger`). Codex asks before each `send` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
 
 </details>
 

@@ -183,10 +183,10 @@ describeUnix("listClaudeSessions", () => {
     // No socket: an older Claude Code, or a record of another kind.
     register(`${sleeper.pid}.json`, { messagingSocketPath: undefined });
     expect(listClaudeSessions({ cwd: wsA })).toEqual([]);
-    // codex-collab's own registrations (a broker, a thread peer, a send).
+    // codex-collab's own registrations (a broker, a thread peer, a task's receiver).
     register(`${sleeper.pid}.json`, { messagingSocketPath: join(config.dataDir, "workspaces", "x", "peer.sock") });
     expect(listClaudeSessions({ cwd: wsA })).toEqual([]);
-    register(`${sleeper.pid}.json`, { messagingSocketPath: join(mailboxRoot(), "send-123.sock") });
+    register(`${sleeper.pid}.json`, { messagingSocketPath: join(mailboxRoot(), "task-abc12345.sock") });
     expect(listClaudeSessions({ cwd: wsA })).toEqual([]);
     // A dead pid, a filename that does not match, a recycled pid.
     register("999999.json", { pid: 999999 });
@@ -274,7 +274,7 @@ describeUnix("process identity", () => {
 
 describeUnix("resolveSession", () => {
   const sessions = ["Explore messaging", "explore-two", "claude(ws-a-abc123)"].map((name) => ({
-    pid: 1, name, status: "idle" as const, kind: "interactive", cwd: "/", socketPath: "/s", sessionId: null, procStart: null, verified: true, statusUpdatedAt: null, spawned: null,
+    pid: 1, name, status: "idle" as const, kind: "interactive", cwd: "/", entrypoint: "cli", tmux: null, socketPath: "/s", sessionId: null, procStart: null, verified: true, statusUpdatedAt: null, spawned: null,
   }));
   test("exact name wins, a unique prefix resolves, an ambiguous one lists candidates", () => {
     expect(resolveSession(sessions, "explore-two").session?.name).toBe("explore-two");

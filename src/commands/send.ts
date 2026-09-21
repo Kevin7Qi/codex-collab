@@ -1,31 +1,42 @@
-// src/commands/send.ts — send: message a Claude Code session and wait for its reply
+// src/commands/send.ts — send: hand a message to a Claude Code session, and its reply back
 //
 // Invoked BY CODEX from its own session — the TUI, the app, an exec run —
 // none of which codex-collab started. The session is named (see `peers`),
 // or is the only one live in the workspace, or is started for the
-// occasion. The reply prints on stdout, which lands in Codex's context;
-// no reply within the deadline prints a notice and exits 0 all the same —
-// from Codex's point of view the command always returns, only the advice
-// differs. Non-zero exits are for genuine failures: no session to reach,
-// an unreachable socket, the sandbox.
+// occasion. The reply prints on stdout, which lands in Codex's context.
 //
-// How it works: this process registers itself, for the duration of the
-// exchange, as a peer in Claude Code's session registry — under its own
-// pid, with its own socket — delivers the message straight to the
-// session's messaging socket, and receives the reply on its own. Nothing
-// else has to be running. That is also why it cannot run inside Codex's
-// sandbox, which blocks every unix socket: Codex reruns a command outside
-// the sandbox when asked to, and the notice below says so.
+// Every message is a TASK (claude-tasks.ts), and `send` has two halves. The
+// one Codex runs chooses the session, records the task, and starts the other:
+// a detached receiver (`recv-task`, private) that registers, for as long as
+// the task takes, as a peer in Claude Code's session registry — under its own
+// pid, with its own socket — delivers the message straight to the session's
+// messaging socket, and writes the reply into the task's record when it
+// comes. The first half then only watches the record. Its `--timeout` bounds
+// how long the COMMAND waits, and nothing else: a reply that comes later is
+// kept, and `task wait` / `task result` collect it. Which is why the session
+// is told no deadline — there is none for it to fit its work into.
+//
+// The exit code says how it went (see `exitCodeFor`): 0 replied, 3 no reply
+// yet and the task goes on, 5 the session stopped at a prompt, 1 failure.
+//
+// Nothing else has to be running. The receiver's sockets are also why `send`
+// cannot run inside Codex's sandbox, which blocks every unix socket: Codex
+// reruns a command outside the sandbox when asked to, and the notice below
+// says so.
 
 import { connect, createServer, type Server } from "node:net";
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
   buildEnvelope,
   buildRegistryEntry,
+  ownPidDomain,
   parseEnvelope,
+  procIdentity,
   procStartOf,
+  procStartTicksOf,
   sessionsDir,
   sniffRegistryVersion,
   workspaceSuffix,
@@ -44,16 +55,16 @@ import {
   resumableSession,
   sessionStatusNow,
   spawnClaudeSession,
-  stopClaudeSession,
+  spawnEnv,
+  stopAndConfirm,
   transientSessionId,
   type ClaudeSession,
 } from "../claude-sessions";
+import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, taskLogFile, updateTask, type TaskRecord } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
+import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
-
-/** Default reply deadline (seconds) — the same order as the ask channel's. */
-export const DEFAULT_SEND_TIMEOUT_SEC = 600;
 
 /** Codex sets CODEX_SANDBOX in every command it runs inside its sandbox,
  *  and in none it runs outside it. CODEX_SANDBOX_NETWORK_DISABLED is not
@@ -75,58 +86,36 @@ export function codexThreadId(env: NodeJS.ProcessEnv = process.env): string | nu
   return id && /^[0-9a-f-]{8,}$/i.test(id) ? id : null;
 }
 
-/** The name this exchange registers under: codex(<thread>-<workspace>),
- *  the same family as the broker's front door and thread peers, so Claude
- *  can tell which Codex session is talking and from which workspace. */
-export function senderName(cwd: string, threadId: string | null): string {
-  const tag = threadId ? threadId.replace(/-/g, "").slice(0, 8) : `shell-${process.pid}`;
-  return `codex(${tag}-${workspaceSuffix(cwd)})`;
+/** The name a task's receiver registers under, which IS the address its
+ *  reply is sent to: codex(<thread>-<workspace>-<task>). The same family as
+ *  the broker's front door and thread peers, so Claude can tell which Codex
+ *  session is talking and from which workspace — and one address per task,
+ *  so that whatever is sent to it can only be that task's. With a name a
+ *  Codex thread's tasks shared, a session's second thought about a finished
+ *  task would reach whichever task held the name by then, and be recorded as
+ *  its reply; sent to a finished task's own address it finds nobody, and
+ *  Claude is told so. */
+export function senderName(cwd: string, threadId: string | null, taskId: string): string {
+  const tag = threadId ? threadId.replace(/-/g, "").slice(0, 8) : "shell";
+  return `codex(${tag}-${workspaceSuffix(cwd)}-${taskId})`;
 }
 
-/** The name IS the address: two parallel sends from one Codex thread must
- *  not register the same one, or a reply by name lands on either. When a
- *  live entry already carries `name`, this exchange takes `name` with its
- *  pid inside the parentheses. */
-export function uniqueSenderName(name: string, taken: (candidate: string) => boolean = nameIsTaken): string {
-  if (!taken(name)) return name;
-  return name.replace(/\)$/, `-${process.pid})`);
-}
-
-function nameIsTaken(name: string): boolean {
-  try {
-    for (const file of readdirSync(sessionsDir())) {
-      if (!file.endsWith(".json")) continue;
-      try {
-        const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
-        if (entry?.name !== name || typeof entry?.pid !== "number" || entry.pid === process.pid) continue;
-        process.kill(entry.pid, 0);
-        return true;
-      } catch { /* dead or unreadable — not taken */ }
-    }
-  } catch { /* registry gone */ }
-  return false;
-}
-
-/** The text Claude receives: the message, then one line saying who sent
- *  it and whether it is waiting. */
-export function composeMessage(
-  text: string,
-  opts: { threadId: string | null; wait: boolean; timeoutSec: number },
-): string {
+/** The text Claude receives: the message, then one line saying who sent it
+ *  and where the reply goes. It names no deadline. The reply is kept whenever
+ *  it comes, so there is none on Claude's side — and a number here, however
+ *  generous, is a budget a careful model cuts its work to fit. */
+export function composeMessage(text: string, opts: { threadId: string | null }): string {
   const who = opts.threadId ? `Codex thread ${opts.threadId}` : "a Codex session";
-  const trailer = opts.wait
-    ? `(From ${who}, waiting for your reply — send it to this peer; it waits up to ${formatDuration(opts.timeoutSec * 1000)}.)`
-    : `(From ${who}. It is not waiting for a reply, and a reply cannot reach it.)`;
-  return `${text}\n\n${trailer}`;
+  return `${text}\n\n(From ${who}. Reply to this peer when you are done; your reply is kept for it.)`;
 }
 
-/** Where a session's reply lands: a socket of ours under codex-collab's
- *  temp root (the ask mailbox's home). Short enough for a unix socket
- *  path wherever the home directory is, and a location every codex-collab
- *  process recognizes as ours (`isCodexCollabSocket`), so a `send` in
- *  flight is never listed as a Claude session. */
-export function ownSocketPath(pid = process.pid): string {
-  return join(mailboxRoot(), `send-${pid}.sock`);
+/** Where a task's reply lands: a socket of its receiver's under
+ *  codex-collab's temp root (the ask mailbox's home). Short enough for a unix
+ *  socket path wherever the home directory is, and a location every
+ *  codex-collab process recognizes as ours (`isCodexCollabSocket`), so a
+ *  task in flight is never listed as a Claude session. */
+export function taskSocketPath(id: string): string {
+  return join(mailboxRoot(), `task-${id}.sock`);
 }
 
 /** Said when something fails that a sandbox would explain. Codex does not
@@ -204,7 +193,7 @@ export async function handleSend(args: string[]): Promise<void> {
   const cwd = options.dir;
   const wsRoot = resolveWorkspaceDir(cwd);
   const stateDir = resolveStateDir(cwd);
-  const timeoutSec = options.explicit.has("timeout") ? options.timeout : DEFAULT_SEND_TIMEOUT_SEC;
+  const timeoutSec = options.explicit.has("timeout") ? options.timeout : DEFAULT_TASK_WAIT_SEC;
   const wait = !options.noWait;
 
   if (process.platform === "win32") {
@@ -355,30 +344,256 @@ export async function handleSend(args: string[]): Promise<void> {
     if (note) notes.push(note);
   }
 
-  // ── Our own address for the reply ──
-  mkdirSync(mailboxRoot(), { recursive: true, mode: 0o700 });
-  // The root must be privately ours before a socket goes in it — the same
-  // check the ask mailbox makes, for the same reason (a shared temp dir).
-  try {
-    verifyMailboxDir(mailboxRoot());
-  } catch (e) {
-    die(e instanceof Error ? e.message : String(e));
-  }
-  const socketPath = ownSocketPath();
-  try { unlinkSync(socketPath); } catch { /* none */ }
+  // ── Record the task, and hand it to a receiver of its own ──
   const threadId = codexThreadId();
-  let name = senderName(cwd, threadId);
+  let task: TaskRecord;
+  try {
+    task = createTask(stateDir, {
+      cwd: wsRoot,
+      threadId,
+      message,
+      target: { name: target.name, pid: target.pid, socketPath: target.socketPath, sessionId: target.sessionId, procStart: target.procStart, spawned: target.spawned },
+      // A caller willing to wait longer than a task is normally waited on
+      // must not see it expire under them.
+      maxWaitSec: Math.max(TASK_MAX_WAIT_SEC, timeoutSec),
+    });
+  } catch (e) {
+    die(`Could not record the task under ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
+  }
+  const delivered = await startReceiver(task, stateDir, cwd);
+
+  for (const note of notes) console.log(note);
+  const hint = dirHint(options);
+  const busy = target.status === "busy" ? " It is busy — your message joins its current turn." : "";
+  if (!wait) {
+    console.log(`Sent to ${target.name} as task ${task.id}.${busy} Not waiting: its reply is kept when it comes.`);
+    console.log(`  codex-collab task wait ${task.id}${hint}     waits for it`);
+    console.log(`  codex-collab task result ${task.id}${hint}   prints it once it is there`);
+    process.exit(0);
+  }
+  console.log(`Sent to ${target.name} as task ${task.id}.${busy} Waiting up to ${formatDuration(timeoutSec * 1000)} for its reply…`);
+
+  const started = Date.now();
+  const outcome = FINAL_STATUSES.has(delivered.status) ? delivered : await waitForTask(stateDir, task.id, timeoutSec * 1000);
+  if (!outcome) die(`Task ${task.id} was removed while it was being waited on.`);
+  console.log("");
+  reportOutcome(outcome, { waitedMs: Date.now() - started, hint });
+  process.exit(exitCodeFor(outcome.status));
+}
+
+// ---------------------------------------------------------------------------
+// The receiver — the half of `send` that outlives the command
+// ---------------------------------------------------------------------------
+
+/** How long `send` waits for a receiver to deliver. It covers a runtime
+ *  start, a `ps`, two locks and one local connect. */
+const RECEIVER_HANDSHAKE_TIMEOUT_MS = 30_000;
+
+/** Start `task`'s receiver, detached, and return once it has delivered the
+ *  message (the record has left `pending`) — or die with the reason it could
+ *  not. The handshake is the record itself, as `run --detach` uses the run
+ *  ledger: what `send` reports as sent has been sent. */
+async function startReceiver(task: TaskRecord, stateDir: string, cwd: string): Promise<TaskRecord> {
+  const logPath = taskLogFile(stateDir, task.id);
+  const logFd = openSync(logPath, "a", 0o600);
+  // Its own process group and no terminal: the task must outlive this
+  // command, a Ctrl-C in the invoking shell, and the Codex turn that ran it.
+  // Codex's markers are dropped, as for the reaper — it is nobody's command.
+  const child = spawn(process.execPath, ["run", process.argv[1], "recv-task", task.id, "--dir", cwd], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: spawnEnv(),
+  });
+  closeSync(logFd);
+  let childGone = false;
+  let spawnError: Error | null = null;
+  child.once("exit", () => { childGone = true; });
+  child.once("error", (e) => { spawnError = e; childGone = true; });
+  child.unref();
+
+  /** The receiver is gone and the record still says `pending`: nobody else
+   *  will ever write it, so this command may — the record has one writer at
+   *  a time, and that writer has just left. */
+  const giveUp: (reason: string) => never = (reason) => {
+    updateTask(stateDir, task.id, { status: "failed", error: reason, finishedAt: new Date().toISOString() });
+    let tail = "";
+    try { tail = readFileSync(logPath, "utf-8").trim().split("\n").slice(-10).join("\n"); } catch { /* none */ }
+    die(`${reason}${sandboxHint()}${tail ? `\nReceiver output (${logPath}):\n${tail}` : ""}`);
+  };
+  /** What the record says once it has left `pending`: delivered (returned),
+   *  or the receiver's own account of why not (fatal). */
+  const verdict = (now: TaskRecord | null): TaskRecord | null => {
+    if (!now || now.status === "pending") return null;
+    // Delivered is delivered, whatever became of the receiver afterwards:
+    // "could not deliver" here would have Codex send the message again.
+    if (now.status === "failed" && !now.deliveredAt) die(`${now.error ?? "The message could not be delivered."}${sandboxHint()}`);
+    return now;
+  };
+
+  const deadline = Date.now() + RECEIVER_HANDSHAKE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const now = verdict(loadTask(stateDir, task.id));
+    if (now) return now;
+    if (spawnError) giveUp(`Could not start the process that collects the reply: ${(spawnError as Error).message}`);
+    if (childGone) {
+      // It may have delivered, been answered and left since that look.
+      const last = verdict(loadTask(stateDir, task.id));
+      if (last) return last;
+      giveUp("The process that collects the reply exited before it delivered the message.");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // Reporting failure while the receiver lives would let it deliver after
+  // Codex was told the message never went: stop it, and see it gone, before
+  // anything is said — it may be delivering at this very moment, and then
+  // the record says so.
+  if (!childGone && child.pid) {
+    try { process.kill(child.pid, "SIGTERM"); } catch { /* gone */ }
+    const until = Date.now() + 5000;
+    while (!childGone && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+    if (!childGone) { try { process.kill(child.pid, "SIGKILL"); } catch { /* gone */ } }
+  }
+  const last = verdict(loadTask(stateDir, task.id));
+  if (last) return last;
+  giveUp(`The message was not delivered within ${RECEIVER_HANDSHAKE_TIMEOUT_MS / 1000}s.`);
+}
+
+/** Remove what a receiver that was killed outright left behind: its entry in
+ *  Claude Code's registry and its socket. Every other way out of a receiver
+ *  removes both; SIGKILL, an out-of-memory kill or a power cut runs no code,
+ *  and a receiver now lives for hours. Two witnesses are asked before
+ *  anything is removed — the process is gone, AND nothing answers at the
+ *  socket — because from inside a pid namespace of its own every host process
+ *  looks gone, while a connection that a sandbox refuses is not "nobody
+ *  there". Returns how many were removed. */
+export async function sweepDeadReceivers(): Promise<number> {
+  let files: string[];
+  try {
+    files = readdirSync(sessionsDir());
+  } catch {
+    return 0;
+  }
+  const ours = join(mailboxRoot(), "task-");
+  let removed = 0;
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    const path = join(sessionsDir(), file);
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(readFileSync(path, "utf-8"));
+    } catch {
+      continue;
+    }
+    const socket = entry?.messagingSocketPath;
+    if (typeof socket !== "string" || !socket.startsWith(ours) || entry.pid === process.pid) continue;
+    if (procIdentity(entry) !== "dead") continue;
+    const nobodyThere = await new Promise<boolean>((resolve) => {
+      const sock = connect({ path: socket }, () => { sock.destroy(); resolve(false); });
+      sock.on("error", (e: NodeJS.ErrnoException) => resolve(e.code === "ECONNREFUSED" || e.code === "ENOENT"));
+      sock.setTimeout(1000, () => { sock.destroy(); resolve(false); });
+    });
+    if (!nobodyThere) continue;
+    try { unlinkSync(socket); } catch { /* gone */ }
+    try { unlinkSync(path); removed++; } catch { /* gone */ }
+  }
+  return removed;
+}
+
+/** Watch for the session a task waits on going away: its registry entry
+ *  gone, or now another session's, or its process dead. Resolves "lost" once
+ *  that has held for several looks in a row — Claude Code rewrites entries
+ *  while it runs, and one unreadable moment is no evidence. */
+export function watchForLost(target: TaskRecord["target"], opts: { pollMs?: number; looks?: number } = {}): { lost: Promise<"lost">; stop(): void } {
+  const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_LOST_POLL_MS) || 2000);
+  const looks = opts.looks ?? 3;
+  const file = join(sessionsDir(), `${target.pid}.json`);
+  const gone = (): boolean => {
+    let entry: Record<string, unknown>;
+    try {
+      entry = JSON.parse(readFileSync(file, "utf-8"));
+    } catch {
+      return true;
+    }
+    if (!entry || entry.pid !== target.pid) return true;
+    if (target.sessionId && entry.sessionId !== target.sessionId) return true;
+    if (target.procStart && entry.procStart !== target.procStart) return true;
+    return procIdentity(entry) === "dead";
+  };
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const lost = new Promise<"lost">((resolve) => {
+    let seen = 0;
+    timer = setInterval(() => {
+      seen = gone() ? seen + 1 : 0;
+      if (seen >= looks) resolve("lost");
+    }, pollMs);
+  });
+  return { lost, stop() { if (timer) clearInterval(timer); } };
+}
+
+/** `codex-collab recv-task <id> --dir <workspace>` (private). Started
+ *  detached by `send`: delivers the task's message from an address of its
+ *  own, then listens there until the session replies, is found stopped at a
+ *  prompt, goes away, or the task's longest wait is over — and writes which
+ *  into the task's record. What it prints goes to the task's log. */
+export async function handleRecvTask(args: string[]): Promise<void> {
+  const { positional, options } = parseOptions(args);
+  const stateDir = resolveStateDir(options.dir);
+  const id = positional[0];
+  const task = isTaskId(id) ? loadTask(stateDir, id) : null;
+  // Only a task `send` has just recorded is a receiver's to take: a second
+  // one for the same task would deliver the message twice.
+  if (!task || task.status !== "pending" || task.receiver) {
+    console.error(`No pending task ${id ?? ""} in this workspace — nothing to receive.`);
+    process.exit(1);
+  }
+  const { target } = task;
+  const socketPath = taskSocketPath(task.id);
   const entryPath = join(sessionsDir(), `${process.pid}.json`);
   let server: Server | null = null;
-  const cleanup = (): void => {
+  let finished = false;
+  const release = (): void => {
     try { server?.close(); } catch { /* closed */ }
     try { unlinkSync(socketPath); } catch { /* gone */ }
     try { unlinkSync(entryPath); } catch { /* gone */ }
   };
+  /** The address goes first and the verdict last: whoever reads a final
+   *  status finds no registration of this task left behind. */
+  const finish: (patch: Partial<TaskRecord>, code?: number) => never = (patch, code = 0) => {
+    release();
+    finished = true;
+    // A log with nothing in it explains nothing.
+    try { if (statSync(taskLogFile(stateDir, task.id)).size === 0) unlinkSync(taskLogFile(stateDir, task.id)); } catch { /* none */ }
+    updateTask(stateDir, task.id, { ...patch, finishedAt: new Date().toISOString() });
+    process.exit(code);
+  };
   // SIGINT/SIGTERM reach the CLI's own handlers (cli.ts), which exit — and
-  // the exit hook cleans up. SIGHUP has no handler there.
-  process.on("exit", cleanup);
-  process.on("SIGHUP", () => { cleanup(); process.exit(129); });
+  // the exit hook says what happened. SIGHUP has no handler there.
+  process.on("exit", () => {
+    if (finished) return;
+    release();
+    try { updateTask(stateDir, task.id, { status: "failed", error: "the process collecting the reply was stopped before a reply came", finishedAt: new Date().toISOString() }); } catch { /* state dir gone */ }
+  });
+  process.on("SIGHUP", () => process.exit(129));
+
+  // Who is collecting, before anything can go wrong: a reader tells a
+  // receiver that died from one still at work by this.
+  let ownStart: string | null = procStartTicksOf(process.pid);
+  if (ownStart === null) { try { ownStart = procStartOf(process.pid); } catch { /* ps unavailable */ } }
+  updateTask(stateDir, task.id, { receiver: { pid: process.pid, procStart: ownStart, pidDomain: ownPidDomain() } });
+
+  // ── Our own address for the reply ──
+  // The root must be privately ours before a socket goes in it — the same
+  // check the ask mailbox makes, for the same reason (a shared temp dir).
+  try {
+    mkdirSync(mailboxRoot(), { recursive: true, mode: 0o700 });
+    verifyMailboxDir(mailboxRoot());
+  } catch (e) {
+    finish({ status: "failed", error: e instanceof Error ? e.message : String(e) }, 1);
+  }
+  try { unlinkSync(socketPath); } catch { /* none */ }
+  // Tidy up after receivers that never got the chance to: never a reason
+  // for this task to fail.
+  try { await sweepDeadReceivers(); } catch { /* leave them */ }
 
   let resolveReply!: (reply: { text: string; fromName: string }) => void;
   const reply = new Promise<{ text: string; fromName: string }>((resolve) => { resolveReply = resolve; });
@@ -395,10 +610,10 @@ export async function handleSend(args: string[]): Promise<void> {
         if (!line) continue;
         const msg = parseEnvelope(line);
         if (!msg) continue;
-        // The reply Codex is waiting for is the named session's. Another
+        // The reply the task waits for is the named session's. Another
         // sender's message is not an answer — it is noted, not consumed.
         if (msg.replyPath !== target.socketPath) {
-          console.log(`(A message from ${msg.fromName} arrived meanwhile; still waiting for ${target.name}.)`);
+          console.log(`A message from ${msg.fromName} arrived; still waiting for ${target.name}.`);
           continue;
         }
         resolveReply({ text: msg.text, fromName: msg.fromName });
@@ -421,20 +636,15 @@ export async function handleSend(args: string[]): Promise<void> {
       process.umask(prevUmask);
     }
   } catch (e) {
-    cleanup();
-    die(`Could not open a socket for the reply at ${socketPath}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
+    finish({ status: "failed", error: `Could not open a socket for the reply at ${socketPath}: ${e instanceof Error ? e.message : String(e)}` }, 1);
   }
-  // Pick the name and register under one lock: two sends from one Codex
-  // thread at once would otherwise both find the plain name free.
-  let releaseRegister: (() => void) | null = null;
+  const name = senderName(task.cwd, task.threadId, task.id);
   let registerError: unknown = null;
   try {
     mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
-    releaseRegister = await acquireLockAsync(join(mailboxRoot(), "register.lock"), { maxAttempts: 200, staleThresholdMs: 10_000 });
-    name = uniqueSenderName(name);
     writeFileSync(entryPath, JSON.stringify(buildRegistryEntry({
       pid: process.pid,
-      cwd: wsRoot,
+      cwd: task.cwd,
       name,
       socketPath,
       version: sniffRegistryVersion(),
@@ -443,23 +653,19 @@ export async function handleSend(args: string[]): Promise<void> {
     })));
   } catch (e) {
     registerError = e;
-  } finally {
-    releaseRegister?.();
   }
   if (registerError) {
     const e = registerError;
-    cleanup();
-    die(`Could not register with Claude Code's session registry (${sessionsDir()}): ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
+    finish({ status: "failed", error: `Could not register with Claude Code's session registry (${sessionsDir()}): ${e instanceof Error ? e.message : String(e)}` }, 1);
   }
 
   // ── Deliver ──
   const line = buildEnvelope({
-    text: composeMessage(message, { threadId, wait, timeoutSec }),
+    text: composeMessage(task.message, { threadId: task.threadId }),
     ourSocketPath: socketPath,
     ourName: name,
     mode: "prompting",
   });
-  const sentAt = Date.now();
   try {
     await new Promise<void>((resolve, reject) => {
       const sock = connect({ path: target.socketPath }, () => {
@@ -471,54 +677,39 @@ export async function handleSend(args: string[]): Promise<void> {
       sock.on("error", reject);
     });
   } catch (e) {
-    cleanup();
     const detail = e instanceof Error ? e.message : String(e);
-    die(`Could not reach ${target.name} (socket ${target.socketPath}): ${detail}${sandboxHint()}\nIt may have just exited — \`codex-collab peers\` shows who is live.`);
+    finish({ status: "failed", error: `Could not reach ${target.name} (socket ${target.socketPath}): ${detail}\nIt may have just exited — \`codex-collab peers\` shows who is live.` }, 1);
   }
+  updateTask(stateDir, task.id, { status: "running", deliveredAt: new Date().toISOString(), senderName: name });
 
-  for (const note of notes) console.log(note);
-  const busy = target.status === "busy" ? " It is busy — your message joins its current turn." : "";
-  if (!wait) {
-    console.log(`Sent to ${target.name}.${busy} Not waiting for a reply.`);
-    cleanup();
-    process.exit(0);
-  }
-  console.log(`Sent to ${target.name}.${busy} Waiting up to ${formatDuration(timeoutSec * 1000)} for its reply…`);
-
+  // ── Listen ──
   // A session codex-collab started has nobody attached. If it stops at a
   // prompt no reply will ever come — and it does stop at one when it is not
   // in auto mode after all: Claude Code falls back to asking where that mode
   // is unavailable to the session, which depends on the model. Watching for
-  // it turns a whole timeout of silence into an answer Codex can act on.
-  const watch = target.spawned ? watchForBlocked(target.pid) : null;
+  // it turns hours of silence into an answer Codex can act on.
+  const blockedWatch = target.spawned ? watchForBlocked(target.pid) : null;
+  const lostWatch = watchForLost(target);
+  const remaining = Math.max(0, Date.parse(task.expiresAt) - Date.now());
   const answer = await Promise.race([
     reply,
-    new Promise<null>((r) => setTimeout(r, timeoutSec * 1000)),
-    ...(watch ? [watch.blocked] : []),
+    new Promise<"expired">((r) => setTimeout(() => r("expired"), Number.isFinite(remaining) ? remaining : TASK_MAX_WAIT_SEC * 1000)),
+    lostWatch.lost,
+    ...(blockedWatch ? [blockedWatch.blocked] : []),
   ]);
-  watch?.stop();
-  const elapsed = formatDuration(Math.max(1000, Date.now() - sentAt));
-  console.log("");
-  if (answer === "blocked" && target.spawned) {
-    const ranOn = describeModelChoice(target.spawned.model, target.spawned.effort);
-    console.log(`NO REPLY from ${target.name}: it has stopped at a prompt (a permission request, most likely), and nobody is attached to answer it.`);
-    console.log(`It was started in \`auto\` permission mode, where nothing prompts; Claude Code asks like this when that mode is not available to the session, which depends on the model. This one runs on ${ranOn}.`);
+  blockedWatch?.stop();
+  lostWatch.stop();
+  if (answer === "blocked") {
     // Left as it is it would sit at that prompt until the reaper came, and
-    // swallow every message sent meanwhile. Stopped, it can be resumed.
-    stopClaudeSession(target.spawned);
-    markSpawnedSessionStopped(stateDir, target.spawned.id);
-    console.log("It has been stopped. Send again with a model that has auto mode (`codex-collab models --claude` lists the choices; `--model sonnet` or above): the conversation resumes on it.");
-  } else if (answer && answer !== "blocked") {
-    console.log(`REPLY FROM ${target.name} (after ${elapsed}):`);
-    // Indented so no reply line sits at column 0, the way `ask` prints answers.
-    for (const l of sanitizeForTerminal(answer.text).trimEnd().split("\n")) console.log(`  ${l}`);
-  } else {
-    console.log(`NO REPLY from ${target.name} within ${formatDuration(timeoutSec * 1000)}. Proceed on your own judgment.`);
-    console.log(sessionStatusNow(target.pid) === "waiting"
-      ? "It is waiting at a prompt in its own terminal — a permission request or a question only its user can answer there."
-      : "It may still be working on your message; a later reply cannot reach this command.");
-    console.log("(A Claude Code session running with bypassPermissions holds peer messages for its user to approve unless its crossSessionInbound setting is accept.)");
+    // swallow every message sent meanwhile. Stopped, it can be resumed. Two
+    // tasks may find the same session blocked: stopping and marking it are
+    // both safe to do twice.
+    if (target.spawned) {
+      await stopAndConfirm(target.spawned);
+      markSpawnedSessionStopped(stateDir, target.spawned.id);
+    }
+    finish({ status: "blocked" });
   }
-  cleanup();
-  process.exit(0);
+  if (answer === "lost" || answer === "expired") finish({ status: answer });
+  finish({ status: "replied", reply: answer });
 }

@@ -134,7 +134,9 @@ codex-collab follow --watch
 | `kill <id> [--clear]` | 中断运行中的会话。若存在进行中的 goal 会先暂停；`--clear` 表示直接放弃 |
 | `peer [up]` | 查看 Codex 在跨会话消息中的注册状态；`peer up` 启动 broker 并完成注册 |
 | `peers [--all] [--json]` | 列出当前工作区内存活的 Claude Code 会话 |
-| `send [<peer>] "message"` | 向指定的 Claude 会话发送消息并等待回复（`--no-wait` 发送单向通知；`send -` 从标准输入读取） |
+| `send [<peer>] "message"` | 将消息作为一项任务交给指定的 Claude 会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`send -` 从标准输入读取） |
+| `task status\|wait\|result <id>` | 查看任务状态、等待其回复或打印回复——`send` 停止等待之后才到的回复同样会被保存 |
+| `tasks` | 列出本工作区发出的任务 |
 
 <details>
 <summary>提问与审批</summary>
@@ -286,7 +288,7 @@ codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 
 <details>
 <summary>在 Codex 中联系 Claude</summary>
 
-在 Codex 会话中，`codex-collab peers` 列出工作区内的 Claude Code 会话，`codex-collab send <name> "message"` 向指定会话发消息并等待回复（默认 600 秒；无回复以 0 退出）。无存活会话时 `send` 自动启动后台会话，空闲 30 分钟后停止（`config spawn`、`config linger`）。每次 `send` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
+在 Codex 会话中，`codex-collab peers` 列出工作区内的 Claude Code 会话，`codex-collab send <name> "message"` 将消息作为一项任务交给指定会话并等待回复（默认 600 秒）。等待时限只约束命令本身：之后才到的回复同样会被保存，可用 `codex-collab task wait <id>` 或 `task result <id>` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 失败）。无存活会话时 `send` 自动启动后台会话，空闲 30 分钟后停止（`config spawn`、`config linger`）。每次 `send` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
 
 </details>
 

@@ -15,6 +15,17 @@ function idleFor(session: ClaudeSession, now: number): string | null {
   return formatDuration(Math.max(0, now - session.statusUpdatedAt));
 }
 
+/** Where a person would find the session, when the registry says: a
+ *  session in the VS Code extension's panel, or in a tmux pane, is every bit
+ *  as `interactive` as one in the terminal in front of them — and without
+ *  this, a listed session nobody can see in any terminal looks like a ghost. */
+export function whereItLives(s: Pick<ClaudeSession, "entrypoint" | "tmux">): string | null {
+  if (s.tmux) return `tmux ${s.tmux}`;
+  if (s.entrypoint === "claude-vscode") return "in VS Code";
+  if (s.entrypoint && s.entrypoint !== "cli") return `via ${s.entrypoint}`;
+  return null;
+}
+
 /** One line per session, columns aligned. Exported for tests. */
 export function formatSessions(sessions: ClaudeSession[], now = Date.now()): string {
   // A row is marked only where the mark tells rows apart. From inside
@@ -23,6 +34,8 @@ export function formatSessions(sessions: ClaudeSession[], now = Date.now()): str
   const mixed = sessions.some((s) => s.verified) && sessions.some((s) => !s.verified);
   const rows = sessions.map((s) => {
     const notes: string[] = [];
+    const where = whereItLives(s);
+    if (where) notes.push(where);
     if (!s.verified && mixed) notes.push("unverified: its process cannot be checked from here");
     if (s.spawned) {
       notes.push("started by codex-collab");
@@ -76,6 +89,8 @@ export async function handlePeers(args: string[]): Promise<void> {
       kind: s.kind,
       cwd: s.cwd,
       pid: s.pid,
+      entrypoint: s.entrypoint,
+      tmux: s.tmux,
       verified: s.verified,
       spawned: s.spawned ? { id: s.spawned.id, startedAt: s.spawned.startedAt, lingerSec: s.spawned.lingerSec, model: s.spawned.model ?? null, effort: s.spawned.effort ?? null } : null,
     })), null, 2));

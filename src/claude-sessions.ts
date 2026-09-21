@@ -34,6 +34,12 @@ export interface ClaudeSession {
   /** Registry kind: interactive, bg, daemon… Background sessions
    *  (`claude --bg`) report `bg`. */
   kind: string;
+  /** What the session runs under: `cli` for a terminal, `claude-vscode` for
+   *  the VS Code extension's panel… An `interactive` session is not always
+   *  one a person can see in a terminal, and this is what says where it is. */
+  entrypoint: string | null;
+  /** The tmux pane a terminal session lives in (`session:@window.%pane`). */
+  tmux: string | null;
   cwd: string;
   socketPath: string;
   sessionId: string | null;
@@ -134,7 +140,7 @@ function entryLiveness(entry: Record<string, unknown>): "verified" | "socket" | 
  *  those working in `cwd`'s workspace (same git root, so a session at the
  *  repo root and a Codex run in a subdirectory see each other); `all`
  *  lists every workspace. codex-collab's own registrations — brokers,
- *  thread peers, a `send` in flight — are never Claude sessions and are
+ *  thread peers, a task's receiver — are never Claude sessions and are
  *  left out. */
 export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?: string; name?: string }): ClaudeSession[] {
   const dir = sessionsDir();
@@ -172,6 +178,8 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
       name: typeof entry.name === "string" && entry.name ? entry.name : `claude (pid ${pid})`,
       status,
       kind: typeof entry.kind === "string" ? entry.kind : "interactive",
+      entrypoint: typeof entry.entrypoint === "string" ? entry.entrypoint : null,
+      tmux: typeof entry.tmux === "string" && entry.tmux ? entry.tmux : null,
       cwd,
       socketPath,
       sessionId: typeof entry.sessionId === "string" ? entry.sessionId : null,
@@ -326,7 +334,7 @@ export function spawnedSessionName(cwd: string): string {
 export function spawnedSessionBrief(wsRoot: string): string {
   return [
     `You are a Claude Code session started by codex-collab for the Codex sessions working in ${wsRoot}.`,
-    "Codex sessions message you through codex-collab; each message says which Codex thread it comes from and whether that session is waiting for a reply.",
+    "Codex sessions message you through codex-collab; each message says which Codex thread it comes from.",
     "Answer by replying to the sender with SendMessage — the reply is what the Codex session receives.",
     "Read the workspace as needed. Do not change files unless a message asks you to.",
     // Whatever Claude Code's settings decide about where a background
@@ -398,8 +406,9 @@ export function parseBackgroundId(output: string): string | null {
  *  runs with a safety check and without a prompt. Where auto mode is
  *  unavailable to the session (a setting turns it off, or the model lacks
  *  it) Claude Code starts it in Manual instead: an action that needs
- *  approval then waits on a prompt nobody sees, and `send`'s timeout is
- *  what ends the wait. */
+ *  approval then waits on a prompt nobody sees. The receiver of the task
+ *  that led there notices (`watchForBlocked`), stops the session, and
+ *  records the task as `blocked`. */
 export const SPAWN_PERMISSION_MODE = "auto";
 
 /** Settings a started session runs with, passed to that session alone
@@ -565,6 +574,21 @@ export function stopClaudeSession(session: SpawnedSession, claudeBin = "claude")
   } catch { /* already gone */ }
 }
 
+/** Stop a session we started and make sure of it. `claude stop` can fail
+ *  quietly — a session sitting at a prompt is just the kind to ignore it — so
+ *  after a moment a session still registered under the same identity, and
+ *  verifiably that process, gets a signal. Whoever marks a session stopped
+ *  goes through here first: a record marked stopped while its session lives
+ *  makes the session read as the user's own, which nothing of ours watches. */
+export async function stopAndConfirm(session: SpawnedSession, opts: { claudeBin?: string; confirmAfterMs?: number } = {}): Promise<void> {
+  stopClaudeSession(session, opts.claudeBin);
+  const confirmAfterMs = opts.confirmAfterMs ?? Math.min(Number(process.env.CODEX_COLLAB_REAP_POLL_MS) || 5000, 5000);
+  await new Promise((r) => setTimeout(r, confirmAfterMs));
+  if (isVerifiablyOurs(session)) {
+    try { process.kill(session.pid, "SIGTERM"); } catch { /* gone meanwhile */ }
+  }
+}
+
 // ─── Reaper ─────────────────────────────────────────────────────────────────
 
 /** Start the detached process that stops `session` once it has idled for
@@ -632,13 +656,7 @@ export async function runReaper(
       return "gone";
     }
     if (verdict === "stop") {
-      stopClaudeSession(session, opts.claudeBin);
-      // Confirm: `claude stop` can fail quietly. A session still registered
-      // under the same identity, and verifiably that process, gets a signal.
-      await new Promise((r) => setTimeout(r, Math.min(pollMs, 5000)));
-      if (isVerifiablyOurs(session)) {
-        try { process.kill(session.pid, "SIGTERM"); } catch { /* gone meanwhile */ }
-      }
+      await stopAndConfirm(session, { claudeBin: opts.claudeBin, confirmAfterMs: Math.min(pollMs, 5000) });
       // `claude stop` keeps the conversation; keep the record that finds it.
       markSpawnedSessionStopped(stateDir, session.id);
       return "stopped";

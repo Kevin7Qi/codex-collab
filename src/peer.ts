@@ -445,8 +445,9 @@ export function isCodexCollabSocket(socketPath: unknown): boolean {
   if (typeof socketPath !== "string" || socketPath.length === 0) return false;
   const root = config.dataDir;
   if (socketPath === root || socketPath.startsWith(root + sep)) return true;
-  // A `send` in flight registers a socket under the temp root (short
-  // enough for any home directory); it is a Codex session's, not Claude's.
+  // A task's receiver (see `send`) registers a socket under the temp root
+  // (short enough for any home directory); it is a Codex session's, not
+  // Claude's.
   const tmpRoot = mailboxRoot();
   return socketPath.startsWith(tmpRoot + sep);
 }
