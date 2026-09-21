@@ -21,6 +21,7 @@ import { basename, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { resolveWorkspaceDir } from "./config";
 import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./peer";
+import { outstandingTasksFor } from "./claude-tasks";
 import { acquireLockSync } from "./lock";
 
 /** A live Claude Code session as the registry describes it. */
@@ -89,9 +90,11 @@ export const DEFAULT_SPAWN_RESUME_SEC = 7 * 24 * 3600;
  *  the shorter bound we enforce for sessions nobody asked for by name. */
 export const DEFAULT_SPAWN_LINGER_SEC = 30 * 60;
 
-/** A started session is stopped after this long whatever it is doing: a
- *  session that reports busy forever would otherwise keep itself, and its
- *  reaper, alive indefinitely. */
+/** A started session with nothing outstanding is stopped after this long
+ *  whatever it reports: a session that reports busy forever would otherwise
+ *  keep itself, and its reaper, alive indefinitely. It never applies while a
+ *  task is still waiting on the session — work that runs longer than this is
+ *  work, not a session stuck reporting busy. */
 export const SPAWN_MAX_LIFETIME_SEC = 4 * 3600;
 
 /** Registry entries older Claude Codes wrote carry no `kind`; treat any
@@ -647,7 +650,14 @@ export async function runReaper(
   const retireAt = Number.isFinite(born) ? born + SPAWN_MAX_LIFETIME_SEC * 1000 : Infinity;
   for (let round = 0; opts.maxRounds === undefined || round < opts.maxRounds; round++) {
     let verdict = reaperVerdict(readEntry(file), session.pid, session.lingerSec, Date.now(), identity);
-    if (verdict === "wait" && Date.now() >= retireAt) verdict = "stop";
+    // A session a task is still waiting on is working, whatever the registry
+    // says: Claude Code calls a session idle the moment it ends a turn, and a
+    // turn that leaves a command running in the background and reports when
+    // it finishes ends like any other. Stopping it there threw the work away
+    // and left the task with no reply that could ever come.
+    const owed = verdict !== "gone" && outstandingTasksFor(stateDir, session).length > 0;
+    if (verdict === "wait" && Date.now() >= retireAt && !owed) verdict = "stop";
+    if (verdict === "stop" && owed) verdict = "wait";
     if (verdict === "gone") {
       // Gone on its own — Claude Code stops an unattached session itself,
       // and a person may have. Its conversation is kept all the same, so the

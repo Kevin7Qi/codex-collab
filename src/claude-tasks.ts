@@ -197,6 +197,23 @@ export function resolveTaskId(stateDir: string, typed: string): { id: string | n
   return { id: matches.length === 1 ? matches[0] : null, matches };
 }
 
+/** The tasks of this workspace still waiting on a session — its pid, and its
+ *  session id where the record carries one. A session somebody is waiting on
+ *  is doing that work whatever the registry says it is doing: Claude Code
+ *  reports a session `idle` the moment it ends a turn, including a turn that
+ *  left a command running in the background and will report when it finishes.
+ *  Reaping such a session throws the work away and loses the reply. */
+export function outstandingTasksFor(
+  stateDir: string,
+  target: { pid: number; sessionId?: string | null },
+): TaskRecord[] {
+  return listTasks(stateDir)
+    .map((t) => settled(t))
+    .filter((t) => !FINAL_STATUSES.has(t.status)
+      && t.target.pid === target.pid
+      && (!target.sessionId || !t.target.sessionId || t.target.sessionId === target.sessionId));
+}
+
 /** Remove finished tasks (and any task's leftovers) older than `maxAgeMs`.
  *  A task still being waited on is never old: its receiver ends it first. */
 export function sweepTasks(stateDir: string, maxAgeMs: number = TASK_KEEP_MS, now: number = Date.now()): number {

@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { buildRegistryEntry, procIdentity, procStartOf, procStartTicksOf } from "./peer";
 import { config, mailboxRoot } from "./config";
+import { createTask, updateTask } from "./claude-tasks";
 import {
   CLAUDE_CHILD_MARKERS,
   CLAUDE_EFFORTS,
@@ -32,6 +33,7 @@ import {
   resumableSession,
   resumedSessionBrief,
   runReaper,
+  SPAWN_MAX_LIFETIME_SEC,
   spawnClaudeSession,
   spawnEnv,
   spawnedSessionBrief,
@@ -634,6 +636,45 @@ describeUnix("reaper", () => {
     } finally {
       setProcProbesForTests(null);
       bystander.kill();
+    }
+  });
+
+  test("a session a task is still waiting on is never reaped for idling, nor at its lifetime cap", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-owed");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: false });
+    const stateDir = join(root, "state-owed");
+    const own = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const ownStart = procStartOf(own.pid!);
+    const session: SpawnedSession = {
+      id: "deadbee2", pid: own.pid!, name: "claude(ws-a-x)", startedAt: new Date(Date.now() - (SPAWN_MAX_LIFETIME_SEC + 60) * 1000).toISOString(),
+      lingerSec: 1, procStart: ownStart, sessionId: "00000000-0000-4000-8000-000000000002",
+    };
+    recordSpawnedSession(stateDir, session);
+    // Idle long past its linger, and started long past its lifetime cap: on
+    // both counts the reaper would stop it.
+    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, statusUpdatedAt: Date.now() - 600_000 });
+    const target = { pid: own.pid!, socketPath: "/s", sessionId: session.sessionId!, procStart: ownStart, spawned: session, name: session.name };
+    const task = createTask(stateDir, { cwd: wsA, threadId: null, message: "long job", target, maxWaitSec: 3600 });
+    updateTask(stateDir, task.id, { status: "running", deliveredAt: new Date().toISOString(), receiver: { pid: process.pid, procStart: null, pidDomain: null } });
+    try {
+      // The session ended its turn — Claude Code calls that idle — with the
+      // work still running and the reply still owed.
+      // Three rounds of waiting, then the loop runs out: nothing was stopped,
+      // nothing was signalled, and the record still reads as running.
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("gone");
+      expect(existsSync(fake.stopLog)).toBe(false);
+      try { process.kill(own.pid!, 0); } catch { throw new Error("the session was signalled"); }
+      expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
+      // Once the task is over, the same session is reaped as before.
+      updateTask(stateDir, task.id, { status: "replied", finishedAt: new Date().toISOString() });
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbee2\n");
+    } finally {
+      try { process.kill(own.pid!, "SIGKILL"); } catch { /* gone */ }
+      killSleeper(fake.pidFile);
     }
   });
 
