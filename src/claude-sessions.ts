@@ -28,10 +28,12 @@ import { acquireLockSync } from "./lock";
 export interface ClaudeSession {
   pid: number;
   name: string;
-  /** `idle` or `busy` as the session last reported; `waiting` when it has
-   *  stopped at a prompt only a person can answer (a permission request, a
-   *  question); `unknown` for entries that carry no status. */
-  status: "idle" | "busy" | "waiting" | "unknown";
+  /** What the session last reported: `idle`; `busy` for a turn in progress;
+   *  `shell` for a turn that has ended leaving a command of its own still
+   *  running (Claude Code writes `shell` in place of `idle` while one is);
+   *  `waiting` when it has stopped at a prompt only a person can answer;
+   *  `unknown` for entries that carry no status, or one we do not know. */
+  status: "idle" | "busy" | "shell" | "waiting" | "unknown";
   /** Registry kind: interactive, bg, daemon… Background sessions
    *  (`claude --bg`) report `bg`. */
   kind: string;
@@ -176,7 +178,7 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
     }
     const liveness = entryLiveness(entry);
     if (liveness === "dead") continue;
-    const status = entry.status === "idle" || entry.status === "busy" || entry.status === "waiting" ? entry.status : "unknown";
+    const status = entry.status === "idle" || entry.status === "busy" || entry.status === "shell" || entry.status === "waiting" ? entry.status : "unknown";
     sessions.push({
       pid,
       name: typeof entry.name === "string" && entry.name ? entry.name : `claude (pid ${pid})`,
@@ -200,6 +202,18 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
   // and any prefix resolution predictable.
   sessions.sort((a, b) => Number(a.kind === "bg") - Number(b.kind === "bg") || a.name.localeCompare(b.name));
   return sessions;
+}
+
+/** Whether a reported status means the session has work in hand. Only `idle`
+ *  and `waiting` (stopped at a prompt nobody will answer) are doing nothing:
+ *  `busy` is a turn in progress, and `shell` is Claude Code's word for idle
+ *  WITH a shell command of its own still running — the background command a
+ *  turn left behind and will report on when it finishes. A status we do not
+ *  know is not evidence of idleness either, so it counts as work: the cost of
+ *  waiting on a session that had nothing to do is one process; the cost of
+ *  stopping one that did is its work, and the reply nobody will ever get. */
+export function statusHasWorkInHand(status: unknown): boolean {
+  return typeof status === "string" && status !== "idle" && status !== "waiting";
 }
 
 /** What the registry says a session is doing right now, or null when its
@@ -627,7 +641,7 @@ export function reaperVerdict(
   if (identity.procStart && entry.procStart !== identity.procStart) return "gone";
   if (identity.sessionId && entry.sessionId !== identity.sessionId) return "gone";
   if (entryLiveness(entry) === "dead") return "gone";
-  if (entry.status === "busy") return "wait";
+  if (statusHasWorkInHand(entry.status)) return "wait";
   // Idle since its last status change; an entry that never reports one
   // is idle since it registered.
   const since = typeof entry.statusUpdatedAt === "number"
@@ -660,7 +674,7 @@ export async function runReaper(
     const owed = verdict !== "gone" && outstandingTasksFor(stateDir, session).length > 0;
     // Old enough to retire, and nothing to interrupt: a session in the middle
     // of a turn is working, and its age is no reason to stop it there.
-    if (verdict === "wait" && Date.now() >= retireAt && !owed && entry?.status !== "busy") verdict = "stop";
+    if (verdict === "wait" && Date.now() >= retireAt && !owed && !statusHasWorkInHand(entry?.status)) verdict = "stop";
     if (verdict === "stop" && owed) verdict = "wait";
     if (verdict === "gone") {
       // Gone on its own — Claude Code stops an unattached session itself,

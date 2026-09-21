@@ -563,6 +563,14 @@ describeUnix("reaper", () => {
     expect(reaperVerdict({ pid: pid + 1 }, pid, 60, now)).toBe("gone");
     expect(reaperVerdict({ pid: 999999, procStart: "x" }, 999999, 60, now)).toBe("gone");
     expect(reaperVerdict(idleEntry(pid, { status: "busy", statusUpdatedAt: now - 10_000_000 }), pid, 60, now)).toBe("wait");
+    // `shell`: Claude Code's word for idle with a command of its own still
+    // running — the background command a turn left behind. Reading it as
+    // idleness stopped sessions in the middle of their work.
+    expect(reaperVerdict(idleEntry(pid, { status: "shell", statusUpdatedAt: now - 10_000_000 }), pid, 60, now)).toBe("wait");
+    // A status from a Claude Code we do not know is not evidence of idleness.
+    expect(reaperVerdict(idleEntry(pid, { status: "idle_background", statusUpdatedAt: now - 10_000_000 }), pid, 60, now)).toBe("wait");
+    // At a prompt nobody will answer, it is doing nothing: that is reapable.
+    expect(reaperVerdict(idleEntry(pid, { status: "waiting", statusUpdatedAt: now - 60_000 }), pid, 60, now)).toBe("stop");
     expect(reaperVerdict(idleEntry(pid, { statusUpdatedAt: now - 30_000 }), pid, 60, now)).toBe("wait");
     expect(reaperVerdict(idleEntry(pid, { statusUpdatedAt: now - 60_000 }), pid, 60, now)).toBe("stop");
     // No status timestamp: idle since it registered.

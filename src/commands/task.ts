@@ -155,8 +155,9 @@ function printStatus(record: TaskRecord, hint: string): void {
   console.log(`  sent      ${since(record.deliveredAt ?? record.createdAt)} ago`);
   if (final && record.finishedAt) console.log(`  finished  ${since(record.finishedAt)} ago`);
   if (!final) {
-    // One look at the registry: `busy` is a turn in progress, `idle` a session
-    // that has ended its turn, `waiting` one stopped at a prompt.
+    // One look at the registry: `busy` is a turn in progress, `shell` a turn
+    // that has ended with a command of its own still running, `idle` a session
+    // with nothing in hand, `waiting` one stopped at a prompt.
     console.log(`  session   ${sessionStatusNow(record.target.pid) ?? "not registered"}`);
   }
   if (record.error) console.log(`  error     ${record.error}`);
