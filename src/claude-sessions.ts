@@ -90,11 +90,12 @@ export const DEFAULT_SPAWN_RESUME_SEC = 7 * 24 * 3600;
  *  the shorter bound we enforce for sessions nobody asked for by name. */
 export const DEFAULT_SPAWN_LINGER_SEC = 30 * 60;
 
-/** A started session with nothing outstanding is stopped after this long
- *  whatever it reports: a session that reports busy forever would otherwise
- *  keep itself, and its reaper, alive indefinitely. It never applies while a
- *  task is still waiting on the session — work that runs longer than this is
- *  work, not a session stuck reporting busy. */
+/** How long a started session may live before the reaper stops it at the
+ *  next quiet moment. It catches a session that never idles long enough for
+ *  the linger — flipping between busy and idle for days would otherwise keep
+ *  it, and its reaper, alive forever. It is never a deadline on work: a
+ *  session that is busy, or that a task is still waiting on, is left alone
+ *  however old it is. */
 export const SPAWN_MAX_LIFETIME_SEC = 4 * 3600;
 
 /** Registry entries older Claude Codes wrote carry no `kind`; treat any
@@ -649,14 +650,17 @@ export async function runReaper(
   const born = Date.parse(session.startedAt);
   const retireAt = Number.isFinite(born) ? born + SPAWN_MAX_LIFETIME_SEC * 1000 : Infinity;
   for (let round = 0; opts.maxRounds === undefined || round < opts.maxRounds; round++) {
-    let verdict = reaperVerdict(readEntry(file), session.pid, session.lingerSec, Date.now(), identity);
+    const entry = readEntry(file);
+    let verdict = reaperVerdict(entry, session.pid, session.lingerSec, Date.now(), identity);
     // A session a task is still waiting on is working, whatever the registry
     // says: Claude Code calls a session idle the moment it ends a turn, and a
     // turn that leaves a command running in the background and reports when
     // it finishes ends like any other. Stopping it there threw the work away
     // and left the task with no reply that could ever come.
     const owed = verdict !== "gone" && outstandingTasksFor(stateDir, session).length > 0;
-    if (verdict === "wait" && Date.now() >= retireAt && !owed) verdict = "stop";
+    // Old enough to retire, and nothing to interrupt: a session in the middle
+    // of a turn is working, and its age is no reason to stop it there.
+    if (verdict === "wait" && Date.now() >= retireAt && !owed && entry?.status !== "busy") verdict = "stop";
     if (verdict === "stop" && owed) verdict = "wait";
     if (verdict === "gone") {
       // Gone on its own — Claude Code stops an unattached session itself,

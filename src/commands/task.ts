@@ -41,6 +41,15 @@ export function dirHint(options: { dir: string; explicit: Set<string> }): string
   return options.explicit.has("dir") ? ` -d ${shellQuote(resolve(options.dir))}` : "";
 }
 
+/** Said wherever a task ends with no reply from a session codex-collab
+ *  started. Claude Code keeps a stopped session's conversation, so the next
+ *  `send` picks the work up where it stopped — which a status like `lost`
+ *  reads as denying. A Codex session that takes it for unrecoverable starts
+ *  over instead, and throws away the very thing that was kept. */
+export function resumeAdvice(name: string): string {
+  return `${name} was started by codex-collab, so its conversation is kept: send again and it resumes with what it had done so far. \`--fresh\` would discard it.`;
+}
+
 function since(iso: string | undefined, now = Date.now()): string {
   const t = iso ? Date.parse(iso) : NaN;
   return Number.isFinite(t) ? formatDuration(Math.max(1000, now - t)) : "an unknown time";
@@ -99,8 +108,8 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
       return;
     }
     case "lost":
-      console.log(`NO REPLY from ${target.name}: the session is gone — it ended, or was stopped, before it replied.`);
-      if (target.spawned) console.log("codex-collab started it, so its conversation is kept: send again, and it resumes with what it had done so far.");
+      console.log(`NO REPLY from ${target.name}: the session ended, or was stopped, before it replied. The reply is lost;${target.spawned ? " the work it had done is not." : " whatever it did in the workspace stands."}`);
+      if (target.spawned) console.log(resumeAdvice(target.name));
       return;
     case "expired":
       console.log(`NO REPLY from ${target.name} in ${since(record.deliveredAt ?? record.createdAt, Date.parse(record.finishedAt ?? "") || Date.now())}, the longest a task is waited on. A reply can no longer reach it.`);
@@ -154,6 +163,7 @@ function printStatus(record: TaskRecord, hint: string): void {
   console.log(`  message   ${firstLine(record.message)}`);
   if (record.status === "replied") console.log(`Print the reply: codex-collab task result ${record.id}${hint}`);
   else if (!final) console.log(`Wait for the reply: codex-collab task wait ${record.id}${hint}`);
+  else if (record.status !== "blocked" && record.target.spawned) console.log(resumeAdvice(record.target.name));
 }
 
 const TASK_USAGE = "codex-collab task status|wait|result <id> [--timeout <sec>] [--json]";
@@ -203,5 +213,9 @@ export async function handleTasks(args: string[]): Promise<void> {
   for (const r of rows) console.log(`  ${r.id}  ${r.status.padEnd(w("status"))}  ${r.to.padEnd(w("to"))}  ${r.sent.padEnd(w("sent"))}  ${r.message}`);
   if (shown.length < all.length) console.log(`(${all.length - shown.length} older not shown — --all lists every task.)`);
   console.log("");
+  // `lost` is about the reply, never about the work: without this the
+  // listing reads as though that conversation were gone too.
+  const strandedName = shown.find((t) => t.status === "lost" && t.target.spawned)?.target.name;
+  if (strandedName) console.log(resumeAdvice(strandedName));
   console.log("codex-collab task status <id> says where one stands; task wait <id> waits for its reply; task result <id> prints it.");
 }

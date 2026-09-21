@@ -860,7 +860,9 @@ describeUnix("send", () => {
     const lost = await runCli(["task", "wait", id, "--timeout", "20"]);
     expect(lost.code).toBe(1);
     expect(lost.stdout).toContain(`task: ${id}  status: lost`);
-    expect(lost.stdout).toContain("NO REPLY from leaving-claude: the session is gone");
+    expect(lost.stdout).toContain("NO REPLY from leaving-claude: the session ended, or was stopped, before it replied.");
+    // The user's own session: nothing of ours to resume, and nothing claimed.
+    expect(lost.stdout).not.toContain("--fresh");
 
     const other = startFake("staying-claude", { reply: null });
     registerFake(other);
@@ -910,6 +912,32 @@ describeUnix("send", () => {
     } finally {
       if (saved === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
       else process.env.CODEX_COLLAB_SESSIONS_DIR = saved;
+    }
+  });
+
+  test("a started session that goes away leaves the task lost, and every report says its conversation is kept", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-lost-spawn");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 60 });
+    try {
+      const sent = await runCli(["send", "long job", "--no-wait"], { PATH: `${binDir}:${process.env.PATH}` });
+      const id = taskIdOf(sent.stdout);
+      // The session ends before it replies.
+      killFakeSleepers(binDir);
+      for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+      const lost = await runCli(["task", "wait", id, "--timeout", "20"]);
+      expect(lost.code).toBe(1);
+      expect(lost.stdout).toContain(`task: ${id}  status: lost`);
+      // `lost` is the reply, never the work: a Codex session that reads it as
+      // unrecoverable starts over and throws the conversation away.
+      for (const out of [lost.stdout, (await runCli(["task", "status", id])).stdout, (await runCli(["tasks"])).stdout]) {
+        expect(out).toContain(`${fake.name} was started by codex-collab, so its conversation is kept: send again and it resumes with what it had done so far. \`--fresh\` would discard it.`);
+      }
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
     }
   });
 
