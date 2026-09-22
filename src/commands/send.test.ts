@@ -11,10 +11,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, te
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
-import { codexThreadId, composeMessage, insideCodexSandbox, senderName, splitTarget, watchForLost } from "./send";
+import { codexThreadId, composeMessage, insideCodexSandbox, senderName, splitTarget, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
@@ -33,7 +33,7 @@ interface FakeSession {
   name: string;
   socketPath: string;
   received: Array<{ fromName: string; replyPath: string; text: string }>;
-  reply: ((text: string) => string) | null;
+  reply: ((text: string) => string | null) | null;
   server: ReturnType<typeof Bun.listen>;
   entryPath: string;
   stop(): void;
@@ -44,7 +44,7 @@ let n = 0;
 
 /** A fake Claude session: registered, listening, replying (unless told not
  *  to) by connecting back to the sender's advertised address. */
-function startFake(name: string, opts: { reply?: ((text: string) => string) | null; cwd?: string; status?: string; kind?: string } = {}): FakeSession {
+function startFake(name: string, opts: { reply?: ((text: string) => string | null) | null; cwd?: string; status?: string; kind?: string } = {}): FakeSession {
   const socketPath = join(tmpdir(), `cc-fake-${process.pid}-${++n}.sock`);
   try { unlinkSync(socketPath); } catch { /* none */ }
   const fake: FakeSession = {
@@ -73,8 +73,8 @@ function startFake(name: string, opts: { reply?: ((text: string) => string) | nu
           const msg = parseEnvelope(line);
           if (!msg) continue;
           fake.received.push({ fromName: msg.fromName, replyPath: msg.replyPath, text: msg.text });
-          if (fake.reply) {
-            const answer = fake.reply(msg.text);
+          const answer = fake.reply ? fake.reply(msg.text) : null;
+          if (answer !== null) {
             const out = Bun.connect({
               unix: msg.replyPath,
               socket: {
@@ -188,7 +188,7 @@ function removeConfig(): void {
  *  registers a live entry (a sleeper it starts) whose socket is `socketPath`
  *  — a fake session this test serves. `stop <id>` only logs, so a reaper's
  *  confirming look finds the entry still live and signals the sleeper. */
-function writeFakeClaude(binDir: string, socketPath: string): void {
+function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s"): void {
   mkdirSync(binDir, { recursive: true });
   writeFileSync(join(binDir, "claude"), `#!/bin/sh
 case "$1" in
@@ -201,7 +201,7 @@ case "$1" in
     echo "$pid" >> "${binDir}/sleepers"
     start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')
     now="$(date +%s)000"
-    printf '{"pid":%s,"sessionId":"s","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
+    printf '{"pid":%s,"sessionId":"${sessionId}","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
       "$pid" "$(pwd)" "$now" "$start" "${socketPath}" "$3" "$now" "$now" > "$CODEX_COLLAB_SESSIONS_DIR/$pid.json"
     ;;
   stop) echo "stop $2" >> "${binDir}/stop.log" ;;
@@ -378,12 +378,109 @@ describeUnix("peers", () => {
     expect(none.stdout).toContain("starts one in the background");
   });
 
+  test("peers stop ends a session codex-collab started, and refuses one it did not", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-peers-stop");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 600 });
+    try {
+      const env = { PATH: `${binDir}:${process.env.PATH}` };
+      // Nothing live yet, so this starts the session it will later stop.
+      expect((await runCli(["send", "hello"], env)).code).toBe(0);
+      const mine = startFake("the-users-own", { reply: () => "ok" });
+      registerFake(mine);
+      // A session the user is working in is theirs to close, whatever Codex
+      // makes of it.
+      const refused = await runCli(["peers", "stop", "the-users-own"], env);
+      expect(refused.code).toBe(1);
+      expect(refused.stderr).toContain("was not started by codex-collab, so it is not ours to stop");
+      // Its process, not its registry entry: the entry is this test's to write,
+      // so it would survive a signal and prove nothing.
+      const minePid = Number(basename(mine.entryPath, ".json"));
+      expect(() => process.kill(minePid, 0)).not.toThrow();
+      // Ours: stopped the way it was started, and left resumable.
+      const stopped = await runCli(["peers", "stop", spawnedSessionName(WS)], env);
+      expect(stopped.stderr + stopped.stdout).toContain("Stopped");
+      expect(stopped.code).toBe(0);
+      expect(stopped.stdout).toContain(`Stopped ${spawnedSessionName(WS)}. Its conversation is kept:`);
+      expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
+      expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", stoppedAt: expect.any(String) }));
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
   test("peers does not refuse under the sandbox marker", async () => {
     const fake = startFake("fake-claude");
     registerFake(fake);
     const listed = await runCli(["peers"], { CODEX_SANDBOX: "seatbelt" });
     expect(listed.code).toBe(0);
     expect(listed.stdout).toContain("fake-claude");
+  });
+});
+
+describeUnix("a turn that ended on an error", () => {
+  const sid = "55555555-5555-4555-8555-555555555555";
+  const projects = join(TEST_HOME, "projects-watch");
+  const transcript = (lines: string[]) => writeFileSync(join(projects, "-ws", `${sid}.jsonl`), lines.join("\n") + "\n");
+  const apiError = (at: string) => JSON.stringify({ type: "assistant", timestamp: at, isApiErrorMessage: true, apiErrorStatus: 500, error: "server_error" });
+  const said = (at: string) => JSON.stringify({ type: "assistant", timestamp: at });
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const future = new Date(Date.now() + 60_000).toISOString();
+  const saved = { projects: process.env.CODEX_COLLAB_PROJECTS_DIR, sessions: process.env.CODEX_COLLAB_SESSIONS_DIR };
+
+  beforeAll(() => {
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    process.env.CODEX_COLLAB_PROJECTS_DIR = projects;
+    // The watcher runs in this process, so it reads the fake registry only
+    // when this process is pointed at it too.
+    process.env.CODEX_COLLAB_SESSIONS_DIR = REGISTRY;
+  });
+  afterAll(() => {
+    for (const [k, v] of [["CODEX_COLLAB_PROJECTS_DIR", saved.projects], ["CODEX_COLLAB_SESSIONS_DIR", saved.sessions]] as const) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  /** A live registry entry for a sleeper, at whatever status. */
+  const live = (status: string) => {
+    const sleeper = spawn("sleep", ["300"], { stdio: "ignore" });
+    sleepers.push(sleeper);
+    const pid = sleeper.pid!;
+    writeFileSync(join(REGISTRY, `${pid}.json`), JSON.stringify({
+      ...buildRegistryEntry({ pid, cwd: WS, name: "watched", socketPath: "/tmp/x.sock", version: "2.1.261", procStart: procStartOf(pid), sessionId: sid }),
+      status,
+    }));
+    return { pid, socketPath: "/tmp/x.sock", sessionId: sid, procStart: procStartOf(pid), spawned: null, name: "watched" };
+  };
+  const looksFor = (target: Parameters<typeof watchForStalledTurn>[0], since: string, ms = 400) =>
+    new Promise<boolean>((resolve) => {
+      const w = watchForStalledTurn(target, since, { pollMs: 20, looks: 3 });
+      void w.stalled.then(() => resolve(true));
+      setTimeout(() => { w.stop(); resolve(false); }, ms);
+    });
+
+  test("the error must be the last thing said, and later than the delivery", async () => {
+    transcript([said(past), apiError(future)]);
+    expect(await looksFor(live("idle"), past)).toBe(true);
+    // Delivered after that error: it belongs to something earlier.
+    expect(await looksFor(live("idle"), new Date(Date.now() + 120_000).toISOString(), 200)).toBe(false);
+    // It carried on after the error.
+    transcript([apiError(future), said(future)]);
+    expect(await looksFor(live("idle"), past, 200)).toBe(false);
+  });
+
+  test("only an idle session has settled: a prompt and an unreadable entry are not evidence", async () => {
+    transcript([said(past), apiError(future)]);
+    // `waiting` is a person about to act, not a turn that died.
+    expect(await looksFor(live("waiting"), past, 200)).toBe(false);
+    expect(await looksFor(live("busy"), past, 200)).toBe(false);
+    expect(await looksFor(live("shell"), past, 200)).toBe(false);
+    // No registry entry at all says nothing either.
+    expect(await looksFor({ pid: 999_999, socketPath: "/tmp/x.sock", sessionId: sid, procStart: null, spawned: null, name: "gone" }, past, 200)).toBe(false);
   });
 });
 
@@ -421,9 +518,14 @@ describeUnix("send", () => {
     expect(r.code).toBe(3);
     const id = taskIdOf(r.stdout);
     expect(r.stdout).toContain(`task: ${id}  status: running`);
-    expect(r.stdout).toContain("NO REPLY from slow-claude within 1s. The task goes on, and its reply is kept when it comes:");
-    expect(r.stdout).toContain(`codex-collab task wait ${id}`);
-    expect(r.stdout).toContain(`codex-collab task result ${id}`);
+    expect(r.stdout).toContain("no reply from slow-claude within 1s");
+    // Codex reads this output as context and has the commands from its skill:
+    // a line of syntax under every send is cost with nothing in it. Piped —
+    // which is how Codex runs it — the report is the status line and what
+    // happened, and nothing else.
+    expect(r.stdout).not.toContain("codex-collab task wait");
+    expect(r.stdout).not.toContain("bypassPermissions");
+    expect(r.stdout.trimEnd().split("\n").filter((l) => l.trim())).toHaveLength(4);
     // Asking before the reply is there: still running, same code.
     const early = await runCli(["task", "result", id]);
     expect(early.code).toBe(3);
@@ -467,8 +569,9 @@ describeUnix("send", () => {
     const r = await runCli(["send", "long job", "--no-wait"]);
     expect(r.code).toBe(0);
     const id = taskIdOf(r.stdout);
-    expect(r.stdout).toContain(`Sent to fake-claude as task ${id}. Not waiting: its reply is kept when it comes.`);
+    expect(r.stdout).toContain(`Sent to fake-claude as task ${id}. Not waiting; its reply is kept.`);
     expect(r.stdout).not.toContain("REPLY");
+    expect(r.stdout).not.toContain("codex-collab task");
     // Delivered before `send` said so — not merely queued.
     expect(fake.received).toHaveLength(1);
     expect(fake.received[0].text.startsWith("long job\n\n(From Codex thread")).toBe(true);
@@ -768,9 +871,8 @@ describeUnix("send", () => {
       expect(r.code).toBe(5);
       expect(Date.now() - started).toBeLessThan(30_000);
       expect(r.stdout).toMatch(/task: [0-9a-f]{8}  status: blocked/);
-      expect(r.stdout).toContain(`NO REPLY from ${fake.name}: it stopped at a prompt`);
-      expect(r.stdout).toContain("This one ran on haiku, default effort.");
-      expect(r.stdout).toContain("It has been stopped. Send again with a model that has auto mode");
+      expect(r.stdout).toContain(`${fake.name} stopped at a prompt with nobody attached; it ran on haiku, default effort`);
+      expect(r.stdout).toContain("session: stopped by codex-collab, conversation kept");
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001\n");
       // The fake `claude stop` does nothing, as a session wedged at a prompt
       // may: the session is signalled all the same before it is called stopped.
@@ -789,8 +891,8 @@ describeUnix("send", () => {
     registerFake(fake, { status: "waiting" });
     const r = await runCli(["send", "hello", "--timeout", "1"], { CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
     expect(r.code).toBe(3);
-    expect(r.stdout).toContain("NO REPLY from asking-claude within 1s");
-    expect(r.stdout).toContain("asking-claude is waiting at a prompt in its own terminal");
+    expect(r.stdout).toContain("no reply from asking-claude within 1s");
+    expect(r.stdout).toContain("session: asking-claude is at a prompt in its own terminal");
     expect(r.stdout).not.toContain("It has been stopped");
     // Still registered: the user's session is theirs.
     expect(existsSync(fake.entryPath)).toBe(true);
@@ -860,9 +962,9 @@ describeUnix("send", () => {
     const lost = await runCli(["task", "wait", id, "--timeout", "20"]);
     expect(lost.code).toBe(1);
     expect(lost.stdout).toContain(`task: ${id}  status: lost`);
-    expect(lost.stdout).toContain("NO REPLY from leaving-claude: the session ended, or was stopped, before it replied.");
-    // The user's own session: nothing of ours to resume, and nothing claimed.
-    expect(lost.stdout).not.toContain("--fresh");
+    expect(lost.stdout).toContain("leaving-claude ended before it replied");
+    // A tool says what happened; what to do about it is the reader's.
+    expect(lost.stdout).not.toMatch(/send again|carry on|--fresh/);
 
     const other = startFake("staying-claude", { reply: null });
     registerFake(other);
@@ -932,9 +1034,155 @@ describeUnix("send", () => {
       expect(lost.stdout).toContain(`task: ${id}  status: lost`);
       // `lost` is the reply, never the work: a Codex session that reads it as
       // unrecoverable starts over and throws the conversation away.
-      for (const out of [lost.stdout, (await runCli(["task", "status", id])).stdout, (await runCli(["tasks"])).stdout]) {
-        expect(out).toContain(`${fake.name} was started by codex-collab, so its conversation is kept: send again and it resumes with what it had done so far. \`--fresh\` would discard it.`);
+      expect(lost.stdout).toContain("session: started by codex-collab, conversation kept");
+      expect((await runCli(["task", "status", id])).stdout).toContain("session   conversation kept");
+      for (const out of [lost.stdout, (await runCli(["tasks"])).stdout]) {
+        expect(out).not.toMatch(/send again|carry on/);
       }
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a task that ends with no reply says what the session's own transcript says went wrong", async () => {
+    const projects = join(TEST_HOME, "projects-api-error");
+    const sid = "00000000-0000-4000-8000-0000000000aa";  // what registerFake writes
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    const fake = startFake("erroring-claude", { reply: null });
+    registerFake(fake);
+    const sent = await runCli(["send", "please do this", "--no-wait"], { CODEX_COLLAB_PROJECTS_DIR: projects });
+    const id = taskIdOf(sent.stdout);
+    // Claude Code's word for a turn that died on an API error, written after
+    // the message was delivered.
+    writeFileSync(join(projects, "-ws", `${sid}.jsonl`), JSON.stringify({
+      type: "assistant", timestamp: new Date(Date.now() + 1000).toISOString(),
+      isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error",
+    }) + "\n");
+    fake.stop();
+    const lost = await runCli(["task", "wait", id, "--timeout", "20"], { CODEX_COLLAB_PROJECTS_DIR: projects });
+    expect(lost.code).toBe(1);
+    expect(lost.stdout).toContain(`task: ${id}  status: lost`);
+    expect(lost.stdout).toMatch(/^error: 529 server_error at \S+$/m);
+    // Recorded, so it survives the session and the command that asked.
+    expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "lost", error: expect.stringContaining("529 server_error") }));
+    expect((await runCli(["task", "status", id], { CODEX_COLLAB_PROJECTS_DIR: projects })).stdout).toContain("529 server_error");
+  });
+
+  test("a user's own session whose turn died keeps the task and its address; the error is recorded", async () => {
+    const projects = join(TEST_HOME, "projects-stalled");
+    const sid = "00000000-0000-4000-8000-0000000000aa";
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    writeFileSync(join(projects, "-ws", `${sid}.jsonl`), JSON.stringify({
+      type: "assistant", timestamp: new Date(Date.now() + 1000).toISOString(),
+      isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error",
+    }) + "\n");
+    const fake = startFake("dying-claude", { reply: null });
+    registerFake(fake);
+    const env = { CODEX_COLLAB_PROJECTS_DIR: projects, CODEX_COLLAB_STALL_POLL_MS: "40" };
+    const r = await runCli(["send", "the whole job, in detail", "--timeout", "3"], env);
+    // A person is in that session and can set the turn going again, so the
+    // task is still open and its reply still has somewhere to land.
+    expect(r.code).toBe(3);
+    const id = taskIdOf(r.stdout);
+    expect(fake.received).toHaveLength(1);
+    await waitFor(() => !!(taskRecord(id) as { error?: string })?.error, 10_000);
+    expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "running", error: expect.stringContaining("529 server_error") }));
+    expect((await runCli(["task", "status", id], env)).stdout).toContain("529 server_error");
+    // And the reply, whenever the turn is picked up again, still arrives.
+    speak(fake, fake.received[0].replyPath, "recovered later");
+    const waited = await runCli(["task", "wait", id], env);
+    expect(waited.code).toBe(0);
+    expect(waited.stdout).toContain("  recovered later");
+    // The turn finished after all, so the note about it dying is not what
+    // the next reader should be told.
+    expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "replied" }));
+    expect(taskRecord(id)).not.toHaveProperty("error");
+    const after = await runCli(["task", "status", id], env);
+    expect(after.stdout).not.toContain("529");
+    expect(after.stdout).not.toContain("without replying");
+  });
+
+  test("a started session whose turn died ends the task as failed, and nothing is sent to it", async () => {
+    await settleSpawnState();
+    const projects = join(TEST_HOME, "projects-stalled-bg");
+    const sid = "cafe0001-0000-4000-8000-00000000cafe";
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    const binDir = join(TEST_HOME, "bin-stalled-bg");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath, sid);
+    writeConfig({ linger: 600 });
+    try {
+      writeFileSync(join(projects, "-ws", `${sid}.jsonl`), JSON.stringify({
+        type: "assistant", timestamp: new Date(Date.now() + 1000).toISOString(),
+        isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error",
+      }) + "\n");
+      const r = await runCli(["send", "the whole job", "--timeout", "25"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_PROJECTS_DIR: projects, CODEX_COLLAB_STALL_POLL_MS: "40" });
+      // Nobody is attached to set this one going again.
+      expect(r.code).toBe(1);
+      expect(r.stdout).toMatch(/status: failed/);
+      expect(r.stdout).toContain("ended its turn without replying: 529 server_error at ");
+      expect(fake.received).toHaveLength(1);
+      expect(r.stdout).not.toMatch(/send again|carry on|most likely/);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a task still waiting says nothing of an error the session carried on from", async () => {
+    const projects = join(TEST_HOME, "projects-carried-on");
+    const sid = "00000000-0000-4000-8000-0000000000aa";
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    // Hit an error, then went on working: the turn did not end there, so it
+    // says nothing about this task, which is still waiting on a reply.
+    // Both after the message is delivered, so neither is filtered out by
+    // time: what settles it is that the error is not the last thing said.
+    writeFileSync(join(projects, "-ws", `${sid}.jsonl`), [
+      JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 1000).toISOString(), isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error" }),
+      JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 2000).toISOString() }),
+      "",
+    ].join("\n"));
+    const fake = startFake("working-claude", { reply: null });
+    registerFake(fake, { status: "busy" });
+    const env = { CODEX_COLLAB_PROJECTS_DIR: projects };
+    const r = await runCli(["send", "a long job", "--timeout", "1"], env);
+    expect(r.code).toBe(3);
+    expect(r.stdout).toContain("no reply from working-claude within 1s");
+    expect(r.stdout).not.toContain("529");
+    expect((await runCli(["task", "status", taskIdOf(r.stdout)], env)).stdout).not.toContain("529");
+  });
+
+  test("a started session that hit an error and carried on is never reported as dead", async () => {
+    await settleSpawnState();
+    const projects = join(TEST_HOME, "projects-recovers");
+    const sid = "cafe0002-0000-4000-8000-00000000cafe";
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    const binDir = join(TEST_HOME, "bin-recovers");
+    // Replies, but only after the stall watcher has had many looks at it.
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath, sid);
+    writeConfig({ linger: 600 });
+    try {
+      // The error is in its transcript, and it is NOT the last thing said:
+      // the session hit it and carried on. This is the case that must not be
+      // called dead — the branch that would end a started session's task.
+      writeFileSync(join(projects, "-ws", `${sid}.jsonl`), [
+        JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 500).toISOString(), isApiErrorMessage: true, apiErrorStatus: 500, error: "server_error" }),
+        JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 600).toISOString() }),
+        "",
+      ].join("\n"));
+      const env = { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_PROJECTS_DIR: projects, CODEX_COLLAB_STALL_POLL_MS: "20" };
+      const live = runCliLive(["send", "a long job", "--timeout", "25"], env);
+      await waitFor(() => fake.received.length === 1, 15_000);
+      // Long past the watcher's twenty looks at 20ms, and still nothing.
+      await new Promise((res) => setTimeout(res, 2000));
+      speak(fake, fake.received[0].replyPath, "slow but here");
+      const r = await live.done;
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("  slow but here");
+      expect(r.stdout).not.toContain("failed");
+      expect(taskRecord(taskIdOf(r.stdout))).toEqual(expect.objectContaining({ status: "replied" }));
     } finally {
       removeConfig();
       killFakeSleepers(binDir);

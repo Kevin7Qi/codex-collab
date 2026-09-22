@@ -53,15 +53,20 @@ export function installedCodexSkillMd(dir: string = codexSkillInstallDir()): str
  *  runs an explicitly allowed command prefix with no approval prompt AND
  *  outside its sandbox (an exec-policy `allow` implies full trust —
  *  verified on 0.153.4), which is what `send` needs to reach a local socket.
- *  Only `send`: `peers` works inside the sandbox. Opt-in (`config codex-rule
- *  on`), because it lets any Codex session message the user's Claude
- *  sessions, and start one, without asking. */
+ *  `peers stop` needs the same: it ends the session through Claude Code, and
+ *  from inside the sandbox neither that nor the confirming signal can reach
+ *  it. The rest of `peers`, and `task`, only read, so they stay inside.
+ *  Opt-in (`config codex-rule on`), because it lets any Codex session message
+ *  the user's Claude sessions, start one, and stop one it started, without
+ *  asking. */
 export const CODEX_RULES_SOURCE: string = [
-  "# codex-collab: lets a Codex session run `codex-collab send` without an",
-  "# approval prompt and outside its sandbox, which blocks the local socket",
-  "# `send` needs. Written by `codex-collab config codex-rule on`; removed by",
+  "# codex-collab: lets a Codex session run `codex-collab send`, and stop a",
+  "# session it started, without an approval prompt and outside its sandbox,",
+  "# which blocks the local socket both need. Written by",
+  "# `codex-collab config codex-rule on`; removed by",
   "# `codex-collab config codex-rule off`.",
   'prefix_rule(pattern=["codex-collab", "send"], decision="allow")',
+  'prefix_rule(pattern=["codex-collab", "peers", "stop"], decision="allow")',
   "",
 ].join("\n");
 

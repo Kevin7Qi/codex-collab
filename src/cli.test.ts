@@ -454,7 +454,9 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     // Needs no app-server: a Codex session runs it inside its sandbox.
     const listed = cli("models", "--claude");
     expect(listed.exitCode).toBe(0);
-    for (const alias of ["fable", "opus", "sonnet", "haiku"]) expect(listed.stdout).toMatch(new RegExp(`^  ${alias} +\\S`, "m"));
+    for (const alias of ["fable", "opus", "sonnet"]) expect(listed.stdout).toMatch(new RegExp(`^  ${alias} +\\S`, "m"));
+    // A model the list leaves out is still a model `--model` takes.
+    expect(listed.stdout).not.toContain("haiku");
     expect(listed.stdout).toContain("Effort, lowest first: low, medium, high, xhigh, max");
     expect(listed.stdout).toContain("With nothing chosen, a started session runs on: the user's Claude Code default model and effort");
 

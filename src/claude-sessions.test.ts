@@ -20,6 +20,7 @@ import {
   CODEX_COMMAND_MARKERS,
   DEFAULT_SPAWN_LINGER_SEC,
   describeModelChoice,
+  isAutocompactWindow,
   isClaudeEffort,
   isModelName,
   forgetSpawnedSession,
@@ -399,7 +400,15 @@ describeUnix("spawn helpers", () => {
     expect(describeModelChoice("haiku")).toBe("haiku, default effort");
     expect(describeModelChoice(undefined, "low")).toBe("default model, low effort");
     // Most capable first, by alias: nothing here names a version.
-    expect(CLAUDE_MODEL_TIERS.map((t) => t.alias)).toEqual(["fable", "opus", "sonnet", "haiku"]);
+    expect(CLAUDE_MODEL_TIERS.map((t) => t.alias)).toEqual(["fable", "opus", "sonnet"]);
+  });
+
+  test("the compaction window a started session takes is what Claude Code accepts", () => {
+    // `claude --autocompact` takes auto, or 100k-1M as a number, `500k`, or
+    // `500` as shorthand; anything else it refuses at the command line, which
+    // would fail the spawn rather than start a session on the wrong window.
+    for (const ok of ["auto", "500k", "500", "100k", "1000k", "200000", "1000000"]) expect(isAutocompactWindow(ok)).toBe(true);
+    for (const bad of ["5000", "99k", "2000k", "2000000", "", "lots", "500kb", "-500k", 500000, null]) expect(isAutocompactWindow(bad)).toBe(false);
   });
 
   test("spawnedSessionName mirrors the front door's shape", () => {
@@ -500,6 +509,9 @@ describeUnix("spawnClaudeSession", () => {
       const args = readFileSync(fake.argsLog, "utf-8").trimEnd().split("\n");
       expect(args[args.indexOf("--permission-mode") + 1]).toBe("auto");
       expect(JSON.parse(args[args.indexOf("--settings") + 1])).toEqual({ worktree: { bgIsolation: "none" }, autoCompactEnabled: true });
+      // Compacts at a window it can afford rather than at the largest the
+      // model allows: a long-lived session pays for its context every turn.
+      expect(args[args.indexOf("--autocompact") + 1]).toBe("500k");
       // The name stays where `claude -n` reads it, and the brief comes last.
       expect(args.slice(0, 3)).toEqual(["--bg", "-n", spawnedSessionName(wsA)]);
       expect(args[args.length - 1]).toContain("started by codex-collab");

@@ -11,6 +11,7 @@ import { resolveStateDir } from "../config";
 import { shellQuote } from "../approvals";
 import { describeModelChoice, sessionStatusNow } from "../claude-sessions";
 import { FINAL_STATUSES, listTasks, loadTask, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
+import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
@@ -35,19 +36,19 @@ export function statusLine(record: Pick<TaskRecord, "id" | "status">): string {
   return `task: ${record.id}  status: ${record.status}`;
 }
 
+/** Whether to print the command that would do the next thing. Only for a
+ *  person at a terminal: Codex reads this output as context, and it has these
+ *  commands from its skill already, so a line of syntax under every send is
+ *  cost with nothing in it. What a report owes Codex is what happened and the
+ *  id it happened to. */
+export function showsHints(): boolean {
+  return process.stdout.isTTY === true;
+}
+
 /** ` -d <dir>` for the commands a report suggests, when the caller named a
  *  directory: a task id resolves only within its own workspace. */
 export function dirHint(options: { dir: string; explicit: Set<string> }): string {
   return options.explicit.has("dir") ? ` -d ${shellQuote(resolve(options.dir))}` : "";
-}
-
-/** Said wherever a task ends with no reply from a session codex-collab
- *  started. Claude Code keeps a stopped session's conversation, so the next
- *  `send` picks the work up where it stopped — which a status like `lost`
- *  reads as denying. A Codex session that takes it for unrecoverable starts
- *  over instead, and throws away the very thing that was kept. */
-export function resumeAdvice(name: string): string {
-  return `${name} was started by codex-collab, so its conversation is kept: send again and it resumes with what it had done so far. \`--fresh\` would discard it.`;
 }
 
 function since(iso: string | undefined, now = Date.now()): string {
@@ -88,36 +89,64 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
     case "pending":
     case "running": {
       console.log(opts.waitedMs !== undefined
-        ? `NO REPLY from ${target.name} within ${formatDuration(opts.waitedMs)}. The task goes on, and its reply is kept when it comes:`
-        : `No reply from ${target.name} yet (sent ${since(record.deliveredAt ?? record.createdAt)} ago). Its reply is kept when it comes:`);
-      console.log(`  codex-collab task wait ${record.id}${hint}     waits for it`);
-      console.log(`  codex-collab task result ${record.id}${hint}   prints it once it is there`);
-      if (sessionStatusNow(target.pid) === "waiting") {
-        console.log(`${target.name} is waiting at a prompt in its own terminal — a permission request or a question only its user can answer there.`);
+        ? `no reply from ${target.name} within ${formatDuration(opts.waitedMs)}`
+        : `no reply from ${target.name} yet (sent ${since(record.deliveredAt ?? record.createdAt)} ago)`);
+      if (showsHints()) {
+        console.log(`  codex-collab task wait ${record.id}${hint}     waits for it`);
+        console.log(`  codex-collab task result ${record.id}${hint}   prints it once it is there`);
       }
-      if (opts.waitedMs !== undefined) {
-        console.log("(A Claude Code session running with bypassPermissions holds peer messages for its user to approve unless its crossSessionInbound setting is accept.)");
-      }
+      printSessionFacts(record);
       return;
     }
-    case "blocked": {
-      const ranOn = describeModelChoice(target.spawned?.model, target.spawned?.effort);
-      console.log(`NO REPLY from ${target.name}: it stopped at a prompt (a permission request, most likely), and nobody is attached to answer it.`);
-      console.log(`It was started in \`auto\` permission mode, where nothing prompts; Claude Code asks like this when that mode is not available to the session, which depends on the model. This one ran on ${ranOn}.`);
-      console.log("It has been stopped. Send again with a model that has auto mode (`codex-collab models --claude` lists the choices; `--model sonnet` or above): the conversation resumes on it.");
+    case "blocked":
+      console.log(`${target.name} stopped at a prompt with nobody attached; it ran on ${describeModelChoice(target.spawned?.model, target.spawned?.effort)}`);
+      console.log("session: stopped by codex-collab, conversation kept");
       return;
-    }
     case "lost":
-      console.log(`NO REPLY from ${target.name}: the session ended, or was stopped, before it replied. The reply is lost;${target.spawned ? " the work it had done is not." : " whatever it did in the workspace stands."}`);
-      if (target.spawned) console.log(resumeAdvice(target.name));
+      console.log(`${target.name} ended before it replied`);
+      printSessionFacts(record);
       return;
     case "expired":
-      console.log(`NO REPLY from ${target.name} in ${since(record.deliveredAt ?? record.createdAt, Date.parse(record.finishedAt ?? "") || Date.now())}, the longest a task is waited on. A reply can no longer reach it.`);
+      console.log(`no reply from ${target.name} in ${since(record.deliveredAt ?? record.createdAt, Date.parse(record.finishedAt ?? "") || Date.now())}`);
+      printSessionFacts(record);
       return;
     case "failed":
-      console.log(`Task ${record.id} to ${target.name} failed: ${record.error ?? "no reason recorded"}.`);
+      console.log(record.error ?? "no reason recorded");
+      printSessionFacts(record, { skipError: !!record.error });
       return;
   }
+}
+
+/** What the session's own transcript recorded since the message was
+ *  delivered, as a field. */
+function describeFailure(record: TaskRecord): string | null {
+  // A task that got its answer had no trouble, whatever the session hit
+  // afterwards; and a task that ended has no share of what came later.
+  if (!record.deliveredAt || record.status === "replied") return null;
+  if (!FINAL_STATUSES.has(record.status)) {
+    // Still waiting: only a turn that ENDED on an error says anything about
+    // this task. A session that hit one and carried on is working, and
+    // reporting that error would read as a turn that had died.
+    const e = turnEndedOnError(record.target.sessionId, record.deliveredAt);
+    return e ? describeTurnError(e) : null;
+  }
+  const t = turnTrouble(record.target.sessionId, record.deliveredAt, record.finishedAt);
+  return t ? describeTrouble(t) : null;
+}
+
+/** The facts a report has no other line for: what went wrong on the session's
+ *  side, and whether its conversation is still there. What to make of either
+ *  is the reader's. */
+function printSessionFacts(record: TaskRecord, opts: { skipError?: boolean } = {}): void {
+  // What the receiver wrote down when it happened, in preference to reading
+  // the transcript again: the same task must not read differently twice.
+  const failure = opts.skipError ? null : record.error ?? describeFailure(record);
+  if (failure) console.log(`error: ${failure}`);
+  if (record.status === "pending" || record.status === "running") {
+    if (sessionStatusNow(record.target.pid) === "waiting") console.log(`session: ${record.target.name} is at a prompt in its own terminal`);
+    return;
+  }
+  if (record.target.spawned) console.log("session: started by codex-collab, conversation kept");
 }
 
 /** The record behind an id a caller typed, or a usage error. */
@@ -160,11 +189,14 @@ function printStatus(record: TaskRecord, hint: string): void {
     // with nothing in hand, `waiting` one stopped at a prompt.
     console.log(`  session   ${sessionStatusNow(record.target.pid) ?? "not registered"}`);
   }
-  if (record.error) console.log(`  error     ${record.error}`);
+  // One line, whether it was recorded when it happened or read from the
+  // transcript now — two would be the same trouble told twice, differently.
+  const recorded = record.error ?? describeFailure(record);
+  if (recorded) console.log(`  error     ${recorded}`);
   console.log(`  message   ${firstLine(record.message)}`);
-  if (record.status === "replied") console.log(`Print the reply: codex-collab task result ${record.id}${hint}`);
-  else if (!final) console.log(`Wait for the reply: codex-collab task wait ${record.id}${hint}`);
-  else if (record.status !== "blocked" && record.target.spawned) console.log(resumeAdvice(record.target.name));
+  if (showsHints() && record.status === "replied") console.log(`Print the reply: codex-collab task result ${record.id}${hint}`);
+  else if (showsHints() && !final) console.log(`Wait for the reply: codex-collab task wait ${record.id}${hint}`);
+  if (final && record.target.spawned) console.log("  session   conversation kept");
 }
 
 const TASK_USAGE = "codex-collab task status|wait|result <id> [--timeout <sec>] [--json]";
@@ -213,10 +245,5 @@ export async function handleTasks(args: string[]): Promise<void> {
   console.log(`  ${"ID".padEnd(8)}  ${"STATUS".padEnd(w("status"))}  ${"TO".padEnd(w("to"))}  ${"SENT".padEnd(w("sent"))}  MESSAGE`);
   for (const r of rows) console.log(`  ${r.id}  ${r.status.padEnd(w("status"))}  ${r.to.padEnd(w("to"))}  ${r.sent.padEnd(w("sent"))}  ${r.message}`);
   if (shown.length < all.length) console.log(`(${all.length - shown.length} older not shown — --all lists every task.)`);
-  console.log("");
-  // `lost` is about the reply, never about the work: without this the
-  // listing reads as though that conversation were gone too.
-  const strandedName = shown.find((t) => t.status === "lost" && t.target.spawned)?.target.name;
-  if (strandedName) console.log(resumeAdvice(strandedName));
-  console.log("codex-collab task status <id> says where one stands; task wait <id> waits for its reply; task result <id> prints it.");
+  if (showsHints()) console.log("\ncodex-collab task status <id> says where one stands; task wait <id> waits for its reply; task result <id> prints it.");
 }

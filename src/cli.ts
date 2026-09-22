@@ -202,6 +202,10 @@ Commands:
   peers [--all]           (for Codex) List the Claude Code sessions live in
                           this workspace — the ones 'send' can reach
                           (--all: every workspace; --json)
+  peers stop [<peer>]     Stop a session codex-collab started, the way it was
+                          started: its conversation is kept, so the next
+                          'send' picks it up. A session it did not start is
+                          its user's to close, and is refused
   send [<peer>] "message" (for Codex, outside its sandbox) Hand a message to a
                           Claude Code session as a task and print its reply;
                           --to <peer> names the session (a unique prefix will
@@ -289,8 +293,9 @@ Exit codes (send, task wait, task result):
   0  the session replied   3  no reply yet — the task goes on, and its reply
   1  it will never reply      is kept: 'task wait <id>' / 'task result <id>'
      (undeliverable, the   5  a session codex-collab started stopped at a
-     session went away)       prompt nobody could answer; it was stopped, and
-                              the next send resumes its conversation
+     session went away,       prompt nobody could answer; it was stopped, and
+     or its turn ended        the next send resumes its conversation
+     on an error)
 
 Exit codes (next):
   0  event delivered           3  --timeout elapsed with no event

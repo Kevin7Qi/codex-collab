@@ -137,6 +137,7 @@ codex-collab follow --watch
 | `send [<peer>] "message"` | 将消息作为一项任务交给指定的 Claude 会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`send -` 从标准输入读取） |
 | `task status\|wait\|result <id>` | 查看任务状态、等待其回复或打印回复——`send` 停止等待之后才到的回复同样会被保存 |
 | `tasks` | 列出本工作区发出的任务 |
+| `peers stop [<peer>]` | 停止由 codex-collab 启动的会话（对话内容保留）；非其启动的会话会被拒绝 |
 
 <details>
 <summary>提问与审批</summary>
@@ -308,7 +309,7 @@ codex-collab config model --unset       # 取消单个设置（恢复自动检�
 codex-collab config --unset             # 取消所有设置
 ```
 
-可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`spawn-model`、`spawn-effort`、`spawn-models`、`spawn-resume`、`codex-rule`
+可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`spawn-model`、`spawn-effort`、`spawn-models`、`spawn-autocompact`、`spawn-resume`、`codex-rule`
 
 `mode` 控制 codex-collab 与 Claude 的通信方式：`auto`（默认）在平台支持时采用跨会话消息，否则走命令行路径；`peer` 强制使用跨会话消息；`cli` 则完全关闭该机制。修改后执行 `codex-collab peer up` 使之生效。
 

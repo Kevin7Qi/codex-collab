@@ -47,6 +47,7 @@ import {
   DEFAULT_SPAWN_RESUME_SEC,
   describeModelChoice,
   forgetSpawnedSession,
+  isAutocompactWindow,
   isClaudeEffort,
   isModelName,
   listClaudeSessions,
@@ -60,10 +61,11 @@ import {
   transientSessionId,
   type ClaudeSession,
 } from "../claude-sessions";
+import { describeTrouble, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, taskLogFile, updateTask, type TaskRecord } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
-import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, waitForTask } from "./task";
+import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
 /** Codex sets CODEX_SANDBOX in every command it runs inside its sandbox,
@@ -274,6 +276,11 @@ export async function handleSend(args: string[]): Promise<void> {
       if (isClaudeEffort(cfg["spawn-effort"])) effort = cfg["spawn-effort"];
       else console.error(`[codex] Warning: ignoring invalid spawn-effort in config: ${cfg["spawn-effort"]}`);
     }
+    let autocompact: string | undefined;
+    if (cfg["spawn-autocompact"] !== undefined) {
+      if (isAutocompactWindow(cfg["spawn-autocompact"])) autocompact = cfg["spawn-autocompact"];
+      else console.error(`[codex] Warning: ignoring invalid spawn-autocompact in config: ${cfg["spawn-autocompact"]}`);
+    }
     // One spawn per workspace at a time: two sends racing here would each
     // start a session under the same name. The second waits, then finds the
     // first's session live and uses it.
@@ -310,7 +317,7 @@ export async function handleSend(args: string[]): Promise<void> {
           const resumeModel = askedModel ?? stopped.model ?? model;
           const resumeEffort = askedEffort ?? stopped.effort ?? effort;
           try {
-            resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model: resumeModel, effort: resumeEffort, resume: stopped });
+            resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model: resumeModel, effort: resumeEffort, autocompact, resume: stopped });
             notes.push(`Resumed ${resumed.name} (its conversation so far is intact; on ${describeModelChoice(resumeModel, resumeEffort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
           } catch (e) {
             console.log(`Could not resume it (${(e instanceof Error ? e.message : String(e)).split("\n")[0]}) — starting a new session instead.`);
@@ -323,7 +330,7 @@ export async function handleSend(args: string[]): Promise<void> {
           target = resumed;
         } else {
           try {
-            target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort });
+            target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact });
           } catch (e) {
             die((e instanceof Error ? e.message : String(e)) + sandboxHint());
           }
@@ -366,9 +373,11 @@ export async function handleSend(args: string[]): Promise<void> {
   const hint = dirHint(options);
   const busy = target.status === "busy" ? " It is busy — your message joins its current turn." : "";
   if (!wait) {
-    console.log(`Sent to ${target.name} as task ${task.id}.${busy} Not waiting: its reply is kept when it comes.`);
-    console.log(`  codex-collab task wait ${task.id}${hint}     waits for it`);
-    console.log(`  codex-collab task result ${task.id}${hint}   prints it once it is there`);
+    console.log(`Sent to ${target.name} as task ${task.id}.${busy} Not waiting; its reply is kept.`);
+    if (showsHints()) {
+      console.log(`  codex-collab task wait ${task.id}${hint}     waits for it`);
+      console.log(`  codex-collab task result ${task.id}${hint}   prints it once it is there`);
+    }
     process.exit(0);
   }
   console.log(`Sent to ${target.name} as task ${task.id}.${busy} Waiting up to ${formatDuration(timeoutSec * 1000)} for its reply…`);
@@ -497,6 +506,50 @@ export async function sweepDeadReceivers(): Promise<number> {
     try { unlinkSync(path); removed++; } catch { /* gone */ }
   }
   return removed;
+}
+
+/** Write one envelope to a session's messaging socket. */
+function deliver(socketPath: string, line: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const sock = connect({ path: socketPath }, () => {
+      sock.write(line, (err) => {
+        if (err) reject(err);
+        else sock.end(resolve);
+      });
+    });
+    sock.on("error", reject);
+  });
+}
+
+/** Watch for a turn that ended on an error without replying: the session's
+ *  transcript names an API error since `since`, and the session has settled
+ *  into doing nothing (`idle`, or gone from the registry's view of work) for
+ *  a full minute of looks in a row. Claude Code retries some errors itself,
+ *  and a person watching the session can tell it to try again: a turn that
+ *  comes back to life within the minute is never reported as dead.
+ *
+ *  Both halves are narrow on purpose. `turnEndedOnError` asks whether the last
+ *  thing said in that conversation is the error, so a session that hit one and
+ *  carried on is not caught. And only `idle` counts as settled: `waiting` is a
+ *  session stopped at a prompt, where a person is about to act, and an entry
+ *  that cannot be read says nothing at all. */
+export function watchForStalledTurn(
+  target: TaskRecord["target"],
+  since: string,
+  opts: { pollMs?: number; looks?: number } = {},
+): { stalled: Promise<"stalled">; stop(): void } {
+  const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_STALL_POLL_MS) || 3000);
+  const looks = opts.looks ?? 20;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const stalled = new Promise<"stalled">((resolve) => {
+    let seen = 0;
+    timer = setInterval(() => {
+      const settled = sessionStatusNow(target.pid) === "idle";
+      seen = settled && turnEndedOnError(target.sessionId, since) ? seen + 1 : 0;
+      if (seen >= looks) resolve("stalled");
+    }, pollMs);
+  });
+  return { stalled, stop() { if (timer) clearInterval(timer); } };
 }
 
 /** Watch for the session a task waits on going away: its registry entry
@@ -660,27 +713,19 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   }
 
   // ── Deliver ──
-  const line = buildEnvelope({
-    text: composeMessage(task.message, { threadId: task.threadId }),
-    ourSocketPath: socketPath,
-    ourName: name,
-    mode: "prompting",
-  });
   try {
-    await new Promise<void>((resolve, reject) => {
-      const sock = connect({ path: target.socketPath }, () => {
-        sock.write(line, (err) => {
-          if (err) reject(err);
-          else sock.end(resolve);
-        });
-      });
-      sock.on("error", reject);
-    });
+    await deliver(target.socketPath, buildEnvelope({
+      text: composeMessage(task.message, { threadId: task.threadId }),
+      ourSocketPath: socketPath,
+      ourName: name,
+      mode: "prompting",
+    }));
   } catch (e) {
     const detail = e instanceof Error ? e.message : String(e);
     finish({ status: "failed", error: `Could not reach ${target.name} (socket ${target.socketPath}): ${detail}\nIt may have just exited — \`codex-collab peers\` shows who is live.` }, 1);
   }
-  updateTask(stateDir, task.id, { status: "running", deliveredAt: new Date().toISOString(), senderName: name });
+  const deliveredAt = new Date().toISOString();
+  updateTask(stateDir, task.id, { status: "running", deliveredAt, senderName: name });
 
   // ── Listen ──
   // A session codex-collab started has nobody attached. If it stops at a
@@ -691,25 +736,60 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   const blockedWatch = target.spawned ? watchForBlocked(target.pid) : null;
   const lostWatch = watchForLost(target);
   const remaining = Math.max(0, Date.parse(task.expiresAt) - Date.now());
-  const answer = await Promise.race([
-    reply,
-    new Promise<"expired">((r) => setTimeout(() => r("expired"), Number.isFinite(remaining) ? remaining : TASK_MAX_WAIT_SEC * 1000)),
-    lostWatch.lost,
-    ...(blockedWatch ? [blockedWatch.blocked] : []),
-  ]);
-  blockedWatch?.stop();
-  lostWatch.stop();
-  if (answer === "blocked") {
-    // Left as it is it would sit at that prompt until the reaper came, and
-    // swallow every message sent meanwhile. Stopped, it can be resumed. Two
-    // tasks may find the same session blocked: stopping and marking it are
-    // both safe to do twice.
-    if (target.spawned) {
-      await stopAndConfirm(target.spawned);
-      markSpawnedSessionStopped(stateDir, target.spawned.id);
+  const expiry = new Promise<"expired">((r) => setTimeout(() => r("expired"), Number.isFinite(remaining) ? remaining : TASK_MAX_WAIT_SEC * 1000));
+  const done: (patch: Partial<TaskRecord>) => never = (patch) => {
+    blockedWatch?.stop();
+    lostWatch.stop();
+    finish(patch);
+  };
+
+  let noted = false;
+  for (;;) {
+    const stall = noted ? null : watchForStalledTurn(target, deliveredAt);
+    const answer = await Promise.race([
+      reply,
+      expiry,
+      lostWatch.lost,
+      ...(stall ? [stall.stalled] : []),
+      ...(blockedWatch ? [blockedWatch.blocked] : []),
+    ]);
+    stall?.stop();
+
+    if (answer === "stalled") {
+      // Its turn ended on an error without replying. Saying so is the whole
+      // job: whether to ask it to carry on, hand the work to someone else or
+      // drop it is the Codex session's to decide, and a message sent from
+      // here would be one it never asked for, in a conversation it cannot see.
+      const t = turnTrouble(target.sessionId, deliveredAt);
+      const reason = `${target.name} ended its turn without replying${t ? `: ${describeTrouble(t)}` : ""}`;
+      // A session codex-collab started has nobody to set it going again, so
+      // that is the end of the task. A session the user is working in has
+      // them: the task keeps its address, and its reply, and what happened is
+      // recorded for whoever reads the task next.
+      if (target.spawned) done({ status: "failed", error: reason });
+      updateTask(stateDir, task.id, { error: reason });
+      noted = true;
+      continue;
     }
-    finish({ status: "blocked" });
+    if (answer === "blocked") {
+      // Left as it is it would sit at that prompt until the reaper came, and
+      // swallow every message sent meanwhile. Stopped, it can be resumed. Two
+      // tasks may find the same session blocked: stopping and marking it are
+      // both safe to do twice.
+      if (target.spawned) {
+        await stopAndConfirm(target.spawned);
+        markSpawnedSessionStopped(stateDir, target.spawned.id);
+      }
+      done({ status: "blocked" });
+    }
+    if (answer === "lost" || answer === "expired") {
+      // Why, while the transcript is still at hand: the record outlives the
+      // session, and "no reply" says nothing a Codex session can act on.
+      const failure = turnTrouble(target.sessionId, deliveredAt);
+      done({ status: answer, ...(failure ? { error: describeTrouble(failure) } : {}) });
+    }
+    // A stall noted earlier belongs to a turn that then finished: leaving it
+    // on the record would tell the next reader this task's turn had died.
+    done({ status: "replied", reply: answer, error: undefined });
   }
-  if (answer === "lost" || answer === "expired") finish({ status: answer });
-  finish({ status: "replied", reply: answer });
 }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
 import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
-import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isClaudeEffort, isModelName } from "../claude-sessions";
+import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isAutocompactWindow, isClaudeEffort, isModelName } from "../claude-sessions";
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
@@ -89,6 +89,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
     "spawn-model":  { validate: isModelName, hint: `the model a started Claude Code session runs on when \`send\` names none: ${CLAUDE_MODEL_TIERS.map((t) => t.alias).join(", ")}, or a full model name (default: your Claude Code default; see \`codex-collab models --claude\`)` },
     "spawn-models": { validate: v => v.split(",").every((name) => isModelName(name.trim())), hint: "comma-separated full model names to offer a Codex session besides the aliases, e.g. claude-opus-4-6,claude-sonnet-4-6 (shown by `codex-collab models --claude`; any model name works with `send --model` whether listed or not)" },
+    "spawn-autocompact": { validate: isAutocompactWindow, hint: `how much context a started Claude Code session fills before it compacts itself: 100k-1M tokens (\`500k\`, \`200000\`), or auto for Claude Code's own window (default ${DEFAULT_SPAWN_AUTOCOMPACT})` },
     "spawn-resume": { validate: v => v === "off" || (Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) <= MAX_TIMEOUT_SECONDS), hint: `seconds after it was stopped that a started Claude Code session is still resumed, with its conversation, by the next \`send\`, 1-${MAX_TIMEOUT_SECONDS}, or off to always start a new one (default ${DEFAULT_SPAWN_RESUME_SEC}, a week; \`send --fresh\` starts a new one once)` },
     "spawn-effort": { validate: isClaudeEffort, hint: `the effort a started Claude Code session runs at when \`send\` names none: ${CLAUDE_EFFORTS.join(", ")} (default: your Claude Code default)` },
   };

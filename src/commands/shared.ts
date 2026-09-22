@@ -648,6 +648,7 @@ export interface UserConfig {
   /** How long after it was stopped a started Claude session is still
    *  resumed, in seconds, or "off" to always start a new one. */
   "spawn-resume"?: number | string;
+  "spawn-autocompact"?: string;
   /** Opt-in Codex exec-policy rule for `send` (on|off; see skill.ts). */
   "codex-rule"?: string;
 }

@@ -6,9 +6,11 @@
 // reads.
 
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { describeModelChoice, listClaudeSessions, readSpawnedSessions, resumableSession, runReaper, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, resolveSession, resumableSession, runReaper, stopAndConfirm, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { outstandingTasksFor } from "../claude-tasks";
 import { resumeWindowSec } from "./send";
-import { formatDuration, loadUserConfig, parseOptions } from "./shared";
+import { insideCodexSandbox } from "./send";
+import { die, formatDuration, loadUserConfig, parseOptions } from "./shared";
 
 function idleFor(session: ClaudeSession, now: number): string | null {
   if (session.status !== "idle" || session.statusUpdatedAt === null) return null;
@@ -71,13 +73,93 @@ export function unverifiedNotice(sessions: ClaudeSession[]): string | null {
   return "Seen from inside a sandbox: these sessions' processes cannot be checked from here, so each is listed because its messaging socket is in place. `codex-collab send` checks again, outside the sandbox, before it delivers.";
 }
 
+/** `codex-collab peers stop [<name>]` — stop a session codex-collab started.
+ *
+ *  Codex had no way to end a session that was not going to answer, so it
+ *  reached for the pid: read /proc, check the start time, SIGTERM. That is a
+ *  careful version of the wrong thing — a signal leaves Claude Code's own
+ *  supervisor to notice, and a restarted session comes back under a pid
+ *  nobody here knows. This stops it the way it was started, through
+ *  `claude stop`, which keeps the conversation for the next `send`.
+ *
+ *  Only a session codex-collab started for this workspace: a session the user
+ *  is working in is theirs to close, whatever a Codex session thinks of it. */
+async function handlePeersStop(name: string | undefined, cwd: string): Promise<void> {
+  // Stopping reaches Claude Code the same way `send` reaches a session, and
+  // the sandbox blocks both: inside it `claude stop` cannot connect and the
+  // confirming signal cannot be sent, so it would report a session stopped
+  // that is still running.
+  if (insideCodexSandbox()) {
+    die(
+      "codex-collab peers stop cannot run inside the Codex sandbox: it stops the session through Claude Code, which the sandbox blocks.\n" +
+      "Rerun this command outside the sandbox (with escalated permissions).",
+    );
+  }
+  const stateDir = resolveStateDir(cwd);
+  const sessions = listClaudeSessions({ cwd, stateDir });
+  let session: ClaudeSession | undefined;
+  if (name) {
+    const resolved = resolveSession(sessions, name);
+    if (!resolved.session) {
+      die(resolved.ambiguous.length > 1
+        ? `"${name}" matches several sessions: ${resolved.ambiguous.map((s) => s.name).join(", ")} — name one exactly.`
+        : `No live Claude Code session named "${name}" in this workspace.`);
+    }
+    session = resolved.session;
+  } else if (sessions.length === 1) {
+    session = sessions[0];
+  } else {
+    die(sessions.length === 0
+      ? "No Claude Code session is live in this workspace."
+      : `Several Claude Code sessions are live here — name one:\n${sessions.map((s) => `  codex-collab peers stop ${JSON.stringify(s.name)}`).join("\n")}`);
+  }
+  // A session id is a true discriminator: Claude Code restarts a background
+  // session it loses, and the conversation comes back under a new pid no
+  // record here has seen, still under that id. A pid alone is not — a record
+  // whose reaper was killed keeps a pid the machine may since have given to a
+  // session the user started — so a pid match has to agree on the start time
+  // too, or it is somebody else's process wearing that number.
+  const records = readSpawnedSessions(stateDir).filter((r) => !r.stoppedAt);
+  const byId = records.find((r) => !!r.sessionId && !!session.sessionId && r.sessionId === session.sessionId);
+  const byPid = records.find((r) => r.pid === session.pid && !!r.procStart && r.procStart === session.procStart);
+  const ours = byId ?? byPid;
+  if (!ours) {
+    die(`${session.name} was not started by codex-collab, so it is not ours to stop — it is a session its user is working in. \`codex-collab peers\` marks the ones started here.`);
+  }
+  const waiting = outstandingTasksFor(stateDir, { pid: session.pid, sessionId: session.sessionId });
+  // Identified by its session id, the live entry is that conversation under
+  // whatever pid it wears now, and that is what the confirming signal checks.
+  await stopAndConfirm(byId ? { ...ours, pid: session.pid, procStart: session.procStart ?? undefined } : ours);
+  // `claude stop` can fail quietly, and a record marked stopped while its
+  // session runs makes that session read as the user's own — no reaper, no
+  // watch for a prompt, and a resume offered for a conversation still live.
+  // A session takes a moment to go after it is told to, so it is given one.
+  const gone = async (): Promise<boolean> => {
+    const until = Date.now() + 3000;
+    for (;;) {
+      if (!listClaudeSessions({ cwd, stateDir }).some((s) => s.pid === session!.pid && s.sessionId === session!.sessionId)) return true;
+      if (Date.now() >= until) return false;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  if (!await gone()) {
+    die(`${session.name} is still running: \`claude stop\` did not take, and its process could not be verified as one codex-collab started. Its record is unchanged.`);
+  }
+  markSpawnedSessionStopped(stateDir, ours.id);
+  console.log(`Stopped ${session.name}. Its conversation is kept: \`codex-collab send\` picks it up where it stopped.`);
+  if (waiting.length > 0) {
+    console.log(`${waiting.length} task${waiting.length === 1 ? " was" : "s were"} still waiting on it (${waiting.map((t) => t.id).join(", ")}) — ${waiting.length === 1 ? "it ends" : "they end"} with no reply.`);
+  }
+}
+
 export async function handlePeers(args: string[]): Promise<void> {
-  const { options } = parseOptions(args);
+  const { positional, options } = parseOptions(args);
   if (process.platform === "win32") {
     if (options.json) console.log("[]");
     else console.log("Claude Code's cross-session messaging does not exist on Windows, so there are no sessions to reach from here.");
     return;
   }
+  if (positional[0] === "stop") return handlePeersStop(positional[1], options.dir);
   const cwd = options.dir;
   const stateDir = resolveStateDir(cwd);
   const sessions = listClaudeSessions({ cwd, all: options.all, stateDir });

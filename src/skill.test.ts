@@ -22,11 +22,15 @@ import {
 } from "./skill";
 
 describe("Codex exec-policy rule (opt-in)", () => {
-  test("allows only `codex-collab send` — peers needs no way out of the sandbox", () => {
+  test("allows the two commands that must leave the sandbox, and nothing wider", () => {
     const rules = expectedCodexRules();
     expect(rules).toContain('prefix_rule(pattern=["codex-collab", "send"], decision="allow")');
-    expect(rules).not.toContain('"peers"');
-    expect(rules.split("\n").filter((l) => l.startsWith("prefix_rule"))).toHaveLength(1);
+    // `peers stop` ends the session through Claude Code, which the sandbox
+    // blocks as surely as it blocks `send`'s socket.
+    expect(rules).toContain('prefix_rule(pattern=["codex-collab", "peers", "stop"], decision="allow")');
+    // Narrow prefixes only: nothing here allows `codex-collab` wholesale.
+    expect(rules.split("\n").filter((l) => l.startsWith("prefix_rule"))).toHaveLength(2);
+    expect(rules).not.toContain('prefix_rule(pattern=["codex-collab"]');
   });
 
   test("path: override, then $CODEX_HOME/rules, then ~/.codex/rules", () => {

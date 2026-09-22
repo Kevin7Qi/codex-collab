@@ -30,6 +30,7 @@ bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) —
 | `src/broker.ts` | Shared app-server lifecycle (connection pooling) |
 | `src/peer.ts` | Native peer messaging (Claude session-registry entries, messaging sockets, consult bridge, per-thread peers) |
 | `src/claude-sessions.ts` | Codex's side of peer messaging: the Claude Code sessions `peers` lists and `send` reaches, sessions `send` starts (`claude --bg`), their records and reaper |
+| `src/claude-transcript.ts` | Reads a Claude Code session's own transcript for why a turn failed (API errors); fails open, undocumented format |
 | `src/claude-tasks.ts` | Task records for `send`: one per message, written by a detached receiver, read by `task status\|wait\|result` and `tasks` |
 | `src/broker-client.ts` | Socket-based client for connecting to the broker server |
 | `src/shared-server.ts` | Attach to Codex's shared app-server over its control socket (WebSocket client, attach/spawn decision) |

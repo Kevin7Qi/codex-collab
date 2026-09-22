@@ -456,11 +456,31 @@ export const SPAWN_SETTINGS = { worktree: { bgIsolation: "none" }, autoCompactEn
  *  weigh cost against the task before it starts a session. Most capable
  *  first. */
 export const CLAUDE_MODEL_TIERS: ReadonlyArray<{ alias: string; description: string }> = [
-  { alias: "fable", description: "Most capable, most expensive: hard design problems, deep debugging, long multi-step work" },
-  { alias: "opus", description: "Strong general model: substantial implementation and careful review" },
-  { alias: "sonnet", description: "Balanced everyday model: routine coding, reviews, explanations" },
-  { alias: "haiku", description: "Fastest and cheapest: lookups, summaries, simple questions" },
+  { alias: "fable", description: "The most capable: hard design problems, deep debugging, long multi-step work" },
+  { alias: "opus", description: "Balanced everyday model: routine coding, reviews, explanations" },
+  { alias: "sonnet", description: "Fastest and cheapest: lookups, summaries, simple questions" },
 ];
+
+/** The context a started session fills before it compacts itself
+ *  (`claude --autocompact`). Claude Code's own default is `auto`, which
+ *  follows the model's window — a million tokens on the models that have one.
+ *  A session started for Codex is long-lived and resumed, and every turn pays
+ *  for the context it carries, so it compacts at a window it can afford
+ *  rather than at the largest one the model allows. `config spawn-autocompact`
+ *  sets it; `auto` gives Claude Code's behaviour back. */
+export const DEFAULT_SPAWN_AUTOCOMPACT = "500k";
+
+/** What `claude --autocompact` takes: `auto`, or 100k–1M in tokens, which it
+ *  accepts as a plain number, `500k`, or `500` as shorthand for 500k. */
+export function isAutocompactWindow(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value === "auto") return true;
+  const m = /^(\d+)k?$/i.exec(value.trim());
+  if (!m) return false;
+  const n = Number(m[1]);
+  const tokens = /k$/i.test(value.trim()) || n <= 1000 ? n * 1000 : n;
+  return tokens >= 100_000 && tokens <= 1_000_000;
+}
 
 /** The effort levels `claude --effort` takes, lowest first. */
 export const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -494,6 +514,8 @@ export interface SpawnClaudeOptions {
    *  session runs on the user's Claude Code default. */
   model?: string;
   effort?: string;
+  /** `claude --autocompact`; the default when left out. */
+  autocompact?: string;
   /** A stopped session (see `resumableSession`) to continue instead of
    *  starting a new one: same conversation, new process. */
   resume?: SpawnedSession;
@@ -519,6 +541,9 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
     ...(opts.model ? ["--model", opts.model] : []),
     ...(opts.effort ? ["--effort", opts.effort] : []),
   ];
+  const autocompact = opts.autocompact ?? DEFAULT_SPAWN_AUTOCOMPACT;
+  // `auto` is Claude Code's own behaviour, and saying it is the same as not.
+  const compaction = autocompact === "auto" ? [] : ["--autocompact", autocompact];
   // Resuming: `claude --bg --resume <session-id>` continues that conversation
   // in the background. Everything else is passed as for a new session — a
   // resumed session is a new process, and takes its mode, settings, model
@@ -529,13 +554,20 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   try {
     announced = execFileSync(
       bin,
-      ["--bg", "-n", name, ...resume, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), ...choice, brief],
+      ["--bg", "-n", name, ...resume, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), ...compaction, ...choice, brief],
       { cwd: wsRoot, env: spawnEnv(), encoding: "utf-8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (e) {
     const err = e as NodeJS.ErrnoException & { stderr?: string };
     if (err.code === "ENOENT") throw new Error("Could not start a Claude Code session: `claude` is not on PATH.");
     const detail = (err.stderr ?? err.message ?? "").toString().trim();
+    // A Claude Code without `--autocompact` refuses the whole command line.
+    // Its own window is a worse fit than ours, and no session at all is worse
+    // than either, so it starts without the flag and says so once.
+    if (compaction.length > 0 && /autocompact/i.test(detail)) {
+      process.stderr.write("[codex] This Claude Code does not take --autocompact; starting the session on its own compaction window (`codex-collab config spawn-autocompact auto` settles it).\n");
+      return spawnClaudeSession({ ...opts, autocompact: "auto" });
+    }
     throw new Error(`Could not start a Claude Code session: ${detail || "claude --bg failed"}`);
   }
   const id = parseBackgroundId(announced);
