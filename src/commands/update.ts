@@ -101,7 +101,7 @@ export async function handleSkill(args: string[]): Promise<void> {
     // The exec-policy rule only for a user who opted in (config codex-rule on).
     if (codexRuleEnabled()) {
       const rules = codexRulesInstallPath();
-      targets.push({ label: "Codex rule", dir: dirname(rules), file: basename(rules), expected: expectedCodexRules(), installed: installedCodexRules(rules), create: true, effect: "Codex runs `codex-collab send` without asking; takes effect in new Codex sessions" });
+      targets.push({ label: "Codex rule", dir: dirname(rules), file: basename(rules), expected: expectedCodexRules(), installed: installedCodexRules(rules), create: true, effect: "Codex runs `codex-collab send` and `peers stop` without asking; takes effect in new Codex sessions" });
     }
   }
   // Up-to-date is content equality (same normalization as the drift notice),

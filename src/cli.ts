@@ -210,17 +210,20 @@ Commands:
                           Claude Code session as a task and print its reply;
                           --to <peer> names the session (a unique prefix will
                           do). --timeout <sec> bounds how long the COMMAND
-                          waits (default 600) — the task goes on, and a later
-                          reply is kept for 'task wait' / 'task result';
-                          --no-wait returns the task id once the message is
-                          delivered. With no session live, resumes the one it
-                          last stopped, with its conversation (config
-                          spawn-resume; --fresh starts a new one), else starts
-                          one in the background (config spawn off, or
-                          --no-spawn, disables both) — on the model and effort
-                          given with -m <model> and -r/--effort <level>, else
-                          config spawn-model / spawn-effort, else your Claude
-                          Code default ('models --claude' lists the choices)
+                          waits (default 600) — the task goes on for four
+                          hours from sending (or the --timeout, if longer),
+                          and a reply in that time is kept for 'task wait' /
+                          'task result'; --no-wait returns the task id once
+                          the message is delivered. With no session live, or
+                          when it is named, resumes the one it last stopped,
+                          with its conversation (config spawn-resume; --fresh
+                          starts a new one), else starts one in the
+                          background (config spawn off, or --no-spawn,
+                          disables both) — on the model and effort given with
+                          -m <model> and -r/--effort <level>, else config
+                          spawn-model / spawn-effort, else your Claude Code
+                          default ('models --claude' lists the choices). Any
+                          other name that is not live is refused
   task status <id>        (for Codex) Where a task stands: whom it went to,
                           when, what that session is doing now (--json: the
                           whole record). Works inside the sandbox, as do:
@@ -294,8 +297,10 @@ Exit codes (send, task wait, task result):
   1  it will never reply      is kept: 'task wait <id>' / 'task result <id>'
      (undeliverable, the   5  a session codex-collab started stopped at a
      session went away,       prompt nobody could answer; it was stopped, and
-     or its turn ended        the next send resumes its conversation
-     on an error)
+     the turn of a session    the next send resumes its conversation (when
+     codex-collab started     it would not stop, the error says so)
+     ended on an error, or
+     the task expired)
 
 Exit codes (next):
   0  event delivered           3  --timeout elapsed with no event

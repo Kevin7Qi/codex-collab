@@ -19,7 +19,7 @@ bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) —
 |------|---------|
 | `src/cli.ts` | CLI router, argument parsing, signal handlers |
 | `src/client.ts` | JSON-RPC client for Codex app server (spawn, handshake, request routing) |
-| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve) |
+| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve; `send` with its detached receiver, `task`/`tasks`, `peers` with `peers stop` and the reaper entry point) |
 | `src/threads.ts` | Thread index, run ledger, short ID mapping |
 | `src/turns.ts` | Turn lifecycle (runTurn, runReview), event wiring |
 | `src/events.ts` | Event dispatcher (progress lines, log writer, output accumulator) |
@@ -39,9 +39,10 @@ bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) —
 | `src/process.ts` | Process spawn/lifecycle utilities |
 | `src/lock.ts` | Advisory file locks (sync/async, single-winner stale breaking) |
 | `src/git.ts` | Git operations (default-branch detection for reviews) |
-| `src/skill.ts` | Installed-skill rendering (embedded SKILL.md source), drift detection, unified diff |
+| `src/skill.ts` | Installed-skill rendering for both skills (embedded SKILL.md sources), the opt-in Codex exec-policy rule (`CODEX_RULES_SOURCE`), drift detection, unified diff |
 | `src/update.ts` | Release checking, update notices (`skill sync` / `update` commands live in `src/commands/update.ts`) |
 | `SKILL.md` | Claude Code skill definition |
+| `codex-skill/SKILL.md` | Codex-side skill (`claude-collab`): how Codex reaches Claude Code sessions (`peers`, `send`, `task`, `peers stop`) |
 
 ## Dependencies
 

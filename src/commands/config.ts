@@ -14,9 +14,9 @@ import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillIn
 function applyCodexRule(on: boolean): void {
   if (on) {
     const path = installCodexRules();
-    console.log(`Wrote ${path} — Codex runs \`codex-collab send\` without asking, outside its sandbox (new Codex sessions pick it up).`);
+    console.log(`Wrote ${path} — Codex runs \`codex-collab send\` and \`codex-collab peers stop\` without asking, outside its sandbox (new Codex sessions pick it up).`);
   } else if (removeCodexRules()) {
-    console.log(`Removed ${codexRulesInstallPath()} — Codex asks again before running \`codex-collab send\` outside its sandbox.`);
+    console.log(`Removed ${codexRulesInstallPath()} — Codex asks again before running \`codex-collab send\` or \`codex-collab peers stop\` outside its sandbox.`);
   }
 }
 
@@ -85,7 +85,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     mode:      { validate: v => (COLLAB_MODES as readonly string[]).includes(v), hint: `${COLLAB_MODES.join(", ")} (auto: peer messaging where supported, CLI otherwise)` },
     server:    { validate: v => (SERVER_PREFERENCES as readonly string[]).includes(v), hint: `${SERVER_PREFERENCES.join(", ")} (auto: attach to Codex's own app-server when its socket answers, else run a private one)` },
     spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
-    "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` without asking, outside its sandbox; default off)" },
+    "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` and `codex-collab peers stop` without asking, outside its sandbox; default off)" },
     linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
     "spawn-model":  { validate: isModelName, hint: `the model a started Claude Code session runs on when \`send\` names none: ${CLAUDE_MODEL_TIERS.map((t) => t.alias).join(", ")}, or a full model name (default: your Claude Code default; see \`codex-collab models --claude\`)` },
     "spawn-models": { validate: v => v.split(",").every((name) => isModelName(name.trim())), hint: "comma-separated full model names to offer a Codex session besides the aliases, e.g. claude-opus-4-6,claude-sonnet-4-6 (shown by `codex-collab models --claude`; any model name works with `send --model` whether listed or not)" },
@@ -343,10 +343,10 @@ export function describeCodexSkill(inSync: boolean | null, dir: string): string 
 /** One line on the opt-in exec-policy rule: on and current, on but the
  *  file drifted or vanished, or off (Codex asks before each `send`). */
 export function describeCodexRule(enabled: boolean, inSync: boolean | null, path: string): string {
-  if (!enabled) return "off — Codex asks before each `codex-collab send` ('codex-collab config codex-rule on' lets it send without asking)";
+  if (!enabled) return "off — Codex asks before each `codex-collab send` and `peers stop` ('codex-collab config codex-rule on' lets it run them without asking)";
   if (inSync === null) return `on, but ${path} is missing — run 'codex-collab skill sync'`;
   if (!inSync) return `on, but ${path} is out of date — run 'codex-collab skill sync'`;
-  return `on (${path}) — Codex runs \`codex-collab send\` without asking`;
+  return `on (${path}) — Codex runs \`codex-collab send\` and \`peers stop\` without asking`;
 }
 
 export async function handleHealth(args: string[]): Promise<void> {

@@ -96,7 +96,7 @@ offer_or_refresh_codex_rule() {
       bun "$entry" skill render --rules > "$out_tmp"
       mkdir -p "$(dirname "$CODEX_RULES_FILE")"
       mv "$out_tmp" "$CODEX_RULES_FILE"
-      echo "Refreshed Codex rule at $CODEX_RULES_FILE (config codex-rule is on)"
+      echo "Refreshed Codex rule at $CODEX_RULES_FILE (config codex-rule is on: Codex runs \`send\` and \`peers stop\` without asking)"
       ;;
     *"not set"*)
       # Only a person at a terminal is asked: an agent's shell (Claude Code's
@@ -105,25 +105,26 @@ offer_or_refresh_codex_rule() {
       # the key stays unset, so a later interactive install asks again.
       if [ -t 0 ] && [ -t 1 ]; then
         echo ""
-        echo "Codex asks (its approval flow) before each \`codex-collab send\`, which reaches a Claude Code"
-        echo "session outside Codex's sandbox. Experimental: an exec-policy rule at $CODEX_RULES_FILE"
-        echo "lets any Codex session run \`send\` without asking. Change later: codex-collab config codex-rule on|off"
+        echo "Codex asks (its approval flow) before each \`codex-collab send\` and \`codex-collab peers stop\`,"
+        echo "which reach Claude Code outside Codex's sandbox. Experimental: an exec-policy rule at $CODEX_RULES_FILE"
+        echo "lets any Codex session run both without asking: message your Claude Code sessions, start one, and"
+        echo "stop one it started. Change later: codex-collab config codex-rule on|off"
         answer=""
-        if read -r -t 60 -p "Let Codex run \`codex-collab send\` without asking? [y/N] " answer; then
+        if read -r -t 60 -p "Let Codex run \`codex-collab send\` and \`peers stop\` without asking? [y/N] " answer; then
           case "$answer" in
             [yY]*) bun "$entry" config codex-rule on ;;
             *)     bun "$entry" config codex-rule off ;;
           esac
         else
           echo ""
-          echo "No answer — left unset; run \`codex-collab config codex-rule on\` to let Codex send without asking"
+          echo "No answer — left unset; run \`codex-collab config codex-rule on\` to let Codex run \`send\` and \`peers stop\` without asking"
         fi
       else
-        echo "Codex asks before each \`send\`; run \`codex-collab config codex-rule on\` to let it send without asking"
+        echo "Codex asks before each \`send\` and \`peers stop\`; run \`codex-collab config codex-rule on\` to let it run them without asking"
       fi
       ;;
     *)
-      echo "Codex asks before each \`send\` (config codex-rule is off)"
+      echo "Codex asks before each \`send\` and \`peers stop\` (config codex-rule is off)"
       ;;
   esac
 }

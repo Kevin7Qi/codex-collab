@@ -133,11 +133,8 @@ codex-collab follow --watch
 | `output <id> [--last]` | Full log for a thread (`--last`: only the latest turn's output) |
 | `kill <id> [--clear]` | Stop a running thread. An active goal is paused first; `--clear` abandons it |
 | `peer [up]` | Show the native-messaging peer's status; `peer up` starts the broker (and with it the peer) |
-| `peers [--all] [--json]` | List the Claude Code sessions live in this workspace |
-| `send [<peer>] "message"` | Hand a message to a named Claude session as a task and wait for the reply (`--no-wait` returns the task id once delivered; `send -` reads from stdin) |
-| `task status\|wait\|result <id>` | Where a task stands, wait for its reply, or print it — a reply that comes after `send` stopped waiting is kept |
-| `tasks` | List the tasks sent from this workspace |
-| `peers stop [<peer>]` | Stop a session codex-collab started (its conversation is kept); a session it did not start is refused |
+
+The commands Codex uses to reach Claude (`peers`, `send`, `task`) are under [Peer messaging](#peer-messaging).
 
 <details>
 <summary>Questions and approvals</summary>
@@ -287,7 +284,15 @@ After `peer up`, `ListAgents` shows `codex(myproject-a1b2c3)` — message it and
 
 <details><summary>From Codex: message Claude</summary>
 
-From Codex's own sessions, `codex-collab peers` lists the Claude Code sessions in the workspace and `codex-collab send <name> "message"` hands one a message as a task and waits for its reply (default 600 s). The wait bounds the command only: a reply that comes later is kept, and `codex-collab task wait <id>` or `task result <id>` collects it (exit 0 replied, 3 still running, 5 stopped at a prompt, 1 failed). With none live, `send` starts a background session that stops after 30 idle minutes (`config spawn`, `config linger`). Codex asks before each `send` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
+From Codex's own sessions, `codex-collab send <name> "message"` hands a Claude Code session in the workspace a message as a task and waits for its reply (default 600 s). The wait bounds the command only: a reply that comes within four hours of sending is kept for `task wait` / `task result` (exit 0 replied, 3 still running, 5 stopped at a prompt, 1 no reply will come: failed, lost or expired). With none live, `send` starts a background session that stops after 30 idle minutes. Codex asks before each `send` and `peers stop` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
+
+| Command | Description |
+|---------|-------------|
+| `peers [--all] [--json]` | List the Claude Code sessions live in this workspace |
+| `send [<peer>] "message"` | Hand a session a message as a task and wait for the reply (`--no-wait` returns the task id once delivered; `send -` reads from stdin) |
+| `task status\|wait\|result <id>` | Where a task stands, wait for its reply, or print it |
+| `tasks` | List the tasks sent from this workspace |
+| `peers stop [<peer>]` | Stop a session codex-collab started (its conversation is kept); a session it did not start is refused |
 
 </details>
 
@@ -318,13 +323,27 @@ codex-collab config --unset
 
 Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `spawn-model`, `spawn-effort`, `spawn-models`, `spawn-autocompact`, `spawn-resume`, `codex-rule`
 
+**Experimental:** `codex-rule` is off by default. Turned on, it lets any Codex session run `codex-collab send` and `peers stop` without asking (details below).
+
+<details><summary><code>mode</code> and <code>server</code></summary>
+
 `mode`: `auto` (default) uses peer messaging where the platform supports it and the CLI path otherwise; `peer` insists on it; `cli` turns it off entirely. A change applies when the workspace broker restarts: `codex-collab peer up`.
 
 `server`: `auto` (default) attaches to Codex's shared app-server when one is running (`codex app-server daemon start`) and runs a private one otherwise; `shared` insists on it; `private` never attaches. `health` shows which one is in use. A change applies at `codex-collab peer up`; `CODEX_COLLAB_SERVER` overrides it for one invocation.
 
-`spawn` controls whether `send` starts a background Claude Code session when none is live: `on` (default) or `off`; `--no-spawn` overrides per call. `linger` sets how many seconds a spawned session may idle before it is stopped (default 1800). `spawn-autocompact` sets how much context a started session fills before it compacts itself (100k-1M tokens, or `auto` for Claude Code's own window; default 500k, since a resumed session pays for its context on every turn). A stopped session keeps its conversation: the next `send` resumes it, context intact, if it was stopped within `spawn-resume` seconds (default 604800, a week; `off` always starts a new session, and `send --fresh` does so once). `spawn-model` and `spawn-effort` set what a spawned session runs on when Codex names nothing; unset, that is your Claude Code default. Codex chooses per message with `send --model <model> --effort <level>`, and `codex-collab models --claude` lists the choices: the tier aliases (`fable`, `opus`, `sonnet`, each the latest model of its tier), plus any specific versions you name in `spawn-models` (comma-separated full model names, e.g. `claude-opus-4-6`). Any model name works with `--model` whether listed or not. A spawned session runs in Claude Code's `auto` permission mode, edits files in the working directory it shares with Codex, and compacts its conversation automatically. These are passed to that session alone (`claude --settings`): your own sessions keep your settings, including an auto-compact you have turned off. Where a model has no auto mode, Claude Code asks for permission instead, and nobody is attached to answer: `send` notices a started session stopped at a prompt, stops it, and says so, and the next `send` resumes the conversation on the model you name.
+</details>
 
-**Experimental.** `codex-rule` (`on` / `off`, default `off`): `on` lets Codex run `codex-collab send` without asking each time; `off` or `--unset` turns it back off; the installer asks once on an interactive terminal and records the answer. With the rule on, any Codex session — including one steered by content it read — can message your Claude Code sessions and start one without asking. Not available on Windows.
+<details><summary>Sessions Codex starts: <code>spawn</code>, <code>linger</code>, <code>spawn-*</code>, <code>codex-rule</code></summary>
+
+`spawn` (`on` by default; `--no-spawn` per call) lets `send` start a background Claude Code session when none is live. `linger` is how many seconds it may idle before it is stopped (default 1800); it is also stopped four hours after it started, once it has nothing in hand and no task waiting on it. A stopped session keeps its conversation: the next `send`, or one that names it, resumes it if it stopped within `spawn-resume` seconds (default a week; `off` never resumes, and `send --fresh` starts a new one once).
+
+Codex chooses the model and effort per message with `send --model <model> --effort <level>`; `spawn-model` and `spawn-effort` set what a started or resumed session runs on when Codex names nothing, and unset, that is your Claude Code default. `codex-collab models --claude` lists the choices: the tier aliases `fable`, `opus` and `sonnet`, each the latest model of its tier, plus any full model names you list in `spawn-models` (comma-separated, e.g. `claude-opus-4-6`). `--model` takes any model name, listed or not.
+
+A started session runs in Claude Code's `auto` permission mode, edits files in the working directory it shares with Codex, and compacts itself at `spawn-autocompact` (100k–1M tokens, or `auto` for Claude Code's own window; default 500k). These settings reach that session alone (`claude --settings`); your own sessions keep yours, including an auto-compact you have turned off. Where a model has no `auto` mode, `send` notices the session stopped at a prompt nobody can answer, stops it, and says so; the next `send` resumes the conversation on the model it names.
+
+`codex-rule` (`on` / `off`, default `off`) writes or removes a Codex exec-policy rule that lets Codex run `codex-collab send` and `codex-collab peers stop` without asking each time; `off` or `--unset` removes it. With it on, any Codex session — including one steered by content it read — can message your Claude Code sessions, start one, and stop one it started. The installer asks once on an interactive terminal and records the answer. Not available on Windows.
+
+</details>
 
 CLI flags always take precedence over config, and config takes precedence over auto-detection:
 

@@ -548,9 +548,11 @@ describe("health: the Codex-side lines", () => {
   it("describeCodexRule: off says Codex asks; on reports the file's state", async () => {
     const { describeCodexRule } = await import("./commands/config");
     const path = "/h/.codex/rules/codex-collab.rules";
-    expect(describeCodexRule(false, null, path)).toContain("off — Codex asks before each `codex-collab send`");
+    expect(describeCodexRule(false, null, path)).toContain("off — Codex asks before each `codex-collab send` and `peers stop`");
     expect(describeCodexRule(false, true, path)).toContain("codex-collab config codex-rule on");
-    expect(describeCodexRule(true, true, path)).toBe("on (/h/.codex/rules/codex-collab.rules) — Codex runs `codex-collab send` without asking");
+    // Everything the rule lets Codex do without asking is named: the user
+    // consents to what is said here.
+    expect(describeCodexRule(true, true, path)).toBe("on (/h/.codex/rules/codex-collab.rules) — Codex runs `codex-collab send` and `peers stop` without asking");
     expect(describeCodexRule(true, false, path)).toContain("out of date — run 'codex-collab skill sync'");
     expect(describeCodexRule(true, null, path)).toContain("is missing — run 'codex-collab skill sync'");
   });

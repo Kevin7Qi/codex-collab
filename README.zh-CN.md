@@ -133,11 +133,8 @@ codex-collab follow --watch
 | `output <id> [--last]` | 查看会话完整日志（`--last`: 只输出最近一轮的结果） |
 | `kill <id> [--clear]` | 中断运行中的会话。若存在进行中的 goal 会先暂停；`--clear` 表示直接放弃 |
 | `peer [up]` | 查看 Codex 在跨会话消息中的注册状态；`peer up` 启动 broker 并完成注册 |
-| `peers [--all] [--json]` | 列出当前工作区内存活的 Claude Code 会话 |
-| `send [<peer>] "message"` | 将消息作为一项任务交给指定的 Claude 会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`send -` 从标准输入读取） |
-| `task status\|wait\|result <id>` | 查看任务状态、等待其回复或打印回复——`send` 停止等待之后才到的回复同样会被保存 |
-| `tasks` | 列出本工作区发出的任务 |
-| `peers stop [<peer>]` | 停止由 codex-collab 启动的会话（对话内容保留）；非其启动的会话会被拒绝 |
+
+Codex 用来联系 Claude 的命令（`peers`、`send`、`task`）见[跨会话消息](#跨会话消息)。
 
 <details>
 <summary>提问与审批</summary>
@@ -289,7 +286,15 @@ codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 
 <details>
 <summary>在 Codex 中联系 Claude</summary>
 
-在 Codex 会话中，`codex-collab peers` 列出工作区内的 Claude Code 会话，`codex-collab send <name> "message"` 将消息作为一项任务交给指定会话并等待回复（默认 600 秒）。等待时限只约束命令本身：之后才到的回复同样会被保存，可用 `codex-collab task wait <id>` 或 `task result <id>` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 失败）。无存活会话时 `send` 自动启动后台会话，空闲 30 分钟后停止（`config spawn`、`config linger`）。每次 `send` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
+在 Codex 会话中，`codex-collab send <name> "message"` 将消息作为一项任务交给工作区内的某个 Claude Code 会话并等待回复（默认 600 秒）。等待时限只约束命令本身：发出后四小时内到达的回复同样会被保存，可用 `task wait` / `task result` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 不会再有回复：失败、会话已结束或任务过期）。无存活会话时 `send` 自动启动后台会话，空闲 30 分钟后停止。每次 `send` 与 `peers stop` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
+
+| 命令 | 说明 |
+|------|------|
+| `peers [--all] [--json]` | 列出当前工作区内存活的 Claude Code 会话 |
+| `send [<peer>] "message"` | 将消息作为一项任务交给某个会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`send -` 从标准输入读取） |
+| `task status\|wait\|result <id>` | 查看任务状态、等待其回复或打印回复 |
+| `tasks` | 列出本工作区发出的任务 |
+| `peers stop [<peer>]` | 停止由 codex-collab 启动的会话（对话内容保留）；非其启动的会话会被拒绝 |
 
 </details>
 
@@ -311,13 +316,27 @@ codex-collab config --unset             # 取消所有设置
 
 可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`spawn-model`、`spawn-effort`、`spawn-models`、`spawn-autocompact`、`spawn-resume`、`codex-rule`
 
+**实验性功能：** `codex-rule` 默认关闭；开启后，任何 Codex 会话执行 `codex-collab send` 与 `peers stop` 时都无需审批（详见下文）。
+
+<details><summary><code>mode</code> 与 <code>server</code></summary>
+
 `mode` 控制 codex-collab 与 Claude 的通信方式：`auto`（默认）在平台支持时采用跨会话消息，否则走命令行路径；`peer` 强制使用跨会话消息；`cli` 则完全关闭该机制。修改后执行 `codex-collab peer up` 使之生效。
 
 `server` 控制 broker 连接 Codex app-server 的方式：`auto`（默认）在共享 app-server 运行时（`codex app-server daemon start`）接入，否则启动私有实例；`shared` 强制使用共享 server；`private` 始终启动私有实例。`health` 显示当前连接的类型。修改后执行 `codex-collab peer up` 使之生效；`CODEX_COLLAB_SERVER` 可在单次调用中覆盖此设置。
 
-`spawn` 控制 `send` 在工作区内无 Claude 会话存活时是否自动启动后台会话：`on`（默认）启动、`off` 不启动；`--no-spawn` 可逐次覆盖。`linger` 设置自动启动的会话空闲多少秒后停止（默认 1800）。被停止的会话会保留其对话：若停止时间在 `spawn-resume` 秒之内（默认 604800，即一周），下一次 `send` 会恢复该会话并保留上下文；设为 `off` 则始终启动新会话，`send --fresh` 可单次启动新会话。`spawn-model` 与 `spawn-effort` 设置 Codex 未指定时自动启动的会话所用的模型与推理强度；未设置时沿用你的 Claude Code 默认值。Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定，`codex-collab models --claude` 列出可选项：各档位别名（`fable`、`opus`、`sonnet`、`haiku`，始终指向该档位的最新模型），以及你在 `spawn-models` 中列出的具体版本（逗号分隔的完整模型名，如 `claude-opus-4-6`）。无论是否列出，任何模型名都可用于 `--model`。自动启动的会话以 Claude Code 的 `auto` 权限模式运行，直接在与 Codex 共享的工作区中编辑，并自动压缩（compact）其对话。这些设置仅通过 `claude --settings` 传给该会话：你自己的会话仍沿用你的设置，包括你已关闭的自动压缩。
+</details>
 
-**实验性功能。** `codex-rule`（`on` / `off`，默认 `off`）：`on` 允许 Codex 执行 `codex-collab send` 时无需逐次审批；`off` 或 `--unset` 恢复原状；安装脚本在交互式终端中询问一次并记录选择。启用后，任何 Codex 会话——包括受其所读取内容引导的会话——均可在无需确认的情况下向 Claude Code 会话发送消息并启动后台会话。Windows 上不可用。
+<details><summary>Codex 启动的会话：<code>spawn</code>、<code>linger</code>、<code>spawn-*</code>、<code>codex-rule</code></summary>
+
+`spawn`（默认 `on`；`--no-spawn` 可逐次覆盖）决定 `send` 在无存活会话时是否启动后台 Claude Code 会话。`linger` 是该会话可空闲多少秒后被停止（默认 1800）；此外，会话启动四小时后，只要手头没有工作、也没有任务在等它，同样会被停止。被停止的会话保留其对话：若停止时间在 `spawn-resume` 秒之内（默认一周；`off` 表示从不恢复，`send --fresh` 可单次启动新会话），下一次 `send`（或点名该会话的 `send`）会恢复它。
+
+Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型与推理强度；`spawn-model` 与 `spawn-effort` 设置 Codex 未指定时启动或恢复的会话所用的模型与推理强度，未设置时沿用你的 Claude Code 默认值。`codex-collab models --claude` 列出可选项：各档位别名 `fable`、`opus`、`sonnet`（始终指向该档位的最新模型），以及你在 `spawn-models` 中列出的完整模型名（逗号分隔，如 `claude-opus-4-6`）。无论是否列出，任何模型名都可用于 `--model`。
+
+自动启动的会话以 Claude Code 的 `auto` 权限模式运行，直接编辑与 Codex 共享的工作目录，并在上下文达到 `spawn-autocompact` 时自行压缩（100k–1M tokens，或 `auto` 沿用 Claude Code 自身的窗口；默认 500k）。这些设置只传给该会话（`claude --settings`），你自己的会话仍沿用你的设置，包括你已关闭的自动压缩。若所选模型不支持 `auto` 模式，`send` 会发现会话停在无人应答的确认提示上，将其停止并如实说明；下一次 `send` 会以其指定的模型恢复该对话。
+
+`codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。Windows 上不可用。
+
+</details>
 
 优先级: `CLI 参数 > 配置文件 > 自动检测`
 
