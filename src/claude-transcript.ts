@@ -81,10 +81,6 @@ export function turnTrouble(sessionId: string | null | undefined, sinceIso?: str
   return errors.length ? { count: errors.length, last: errors[errors.length - 1] } : null;
 }
 
-/** The last API error in a session's transcript, if one came at or after
- *  `sinceIso` — the moment the task was delivered, so that errors from
- *  earlier work are not reported as this task's. null whenever the transcript
- *  is missing, unreadable, or says nothing of the kind. */
 /** Entry types that are the conversation itself. Claude Code writes plenty
  *  besides — `system`, `cost-state`, `last-prompt`, `bridge-session`,
  *  `file-history-snapshot`, `queue-operation` — and those keep being written
@@ -95,13 +91,17 @@ const CONVERSATION_TYPES = new Set(["assistant", "user"]);
  *  API error, and it came after `sinceIso`. A session that hit an error and
  *  carried on has something of its own after it, so this tells a turn that
  *  died from one that stumbled. (Bookkeeping entries are written after a dead
- *  turn too, which is why they are not counted as something said.) */
-export function turnEndedOnError(sessionId: string | null | undefined, sinceIso?: string): TurnError | null {
+ *  turn too, which is why they are not counted as something said.) An error
+ *  after `untilIso` — when another task's message started a turn of its own —
+ *  is that turn's. */
+export function turnEndedOnError(sessionId: string | null | undefined, sinceIso?: string, untilIso?: string): TurnError | null {
   const last = lastConversationEntry(sessionId);
   if (!last || last.d.isApiErrorMessage !== true) return null;
   const at = typeof last.d.timestamp === "string" ? last.d.timestamp : "";
   const since = sinceIso ? Date.parse(sinceIso) : NaN;
   if (Number.isFinite(since) && (!at || Date.parse(at) < since)) return null;
+  const until = untilIso ? Date.parse(untilIso) : NaN;
+  if (Number.isFinite(until) && (!at || Date.parse(at) > until)) return null;
   return {
     status: typeof last.d.apiErrorStatus === "number" ? last.d.apiErrorStatus : null,
     reason: typeof last.d.error === "string" ? last.d.error : null,
@@ -109,17 +109,35 @@ export function turnEndedOnError(sessionId: string | null | undefined, sinceIso?
   };
 }
 
+/** When something was first said in the conversation at or after
+ *  `sinceIso`, or null — the turn a message delivered then was taken into. */
+export function firstSaidSince(sessionId: string | null | undefined, sinceIso: string): string | null {
+  const since = Date.parse(sinceIso);
+  if (!Number.isFinite(since)) return null;
+  for (const { d } of conversationEntries(sessionId)) {
+    const at = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : NaN;
+    if (Number.isFinite(at) && at >= since) return d.timestamp as string;
+  }
+  return null;
+}
+
 function lastConversationEntry(sessionId: string | null | undefined): { d: Record<string, unknown> } | null {
-  if (!sessionId) return null;
+  const all = conversationEntries(sessionId);
+  return all.length ? all[all.length - 1] : null;
+}
+
+/** The conversation's own entries in the transcript's tail, oldest first. */
+function conversationEntries(sessionId: string | null | undefined): Array<{ d: Record<string, unknown> }> {
+  if (!sessionId) return [];
   const file = transcriptPath(sessionId);
-  if (!file) return null;
+  if (!file) return [];
   let text: string;
   try {
     text = tail(file);
   } catch {
-    return null;
+    return [];
   }
-  let found: { d: Record<string, unknown> } | null = null;
+  const found: Array<{ d: Record<string, unknown> }> = [];
   for (const line of text.split("\n")) {
     if (!line.startsWith("{")) continue;
     let d: Record<string, unknown>;
@@ -128,7 +146,7 @@ function lastConversationEntry(sessionId: string | null | undefined): { d: Recor
     } catch {
       continue;
     }
-    if (d && typeof d === "object" && typeof d.type === "string" && CONVERSATION_TYPES.has(d.type)) found = { d };
+    if (d && typeof d === "object" && typeof d.type === "string" && CONVERSATION_TYPES.has(d.type)) found.push({ d });
   }
   return found;
 }
@@ -168,6 +186,10 @@ export function turnErrorsSince(sessionId: string | null | undefined, sinceIso?:
   return found;
 }
 
+/** The last API error in a session's transcript, if one came at or after
+ *  `sinceIso` — the moment the task was delivered, so that errors from
+ *  earlier work are not reported as this task's. null whenever the transcript
+ *  is missing, unreadable, or says nothing of the kind. */
 export function lastTurnError(sessionId: string | null | undefined, sinceIso?: string): TurnError | null {
   const errors = turnErrorsSince(sessionId, sinceIso);
   return errors.length ? errors[errors.length - 1] : null;

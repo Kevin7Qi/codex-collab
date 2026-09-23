@@ -10,7 +10,7 @@ import { resolve } from "node:path";
 import { resolveStateDir } from "../config";
 import { shellQuote } from "../approvals";
 import { describeModelChoice, sessionStatusNow } from "../claude-sessions";
-import { FINAL_STATUSES, listTasks, loadTask, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
+import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
@@ -72,9 +72,10 @@ export async function waitForTask(stateDir: string, id: string, timeoutMs: numbe
 
 /** Print what became of a task, status line first. `waitedMs` is how long
  *  the caller just waited, when it did. */
-export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hint?: string } = {}): void {
+export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hint?: string; stateDir?: string } = {}): void {
   const { target } = record;
   const hint = opts.hint ?? "";
+  const facts = { stateDir: opts.stateDir };
   console.log(statusLine(record));
   switch (record.status) {
     case "replied": {
@@ -95,52 +96,57 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
         console.log(`  codex-collab task wait ${record.id}${hint}     waits for it`);
         console.log(`  codex-collab task result ${record.id}${hint}   prints it once it is there`);
       }
-      printSessionFacts(record);
+      printSessionFacts(record, facts);
       return;
     }
     case "blocked":
       console.log(`${target.name} stopped at a prompt with nobody attached; it ran on ${describeModelChoice(target.spawned?.model, target.spawned?.effort)}`);
-      console.log("session: stopped by codex-collab, conversation kept");
+      // Recorded only when it did not stop: what the line below would claim.
+      if (record.error) console.log(`error: ${record.error}`);
+      else console.log("session: stopped by codex-collab, conversation kept");
       return;
     case "lost":
       console.log(`${target.name} ended before it replied`);
-      printSessionFacts(record);
+      printSessionFacts(record, facts);
       return;
     case "expired":
       console.log(`no reply from ${target.name} in ${since(record.deliveredAt ?? record.createdAt, Date.parse(record.finishedAt ?? "") || Date.now())}`);
-      printSessionFacts(record);
+      printSessionFacts(record, facts);
       return;
     case "failed":
       console.log(record.error ?? "no reason recorded");
-      printSessionFacts(record, { skipError: !!record.error });
+      printSessionFacts(record, { ...facts, skipError: !!record.error });
       return;
   }
 }
 
 /** What the session's own transcript recorded since the message was
  *  delivered, as a field. */
-function describeFailure(record: TaskRecord): string | null {
+function describeFailure(record: TaskRecord, stateDir: string | undefined): string | null {
   // A task that got its answer had no trouble, whatever the session hit
-  // afterwards; and a task that ended has no share of what came later.
+  // afterwards; and a task that ended has no share of what came later — nor
+  // of a turn another task's message started after it.
   if (!record.deliveredAt || record.status === "replied") return null;
+  const next = stateDir ? nextTurnAfter(stateDir, record.id) : undefined;
   if (!FINAL_STATUSES.has(record.status)) {
     // Still waiting: only a turn that ENDED on an error says anything about
     // this task. A session that hit one and carried on is working, and
     // reporting that error would read as a turn that had died.
-    const e = turnEndedOnError(record.target.sessionId, record.deliveredAt);
+    const e = turnEndedOnError(record.target.sessionId, record.deliveredAt, next);
     return e ? describeTurnError(e) : null;
   }
-  const t = turnTrouble(record.target.sessionId, record.deliveredAt, record.finishedAt);
+  const until = [record.finishedAt, next].filter((t): t is string => !!t).sort()[0];
+  const t = turnTrouble(record.target.sessionId, record.deliveredAt, until);
   return t ? describeTrouble(t) : null;
 }
 
 /** The facts a report has no other line for: what went wrong on the session's
  *  side, and whether its conversation is still there. What to make of either
  *  is the reader's. */
-function printSessionFacts(record: TaskRecord, opts: { skipError?: boolean } = {}): void {
+function printSessionFacts(record: TaskRecord, opts: { skipError?: boolean; stateDir?: string } = {}): void {
   // What the receiver wrote down when it happened, in preference to reading
   // the transcript again: the same task must not read differently twice.
-  const failure = opts.skipError ? null : record.error ?? describeFailure(record);
+  const failure = opts.skipError ? null : record.error ?? describeFailure(record, opts.stateDir);
   if (failure) console.log(`error: ${failure}`);
   if (record.status === "pending" || record.status === "running") {
     if (sessionStatusNow(record.target.pid) === "waiting") console.log(`session: ${record.target.name} is at a prompt in its own terminal`);
@@ -176,7 +182,7 @@ function firstLine(text: string, max = 100): string {
 }
 
 /** `task status`: what is known of a task right now, without waiting. */
-function printStatus(record: TaskRecord, hint: string): void {
+function printStatus(record: TaskRecord, hint: string, stateDir: string): void {
   const final = FINAL_STATUSES.has(record.status);
   console.log(statusLine(record));
   console.log(`  to        ${describeTarget(record)}`);
@@ -191,7 +197,7 @@ function printStatus(record: TaskRecord, hint: string): void {
   }
   // One line, whether it was recorded when it happened or read from the
   // transcript now — two would be the same trouble told twice, differently.
-  const recorded = record.error ?? describeFailure(record);
+  const recorded = record.error ?? describeFailure(record, stateDir);
   if (recorded) console.log(`  error     ${recorded}`);
   console.log(`  message   ${firstLine(record.message)}`);
   if (showsHints() && record.status === "replied") console.log(`Print the reply: codex-collab task result ${record.id}${hint}`);
@@ -212,7 +218,7 @@ export async function handleTask(args: string[]): Promise<void> {
 
   if (sub === "status") {
     if (options.json) console.log(JSON.stringify(record, null, 2));
-    else printStatus(record, hint);
+    else printStatus(record, hint, stateDir);
     return;
   }
   let waitedMs: number | undefined;
@@ -223,7 +229,7 @@ export async function handleTask(args: string[]): Promise<void> {
     waitedMs = Date.now() - started;
   }
   if (options.json) console.log(JSON.stringify(record, null, 2));
-  else reportOutcome(record, { waitedMs, hint });
+  else reportOutcome(record, { waitedMs, hint, stateDir });
   process.exit(exitCodeFor(record.status));
 }
 

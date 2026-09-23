@@ -50,7 +50,15 @@ export interface TaskRecord {
     spawned: SpawnedSession | null;
   };
   createdAt: string;
+  /** When the receiver began delivering: from then on the message may have
+   *  reached the session, whatever becomes of the receiver. */
+  deliveryStartedAt?: string;
+  /** Whether the message found the session in a turn already running, where
+   *  it found it idle otherwise: what tells one task's error from another's. */
+  joinedTurn?: boolean;
   deliveredAt?: string;
+  /** When the turn this message is in was first seen running. */
+  busySeenAt?: string;
   finishedAt?: string;
   /** When the receiver stops listening, reply or none. */
   expiresAt: string;
@@ -68,8 +76,20 @@ export interface TaskRecord {
  *  `send --timeout` beyond it extends it for that task. */
 export const TASK_MAX_WAIT_SEC = 4 * 3600;
 
+/** TASK_MAX_WAIT_SEC, or what CODEX_COLLAB_TASK_MAX_WAIT_SEC says — a test
+ *  seam, as the poll intervals are: four hours is no length for a test. */
+export function taskMaxWaitSec(): number {
+  const v = Number(process.env.CODEX_COLLAB_TASK_MAX_WAIT_SEC);
+  return Number.isFinite(v) && v > 0 ? v : TASK_MAX_WAIT_SEC;
+}
+
 /** Finished tasks older than this are removed by `clean`. */
 export const TASK_KEEP_MS = 7 * 24 * 3600 * 1000;
+
+/** How long a new task may go without a receiver before it is taken as never
+ *  started: `send` waits 30 s for its receiver to deliver, and a receiver
+ *  notes itself on the record the moment it starts. */
+export const RECEIVER_START_GRACE_MS = 2 * 60 * 1000;
 
 export function tasksDir(stateDir: string): string {
   return join(stateDir, "tasks");
@@ -156,17 +176,28 @@ export function updateTask(stateDir: string, id: string, patch: Partial<TaskReco
  *  itself: it reads as `failed`, with the reason. A receiver that cannot be
  *  checked from here (inside Codex's sandbox every host pid looks dead, which
  *  is why `procIdentity` looks at the pid domain first) is taken at its word. */
-export function settled(record: TaskRecord, identify: typeof procIdentity = procIdentity): TaskRecord {
-  if (FINAL_STATUSES.has(record.status) || !record.receiver) return record;
+export function settled(record: TaskRecord, identify: typeof procIdentity = procIdentity, now: number = Date.now()): TaskRecord {
+  if (FINAL_STATUSES.has(record.status)) return record;
+  if (!record.receiver) {
+    // A receiver notes itself before it does anything else, so a task this
+    // old without one never got one: `send` was killed before it started it,
+    // or starting it failed. Nothing will ever write this record, and it
+    // must not hold the session it names from the reaper for ever.
+    const age = now - Date.parse(record.createdAt);
+    if (record.status !== "pending" || !(age > RECEIVER_START_GRACE_MS)) return record;
+    return { ...record, status: "failed", error: "the process that was to deliver it never started, so the message was not delivered" };
+  }
   const { pid, procStart, pidDomain } = record.receiver;
   const entry: Record<string, unknown> = { pid, ...(procStart ? { procStart } : {}), ...(pidDomain ? { pidDomain } : {}) };
   if (identify(entry) !== "dead") return record;
   return {
     ...record,
     status: "failed",
-    error: record.status === "pending"
-      ? "the process that was to deliver it is gone, and the message may not have been delivered"
-      : "the process collecting the reply is gone (it was killed, or the machine restarted), so a reply can no longer reach this task",
+    error: record.status === "running"
+      ? "the process collecting the reply is gone (it was killed, or the machine restarted), so a reply can no longer reach this task"
+      : record.deliveryStartedAt
+        ? "the process delivering it is gone, and went while delivering it, so the message may have reached the session"
+        : "the process that was to deliver it is gone, and went before delivering it, so the message was not delivered",
   };
 }
 
@@ -217,6 +248,27 @@ export function outstandingTasksFor(
  *  and the pid where either does not. */
 function sameSession(a: { pid: number; sessionId?: string | null }, b: { pid: number; sessionId?: string | null }): boolean {
   return a.sessionId && b.sessionId ? a.sessionId === b.sessionId : a.pid === b.pid;
+}
+
+/** When the next turn of the session a task went to began, as far as this
+ *  workspace's own tasks show it: the first message delivered after this
+ *  task's turn was seen running that found the session idle. The session
+ *  was at work on this task's turn and then was not, so that message started
+ *  a turn of its own, and an error after it belongs to that turn. Before this
+ *  task's turn has been seen running nothing is known: two messages that
+ *  reach an idle session a moment apart land in the same turn, and its end
+ *  is both of theirs. Undefined when no later task has started a turn. */
+export function nextTurnAfter(stateDir: string, id: string): string | undefined {
+  const task = loadTask(stateDir, id);
+  const running = task?.busySeenAt ? Date.parse(task.busySeenAt) : NaN;
+  if (!task || !Number.isFinite(running)) return undefined;
+  let next: number | undefined;
+  for (const other of listTasks(stateDir)) {
+    if (other.id === id || !other.deliveredAt || other.joinedTurn === true || !sameSession(other.target, task.target)) continue;
+    const at = Date.parse(other.deliveredAt);
+    if (Number.isFinite(at) && at > running && (next === undefined || at < next)) next = at;
+  }
+  return next === undefined ? undefined : new Date(next).toISOString();
 }
 
 /** Remove finished tasks (and any task's leftovers) older than `maxAgeMs`.

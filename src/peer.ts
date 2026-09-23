@@ -31,7 +31,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { homedir } from "node:os";
 import {
   registerThread,
@@ -291,16 +291,17 @@ export function procStartTicksOf(pid: number, statPath = `/proc/${pid}/stat`): s
  *  its registry entries on Linux (`pidDomain`): the machine id and the PID
  *  namespace. A pid means something only inside its own domain — a command
  *  Codex runs in its sandbox (its own PID namespace from 0.154) sees none of
- *  the host's pids. null where it cannot be told (not Linux, unreadable). */
+ *  the host's pids. Built exactly as Claude Code builds it, a part it cannot
+ *  read left empty (a container often has no /etc/machine-id): two domains
+ *  are compared as strings, and one written differently would read as
+ *  another machine's. null where there is no such thing (not Linux). */
 export function ownPidDomain(): string | null {
   if (process.platform !== "linux") return null;
-  try {
-    const machine = readFileSync("/etc/machine-id", "utf-8").trim();
-    const ns = readlinkSync("/proc/self/ns/pid");
-    return machine && ns ? `linux:${machine}:${ns}` : null;
-  } catch {
-    return null;
-  }
+  let machine = "";
+  try { machine = readFileSync("/etc/machine-id", "utf-8").trim(); } catch { /* none */ }
+  let ns = "";
+  try { ns = readlinkSync("/proc/self/ns/pid"); } catch { /* none */ }
+  return `linux:${machine}:${ns}`;
 }
 
 /** What one look at a registry entry's process says: it is the process that
@@ -447,9 +448,11 @@ export function isCodexCollabSocket(socketPath: unknown): boolean {
   if (socketPath === root || socketPath.startsWith(root + sep)) return true;
   // A task's receiver (see `send`) registers a socket under the temp root
   // (short enough for any home directory); it is a Codex session's, not
-  // Claude's.
+  // Claude's. The temp root follows TMPDIR, which differs between processes —
+  // a sandboxed shell, a login that sets its own — so it is recognised by its
+  // own name wherever it sits, not only where this process would put it.
   const tmpRoot = mailboxRoot();
-  return socketPath.startsWith(tmpRoot + sep);
+  return socketPath.startsWith(tmpRoot + sep) || basename(dirname(socketPath)) === basename(tmpRoot);
 }
 
 export function peerNameFor(cwd: string): string {

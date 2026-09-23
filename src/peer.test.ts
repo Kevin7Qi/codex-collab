@@ -3,12 +3,12 @@
 // behavior is exercised end to end by the contract tests, not here.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { config } from "./config";
+import { config, mailboxRoot } from "./config";
 import { listRuns } from "./threads";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { writeFileSync } from "node:fs";
 import {
@@ -273,6 +273,15 @@ describe("isCodexCollabSocket", () => {
 
   test("a path that merely starts with the same characters is not ours", () => {
     expect(isCodexCollabSocket(join(`${config.dataDir}-evil`, "peer.sock"))).toBe(false);
+  });
+
+  test("a task receiver's socket is ours whichever temp directory it was made under", () => {
+    // TMPDIR differs between processes (a sandboxed shell, a login that sets
+    // its own): another process's receiver must not be taken for a Claude session.
+    const own = basename(mailboxRoot());
+    expect(isCodexCollabSocket(join(mailboxRoot(), "task-abcdef12.sock"))).toBe(true);
+    expect(isCodexCollabSocket(join(sep, "some", "other", "tmp", own, "task-abcdef12.sock"))).toBe(true);
+    expect(isCodexCollabSocket(join(sep, "some", "other", "tmp", `${own}-evil`, "task-abcdef12.sock"))).toBe(false);
   });
 
   test("missing or malformed values are not ours", () => {

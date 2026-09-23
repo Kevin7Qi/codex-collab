@@ -58,12 +58,12 @@ import {
   spawnClaudeSession,
   spawnEnv,
   spawnedSessionName,
-  stopAndConfirm,
+  stopSpawnedSession,
   transientSessionId,
   type ClaudeSession,
 } from "../claude-sessions";
-import { describeTrouble, turnEndedOnError, turnTrouble } from "../claude-transcript";
-import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, taskLogFile, updateTask, type TaskRecord } from "../claude-tasks";
+import { describeTrouble, firstSaidSince, turnEndedOnError, turnTrouble } from "../claude-transcript";
+import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
 import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, showsHints, waitForTask } from "./task";
@@ -378,7 +378,7 @@ export async function handleSend(args: string[]): Promise<void> {
       target: { name: target.name, pid: target.pid, socketPath: target.socketPath, sessionId: target.sessionId, procStart: target.procStart, spawned: target.spawned },
       // A caller willing to wait longer than a task is normally waited on
       // must not see it expire under them.
-      maxWaitSec: Math.max(TASK_MAX_WAIT_SEC, timeoutSec),
+      maxWaitSec: Math.max(taskMaxWaitSec(), timeoutSec),
     });
   } catch (e) {
     die(`Could not record the task under ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
@@ -402,7 +402,7 @@ export async function handleSend(args: string[]): Promise<void> {
   const outcome = FINAL_STATUSES.has(delivered.status) ? delivered : await waitForTask(stateDir, task.id, timeoutSec * 1000);
   if (!outcome) die(`Task ${task.id} was removed while it was being waited on.`);
   console.log("");
-  reportOutcome(outcome, { waitedMs: Date.now() - started, hint });
+  reportOutcome(outcome, { waitedMs: Date.now() - started, hint, stateDir });
   process.exit(exitCodeFor(outcome.status));
 }
 
@@ -411,8 +411,9 @@ export async function handleSend(args: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /** How long `send` waits for a receiver to deliver. It covers a runtime
- *  start, a `ps`, two locks and one local connect. */
-const RECEIVER_HANDSHAKE_TIMEOUT_MS = 30_000;
+ *  start, a `ps`, two locks and one local connect. (The variable is a test
+ *  seam, as the poll intervals are.) */
+const RECEIVER_HANDSHAKE_TIMEOUT_MS = Number(process.env.CODEX_COLLAB_HANDSHAKE_MS) || 30_000;
 
 /** Start `task`'s receiver, detached, and return once it has delivered the
  *  message (the record has left `pending`) — or die with the reason it could
@@ -420,31 +421,42 @@ const RECEIVER_HANDSHAKE_TIMEOUT_MS = 30_000;
  *  ledger: what `send` reports as sent has been sent. */
 async function startReceiver(task: TaskRecord, stateDir: string, cwd: string): Promise<TaskRecord> {
   const logPath = taskLogFile(stateDir, task.id);
-  const logFd = openSync(logPath, "a", 0o600);
+
+  /** The receiver is gone (or never came) and the record still says
+   *  `pending`: nobody else will ever write it, so this command may — the
+   *  record has one writer at a time, and that writer has just left. A
+   *  receiver that got as far as delivering may have delivered. */
+  const giveUp: (reason: string) => never = (reason) => {
+    const said = `${reason} ${howFarItGot(loadTask(stateDir, task.id) ?? task)}`;
+    updateTask(stateDir, task.id, { status: "failed", error: said, finishedAt: new Date().toISOString() });
+    let tail = "";
+    try { tail = readFileSync(logPath, "utf-8").trim().split("\n").slice(-10).join("\n"); } catch { /* none */ }
+    die(`${said}${sandboxHint()}${tail ? `\nReceiver output (${logPath}):\n${tail}` : ""}`);
+  };
+
   // Its own process group and no terminal: the task must outlive this
   // command, a Ctrl-C in the invoking shell, and the Codex turn that ran it.
   // Codex's markers are dropped, as for the reaper — it is nobody's command.
-  const child = spawn(process.execPath, ["run", process.argv[1], "recv-task", task.id, "--dir", cwd], {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: spawnEnv(),
-  });
-  closeSync(logFd);
+  let child: ReturnType<typeof spawn>;
+  try {
+    const logFd = openSync(logPath, "a", 0o600);
+    try {
+      child = spawn(process.execPath, ["run", process.argv[1], "recv-task", task.id, "--dir", cwd], {
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        env: spawnEnv(),
+      });
+    } finally {
+      closeSync(logFd);
+    }
+  } catch (e) {
+    giveUp(`Could not start the process that delivers the message: ${e instanceof Error ? e.message : String(e)}.`);
+  }
   let childGone = false;
   let spawnError: Error | null = null;
   child.once("exit", () => { childGone = true; });
   child.once("error", (e) => { spawnError = e; childGone = true; });
   child.unref();
-
-  /** The receiver is gone and the record still says `pending`: nobody else
-   *  will ever write it, so this command may — the record has one writer at
-   *  a time, and that writer has just left. */
-  const giveUp: (reason: string) => never = (reason) => {
-    updateTask(stateDir, task.id, { status: "failed", error: reason, finishedAt: new Date().toISOString() });
-    let tail = "";
-    try { tail = readFileSync(logPath, "utf-8").trim().split("\n").slice(-10).join("\n"); } catch { /* none */ }
-    die(`${reason}${sandboxHint()}${tail ? `\nReceiver output (${logPath}):\n${tail}` : ""}`);
-  };
   /** What the record says once it has left `pending`: delivered (returned),
    *  or the receiver's own account of why not (fatal). */
   const verdict = (now: TaskRecord | null): TaskRecord | null => {
@@ -459,12 +471,12 @@ async function startReceiver(task: TaskRecord, stateDir: string, cwd: string): P
   while (Date.now() < deadline) {
     const now = verdict(loadTask(stateDir, task.id));
     if (now) return now;
-    if (spawnError) giveUp(`Could not start the process that collects the reply: ${(spawnError as Error).message}`);
+    if (spawnError) giveUp(`Could not start the process that delivers the message: ${(spawnError as Error).message}.`);
     if (childGone) {
       // It may have delivered, been answered and left since that look.
       const last = verdict(loadTask(stateDir, task.id));
       if (last) return last;
-      giveUp("The process that collects the reply exited before it delivered the message.");
+      giveUp("The process delivering the message exited before it confirmed delivery.");
     }
     await new Promise((r) => setTimeout(r, 50));
   }
@@ -478,9 +490,23 @@ async function startReceiver(task: TaskRecord, stateDir: string, cwd: string): P
     while (!childGone && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
     if (!childGone) { try { process.kill(child.pid, "SIGKILL"); } catch { /* gone */ } }
   }
-  const last = verdict(loadTask(stateDir, task.id));
-  if (last) return last;
-  giveUp(`The message was not delivered within ${RECEIVER_HANDSHAKE_TIMEOUT_MS / 1000}s.`);
+  const late = `The message was not confirmed delivered within ${RECEIVER_HANDSHAKE_TIMEOUT_MS / 1000}s, and the process delivering it was stopped.`;
+  const last = loadTask(stateDir, task.id);
+  if (last && last.status !== "pending") {
+    // Stopped, the receiver wrote how far it had got.
+    if (last.status === "failed" && !last.deliveredAt) die(`${late} ${howFarItGot(last)}${sandboxHint()}`);
+    return last;
+  }
+  giveUp(late);
+}
+
+/** Of a task whose receiver went before it confirmed delivery: whether the
+ *  message can have reached the session. The receiver notes that it is
+ *  delivering before it starts, so without that note it never began. */
+function howFarItGot(record: TaskRecord): string {
+  return record.deliveryStartedAt
+    ? `It was delivering the message when it went, so the message may have reached ${record.target.name}.`
+    : "The message was not delivered.";
 }
 
 /** Remove what a receiver that was killed outright left behind: its entry in
@@ -548,11 +574,14 @@ function deliver(socketPath: string, line: string): Promise<void> {
  *  thing said in that conversation is the error, so a session that hit one and
  *  carried on is not caught. And only `idle` counts as settled: `waiting` is a
  *  session stopped at a prompt, where a person is about to act, and an entry
- *  that cannot be read says nothing at all. */
+ *  that cannot be read says nothing at all.
+ *
+ *  `until` bounds it from above: once another task's message has started a
+ *  turn of its own in that session, an error after it is that turn's. */
 export function watchForStalledTurn(
   target: TaskRecord["target"],
   since: string,
-  opts: { pollMs?: number; looks?: number } = {},
+  opts: { pollMs?: number; looks?: number; until?: () => string | undefined } = {},
 ): { stalled: Promise<"stalled">; stop(): void } {
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_STALL_POLL_MS) || 3000);
   const looks = opts.looks ?? 20;
@@ -561,7 +590,7 @@ export function watchForStalledTurn(
     let seen = 0;
     timer = setInterval(() => {
       const settled = sessionStatusNow(target.pid) === "idle";
-      seen = settled && turnEndedOnError(target.sessionId, since) ? seen + 1 : 0;
+      seen = settled && turnEndedOnError(target.sessionId, since, opts.until?.()) ? seen + 1 : 0;
       if (seen >= looks) resolve("stalled");
     }, pollMs);
   });
@@ -636,11 +665,18 @@ export async function handleRecvTask(args: string[]): Promise<void> {
     process.exit(code);
   };
   // SIGINT/SIGTERM reach the CLI's own handlers (cli.ts), which exit — and
-  // the exit hook says what happened. SIGHUP has no handler there.
+  // the exit hook says what happened, as far as it had got. SIGHUP has no
+  // handler there.
+  let phase: "before" | "delivering" | "delivered" = "before";
   process.on("exit", () => {
     if (finished) return;
     release();
-    try { updateTask(stateDir, task.id, { status: "failed", error: "the process collecting the reply was stopped before a reply came", finishedAt: new Date().toISOString() }); } catch { /* state dir gone */ }
+    const error = phase === "delivered"
+      ? "the process collecting the reply was stopped before a reply came"
+      : phase === "delivering"
+        ? `the process delivering the message was stopped while delivering it, so the message may have reached ${target.name}`
+        : "the process delivering the message was stopped before it delivered it";
+    try { updateTask(stateDir, task.id, { status: "failed", error, finishedAt: new Date().toISOString() }); } catch { /* state dir gone */ }
   });
   process.on("SIGHUP", () => process.exit(129));
 
@@ -664,8 +700,11 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   // for this task to fail.
   try { await sweepDeadReceivers(); } catch { /* leave them */ }
 
+  // The reply, also kept where code that is busy elsewhere (stopping a
+  // blocked session) can see it came.
+  let arrived = null as { text: string; fromName: string } | null;
   let resolveReply!: (reply: { text: string; fromName: string }) => void;
-  const reply = new Promise<{ text: string; fromName: string }>((resolve) => { resolveReply = resolve; });
+  const reply = new Promise<{ text: string; fromName: string }>((resolve) => { resolveReply = (r) => { arrived ??= r; resolve(r); }; });
   server = createServer((sock) => {
     sock.setEncoding("utf8");
     let buffer = "";
@@ -729,6 +768,14 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   }
 
   // ── Deliver ──
+  // Noted first: a receiver that goes from here on may have delivered, and
+  // whoever reads the record must not be told the message never went. The
+  // session's state at this moment says whether the message starts a turn
+  // or joins one already running — which is what tells a later task's error
+  // from this one's (see nextTurnAfter).
+  phase = "delivering";
+  const joinedTurn = sessionStatusNow(target.pid) === "busy";
+  updateTask(stateDir, task.id, { deliveryStartedAt: new Date().toISOString(), joinedTurn });
   try {
     await deliver(target.socketPath, buildEnvelope({
       text: composeMessage(task.message, { threadId: task.threadId }),
@@ -741,7 +788,23 @@ export async function handleRecvTask(args: string[]): Promise<void> {
     finish({ status: "failed", error: `Could not reach ${target.name} (socket ${target.socketPath}): ${detail}\nIt may have just exited — \`codex-collab peers\` shows who is live.` }, 1);
   }
   const deliveredAt = new Date().toISOString();
-  updateTask(stateDir, task.id, { status: "running", deliveredAt, senderName: name });
+  updateTask(stateDir, task.id, { status: "running", deliveredAt, senderName: name, ...(joinedTurn ? { busySeenAt: deliveredAt } : {}) });
+  phase = "delivered";
+  // Errors are this task's until another task's message starts a turn of its
+  // own in that session — which it can only do once this message's turn has
+  // been seen running: until then, a message delivered after it may land in
+  // the same turn. So that moment is noted when it comes.
+  const until = (): string | undefined => nextTurnAfter(stateDir, task.id);
+  let busyWatch: ReturnType<typeof setInterval> | null = joinedTurn ? null : setInterval(() => {
+    // The conversation dates it best — the first thing said after delivery
+    // is this message's turn at work, however short that turn was; the
+    // status says so too, while the turn lasts.
+    const said = firstSaidSince(target.sessionId, deliveredAt);
+    if (!said && sessionStatusNow(target.pid) !== "busy") return;
+    updateTask(stateDir, task.id, { busySeenAt: said ?? new Date().toISOString() });
+    if (busyWatch) clearInterval(busyWatch);
+    busyWatch = null;
+  }, Number(process.env.CODEX_COLLAB_BUSY_POLL_MS) || 1000);
 
   // ── Listen ──
   // A session codex-collab started has nobody attached. If it stops at a
@@ -756,12 +819,13 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   const done: (patch: Partial<TaskRecord>) => never = (patch) => {
     blockedWatch?.stop();
     lostWatch.stop();
+    if (busyWatch) clearInterval(busyWatch);
     finish(patch);
   };
 
   let noted = false;
   for (;;) {
-    const stall = noted ? null : watchForStalledTurn(target, deliveredAt);
+    const stall = noted ? null : watchForStalledTurn(target, deliveredAt, { until });
     const answer = await Promise.race([
       reply,
       expiry,
@@ -776,7 +840,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       // job: whether to ask it to carry on, hand the work to someone else or
       // drop it is the Codex session's to decide, and a message sent from
       // here would be one it never asked for, in a conversation it cannot see.
-      const t = turnTrouble(target.sessionId, deliveredAt);
+      const t = turnTrouble(target.sessionId, deliveredAt, until());
       const reason = `${target.name} ended its turn without replying${t ? `: ${describeTrouble(t)}` : ""}`;
       // A session codex-collab started has nobody to set it going again, so
       // that is the end of the task. A session the user is working in has
@@ -792,16 +856,28 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       // swallow every message sent meanwhile. Stopped, it can be resumed. Two
       // tasks may find the same session blocked: stopping and marking it are
       // both safe to do twice.
+      let stillThere = false;
       if (target.spawned) {
-        await stopAndConfirm(target.spawned);
-        markSpawnedSessionStopped(stateDir, target.spawned.id);
+        // Recorded as stopped only once it is, as the reaper does: a record
+        // marked stopped while its session runs makes that session read as
+        // the user's own. And stopped is stopped whatever becomes of the
+        // record: one that could not be marked is the next reader's to settle,
+        // and no reason to report this task as anything but what happened.
+        if ((await stopSpawnedSession(target.spawned)).gone) {
+          try { markSpawnedSessionStopped(stateDir, target.spawned.id); } catch (e) { console.log(`Could not mark ${target.name} stopped: ${e instanceof Error ? e.message : String(e)}`); }
+        } else {
+          stillThere = true;
+        }
       }
-      done({ status: "blocked" });
+      // It may have got past the prompt and answered while it was being
+      // stopped: an answer that came is the task's answer.
+      if (arrived) done({ status: "replied", reply: arrived, error: undefined });
+      done({ status: "blocked", ...(stillThere ? { error: `${target.name} did not stop when told to, and is still at the prompt` } : {}) });
     }
     if (answer === "lost" || answer === "expired") {
       // Why, while the transcript is still at hand: the record outlives the
       // session, and "no reply" says nothing a Codex session can act on.
-      const failure = turnTrouble(target.sessionId, deliveredAt);
+      const failure = turnTrouble(target.sessionId, deliveredAt, until());
       done({ status: answer, ...(failure ? { error: describeTrouble(failure) } : {}) });
     }
     // A stall noted earlier belongs to a turn that then finished: leaving it

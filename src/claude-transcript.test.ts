@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeTrouble, describeTurnError, lastTurnError, transcriptPath, turnEndedOnError, turnErrorsSince, turnTrouble } from "./claude-transcript";
+import { describeTrouble, describeTurnError, firstSaidSince, lastTurnError, transcriptPath, turnEndedOnError, turnErrorsSince, turnTrouble } from "./claude-transcript";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-transcripts-"));
 const SID = "4da729ee-d7cf-46e2-b700-a5bfab15c4a6";
@@ -59,6 +59,15 @@ describe("what the transcript says went wrong", () => {
     expect(turnEndedOnError(sid, "2026-09-22T01:18:20.000Z")?.status).toBe(500);
     // Delivered after it: that error belongs to something earlier.
     expect(turnEndedOnError(sid, "2026-09-22T02:00:00.000Z")).toBeNull();
+    // Another task's message started a turn of its own before it: the error
+    // is that turn's.
+    expect(turnEndedOnError(sid, "2026-09-22T01:18:20.000Z", "2026-09-22T01:18:22.000Z")).toBeNull();
+    expect(turnEndedOnError(sid, "2026-09-22T01:18:20.000Z", "2026-09-22T01:18:30.000Z")?.status).toBe(500);
+    // What was said, and when: bookkeeping written later is not something said.
+    expect(firstSaidSince(sid, "2026-09-22T01:00:00.000Z")).toBe("2026-09-22T01:10:00.000Z");
+    expect(firstSaidSince(sid, "2026-09-22T01:11:00.000Z")).toBe("2026-09-22T01:18:24.032Z");
+    expect(firstSaidSince(sid, "2026-09-22T01:19:00.000Z")).toBeNull();
+    expect(firstSaidSince("44444444-4444-4444-8444-444444444444", "2026-09-22T01:00:00.000Z")).toBeNull();
     // It hit the error and carried on: the turn did not end there.
     writeFileSync(join(dir, `${sid}.jsonl`), [err, ...bookkeeping, said("2026-09-22T01:19:00.000Z"), ""].join("\n"));
     expect(turnEndedOnError(sid, "2026-09-22T01:18:20.000Z")).toBeNull();

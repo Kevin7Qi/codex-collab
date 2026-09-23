@@ -15,6 +15,7 @@ import {
   createTask,
   listTasks,
   loadTask,
+  nextTurnAfter,
   outstandingTasksFor,
   resolveTaskId,
   settled,
@@ -101,7 +102,10 @@ describe("task records", () => {
     // The check gets what identifies the receiver, pid domain included: from
     // inside Codex's sandbox every host pid looks dead, and only the domain says so.
     expect(seen[0]).toEqual({ pid: 99, procStart: "555", pidDomain: "linux:m:pid:[1]" });
-    expect(settled({ ...base, status: "pending" }, () => "dead").error).toContain("may not have been delivered");
+    // Gone before it delivered, or while delivering: the record says which,
+    // so Codex is never told a message it may have delivered did not go.
+    expect(settled({ ...base, status: "pending" }, () => "dead").error).toContain("so the message was not delivered");
+    expect(settled({ ...base, status: "pending", deliveryStartedAt: "t" }, () => "dead").error).toContain("so the message may have reached the session");
     expect(settled(base, () => "unverifiable")).toBe(base);
     expect(settled(base, () => "live")).toBe(base);
     // A finished task is what it is, whatever became of its receiver since.
@@ -110,6 +114,20 @@ describe("task records", () => {
     // Before the receiver has written itself in there is nobody to check.
     const { receiver: _none, ...unclaimed } = base;
     expect(settled(unclaimed, () => "dead")).toBe(unclaimed);
+  });
+
+  test("a task that never got a receiver settles as not delivered, and holds nothing", () => {
+    const stateDir = freshStateDir();
+    const now = Date.parse("2026-09-21T10:00:00.000Z");
+    // `send` was killed between recording the task and starting its receiver.
+    const orphan = createTask(stateDir, fields, new Date(now - 5 * 60_000));
+    expect(settled(orphan, () => "live", now)).toEqual(expect.objectContaining({ status: "failed", error: expect.stringContaining("never started, so the message was not delivered") }));
+    // A moment old, its receiver may still be starting.
+    const young = createTask(stateDir, fields, new Date(now - 5_000));
+    expect(settled(young, () => "live", now)).toBe(young);
+    // Settled, it no longer holds the session from the reaper.
+    const aged = createTask(stateDir, fields, new Date(Date.now() - 5 * 60_000));
+    expect(outstandingTasksFor(stateDir, target).map((t) => t.id)).not.toContain(aged.id);
   });
 
   test("a task waits on its session under whatever pid the session has now", () => {
@@ -121,6 +139,38 @@ describe("task records", () => {
     expect(outstandingTasksFor(stateDir, { pid: 4242, sessionId: "another" })).toEqual([]);
     // Where a side has no session id, the pid is all there is.
     expect(outstandingTasksFor(stateDir, { pid: 4242, sessionId: null }).map((t) => t.id)).toEqual([task.id]);
+  });
+
+  test("a later task's own turn bounds which errors are this task's", () => {
+    const stateDir = freshStateDir();
+    const at = (s: number) => new Date(Date.parse("2026-09-21T10:00:00.000Z") + s * 1000).toISOString();
+    const a = createTask(stateDir, fields);
+    updateTask(stateDir, a.id, { status: "running", deliveredAt: at(0), joinedTurn: false });
+    // Delivered to the idle session a moment after A, before A's turn was
+    // seen running: both may be in one turn, and its end is both of theirs.
+    const early = createTask(stateDir, fields);
+    updateTask(stateDir, early.id, { status: "running", deliveredAt: at(1), joinedTurn: false });
+    expect(nextTurnAfter(stateDir, a.id)).toBeUndefined();
+    updateTask(stateDir, a.id, { busySeenAt: at(2) });
+    expect(nextTurnAfter(stateDir, a.id)).toBeUndefined();
+    // Delivered into A's turn while it ran: that turn is still A's.
+    const joined = createTask(stateDir, fields);
+    updateTask(stateDir, joined.id, { status: "running", deliveredAt: at(10), joinedTurn: true });
+    expect(nextTurnAfter(stateDir, a.id)).toBeUndefined();
+    // Another session's turns are no concern of A's.
+    const elsewhere = createTask(stateDir, { ...fields, target: { ...target, pid: 7, sessionId: "other" } });
+    updateTask(stateDir, elsewhere.id, { status: "running", deliveredAt: at(20), joinedTurn: false });
+    expect(nextTurnAfter(stateDir, a.id)).toBeUndefined();
+    // A message that started a turn of its own after A's ended: from here on,
+    // whatever the session hits is that turn's.
+    const b = createTask(stateDir, fields);
+    updateTask(stateDir, b.id, { status: "running", deliveredAt: at(30), joinedTurn: false });
+    updateTask(stateDir, b.id, { busySeenAt: at(31) });
+    const c = createTask(stateDir, fields);
+    updateTask(stateDir, c.id, { status: "running", deliveredAt: at(40), joinedTurn: false });
+    expect(nextTurnAfter(stateDir, a.id)).toBe(at(30));
+    expect(nextTurnAfter(stateDir, b.id)).toBe(at(40));
+    expect(nextTurnAfter(stateDir, c.id)).toBeUndefined();
   });
 
   test("clean removes finished tasks once they are old, with their logs, and never one still waited on", () => {

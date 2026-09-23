@@ -100,7 +100,7 @@ function startFake(name: string, opts: { reply?: ((text: string) => string | nul
 
 /** Register `fake` under a live process of its own (a sleeper), so several
  *  fakes can coexist with filename === pid. */
-function registerFake(fake: FakeSession, opts: { cwd?: string; status?: string; kind?: string } = {}): void {
+function registerFake(fake: FakeSession, opts: { cwd?: string; status?: string; kind?: string; sessionId?: string; jobId?: string } = {}): ReturnType<typeof spawn> {
   const sleeper = spawn("sleep", ["300"], { stdio: "ignore" });
   sleepers.push(sleeper);
   const pid = sleeper.pid!;
@@ -115,11 +115,13 @@ function registerFake(fake: FakeSession, opts: { cwd?: string; status?: string; 
       socketPath: fake.socketPath,
       version: "2.1.261",
       procStart: start,
-      sessionId: "00000000-0000-4000-8000-0000000000aa",
+      sessionId: opts.sessionId ?? "00000000-0000-4000-8000-0000000000aa",
     }),
     status: opts.status ?? "idle",
     kind: opts.kind ?? "interactive",
+    ...(opts.jobId ? { jobId: opts.jobId } : {}),
   }));
+  return sleeper;
 }
 
 const sleepers: ReturnType<typeof spawn>[] = [];
@@ -191,7 +193,7 @@ function removeConfig(): void {
  *  registers a live entry (a sleeper it starts) whose socket is `socketPath`
  *  — a fake session this test serves. `stop <id>` only logs, so a reaper's
  *  confirming look finds the entry still live and signals the sleeper. */
-function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s"): void {
+function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s", opts: { stopDelaySec?: number } = {}): void {
   mkdirSync(binDir, { recursive: true });
   writeFileSync(join(binDir, "claude"), `#!/bin/sh
 case "$1" in
@@ -207,7 +209,7 @@ case "$1" in
     printf '{"pid":%s,"sessionId":"${sessionId}","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","jobId":"cafe0001","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
       "$pid" "$(pwd)" "$now" "$start" "${socketPath}" "$3" "$now" "$now" > "$CODEX_COLLAB_SESSIONS_DIR/$pid.json"
     ;;
-  stop) echo "stop $2" >> "${binDir}/stop.log" ;;
+  stop) echo "stop $2" >> "${binDir}/stop.log"${opts.stopDelaySec ? `; sleep ${opts.stopDelaySec}` : ""} ;;
 esac
 `, { mode: 0o755 });
 }
@@ -988,7 +990,8 @@ describeUnix("send", () => {
     expect(r.code).toBe(3);
     expect(r.stdout).toContain("no reply from asking-claude within 1s");
     expect(r.stdout).toContain("session: asking-claude is at a prompt in its own terminal");
-    expect(r.stdout).not.toContain("It has been stopped");
+    expect(r.stdout).not.toContain("stopped by codex-collab");
+    expect(r.stdout).not.toContain("status: blocked");
     // Still registered: the user's session is theirs.
     expect(existsSync(fake.entryPath)).toBe(true);
   });
@@ -1168,8 +1171,10 @@ describeUnix("send", () => {
     const projects = join(TEST_HOME, "projects-stalled");
     const sid = "00000000-0000-4000-8000-0000000000aa";
     mkdirSync(join(projects, "-ws"), { recursive: true });
+    // Stamped well after the delivery, however slowly this machine gets there:
+    // an error stamped before it would be some earlier turn's.
     writeFileSync(join(projects, "-ws", `${sid}.jsonl`), JSON.stringify({
-      type: "assistant", timestamp: new Date(Date.now() + 1000).toISOString(),
+      type: "assistant", timestamp: new Date(Date.now() + 10_000).toISOString(),
       isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error",
     }) + "\n");
     const fake = startFake("dying-claude", { reply: null });
@@ -1208,8 +1213,9 @@ describeUnix("send", () => {
     writeFakeClaude(binDir, fake.socketPath, sid);
     writeConfig({ linger: 600 });
     try {
+      // Stamped well after the delivery, however slowly this machine gets there.
       writeFileSync(join(projects, "-ws", `${sid}.jsonl`), JSON.stringify({
-        type: "assistant", timestamp: new Date(Date.now() + 1000).toISOString(),
+        type: "assistant", timestamp: new Date(Date.now() + 10_000).toISOString(),
         isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error",
       }) + "\n");
       const r = await runCli(["send", "the whole job", "--timeout", "25"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_PROJECTS_DIR: projects, CODEX_COLLAB_STALL_POLL_MS: "40" });
@@ -1231,11 +1237,12 @@ describeUnix("send", () => {
     mkdirSync(join(projects, "-ws"), { recursive: true });
     // Hit an error, then went on working: the turn did not end there, so it
     // says nothing about this task, which is still waiting on a reply.
-    // Both after the message is delivered, so neither is filtered out by
-    // time: what settles it is that the error is not the last thing said.
+    // Both after the message is delivered — well after, however slowly this
+    // machine gets there — so neither is filtered out by time: what settles
+    // it is that the error is not the last thing said.
     writeFileSync(join(projects, "-ws", `${sid}.jsonl`), [
-      JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 1000).toISOString(), isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error" }),
-      JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 2000).toISOString() }),
+      JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 10_000).toISOString(), isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error" }),
+      JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 11_000).toISOString() }),
       "",
     ].join("\n"));
     const fake = startFake("working-claude", { reply: null });
@@ -1263,8 +1270,8 @@ describeUnix("send", () => {
       // the session hit it and carried on. This is the case that must not be
       // called dead — the branch that would end a started session's task.
       writeFileSync(join(projects, "-ws", `${sid}.jsonl`), [
-        JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 500).toISOString(), isApiErrorMessage: true, apiErrorStatus: 500, error: "server_error" }),
-        JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 600).toISOString() }),
+        JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 10_000).toISOString(), isApiErrorMessage: true, apiErrorStatus: 500, error: "server_error" }),
+        JSON.stringify({ type: "assistant", timestamp: new Date(Date.now() + 10_100).toISOString() }),
         "",
       ].join("\n"));
       const env = { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_PROJECTS_DIR: projects, CODEX_COLLAB_STALL_POLL_MS: "20" };
@@ -1368,6 +1375,122 @@ describeUnix("send", () => {
       expect(piped.code).toBe(1);
       expect(piped.stderr).toContain('No live Claude Code session named "gone-claude"');
       expect(users.received).toHaveLength(0);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a task notes when the turn it is in is first seen running", async () => {
+    const idle = startFake("idle-claude", { reply: null });
+    registerFake(idle);
+    const env = { CODEX_COLLAB_BUSY_POLL_MS: "50" };
+    const id = taskIdOf((await runCli(["send", "--to", "idle-claude", "one", "--no-wait"], env)).stdout);
+    // Found idle: its turn has not been seen yet.
+    expect(taskRecord(id)).toEqual(expect.objectContaining({ joinedTurn: false }));
+    expect(taskRecord(id)).not.toHaveProperty("busySeenAt");
+    const entry = JSON.parse(readFileSync(idle.entryPath, "utf-8"));
+    writeFileSync(idle.entryPath, JSON.stringify({ ...entry, status: "busy" }));
+    await waitFor(() => typeof taskRecord(id)?.busySeenAt === "string");
+    // Found in a turn already running: that turn is its own from the start.
+    const busy = startFake("busy-claude", { reply: null });
+    registerFake(busy, { status: "busy" });
+    const joined = taskIdOf((await runCli(["send", "--to", "busy-claude", "two", "--no-wait"], env)).stdout);
+    const record = taskRecord(joined) as { joinedTurn?: boolean; busySeenAt?: string; deliveredAt?: string };
+    expect(record.joinedTurn).toBe(true);
+    expect(record.busySeenAt).toBe(record.deliveredAt);
+  });
+
+  test("a task nobody answers expires after its longest wait, and its receiver goes with it", async () => {
+    const fake = startFake("silent-claude", { reply: null });
+    registerFake(fake);
+    const env = { CODEX_COLLAB_TASK_MAX_WAIT_SEC: "1" };
+    const id = taskIdOf((await runCli(["send", "anyone?", "--timeout", "1"], env)).stdout);
+    const waited = await runCli(["task", "wait", id, "--timeout", "20"], env);
+    expect(waited.code).toBe(1);
+    expect(waited.stdout).toContain(`task: ${id}  status: expired`);
+    expect(waited.stdout).toContain("no reply from silent-claude in");
+    // Nothing left listening: no registration, no socket.
+    const ours = readdirSync(REGISTRY).filter((f) => {
+      try { return String(JSON.parse(readFileSync(join(REGISTRY, f), "utf-8")).name).includes(id); } catch { return false; }
+    });
+    expect(ours).toEqual([]);
+    expect(existsSync(fake.received[0].replyPath)).toBe(false);
+  });
+
+  test("a delivery cut off at the handshake's limit is reported as one that may have reached the session", async () => {
+    // A session that listens and never accepts: the connection waits in the
+    // backlog, a long message fills the socket, and the receiver is left
+    // delivering. (Bun's own servers read whatever arrives, paused or not.)
+    const socketPath = join(tmpdir(), `cc-stuck-${process.pid}.sock`);
+    try { unlinkSync(socketPath); } catch { /* none */ }
+    const listener = spawn("python3", ["-c", `import socket, time\ns = socket.socket(socket.AF_UNIX)\ns.bind(${JSON.stringify(socketPath)})\ns.listen(4)\ntime.sleep(60)`], { stdio: "ignore" });
+    const server = { close: () => listener.kill() };
+    await waitFor(() => existsSync(socketPath));
+    const stuck = { name: "stuck-claude", socketPath, entryPath: "" } as FakeSession;
+    registerFake(stuck);
+    try {
+      const r = await runCli(["send", "stuck-claude", "-", "--no-wait"], { CODEX_COLLAB_HANDSHAKE_MS: "4000" }, "x".repeat(4 * 1024 * 1024));
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("The message was not confirmed delivered within 4s");
+      expect(r.stderr).toContain("so the message may have reached stuck-claude");
+      expect(r.stdout).not.toContain("Sent to");
+    } finally {
+      server.close();
+      try { unlinkSync(socketPath); } catch { /* gone */ }
+    }
+  });
+
+  test("a started session that answers while it is being stopped at a prompt has answered", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-blocked-answers");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    // `claude stop` takes a moment, as it does for a real session.
+    writeFakeClaude(binDir, fake.socketPath, "s", { stopDelaySec: 1 });
+    writeConfig({ linger: 60 });
+    try {
+      const live = runCliLive(["send", "edit the file", "--timeout", "60"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
+      await waitFor(() => fake.received.length === 1, 15_000);
+      for (const f of readdirSync(REGISTRY)) {
+        const file = join(REGISTRY, f);
+        const entry = JSON.parse(readFileSync(file, "utf-8"));
+        if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, status: "waiting" }));
+      }
+      // While it is being stopped it gets past the prompt, and answers.
+      await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
+      speak(fake, fake.received[0].replyPath, "done after all");
+      const r = await live.done;
+      expect(r.code).toBe(0);
+      expect(r.stdout).toMatch(/task: [0-9a-f]{8}  status: replied/);
+      expect(r.stdout).toContain("  done after all");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test.skipIf(process.platform !== "linux")("a started session at a prompt that does not stop when told to is not reported, or recorded, as stopped", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-blocked-stays");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 60 });
+    try {
+      const live = runCliLive(["send", "edit the file", "--timeout", "60"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
+      await waitFor(() => fake.received.length === 1, 15_000);
+      // At a prompt, and seen from another pid domain: `claude stop` does
+      // nothing, and no signal can follow it.
+      for (const f of readdirSync(REGISTRY)) {
+        const file = join(REGISTRY, f);
+        const entry = JSON.parse(readFileSync(file, "utf-8"));
+        if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, status: "waiting", pidDomain: "linux:elsewhere:pid:[1]" }));
+      }
+      const r = await live.done;
+      expect(r.code).toBe(5);
+      expect(r.stdout).toContain(`error: ${fake.name} did not stop when told to, and is still at the prompt`);
+      expect(r.stdout).not.toContain("session: stopped by codex-collab");
+      const [record] = spawnedRecords() as Array<{ id: string; stoppedAt?: string }>;
+      expect(record.stoppedAt).toBeUndefined();
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
