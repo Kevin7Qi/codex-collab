@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describeTrouble, describeTurnError, firstSaidSince, lastTurnError, transcriptPath, turnEndedOnError, turnErrorsSince, turnTrouble } from "./claude-transcript";
+import { conversationMovedSince, describeTrouble, describeTurnError, firstSaidSince, lastTurnError, transcriptPath, turnEndedOnError, turnErrorsSince, turnTrouble } from "./claude-transcript";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-transcripts-"));
 const SID = "4da729ee-d7cf-46e2-b700-a5bfab15c4a6";
@@ -67,7 +67,10 @@ describe("what the transcript says went wrong", () => {
     expect(firstSaidSince(sid, "2026-09-22T01:00:00.000Z")).toBe("2026-09-22T01:10:00.000Z");
     expect(firstSaidSince(sid, "2026-09-22T01:11:00.000Z")).toBe("2026-09-22T01:18:24.032Z");
     expect(firstSaidSince(sid, "2026-09-22T01:19:00.000Z")).toBeNull();
+    expect(conversationMovedSince(sid, "2026-09-22T01:18:00.000Z")).toBe(true);
+    expect(conversationMovedSince(sid, "2026-09-22T01:19:00.000Z")).toBe(false);
     expect(firstSaidSince("44444444-4444-4444-8444-444444444444", "2026-09-22T01:00:00.000Z")).toBeNull();
+    expect(conversationMovedSince(null, "2026-09-22T01:00:00.000Z")).toBe(false);
     // It hit the error and carried on: the turn did not end there.
     writeFileSync(join(dir, `${sid}.jsonl`), [err, ...bookkeeping, said("2026-09-22T01:19:00.000Z"), ""].join("\n"));
     expect(turnEndedOnError(sid, "2026-09-22T01:18:20.000Z")).toBeNull();

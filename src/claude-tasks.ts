@@ -46,9 +46,16 @@ export interface TaskRecord {
     socketPath: string;
     sessionId: string | null;
     procStart: string | null;
+    /** Registry kind (`bg` for a background session) and, for one, its job:
+     *  what Claude Code keeps when it brings a session back as a new process. */
+    kind?: string;
+    jobId?: string | null;
     /** Set when codex-collab started the session: what `blocked` stops. */
     spawned: SpawnedSession | null;
   };
+  /** When Claude Code last brought the session back as a new process while
+   *  the task waited — `target` is the process it is now. */
+  restartedAt?: string;
   createdAt: string;
   /** When the receiver began delivering: from then on the message may have
    *  reached the session, whatever becomes of the receiver. */

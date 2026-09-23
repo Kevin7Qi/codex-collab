@@ -54,6 +54,7 @@ import {
   markSpawnedSessionStopped,
   resolveSession,
   resumableSession,
+  findRestartedSession,
   sessionStatusNow,
   spawnClaudeSession,
   spawnEnv,
@@ -62,7 +63,7 @@ import {
   transientSessionId,
   type ClaudeSession,
 } from "../claude-sessions";
-import { describeTrouble, firstSaidSince, turnEndedOnError, turnTrouble } from "../claude-transcript";
+import { conversationMovedSince, describeTrouble, firstSaidSince, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
@@ -157,14 +158,15 @@ export function splitTarget(
  *  `waiting`, at a prompt, with nobody attached. Resolves "blocked" once the
  *  registry has said so on several looks in a row (a prompt a hook or the
  *  classifier answers is gone again within a moment). */
-export function watchForBlocked(pid: number, opts: { pollMs?: number; looks?: number } = {}): { blocked: Promise<"blocked">; stop(): void } {
+export function watchForBlocked(target: { pid: number }, opts: { pollMs?: number; looks?: number } = {}): { blocked: Promise<"blocked">; stop(): void } {
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_BLOCKED_POLL_MS) || 2000);
   const looks = opts.looks ?? 5;
   let timer: ReturnType<typeof setInterval> | null = null;
   const blocked = new Promise<"blocked">((resolve) => {
     let seen = 0;
     timer = setInterval(() => {
-      seen = sessionStatusNow(pid) === "waiting" ? seen + 1 : 0;
+      // Read at every look: the session may have become another process.
+      seen = sessionStatusNow(target.pid) === "waiting" ? seen + 1 : 0;
       if (seen >= looks) resolve("blocked");
     }, pollMs);
   });
@@ -375,7 +377,7 @@ export async function handleSend(args: string[]): Promise<void> {
       cwd: wsRoot,
       threadId,
       message,
-      target: { name: target.name, pid: target.pid, socketPath: target.socketPath, sessionId: target.sessionId, procStart: target.procStart, spawned: target.spawned },
+      target: { name: target.name, pid: target.pid, socketPath: target.socketPath, sessionId: target.sessionId, procStart: target.procStart, kind: target.kind, jobId: target.jobId ?? null, spawned: target.spawned },
       // A caller willing to wait longer than a task is normally waited on
       // must not see it expire under them.
       maxWaitSec: Math.max(taskMaxWaitSec(), timeoutSec),
@@ -600,15 +602,32 @@ export function watchForStalledTurn(
 /** Watch for the session a task waits on going away: its registry entry
  *  gone, or now another session's, or its process dead. Resolves "lost" once
  *  that has held for several looks in a row — Claude Code rewrites entries
- *  while it runs, and one unreadable moment is no evidence. */
-export function watchForLost(target: TaskRecord["target"], opts: { pollMs?: number; looks?: number } = {}): { lost: Promise<"lost">; stop(): void } {
+ *  while it runs, and one unreadable moment is no evidence.
+ *
+ *  A background session is given longer, because Claude Code brings one back.
+ *  One that dies in the middle of a turn — crashed, killed, signalled — is
+ *  restarted ten seconds later as a new process, under the same job and
+ *  session id, and told to continue the turn it was in: the reply this task
+ *  waits for may yet come, from the new process. So a background session that
+ *  goes is looked for again for `restartGraceMs` before it counts as lost.
+ *  When it comes back, `target` is moved to the process it is now — every
+ *  other watch, and the reply's address, read it from there — and
+ *  `onRestart` is told. It then has `continueGraceMs` to show it picked the
+ *  turn up (seen at work, or its conversation moving on), or it counts as
+ *  lost after all: Claude Code does not continue every turn it restarts.
+ *  `reason()` says why a session that came back was lost. */
+export function watchForLost(
+  target: TaskRecord["target"],
+  opts: { pollMs?: number; looks?: number; restartGraceMs?: number; continueGraceMs?: number; onRestart?: (restartedAt: string) => void } = {},
+): { lost: Promise<"lost">; stop(): void; reason(): string | null } {
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_LOST_POLL_MS) || 2000);
   const looks = opts.looks ?? 3;
-  const file = join(sessionsDir(), `${target.pid}.json`);
+  const restartGraceMs = opts.restartGraceMs ?? (Number(process.env.CODEX_COLLAB_RESTART_GRACE_MS) || 30_000);
+  const continueGraceMs = opts.continueGraceMs ?? (Number(process.env.CODEX_COLLAB_CONTINUE_GRACE_MS) || 60_000);
   const gone = (): boolean => {
     let entry: Record<string, unknown>;
     try {
-      entry = JSON.parse(readFileSync(file, "utf-8"));
+      entry = JSON.parse(readFileSync(join(sessionsDir(), `${target.pid}.json`), "utf-8"));
     } catch {
       return true;
     }
@@ -618,14 +637,54 @@ export function watchForLost(target: TaskRecord["target"], opts: { pollMs?: numb
     return procIdentity(entry) === "dead";
   };
   let timer: ReturnType<typeof setInterval> | null = null;
+  let why: string | null = null;
   const lost = new Promise<"lost">((resolve) => {
     let seen = 0;
+    let goneSince: number | null = null;
+    let restartedAt: number | null = null;
+    // When the new process started: whatever the session says from then on
+    // is the new process at work — the turn carried on, which may have run,
+    // and even ended, before the restart was seen here.
+    let newProcessSince: number | null = null;
     timer = setInterval(() => {
-      seen = gone() ? seen + 1 : 0;
+      const now = Date.now();
+      if (!gone()) {
+        seen = 0;
+        goneSince = null;
+        if (restartedAt !== null) {
+          const since = new Date(newProcessSince ?? restartedAt).toISOString();
+          if (sessionStatusNow(target.pid) === "busy" || conversationMovedSince(target.sessionId, since)) {
+            restartedAt = null;
+          } else if (now - restartedAt >= continueGraceMs) {
+            why = `${target.name} was restarted by Claude Code after its process exited, and did not pick its turn up again`;
+            resolve("lost");
+          }
+        }
+        return;
+      }
+      seen++;
+      goneSince ??= now;
+      if (target.kind === "bg") {
+        const back = findRestartedSession({ pid: target.pid, sessionId: target.sessionId, jobId: target.jobId });
+        if (back && typeof back.pid === "number" && typeof back.messagingSocketPath === "string") {
+          target.pid = back.pid;
+          target.procStart = typeof back.procStart === "string" ? back.procStart : null;
+          target.socketPath = back.messagingSocketPath;
+          if (target.spawned) target.spawned = { ...target.spawned, pid: back.pid, procStart: target.procStart ?? undefined };
+          seen = 0;
+          newProcessSince = typeof back.startedAt === "number" && back.startedAt <= now ? back.startedAt : goneSince;
+          goneSince = null;
+          restartedAt = now;
+          opts.onRestart?.(new Date(now).toISOString());
+          return;
+        }
+        if (seen >= looks && now - goneSince >= restartGraceMs) resolve("lost");
+        return;
+      }
       if (seen >= looks) resolve("lost");
     }, pollMs);
   });
-  return { lost, stop() { if (timer) clearInterval(timer); } };
+  return { lost, stop() { if (timer) clearInterval(timer); }, reason: () => why };
 }
 
 /** `codex-collab recv-task <id> --dir <workspace>` (private). Started
@@ -719,8 +778,14 @@ export async function handleRecvTask(args: string[]): Promise<void> {
         const msg = parseEnvelope(line);
         if (!msg) continue;
         // The reply the task waits for is the named session's. Another
-        // sender's message is not an answer — it is noted, not consumed.
-        if (msg.replyPath !== target.socketPath) {
+        // sender's message is not an answer — it is noted, not consumed. A
+        // background session Claude Code has just brought back replies from
+        // the new process's own socket, and may do so before the watch below
+        // has seen the restart: the same job and session at that address is
+        // the session asked.
+        const fromTarget = msg.replyPath === target.socketPath
+          || (target.kind === "bg" && !!findRestartedSession({ pid: target.pid, sessionId: target.sessionId, jobId: target.jobId, socketPath: msg.replyPath }));
+        if (!fromTarget) {
           console.log(`A message from ${msg.fromName} arrived; still waiting for ${target.name}.`);
           continue;
         }
@@ -812,8 +877,15 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   // in auto mode after all: Claude Code falls back to asking where that mode
   // is unavailable to the session, which depends on the model. Watching for
   // it turns hours of silence into an answer Codex can act on.
-  const blockedWatch = target.spawned ? watchForBlocked(target.pid) : null;
-  const lostWatch = watchForLost(target);
+  const blockedWatch = target.spawned ? watchForBlocked(target) : null;
+  // Brought back as a new process mid-turn, the session is followed there:
+  // the record says so, and says where it is now.
+  const lostWatch = watchForLost(target, {
+    onRestart: (restartedAt) => {
+      console.log(`${target.name} was restarted by Claude Code as pid ${target.pid}; still waiting for its reply.`);
+      updateTask(stateDir, task.id, { target: { ...target }, restartedAt });
+    },
+  });
   const remaining = Math.max(0, Date.parse(task.expiresAt) - Date.now());
   const expiry = new Promise<"expired">((r) => setTimeout(() => r("expired"), Number.isFinite(remaining) ? remaining : TASK_MAX_WAIT_SEC * 1000));
   const done: (patch: Partial<TaskRecord>) => never = (patch) => {
@@ -878,7 +950,8 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       // Why, while the transcript is still at hand: the record outlives the
       // session, and "no reply" says nothing a Codex session can act on.
       const failure = turnTrouble(target.sessionId, deliveredAt, until());
-      done({ status: answer, ...(failure ? { error: describeTrouble(failure) } : {}) });
+      const error = [answer === "lost" ? lostWatch.reason() : null, failure ? describeTrouble(failure) : null].filter(Boolean).join("; ");
+      done({ status: answer, ...(error ? { error } : {}) });
     }
     // A stall noted earlier belongs to a turn that then finished: leaving it
     // on the record would tell the next reader this task's turn had died.

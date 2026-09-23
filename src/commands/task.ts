@@ -148,6 +148,7 @@ function printSessionFacts(record: TaskRecord, opts: { skipError?: boolean; stat
   // the transcript again: the same task must not read differently twice.
   const failure = opts.skipError ? null : record.error ?? describeFailure(record, opts.stateDir);
   if (failure) console.log(`error: ${failure}`);
+  if (record.restartedAt) console.log(`restarted: by Claude Code ${since(record.restartedAt)} ago, after its process exited`);
   if (record.status === "pending" || record.status === "running") {
     if (sessionStatusNow(record.target.pid) === "waiting") console.log(`session: ${record.target.name} is at a prompt in its own terminal`);
     return;
@@ -195,6 +196,7 @@ function printStatus(record: TaskRecord, hint: string, stateDir: string): void {
     // with nothing in hand, `waiting` one stopped at a prompt.
     console.log(`  session   ${sessionStatusNow(record.target.pid) ?? "not registered"}`);
   }
+  if (record.restartedAt) console.log(`  restarted ${since(record.restartedAt)} ago, by Claude Code after its process exited`);
   // One line, whether it was recorded when it happened or read from the
   // transcript now — two would be the same trouble told twice, differently.
   const recorded = record.error ?? describeFailure(record, stateDir);

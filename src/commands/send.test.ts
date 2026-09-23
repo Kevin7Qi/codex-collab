@@ -135,10 +135,9 @@ function cliEnv(extra: Record<string, string>): Record<string, string> {
   delete env.CODEX_SANDBOX_NETWORK_DISABLED;
   // Fast polls: a receiver left waiting by one test sees its session gone,
   // and ends, within a moment of that test's cleanup.
-  // A session that had to be signalled must stay gone past Claude Code's
-  // restart window before it counts as stopped: a moment, here, not half a
-  // minute.
-  return { ...env, HOME: TEST_HOME, CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
+  // A background session that goes is looked for again for Claude Code's
+  // restart window: a moment, here, not half a minute.
+  return { ...env, HOME: TEST_HOME, CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_COLLAB_CONTINUE_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
 }
 
 /** Speak to a sender's advertised reply address as `fake`. */
@@ -1399,6 +1398,124 @@ describeUnix("send", () => {
     const record = taskRecord(joined) as { joinedTurn?: boolean; busySeenAt?: string; deliveredAt?: string };
     expect(record.joinedTurn).toBe(true);
     expect(record.busySeenAt).toBe(record.deliveredAt);
+  });
+
+  test("a background session Claude Code restarts in the middle of a turn is followed, and its reply is the task's", async () => {
+    const sid = "0000000b-0000-4000-8000-00000000000b";
+    const first = startFake("bg-claude", { reply: null });
+    const firstProcess = registerFake(first, { kind: "bg", jobId: "cafe000b", sessionId: sid, status: "busy" });
+    // A long window, so only the restart can settle this one.
+    const env = { CODEX_COLLAB_RESTART_GRACE_MS: "20000" };
+    const id = taskIdOf((await runCli(["send", "--to", "bg-claude", "a long job", "--no-wait"], env)).stdout);
+    await waitFor(() => first.received.length === 1);
+    const replyPath = first.received[0].replyPath;
+    // It dies mid-turn; Claude Code brings the job back as a new process,
+    // under the same job and session id, with a socket of its own.
+    firstProcess.kill("SIGKILL");
+    first.server.stop(true);
+    await new Promise((r) => setTimeout(r, 500));
+    const second = startFake("bg-claude", { reply: null });
+    registerFake(second, { kind: "bg", jobId: "cafe000b", sessionId: sid, status: "busy" });
+    await waitFor(() => typeof taskRecord(id)?.restartedAt === "string", 10_000);
+    const record = taskRecord(id) as { status: string; target: { socketPath: string } };
+    expect(record.status).toBe("running");
+    expect(record.target.socketPath).toBe(second.socketPath);
+    expect((await runCli(["task", "status", id])).stdout).toMatch(/restarted .* ago, by Claude Code after its process exited/);
+    // The new process finishes the turn and replies.
+    speak(second, replyPath, "finished after the restart");
+    const waited = await runCli(["task", "wait", id, "--timeout", "20"]);
+    expect(waited.code).toBe(0);
+    expect(waited.stdout).toContain("  finished after the restart");
+  });
+
+  test("a reply from the restarted process is the task's, even before the restart has been seen", async () => {
+    const sid = "0000000e-0000-4000-8000-00000000000e";
+    const first = startFake("bg-claude", { reply: null });
+    const firstProcess = registerFake(first, { kind: "bg", jobId: "cafe000e", sessionId: sid, status: "busy" });
+    // Slow looks for the session, so the reply comes first.
+    const env = { CODEX_COLLAB_RESTART_GRACE_MS: "20000", CODEX_COLLAB_LOST_POLL_MS: "5000" };
+    const id = taskIdOf((await runCli(["send", "--to", "bg-claude", "a long job", "--no-wait"], env)).stdout);
+    await waitFor(() => first.received.length === 1);
+    firstProcess.kill("SIGKILL");
+    first.server.stop(true);
+    const second = startFake("bg-claude", { reply: null });
+    registerFake(second, { kind: "bg", jobId: "cafe000e", sessionId: sid, status: "busy" });
+    speak(second, first.received[0].replyPath, "done at once");
+    const waited = await runCli(["task", "wait", id, "--timeout", "10"], env);
+    expect(waited.code).toBe(0);
+    expect(waited.stdout).toContain("  done at once");
+  });
+
+  test("a turn picked up again before the restart was seen counts as picked up", async () => {
+    const sid = "0000000f-0000-4000-8000-00000000000f";
+    const projects = join(TEST_HOME, "projects-continued-early");
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    const first = startFake("bg-claude", { reply: null });
+    const firstProcess = registerFake(first, { kind: "bg", jobId: "cafe000f", sessionId: sid, status: "busy" });
+    const env = { CODEX_COLLAB_RESTART_GRACE_MS: "20000", CODEX_COLLAB_LOST_POLL_MS: "1000", CODEX_COLLAB_PROJECTS_DIR: projects };
+    const id = taskIdOf((await runCli(["send", "--to", "bg-claude", "a long job", "--no-wait"], env)).stdout);
+    await waitFor(() => first.received.length === 1);
+    firstProcess.kill("SIGKILL");
+    first.server.stop(true);
+    // The new process starts, carries the turn on at once, and is idle again
+    // — a short step — by the time the restart is seen.
+    const second = startFake("bg-claude", { reply: null });
+    registerFake(second, { kind: "bg", jobId: "cafe000f", sessionId: sid, status: "idle" });
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(projects, "-ws", `${sid}.jsonl`), JSON.stringify({ type: "assistant", timestamp: new Date().toISOString() }) + "\n");
+    await waitFor(() => typeof taskRecord(id)?.restartedAt === "string", 10_000);
+    // Well past the minute the continuation is given (1.5 s here): still open.
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "running" }));
+  });
+
+  test("a turn too short for the status to show is dated from the conversation", async () => {
+    const sid = "00000010-0000-4000-8000-000000000010";
+    const projects = join(TEST_HOME, "projects-short-turn");
+    mkdirSync(join(projects, "-ws"), { recursive: true });
+    const quick = startFake("quick-claude", { reply: null });
+    registerFake(quick, { sessionId: sid, status: "idle" });
+    const env = { CODEX_COLLAB_BUSY_POLL_MS: "50", CODEX_COLLAB_PROJECTS_DIR: projects };
+    const id = taskIdOf((await runCli(["send", "--to", "quick-claude", "one", "--no-wait"], env)).stdout);
+    // The whole turn came and went between two looks at the status.
+    const said = new Date(Date.parse((taskRecord(id) as { deliveredAt: string }).deliveredAt) + 20).toISOString();
+    writeFileSync(join(projects, "-ws", `${sid}.jsonl`), JSON.stringify({ type: "assistant", timestamp: said }) + "\n");
+    await waitFor(() => typeof taskRecord(id)?.busySeenAt === "string");
+    expect(taskRecord(id)?.busySeenAt).toBe(said);
+  });
+
+  test("a restarted session that does not pick its turn up again ends the task as lost, and says so", async () => {
+    const sid = "0000000c-0000-4000-8000-00000000000c";
+    const first = startFake("bg-claude", { reply: null });
+    const firstProcess = registerFake(first, { kind: "bg", jobId: "cafe000c", sessionId: sid, status: "busy" });
+    const id = taskIdOf((await runCli(["send", "--to", "bg-claude", "a long job", "--no-wait"], { CODEX_COLLAB_RESTART_GRACE_MS: "20000" })).stdout);
+    await waitFor(() => first.received.length === 1);
+    firstProcess.kill("SIGKILL");
+    first.server.stop(true);
+    // Back, but idle: the turn it died in was not continued.
+    const second = startFake("bg-claude", { reply: null });
+    registerFake(second, { kind: "bg", jobId: "cafe000c", sessionId: sid, status: "idle" });
+    const waited = await runCli(["task", "wait", id, "--timeout", "20"]);
+    expect(waited.code).toBe(1);
+    expect(waited.stdout).toContain(`task: ${id}  status: lost`);
+    expect(waited.stdout).toContain("error: bg-claude was restarted by Claude Code after its process exited, and did not pick its turn up again");
+  });
+
+  test("a session in a terminal that goes is not looked for as a restarted one", async () => {
+    const sid = "0000000d-0000-4000-8000-00000000000d";
+    const first = startFake("term-claude", { reply: null });
+    const firstProcess = registerFake(first, { sessionId: sid });
+    const id = taskIdOf((await runCli(["send", "--to", "term-claude", "hello", "--no-wait"], { CODEX_COLLAB_RESTART_GRACE_MS: "20000" })).stdout);
+    await waitFor(() => first.received.length === 1);
+    firstProcess.kill("SIGKILL");
+    // The user resumed that conversation in another terminal: same session id,
+    // theirs, and not the process the task was sent to.
+    const resumed = startFake("term-claude", { reply: null });
+    registerFake(resumed, { sessionId: sid });
+    const waited = await runCli(["task", "wait", id, "--timeout", "10"]);
+    expect(waited.code).toBe(1);
+    expect(waited.stdout).toContain(`task: ${id}  status: lost`);
+    expect(taskRecord(id)).not.toHaveProperty("restartedAt");
   });
 
   test("a task nobody answers expires after its longest wait, and its receiver goes with it", async () => {

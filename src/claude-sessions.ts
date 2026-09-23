@@ -864,7 +864,7 @@ export function locateSpawnedSession(session: SpawnedSession): Record<string, un
  *  pid other than `pid`, or null. Only a `bg` entry can be it: a session a
  *  person resumes in a terminal carries the same session id, and is theirs
  *  (see spawnedRecordFor). */
-export function findRestartedSession(s: { pid: number; sessionId: string | null | undefined; jobId?: string | null }): Record<string, unknown> | null {
+export function findRestartedSession(s: { pid: number; sessionId: string | null | undefined; jobId?: string | null; socketPath?: string }): Record<string, unknown> | null {
   if (!s.sessionId) return null;
   const dir = sessionsDir();
   let files: string[];
@@ -880,6 +880,7 @@ export function findRestartedSession(s: { pid: number; sessionId: string | null 
     const entry = readEntry(join(dir, file));
     if (!entry || entry.pid !== pid || entry.sessionId !== s.sessionId || entry.kind !== "bg") continue;
     if (s.jobId && typeof entry.jobId === "string" && entry.jobId !== s.jobId) continue;
+    if (s.socketPath !== undefined && entry.messagingSocketPath !== s.socketPath) continue;
     if (entryLiveness(entry) === "dead") continue;
     return entry;
   }

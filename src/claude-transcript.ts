@@ -109,6 +109,16 @@ export function turnEndedOnError(sessionId: string | null | undefined, sinceIso?
   };
 }
 
+/** Whether anything has been said in the conversation since `sinceIso` —
+ *  a turn picked up again after a restart writes to it at once. False
+ *  whenever the transcript cannot tell. */
+export function conversationMovedSince(sessionId: string | null | undefined, sinceIso: string): boolean {
+  const last = lastConversationEntry(sessionId);
+  const at = typeof last?.d.timestamp === "string" ? Date.parse(last.d.timestamp) : NaN;
+  const since = Date.parse(sinceIso);
+  return Number.isFinite(at) && Number.isFinite(since) && at >= since;
+}
+
 /** When something was first said in the conversation at or after
  *  `sinceIso`, or null — the turn a message delivered then was taken into. */
 export function firstSaidSince(sessionId: string | null | undefined, sinceIso: string): string | null {
