@@ -420,7 +420,9 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
         process.exit(1);
       }
       const model = argv[++i];
-      if (!model || /[^a-zA-Z0-9._\-\/:]/.test(model)) {
+      // Brackets for Claude Code's context suffix (`opus[1m]`), which `send`
+      // passes on and `config spawn-model` accepts.
+      if (!model || /[^a-zA-Z0-9._\-\/:\[\]]/.test(model)) {
         console.error(`Error: Invalid model name: ${model}`);
         process.exit(1);
       }

@@ -311,14 +311,17 @@ describeUnix("send helpers", () => {
     expect(sent).not.toMatch(/\d+\s*(s|m|h|sec|min)\b|waits? up to|deadline|timeout/i);
   });
 
-  test("splitTarget: --to, a leading live name, or no target", () => {
+  test("splitTarget: --to, else the first of two or more whether live or not, else no target", () => {
     const sessions = [{ name: "alpha" }] as Parameters<typeof splitTarget>[2];
     expect(splitTarget(["hi", "there"], "beta", sessions)).toEqual({ targetName: "beta", message: "hi there" });
     expect(splitTarget(["alpha", "hi", "there"], null, sessions)).toEqual({ targetName: "alpha", message: "hi there" });
+    // A name that is not live stays a name. Folded into the message, it
+    // would send that message to whoever else is live.
+    expect(splitTarget(["gone-claude", "review this"], null, sessions)).toEqual({ targetName: "gone-claude", message: "review this" });
+    expect(splitTarget(["gone-claude", "-"], null, sessions)).toEqual({ targetName: "gone-claude", message: "-" });
     // A live session's name alone is a forgotten message, not a message.
     expect(splitTarget(["alpha"], null, sessions)).toEqual({ targetName: "alpha", message: "" });
     expect(splitTarget(["beta"], null, sessions)).toEqual({ targetName: null, message: "beta" });
-    expect(splitTarget(["hi", "alpha"], null, sessions)).toEqual({ targetName: null, message: "hi alpha" });
   });
 });
 
@@ -569,7 +572,7 @@ describeUnix("send", () => {
     const fake = startFake("fake-claude");
     registerFake(fake);
     const before = new Set(readdirSync(REGISTRY));
-    const r = await runCli(["send", "hello", "there"]);
+    const r = await runCli(["send", "hello there"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Sending to fake-claude — the only Claude Code session in this workspace.");
     expect(r.stdout).toMatch(/Sent to fake-claude as task [0-9a-f]{8}\. Waiting up to 10m/);
@@ -923,6 +926,18 @@ describeUnix("send", () => {
       expect(resumed.stdout).not.toContain("did not apply");
       expect(argsOf()[argsOf().indexOf("--resume") + 1]).toBe("s");
       expect(argsOf()[argsOf().indexOf("--model") + 1]).toBe("haiku");
+      // With nothing chosen, a resumed session runs on the configured
+      // default, as a new one would — not on what it was chosen for last time.
+      await stopAt(new Date(Date.now() - 600_000));
+      writeConfig({ linger: 60, "spawn-model": "sonnet" });
+      const byDefault = await runCli(["send", "six"], env);
+      expect(byDefault.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on sonnet, default effort;`);
+      expect(argsOf()[argsOf().indexOf("--model") + 1]).toBe("sonnet");
+      await stopAt(new Date(Date.now() - 600_000));
+      writeConfig({ linger: 60 });
+      const unset = await runCli(["send", "seven"], env);
+      expect(unset.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model and effort;`);
+      expect(argsOf()).not.toContain("--model");
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
@@ -1322,5 +1337,40 @@ describeUnix("send", () => {
     const r = await runCli(["send", "hi"], { CODEX_SANDBOX_NETWORK_DISABLED: "1" });
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("REPLY FROM fake-claude");
+  });
+
+  test("a named session that is not live: the one started here is resumed, any other name is refused, and nobody else is sent it", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-named-resume");
+    const fake = startFake(spawnedSessionName(WS), { reply: (t) => `resumed says: ${t.split("\n")[0]}` });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 600 });
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    try {
+      expect((await runCli(["send", "one"], env)).stdout).toContain(`Started ${fake.name}`);
+      // The session goes (its reaper records it stopped), and the user has a
+      // session of their own open in the workspace.
+      killFakeSleepers(binDir);
+      for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+      await waitFor(() => (spawnedRecords() as Array<{ stoppedAt?: string }>).some((r) => r.stoppedAt), 15_000);
+      const users = startFake("the-users-own", { reply: () => "not me" });
+      registerFake(users);
+      const named = await runCli(["send", fake.name, "review this"], env);
+      expect(named.code).toBe(0);
+      expect(named.stdout).toContain(`${fake.name} is not live — resuming ${fake.name}`);
+      expect(named.stdout).toContain("  resumed says: review this");
+      expect(readFileSync(join(binDir, "args.log"), "utf-8").split("\n")).toContain("--resume");
+      // A name that is nobody's is refused however the message comes.
+      const nobody = await runCli(["send", "gone-claude", "review this"], env);
+      expect(nobody.code).toBe(1);
+      expect(nobody.stderr).toContain('No live Claude Code session named "gone-claude"');
+      const piped = await runCli(["send", "gone-claude", "-"], env, "review this\n");
+      expect(piped.code).toBe(1);
+      expect(piped.stderr).toContain('No live Claude Code session named "gone-claude"');
+      expect(users.received).toHaveLength(0);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
   });
 });

@@ -57,6 +57,7 @@ import {
   sessionStatusNow,
   spawnClaudeSession,
   spawnEnv,
+  spawnedSessionName,
   stopAndConfirm,
   transientSessionId,
   type ClaudeSession,
@@ -129,15 +130,19 @@ export function sandboxHint(): string {
     : "";
 }
 
-/** Split Codex's arguments into target and message: `--to <name>`, or a
- *  first positional that names a live session exactly, else no target. */
+/** Split Codex's arguments into target and message: `--to <name>`; else,
+ *  with two or more, the first is the target, live or not. A name that is
+ *  not live stays a name: folded into the message, it would send that
+ *  message to whichever other session is live — the user's own, perhaps. A
+ *  single argument is the message, unless it is exactly a live session's
+ *  name. */
 export function splitTarget(
   positional: string[],
   to: string | null,
   sessions: ClaudeSession[],
 ): { targetName: string | null; message: string } {
   if (to) return { targetName: to, message: positional.join(" ") };
-  if (positional.length >= 2 && sessions.some((s) => s.name === positional[0])) {
+  if (positional.length >= 2) {
     return { targetName: positional[0], message: positional.slice(1).join(" ") };
   }
   if (positional.length === 1 && sessions.some((s) => s.name === positional[0])) {
@@ -231,18 +236,25 @@ export async function handleSend(args: string[]): Promise<void> {
   }
 
   // ── Whom to send to ──
-  let target: ClaudeSession;
+  let target!: ClaudeSession;
   let startedHere = false;
   const notes: string[] = [];
+  // The session codex-collab starts for this workspace always has this name,
+  // resumed or new: named when it is not live, it is started again.
+  const startedName = spawnedSessionName(cwd);
+  let start: "any" | "named" | null = null;
   if (targetName) {
     const { session, ambiguous } = resolveSession(sessions, targetName);
-    if (!session) {
+    if (session) {
+      target = session;
+    } else if (ambiguous.length > 1) {
+      die(`"${targetName}" matches several sessions: ${ambiguous.map((s) => s.name).join(", ")} — name one exactly.`);
+    } else if (targetName === startedName) {
+      start = "named";
+    } else {
       const live = sessions.length ? `Live here: ${sessions.map((s) => s.name).join(", ")}` : "No Claude Code session is live in this workspace.";
-      die(ambiguous.length > 1
-        ? `"${targetName}" matches several sessions: ${ambiguous.map((s) => s.name).join(", ")} — name one exactly.`
-        : `No live Claude Code session named "${targetName}" in this workspace. ${live}`);
+      die(`No live Claude Code session named "${targetName}" in this workspace. ${live}`);
     }
-    target = session;
   } else if (sessions.length === 1) {
     target = sessions[0];
     notes.push(`Sending to ${target.name} — the only Claude Code session in this workspace.`);
@@ -252,9 +264,13 @@ export async function handleSend(args: string[]): Promise<void> {
       sessions.map((s) => `  codex-collab send ${JSON.stringify(s.name)} "…"`).join("\n"),
     );
   } else {
+    start = "any";
+  }
+  if (start) {
     const cfg = loadUserConfig();
+    const notLive = start === "named" ? `${startedName} is not live` : "No Claude Code session is live in this workspace";
     if (options.noSpawn || cfg.spawn === "off") {
-      die("No Claude Code session is live in this workspace" + (cfg.spawn === "off" ? " (starting one is off: `codex-collab config spawn on` enables it)." : " (--no-spawn)."));
+      die(notLive + (cfg.spawn === "off" ? " (starting one is off: `codex-collab config spawn on` enables it)." : " (--no-spawn)."));
     }
     let lingerSec = DEFAULT_SPAWN_LINGER_SEC;
     if (cfg.linger !== undefined) {
@@ -297,10 +313,11 @@ export async function handleSend(args: string[]): Promise<void> {
     }
     try {
       const again = listClaudeSessions({ cwd, stateDir });
-      if (again.length > 1) {
+      const startedMeanwhile = start === "named" ? again.find((s) => s.name === startedName) : again.length === 1 ? again[0] : undefined;
+      if (start === "any" && again.length > 1) {
         die("Several Claude Code sessions are live in this workspace — name one:\n" + again.map((s) => `  codex-collab send ${JSON.stringify(s.name)} "…"`).join("\n"));
-      } else if (again.length === 1) {
-        target = again[0];
+      } else if (startedMeanwhile) {
+        target = startedMeanwhile;
         notes.push(`Sending to ${target.name} — a background Claude Code session started for this workspace just now.`);
       } else {
         // A session stopped for idling still has its conversation: pick it
@@ -311,20 +328,19 @@ export async function handleSend(args: string[]): Promise<void> {
         let resumed: ClaudeSession | null = null;
         if (stopped) {
           const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
-          console.log(`No Claude Code session is live in this workspace — resuming ${stopped.name}, stopped ${ago} ago, with its conversation so far…`);
-          // What it ran on before holds unless Codex now says otherwise: a
-          // resumed session is a new process, so a new choice can apply.
-          const resumeModel = askedModel ?? stopped.model ?? model;
-          const resumeEffort = askedEffort ?? stopped.effort ?? effort;
+          console.log(`${notLive} — resuming ${stopped.name}, stopped ${ago} ago, with its conversation so far…`);
+          // A resumed session is a new process, and runs on what is chosen
+          // now, as a new one would: the flags, else the configured defaults.
+          // What it ran on before was chosen for the work it had then.
           try {
-            resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model: resumeModel, effort: resumeEffort, autocompact, resume: stopped });
-            notes.push(`Resumed ${resumed.name} (its conversation so far is intact; on ${describeModelChoice(resumeModel, resumeEffort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
+            resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact, resume: stopped });
+            notes.push(`Resumed ${resumed.name} (its conversation so far is intact; on ${describeModelChoice(model, effort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
           } catch (e) {
             console.log(`Could not resume it (${(e instanceof Error ? e.message : String(e)).split("\n")[0]}) — starting a new session instead.`);
             forgetSpawnedSession(stateDir, stopped.id);
           }
         } else {
-          console.log("No Claude Code session is live in this workspace — starting one in the background…");
+          console.log(`${notLive} — starting one in the background…`);
         }
         if (resumed) {
           target = resumed;
