@@ -133,7 +133,10 @@ function cliEnv(extra: Record<string, string>): Record<string, string> {
   delete env.CODEX_SANDBOX_NETWORK_DISABLED;
   // Fast polls: a receiver left waiting by one test sees its session gone,
   // and ends, within a moment of that test's cleanup.
-  return { ...env, HOME: TEST_HOME, CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_THREAD_ID: THREAD, ...extra };
+  // A session that had to be signalled must stay gone past Claude Code's
+  // restart window before it counts as stopped: a moment, here, not half a
+  // minute.
+  return { ...env, HOME: TEST_HOME, CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
 }
 
 /** Speak to a sender's advertised reply address as `fake`. */
@@ -201,7 +204,7 @@ case "$1" in
     echo "$pid" >> "${binDir}/sleepers"
     start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')
     now="$(date +%s)000"
-    printf '{"pid":%s,"sessionId":"${sessionId}","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
+    printf '{"pid":%s,"sessionId":"${sessionId}","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","jobId":"cafe0001","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
       "$pid" "$(pwd)" "$now" "$start" "${socketPath}" "$3" "$now" "$now" > "$CODEX_COLLAB_SESSIONS_DIR/$pid.json"
     ;;
   stop) echo "stop $2" >> "${binDir}/stop.log" ;;
@@ -406,6 +409,83 @@ describeUnix("peers", () => {
       expect(stopped.stdout).toContain(`Stopped ${spawnedSessionName(WS)}. Its conversation is kept:`);
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", stoppedAt: expect.any(String) }));
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("peers stop refuses inside the sandbox, and names the tasks a stopped session leaves unanswered", async () => {
+    const refused = await runCli(["peers", "stop", "anyone"], { CODEX_SANDBOX: "seatbelt" });
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("cannot run inside the Codex sandbox");
+
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-peers-stop-waiting");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 600 });
+    try {
+      const env = { PATH: `${binDir}:${process.env.PATH}` };
+      const id = taskIdOf((await runCli(["send", "a long job", "--no-wait"], env)).stdout);
+      const stopped = await runCli(["peers", "stop", spawnedSessionName(WS)], env);
+      expect(stopped.code).toBe(0);
+      expect(stopped.stdout).toContain(`1 task was still waiting on it (${id}) — it ends with no reply.`);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("peers stop knows a session it started by its process when the session id has changed", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-peers-stop-by-pid");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 600 });
+    try {
+      const env = { PATH: `${binDir}:${process.env.PATH}` };
+      expect((await runCli(["send", "hello"], env)).code).toBe(0);
+      // A new session id, as /clear gives one: the pid and its start time
+      // still say it is the process started here.
+      for (const f of readdirSync(REGISTRY)) {
+        const file = join(REGISTRY, f);
+        const entry = JSON.parse(readFileSync(file, "utf-8"));
+        if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, sessionId: "5e55e55e-0000-4000-8000-000000000000" }));
+      }
+      const stopped = await runCli(["peers", "stop", spawnedSessionName(WS)], env);
+      expect(stopped.code).toBe(0);
+      expect(stopped.stdout).toContain(`Stopped ${spawnedSessionName(WS)}.`);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test.skipIf(process.platform !== "linux")("peers stop that did not take says so, and leaves the record as it was", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-peers-stop-fails");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 600 });
+    try {
+      const env = { PATH: `${binDir}:${process.env.PATH}` };
+      expect((await runCli(["send", "hello"], env)).code).toBe(0);
+      // Seen from another pid domain its process cannot be checked, so no
+      // signal follows a `claude stop` that did nothing.
+      for (const f of readdirSync(REGISTRY)) {
+        const file = join(REGISTRY, f);
+        const entry = JSON.parse(readFileSync(file, "utf-8"));
+        if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, pidDomain: "linux:elsewhere:pid:[1]" }));
+      }
+      const r = await runCli(["peers", "stop", spawnedSessionName(WS)], env);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("is still running: `claude stop` did not take");
+      // Codex ran it: the one cause a sandbox would explain is named.
+      expect(r.stderr).toContain("If Codex ran this command in its sandbox");
+      const [record] = spawnedRecords() as Array<{ id: string; stoppedAt?: string }>;
+      expect(record.id).toBe("cafe0001");
+      expect(record.stoppedAt).toBeUndefined();
     } finally {
       removeConfig();
       killFakeSleepers(binDir);

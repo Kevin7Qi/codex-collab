@@ -209,9 +209,14 @@ export function outstandingTasksFor(
 ): TaskRecord[] {
   return listTasks(stateDir)
     .map((t) => settled(t))
-    .filter((t) => !FINAL_STATUSES.has(t.status)
-      && t.target.pid === target.pid
-      && (!target.sessionId || !t.target.sessionId || t.target.sessionId === target.sessionId));
+    .filter((t) => !FINAL_STATUSES.has(t.status) && sameSession(t.target, target));
+}
+
+/** Whether a task's target is this session. The session id decides where
+ *  both carry one — Claude Code can bring a session back under a new pid —
+ *  and the pid where either does not. */
+function sameSession(a: { pid: number; sessionId?: string | null }, b: { pid: number; sessionId?: string | null }): boolean {
+  return a.sessionId && b.sessionId ? a.sessionId === b.sessionId : a.pid === b.pid;
 }
 
 /** Remove finished tasks (and any task's leftovers) older than `maxAgeMs`.

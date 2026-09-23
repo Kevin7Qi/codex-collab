@@ -18,6 +18,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { resolveWorkspaceDir } from "./config";
 import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./peer";
@@ -49,6 +50,8 @@ export interface ClaudeSession {
   /** The start time the session registered with, verbatim — clock ticks on
    *  Linux, `ps -o lstart=` elsewhere. Its identity, with the pid. */
   procStart: string | null;
+  /** The background job a `bg` session runs as, where Claude Code says. */
+  jobId?: string | null;
   /** False when the process could not be checked from here (another pid
    *  domain, or a sandbox that forbids the check) and the session is listed
    *  on the evidence of its messaging socket alone. */
@@ -100,14 +103,27 @@ export const DEFAULT_SPAWN_LINGER_SEC = 30 * 60;
  *  however old it is. */
 export const SPAWN_MAX_LIFETIME_SEC = 4 * 3600;
 
-/** Registry entries older Claude Codes wrote carry no `kind`; treat any
- *  session that binds a socket as reachable regardless. */
+/** A registry entry, or null when there is none. Claude Code rewrites an
+ *  entry in place on every change of status — truncate, then write — so a
+ *  read can land between the two and find the file empty or half written.
+ *  That is a moment, and it is read again; a file that is not there is an
+ *  absence. Registry entries older Claude Codes wrote carry no `kind`; any
+ *  session that binds a socket counts as reachable regardless. */
 function readEntry(file: string): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(readFileSync(file, "utf-8"));
-    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
-  } catch {
-    return null;
+  for (let attempt = 0; ; attempt++) {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf-8");
+    } catch {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+    } catch {
+      if (attempt >= 3) return null;
+      Bun.sleepSync(15);
+    }
   }
 }
 
@@ -190,11 +206,10 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
       socketPath,
       sessionId: typeof entry.sessionId === "string" ? entry.sessionId : null,
       procStart: typeof entry.procStart === "string" ? entry.procStart : null,
+      jobId: typeof entry.jobId === "string" ? entry.jobId : null,
       verified: liveness === "verified",
       statusUpdatedAt: typeof entry.statusUpdatedAt === "number" ? entry.statusUpdatedAt : null,
-      // A stopped record's pid is history: the number may be another
-      // session's by now.
-      spawned: spawned.find((s) => s.pid === pid && !s.stoppedAt) ?? null,
+      spawned: spawnedRecordFor(spawned, entryIdentity(entry, pid)),
     });
   }
   // Interactive sessions first, then by name: the one the user is looking
@@ -202,6 +217,47 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
   // and any prefix resolution predictable.
   sessions.sort((a, b) => Number(a.kind === "bg") - Number(b.kind === "bg") || a.name.localeCompare(b.name));
   return sessions;
+}
+
+/** What identifies a registry entry's process and session. `kind` and
+ *  `jobId` are Claude Code's: a background session's entry says `bg`, and
+ *  names the job it runs as. */
+export interface EntryIdentity {
+  pid: number;
+  sessionId: string | null;
+  procStart: string | null;
+  kind?: string | null;
+  jobId?: string | null;
+}
+
+/** Which session codex-collab started, if any, a live registry entry is.
+ *
+ *  The same process is the same session: the pid AND its start time. A pid
+ *  alone decides nothing — a record whose reaper died keeps a pid the machine
+ *  may since have given to a session the user started.
+ *
+ *  The same background job is the same session under another process: Claude
+ *  Code brings a job back as a new process — after an update, after a crash —
+ *  under the job's id and its session id, with a new pid. A session id alone
+ *  decides nothing either: `claude --resume <id>` in a terminal continues a
+ *  conversation under its session id, and that is the user's session, which
+ *  must never read as ours. So a match by session id holds only for an entry
+ *  of kind `bg` that names this job (or names none, where an older Claude
+ *  Code wrote no job id).
+ *
+ *  A stopped record's pid is history and never matches. The record comes
+ *  back under the pid the session has now, which is the one any signal must
+ *  check. */
+export function spawnedRecordFor(records: SpawnedSession[], entry: EntryIdentity): SpawnedSession | null {
+  const running = records.filter((r) => !r.stoppedAt);
+  const sameJob = (r: SpawnedSession): boolean =>
+    entry.kind === "bg" && (entry.jobId === undefined || entry.jobId === null || entry.jobId === r.id);
+  const record = running.find((r) => r.pid === entry.pid && !!r.procStart && r.procStart === entry.procStart)
+    ?? (entry.sessionId ? running.find((r) => r.sessionId === entry.sessionId && sameJob(r)) : undefined);
+  if (!record) return null;
+  return record.pid === entry.pid && record.procStart === (entry.procStart ?? undefined)
+    ? record
+    : { ...record, pid: entry.pid, procStart: entry.procStart ?? undefined };
 }
 
 /** Whether a reported status means the session has work in hand. Only `idle`
@@ -310,6 +366,18 @@ export function markSpawnedSessionStopped(stateDir: string, id: string, when: Da
   });
 }
 
+/** Move a running session's record to the process it runs as now: Claude
+ *  Code brought it back under a new pid, and the record is what every later
+ *  look and every signal goes by. */
+export function updateSpawnedSessionProcess(stateDir: string, id: string, pid: number, procStart: string | undefined): void {
+  if (!existsSync(spawnedSessionsFile(stateDir))) return;
+  withRecordsLock(stateDir, () => {
+    const all = readSpawnedSessions(stateDir);
+    if (!all.some((s) => s.id === id && !s.stoppedAt)) return;
+    writeSpawnedSessions(stateDir, all.map((s) => s.id === id && !s.stoppedAt ? { ...s, pid, procStart } : s));
+  });
+}
+
 /** The stopped session the next `send` should resume, if any: the one this
  *  workspace recorded, stopped no longer than `windowSec` ago. */
 export function resumableSession(stateDir: string, windowSec: number, now: number = Date.now()): SpawnedSession | null {
@@ -410,10 +478,52 @@ export function spawnEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessE
 }
 
 /** Parse the id from `claude --bg`'s announcement:
- *  "backgrounded · <id> · <name>". */
+ *  "backgrounded · <id> · <name>". Claude Code colours the id when the
+ *  environment asks for colour (FORCE_COLOR) even into a pipe, and the
+ *  session is already running by then: the escape codes are dropped before
+ *  the id is read, or it would run with no record and no reaper. */
 export function parseBackgroundId(output: string): string | null {
-  const m = /backgrounded\s*·\s*([0-9a-f]{6,})\s*·/i.exec(output);
+  const plain = output.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  const m = /backgrounded\s*·\s*([0-9a-f]{6,})\s*·/i.exec(plain);
   return m ? m[1] : null;
+}
+
+/** Where Claude Code keeps its background jobs' state (`<id>/state.json`). */
+export function jobsDir(): string {
+  // Override for tests: a fake job must never land among the user's.
+  return process.env.CODEX_COLLAB_JOBS_DIR ?? join(homedir(), ".claude", "jobs");
+}
+
+function readJobState(jobId: string): Record<string, unknown> | null {
+  if (!/^[0-9a-f]{6,}$/i.test(jobId)) return null;
+  return readEntry(join(jobsDir(), jobId, "state.json"));
+}
+
+/** The session id a background job runs, from its own state file — what
+ *  its registry entry carries once it registers — or null before the file
+ *  says, or on a Claude Code that does not keep one. */
+export function jobSessionId(jobId: string): string | null {
+  const id = readJobState(jobId)?.sessionId;
+  return typeof id === "string" && id ? id : null;
+}
+
+/** Whether Claude Code counts work in flight for a background job. Some
+ *  of it leaves the registry saying `idle`: a monitor, a scheduled wakeup or
+ *  cron, an MCP task. Claude Code keeps the count in the job's own state
+ *  (`inFlight`). Anything counted there but monitors it can drain holds the
+ *  session, and so does a session cron. That is a little more than Claude
+ *  Code's own retirement waits for — it will retire a settled session with a
+ *  shell command still running — and on purpose: a command left running is
+ *  work, and stopping the session throws it away. No file, or an older
+ *  Claude Code, is no evidence either way: the status and the tasks decide. */
+export function jobHasWorkInFlight(jobId: string): boolean {
+  const inFlight = readJobState(jobId)?.inFlight;
+  if (!inFlight || typeof inFlight !== "object") return false;
+  const f = inFlight as Record<string, unknown>;
+  const count = (v: unknown): number => typeof v === "number" && Number.isFinite(v) ? v : 0;
+  if (count(f.queued) > 0) return true;
+  if (count(f.tasks) - count(f.drainableMonitors) > 0) return true;
+  return Array.isArray(f.kinds) && f.kinds.includes("session_cron");
 }
 
 /** The permission mode a started session runs in. Nobody is attached to it,
@@ -564,7 +674,11 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
     // A Claude Code without `--autocompact` refuses the whole command line.
     // Its own window is a worse fit than ours, and no session at all is worse
     // than either, so it starts without the flag and says so once.
-    if (compaction.length > 0 && /autocompact/i.test(detail)) {
+    // Only the option's own complaint counts ("unknown option '--autocompact'",
+    // "option '--autocompact <tokens>' argument … is invalid"): the settings
+    // JSON on the same command line says autoCompactEnabled, and an error that
+    // echoes it is some other failure.
+    if (compaction.length > 0 && /option\W+--autocompact\b/i.test(detail)) {
       process.stderr.write("[codex] This Claude Code does not take --autocompact; starting the session on its own compaction window (`codex-collab config spawn-autocompact auto` settles it).\n");
       return spawnClaudeSession({ ...opts, autocompact: "auto" });
     }
@@ -573,10 +687,15 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   const id = parseBackgroundId(announced);
   if (!id) throw new Error(`Could not start a Claude Code session: unexpected output from claude --bg: ${announced.trim()}`);
 
+  // The job's own state file names the session it runs, and that is the
+  // entry to wait for: another entry under the same name — a session this
+  // workspace started earlier that Claude Code brought back — is not it.
+  // Before the file says, or where it never does, the name is all there is.
   const deadline = Date.now() + (opts.registerTimeoutMs ?? SPAWN_REGISTER_TIMEOUT_MS);
   let session: ClaudeSession | undefined;
   while (Date.now() < deadline) {
-    session = listClaudeSessions({ cwd: opts.cwd, all: true, name })[0];
+    const sessionId = jobSessionId(id);
+    session = listClaudeSessions({ cwd: opts.cwd, all: true, name }).find((s) => !sessionId || s.sessionId === sessionId);
     if (session) break;
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -605,38 +724,79 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
 function isVerifiablyOurs(session: SpawnedSession): boolean {
   const entry = readEntry(join(sessionsDir(), `${session.pid}.json`));
   if (!entry || entry.pid !== session.pid) return false;
-  if (session.procStart && entry.procStart !== session.procStart) return false;
-  if (session.sessionId && entry.sessionId !== session.sessionId) return false;
+  // Every session codex-collab starts is a background one: whatever else an
+  // entry is, it is somebody's to close, never ours to signal.
+  if (typeof entry.kind === "string" && entry.kind !== "bg") return false;
+  if (!spawnedRecordFor([session], entryIdentity(entry, session.pid))) return false;
   return procIdentity(entry, probes) === "live";
+}
+
+function entryIdentity(entry: Record<string, unknown>, pid: number): EntryIdentity {
+  return {
+    pid,
+    sessionId: typeof entry.sessionId === "string" ? entry.sessionId : null,
+    procStart: typeof entry.procStart === "string" ? entry.procStart : null,
+    kind: typeof entry.kind === "string" ? entry.kind : null,
+    jobId: typeof entry.jobId === "string" ? entry.jobId : undefined,
+  };
 }
 
 /** Stop a session we started: `claude stop` keeps its conversation
  *  resumable; a plain signal is the fallback when the CLI is unavailable —
  *  and only for a process verified to be that session. */
-export function stopClaudeSession(session: SpawnedSession, claudeBin = "claude"): void {
+export function stopClaudeSession(session: SpawnedSession, claudeBin = "claude"): "asked" | "signalled" | "untouched" {
   try {
     execFileSync(claudeBin, ["stop", session.id], { encoding: "utf-8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
-    return;
+    return "asked";
   } catch { /* fall through to the signal */ }
-  if (!isVerifiablyOurs(session)) return;
+  if (!isVerifiablyOurs(session)) return "untouched";
   try {
     process.kill(session.pid, "SIGTERM");
   } catch { /* already gone */ }
+  return "signalled";
 }
 
 /** Stop a session we started and make sure of it. `claude stop` can fail
  *  quietly — a session sitting at a prompt is just the kind to ignore it — so
  *  after a moment a session still registered under the same identity, and
- *  verifiably that process, gets a signal. Whoever marks a session stopped
- *  goes through here first: a record marked stopped while its session lives
- *  makes the session read as the user's own, which nothing of ours watches. */
-export async function stopAndConfirm(session: SpawnedSession, opts: { claudeBin?: string; confirmAfterMs?: number } = {}): Promise<void> {
-  stopClaudeSession(session, opts.claudeBin);
+ *  verifiably that process, gets a signal. Says whether a signal was sent,
+ *  which is what decides how long the session must stay gone (see
+ *  stopSpawnedSession). */
+export async function stopAndConfirm(session: SpawnedSession, opts: { claudeBin?: string; confirmAfterMs?: number } = {}): Promise<{ signalled: boolean }> {
+  let signalled = stopClaudeSession(session, opts.claudeBin) === "signalled";
   const confirmAfterMs = opts.confirmAfterMs ?? Math.min(Number(process.env.CODEX_COLLAB_REAP_POLL_MS) || 5000, 5000);
   await new Promise((r) => setTimeout(r, confirmAfterMs));
   if (isVerifiablyOurs(session)) {
-    try { process.kill(session.pid, "SIGTERM"); } catch { /* gone meanwhile */ }
+    try { process.kill(session.pid, "SIGTERM"); signalled = true; } catch { /* gone meanwhile */ }
   }
+  return { signalled };
+}
+
+/** Stop a session we started, and see it gone: true once it is, false when
+ *  it is still there. Whoever marks a session stopped goes through here
+ *  first — a record marked stopped while its session lives makes that session
+ *  read as the user's own, with nothing of ours watching it.
+ *
+ *  How long it is watched depends on how it went. `claude stop` retires the
+ *  job, and Claude Code does not bring a retired job back: a few looks in a
+ *  row settle it. A signal is another matter — Claude Code takes a
+ *  background session that dies that way in the middle of a turn for a crash,
+ *  and brings the job back ten seconds later — so a session that had to be
+ *  signalled counts as gone only once it has stayed gone past that window. */
+export async function stopSpawnedSession(
+  session: SpawnedSession,
+  opts: { claudeBin?: string; confirmAfterMs?: number; spacingMs?: number } = {},
+): Promise<{ gone: boolean; signalled: boolean }> {
+  const { signalled } = await stopAndConfirm(session, opts);
+  const restartWindowMs = Number(process.env.CODEX_COLLAB_RESTART_GRACE_MS) || 30_000;
+  const spacingMs = opts.spacingMs ?? 250;
+  const gone = await spawnedSessionGone(session, {
+    spacingMs,
+    minAbsentMs: signalled ? restartWindowMs : 0,
+    // Forty looks, and ten seconds at the usual spacing, to go once told to.
+    withinMs: (signalled ? restartWindowMs : 0) + Math.min(10_000, spacingMs * 40),
+  });
+  return { gone, signalled };
 }
 
 // ─── Reaper ─────────────────────────────────────────────────────────────────
@@ -669,9 +829,13 @@ export function reaperVerdict(
   identity: { procStart?: string; sessionId?: string | null } = {},
 ): "wait" | "stop" | "gone" {
   if (!entry || entry.pid !== pid) return "gone";
-  // A session that registered later under a recycled pid is someone else's.
-  if (identity.procStart && entry.procStart !== identity.procStart) return "gone";
-  if (identity.sessionId && entry.sessionId !== identity.sessionId) return "gone";
+  // A session that registered later under a recycled pid is someone else's:
+  // the same session is the same session id, or the same process start.
+  if (identity.procStart || identity.sessionId) {
+    const same = (!!identity.sessionId && entry.sessionId === identity.sessionId)
+      || (!!identity.procStart && entry.procStart === identity.procStart);
+    if (!same) return "gone";
+  }
   if (entryLiveness(entry) === "dead") return "gone";
   if (statusHasWorkInHand(entry.status)) return "wait";
   // Idle since its last status change; an entry that never reports one
@@ -682,48 +846,155 @@ export function reaperVerdict(
   return now - since >= lingerSec * 1000 ? "stop" : "wait";
 }
 
-/** The reaper loop: poll the session's registry entry until it has idled
- *  for the linger, then stop it and forget it. Exits when the session is
- *  gone. `pollMs` is a test seam. */
+/** The registry entry of the session a record names, wherever it is now:
+ *  under the pid it was recorded with, or — Claude Code having brought it
+ *  back as a new process, after an update or a crash — under its session id
+ *  at another pid. Null when it is nowhere, or only as a dead process. */
+export function locateSpawnedSession(session: SpawnedSession): Record<string, unknown> | null {
+  const recorded = readEntry(join(sessionsDir(), `${session.pid}.json`));
+  if (recorded && recorded.pid === session.pid && spawnedRecordFor([session], entryIdentity(recorded, session.pid)) && entryLiveness(recorded) !== "dead") {
+    return recorded;
+  }
+  return findRestartedSession({ pid: session.pid, sessionId: session.sessionId, jobId: session.id });
+}
+
+/** A background session Claude Code brought back as a new process — after an
+ *  update, or after it died in the middle of a turn — found by what the
+ *  restart keeps: its session id and its job. The live registry entry at a
+ *  pid other than `pid`, or null. Only a `bg` entry can be it: a session a
+ *  person resumes in a terminal carries the same session id, and is theirs
+ *  (see spawnedRecordFor). */
+export function findRestartedSession(s: { pid: number; sessionId: string | null | undefined; jobId?: string | null }): Record<string, unknown> | null {
+  if (!s.sessionId) return null;
+  const dir = sessionsDir();
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    const pid = Number(file.slice(0, -".json".length));
+    if (!Number.isInteger(pid) || pid <= 0 || pid === s.pid) continue;
+    const entry = readEntry(join(dir, file));
+    if (!entry || entry.pid !== pid || entry.sessionId !== s.sessionId || entry.kind !== "bg") continue;
+    if (s.jobId && typeof entry.jobId === "string" && entry.jobId !== s.jobId) continue;
+    if (entryLiveness(entry) === "dead") continue;
+    return entry;
+  }
+  return null;
+}
+
+/** How many looks in a row must find a session nowhere before it is taken as
+ *  gone, once it has been told to stop. */
+const STOPPED_GONE_LOOKS = 3;
+
+/** How many looks in a row, `REAPER_RECHECK_MS` apart, must find a session
+ *  nowhere before the reaper takes it as gone of its own accord. Claude Code
+ *  restarts a background session it lost after ten seconds, and the new
+ *  process takes a moment more to register: the looks span thirty seconds, so
+ *  a session on its way back is seen before it is written off. */
+const REAPER_GONE_LOOKS = 4;
+const REAPER_RECHECK_MS = 10_000;
+
+/** The reaper loop: follow the session until it has idled for the linger,
+ *  then stop it, see it gone, and keep its record as stopped. Exits when the
+ *  session is gone. `pollMs` is a test seam. */
 export async function runReaper(
-  session: SpawnedSession,
+  recorded: SpawnedSession,
   stateDir: string,
   opts: { pollMs?: number; claudeBin?: string; maxRounds?: number } = {},
 ): Promise<"stopped" | "gone"> {
-  const file = join(sessionsDir(), `${session.pid}.json`);
+  let session = recorded;
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_REAP_POLL_MS) || 30_000);
-  const identity = { procStart: session.procStart, sessionId: session.sessionId };
+  // A second look at a session that seemed gone comes sooner than the next
+  // poll: gone is final for the reaper, and a moment's absence is not.
+  const recheckMs = Math.min(pollMs, REAPER_RECHECK_MS);
   const born = Date.parse(session.startedAt);
   const retireAt = Number.isFinite(born) ? born + SPAWN_MAX_LIFETIME_SEC * 1000 : Infinity;
+  let missing = 0;
   for (let round = 0; opts.maxRounds === undefined || round < opts.maxRounds; round++) {
-    const entry = readEntry(file);
-    let verdict = reaperVerdict(entry, session.pid, session.lingerSec, Date.now(), identity);
-    // A session a task is still waiting on is working, whatever the registry
-    // says: Claude Code calls a session idle the moment it ends a turn, and a
-    // turn that leaves a command running in the background and reports when
-    // it finishes ends like any other. Stopping it there threw the work away
-    // and left the task with no reply that could ever come.
-    const owed = verdict !== "gone" && outstandingTasksFor(stateDir, session).length > 0;
-    // Old enough to retire, and nothing to interrupt: a session in the middle
-    // of a turn is working, and its age is no reason to stop it there.
-    if (verdict === "wait" && Date.now() >= retireAt && !owed && !statusHasWorkInHand(entry?.status)) verdict = "stop";
-    if (verdict === "stop" && owed) verdict = "wait";
+    // Stopped by someone else (`peers stop`, a task that found it at a
+    // prompt), or its record replaced by a session started or resumed since:
+    // there is nothing left here for this reaper to watch, and a session that
+    // now answers to the same id is another reaper's.
+    const own = readSpawnedSessions(stateDir).find((r) => r.id === session.id);
+    if (!own || own.stoppedAt) return "gone";
+    const entry = locateSpawnedSession(session);
+    if (entry && entry.pid !== session.pid) {
+      // Brought back as a new process: the same session, its work and its
+      // conversation — and still ours to watch, and to stop.
+      session = { ...session, pid: entry.pid as number, procStart: typeof entry.procStart === "string" ? entry.procStart : undefined };
+      updateSpawnedSessionProcess(stateDir, session.id, session.pid, session.procStart);
+    }
+    let verdict = reaperVerdict(entry, session.pid, session.lingerSec, Date.now(), { procStart: session.procStart, sessionId: session.sessionId });
     if (verdict === "gone") {
+      if (++missing < REAPER_GONE_LOOKS) {
+        await new Promise((r) => setTimeout(r, recheckMs));
+        continue;
+      }
       // Gone on its own — Claude Code stops an unattached session itself,
       // and a person may have. Its conversation is kept all the same, so the
       // record stays, as stopped: the next `send` can pick it up again.
       markSpawnedSessionStopped(stateDir, session.id);
       return "gone";
     }
+    missing = 0;
+    // A session a task is still waiting on is working, whatever the registry
+    // says: Claude Code calls a session idle the moment it ends a turn, and a
+    // turn that leaves a command running in the background and reports when
+    // it finishes ends like any other. Stopping it there threw the work away
+    // and left the task with no reply that could ever come. Work Claude Code
+    // counts in flight — a monitor, a scheduled wakeup — holds it the same way.
+    const owed = outstandingTasksFor(stateDir, session).length > 0;
+    const inFlight = jobHasWorkInFlight(session.id);
+    // Old enough to retire, and nothing to interrupt: a session in the middle
+    // of a turn is working, and its age is no reason to stop it there.
+    if (verdict === "wait" && Date.now() >= retireAt && !owed && !inFlight && !statusHasWorkInHand(entry?.status)) verdict = "stop";
+    if (verdict === "stop" && (owed || inFlight)) verdict = "wait";
     if (verdict === "stop") {
-      await stopAndConfirm(session, { claudeBin: opts.claudeBin, confirmAfterMs: Math.min(pollMs, 5000) });
-      // `claude stop` keeps the conversation; keep the record that finds it.
-      markSpawnedSessionStopped(stateDir, session.id);
-      return "stopped";
+      // Recorded as stopped only once it is: a record marked stopped while
+      // its session runs makes that session read as the user's own, with
+      // nothing of ours left watching it. A stop that did not take is tried
+      // again at the next look.
+      if ((await stopSpawnedSession(session, { claudeBin: opts.claudeBin, confirmAfterMs: Math.min(pollMs, 5000), spacingMs: Math.min(pollMs, 250) })).gone) {
+        // `claude stop` keeps the conversation; keep the record that finds it.
+        markSpawnedSessionStopped(stateDir, session.id);
+        return "stopped";
+      }
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
   return "gone";
+}
+
+/** Whether a session told to stop has gone within `withinMs`: nowhere on
+ *  several looks in a row, and for at least `minAbsentMs`. It takes a moment
+ *  to go, a torn read of its entry is not its absence, and a session Claude
+ *  Code is about to bring back is only away. */
+export async function spawnedSessionGone(
+  session: SpawnedSession,
+  opts: { withinMs?: number; spacingMs?: number; minAbsentMs?: number } = {},
+): Promise<boolean> {
+  const until = Date.now() + (opts.withinMs ?? 3000);
+  const spacingMs = opts.spacingMs ?? 100;
+  const minAbsentMs = opts.minAbsentMs ?? 0;
+  let absent = 0;
+  let absentSince: number | null = null;
+  for (;;) {
+    const now = Date.now();
+    if (locateSpawnedSession(session)) {
+      absent = 0;
+      absentSince = null;
+    } else {
+      absent++;
+      absentSince ??= now;
+      if (absent >= STOPPED_GONE_LOOKS && now - absentSince >= minAbsentMs) return true;
+    }
+    if (now >= until) return false;
+    await new Promise((r) => setTimeout(r, spacingMs));
+  }
 }
 
 /** A fresh session id for our own transient registrations. */

@@ -15,6 +15,7 @@ import {
   createTask,
   listTasks,
   loadTask,
+  outstandingTasksFor,
   resolveTaskId,
   settled,
   sweepTasks,
@@ -109,6 +110,17 @@ describe("task records", () => {
     // Before the receiver has written itself in there is nobody to check.
     const { receiver: _none, ...unclaimed } = base;
     expect(settled(unclaimed, () => "dead")).toBe(unclaimed);
+  });
+
+  test("a task waits on its session under whatever pid the session has now", () => {
+    const stateDir = freshStateDir();
+    const task = createTask(stateDir, fields);
+    updateTask(stateDir, task.id, { status: "running", receiver: { pid: process.pid, procStart: null, pidDomain: null } });
+    // Claude Code brought the session back as another process: same id.
+    expect(outstandingTasksFor(stateDir, { pid: 5151, sessionId: "s" }).map((t) => t.id)).toEqual([task.id]);
+    expect(outstandingTasksFor(stateDir, { pid: 4242, sessionId: "another" })).toEqual([]);
+    // Where a side has no session id, the pid is all there is.
+    expect(outstandingTasksFor(stateDir, { pid: 4242, sessionId: null }).map((t) => t.id)).toEqual([task.id]);
   });
 
   test("clean removes finished tasks once they are old, with their logs, and never one still waited on", () => {

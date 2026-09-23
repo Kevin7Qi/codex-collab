@@ -6,10 +6,9 @@
 // reads.
 
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, resolveSession, resumableSession, runReaper, stopAndConfirm, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, resolveSession, resumableSession, runReaper, stopSpawnedSession, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { outstandingTasksFor } from "../claude-tasks";
-import { resumeWindowSec } from "./send";
-import { insideCodexSandbox } from "./send";
+import { insideCodexSandbox, resumeWindowSec, sandboxHint } from "./send";
 import { die, formatDuration, loadUserConfig, parseOptions } from "./shared";
 
 function idleFor(session: ClaudeSession, now: number): string | null {
@@ -77,10 +76,11 @@ export function unverifiedNotice(sessions: ClaudeSession[]): string | null {
  *
  *  Codex had no way to end a session that was not going to answer, so it
  *  reached for the pid: read /proc, check the start time, SIGTERM. That is a
- *  careful version of the wrong thing — a signal leaves Claude Code's own
- *  supervisor to notice, and a restarted session comes back under a pid
- *  nobody here knows. This stops it the way it was started, through
- *  `claude stop`, which keeps the conversation for the next `send`.
+ *  careful version of the wrong thing — Claude Code's own supervisor takes a
+ *  background session that dies that way in the middle of a turn for a
+ *  crash, and brings it back as a new process. This stops it the way it was
+ *  started, through `claude stop`, which keeps the conversation for the next
+ *  `send`.
  *
  *  Only a session codex-collab started for this workspace: a session the user
  *  is working in is theirs to close, whatever a Codex session thinks of it. */
@@ -113,37 +113,23 @@ async function handlePeersStop(name: string | undefined, cwd: string): Promise<v
       ? "No Claude Code session is live in this workspace."
       : `Several Claude Code sessions are live here — name one:\n${sessions.map((s) => `  codex-collab peers stop ${JSON.stringify(s.name)}`).join("\n")}`);
   }
-  // A session id is a true discriminator: Claude Code restarts a background
-  // session it loses, and the conversation comes back under a new pid no
-  // record here has seen, still under that id. A pid alone is not — a record
-  // whose reaper was killed keeps a pid the machine may since have given to a
-  // session the user started — so a pid match has to agree on the start time
-  // too, or it is somebody else's process wearing that number.
-  const records = readSpawnedSessions(stateDir).filter((r) => !r.stoppedAt);
-  const byId = records.find((r) => !!r.sessionId && !!session.sessionId && r.sessionId === session.sessionId);
-  const byPid = records.find((r) => r.pid === session.pid && !!r.procStart && r.procStart === session.procStart);
-  const ours = byId ?? byPid;
+  // Which sessions are ours is decided one way everywhere (spawnedRecordFor):
+  // by session id, or by pid and start time together. The record comes with
+  // the pid the session has now, which is what the confirming signal checks.
+  const ours = session.spawned;
   if (!ours) {
     die(`${session.name} was not started by codex-collab, so it is not ours to stop — it is a session its user is working in. \`codex-collab peers\` marks the ones started here.`);
   }
   const waiting = outstandingTasksFor(stateDir, { pid: session.pid, sessionId: session.sessionId });
-  // Identified by its session id, the live entry is that conversation under
-  // whatever pid it wears now, and that is what the confirming signal checks.
-  await stopAndConfirm(byId ? { ...ours, pid: session.pid, procStart: session.procStart ?? undefined } : ours);
   // `claude stop` can fail quietly, and a record marked stopped while its
   // session runs makes that session read as the user's own — no reaper, no
   // watch for a prompt, and a resume offered for a conversation still live.
-  // A session takes a moment to go after it is told to, so it is given one.
-  const gone = async (): Promise<boolean> => {
-    const until = Date.now() + 3000;
-    for (;;) {
-      if (!listClaudeSessions({ cwd, stateDir }).some((s) => s.pid === session!.pid && s.sessionId === session!.sessionId)) return true;
-      if (Date.now() >= until) return false;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-  };
-  if (!await gone()) {
-    die(`${session.name} is still running: \`claude stop\` did not take, and its process could not be verified as one codex-collab started. Its record is unchanged.`);
+  // So it counts as stopped only once it is seen gone (stopSpawnedSession).
+  const { gone, signalled } = await stopSpawnedSession(ours);
+  if (!gone) {
+    die(`${session.name} is still running: \`claude stop\` did not take, and ${signalled
+      ? "the session came back after a signal"
+      : "its process could not be verified as one codex-collab started, so no signal was sent"}. Its record is unchanged.${sandboxHint()}`);
   }
   markSpawnedSessionStopped(stateDir, ours.id);
   console.log(`Stopped ${session.name}. Its conversation is kept: \`codex-collab send\` picks it up where it stopped.`);

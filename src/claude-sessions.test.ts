@@ -24,6 +24,8 @@ import {
   isClaudeEffort,
   isModelName,
   forgetSpawnedSession,
+  jobHasWorkInFlight,
+  jobSessionId,
   listClaudeSessions,
   markSpawnedSessionStopped,
   parseBackgroundId,
@@ -34,11 +36,13 @@ import {
   resumableSession,
   resumedSessionBrief,
   runReaper,
+  sessionStatusNow,
   SPAWN_MAX_LIFETIME_SEC,
   spawnClaudeSession,
   spawnEnv,
   spawnedSessionBrief,
   spawnedSessionName,
+  stopSpawnedSession,
   setProcProbesForTests,
   setProcStartReaderForTests,
   type SpawnedSession,
@@ -55,17 +59,27 @@ let wsB: string;
 let sleeper: ChildProcess;
 let sleeperStart: string;
 const previousRegistry = process.env.CODEX_COLLAB_SESSIONS_DIR;
+const previousJobs = process.env.CODEX_COLLAB_JOBS_DIR;
+const previousRestartGrace = process.env.CODEX_COLLAB_RESTART_GRACE_MS;
+let jobs: string;
 
 beforeAll(async () => {
   if (onWindows) return;
   root = mkdtempSync(join(tmpdir(), "cc-sessions-"));
   registry = join(root, "sessions");
+  jobs = join(root, "jobs");
   wsA = join(root, "ws-a");
   wsB = join(root, "ws-b");
-  for (const d of [registry, wsA, join(wsA, "sub"), wsB]) mkdirSync(d, { recursive: true });
+  for (const d of [registry, jobs, wsA, join(wsA, "sub"), wsB]) mkdirSync(d, { recursive: true });
   // A workspace is a git checkout: its subdirectories resolve to its root.
   spawnSync("git", ["init", "-q", wsA]);
   process.env.CODEX_COLLAB_SESSIONS_DIR = registry;
+  // Claude Code's job states, faked as the registry is: the reaper and the
+  // spawn read them, and must never read the user's.
+  process.env.CODEX_COLLAB_JOBS_DIR = jobs;
+  // Claude Code's restart window, which a signalled session must stay gone
+  // past: a moment, here, not half a minute.
+  process.env.CODEX_COLLAB_RESTART_GRACE_MS = "300";
   // A live process that is not this one: listClaudeSessions skips our own pid
   // (that is where a `send` registers itself).
   sleeper = spawn("sleep", ["300"], { stdio: "ignore" });
@@ -78,6 +92,10 @@ afterAll(() => {
   try { sleeper.kill(); } catch { /* gone */ }
   if (previousRegistry === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
   else process.env.CODEX_COLLAB_SESSIONS_DIR = previousRegistry;
+  if (previousJobs === undefined) delete process.env.CODEX_COLLAB_JOBS_DIR;
+  else process.env.CODEX_COLLAB_JOBS_DIR = previousJobs;
+  if (previousRestartGrace === undefined) delete process.env.CODEX_COLLAB_RESTART_GRACE_MS;
+  else process.env.CODEX_COLLAB_RESTART_GRACE_MS = previousRestartGrace;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -221,10 +239,61 @@ describeUnix("listClaudeSessions", () => {
     clearRegistry();
     register(`${sleeper.pid}.json`, { name: "claude(ws-a-abc123)", kind: "bg" });
     const stateDir = join(root, "state-spawned");
-    recordSpawnedSession(stateDir, { id: "abc12345", pid: sleeper.pid!, name: "claude(ws-a-abc123)", startedAt: "2026-09-13T00:00:00.000Z", lingerSec: 60 });
+    recordSpawnedSession(stateDir, { id: "abc12345", pid: sleeper.pid!, name: "claude(ws-a-abc123)", startedAt: "2026-09-13T00:00:00.000Z", lingerSec: 60, sessionId: "00000000-0000-4000-8000-000000000001" });
     const [s] = listClaudeSessions({ cwd: wsA, stateDir });
     expect(s.spawned?.id).toBe("abc12345");
     expect(listClaudeSessions({ cwd: wsA })[0].spawned).toBeNull();
+  });
+
+  test("a pid a started session once had, now the user's session, is not ours", () => {
+    clearRegistry();
+    // The user's own session, under a pid a started session had before its
+    // reaper died: another start time, another session id.
+    register(`${sleeper.pid}.json`, { name: "the-users-own" });
+    const stateDir = join(root, "state-reused-pid");
+    recordSpawnedSession(stateDir, {
+      id: "abc12346", pid: sleeper.pid!, name: "claude(ws-a-abc123)", startedAt: "2026-09-13T00:00:00.000Z", lingerSec: 60,
+      procStart: "Mon Jan  1 00:00:00 2001", sessionId: "11111111-1111-4111-8111-111111111111",
+    });
+    expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned).toBeNull();
+    // The same pid AND the same start time is the same process.
+    recordSpawnedSession(stateDir, {
+      id: "abc12347", pid: sleeper.pid!, name: "claude(ws-a-abc123)", startedAt: "2026-09-13T00:00:00.000Z", lingerSec: 60,
+      procStart: sleeperStart, sessionId: "11111111-1111-4111-8111-111111111111",
+    });
+    expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned?.id).toBe("abc12347");
+  });
+
+  test("a started session Claude Code brought back under a new pid is still ours, under that pid", () => {
+    clearRegistry();
+    register(`${sleeper.pid}.json`, { name: "claude(ws-a-abc123)", kind: "bg" });
+    const stateDir = join(root, "state-respawned");
+    // Recorded under the pid it had before Claude Code restarted it.
+    recordSpawnedSession(stateDir, {
+      id: "abc12348", pid: 4242, name: "claude(ws-a-abc123)", startedAt: "2026-09-13T00:00:00.000Z", lingerSec: 60,
+      procStart: "123", sessionId: "00000000-0000-4000-8000-000000000001",
+    });
+    const [s] = listClaudeSessions({ cwd: wsA, stateDir });
+    expect(s.spawned).toEqual(expect.objectContaining({ id: "abc12348", pid: sleeper.pid, procStart: sleeperStart }));
+    // Naming its job, it is the same job.
+    register(`${sleeper.pid}.json`, { name: "claude(ws-a-abc123)", kind: "bg", jobId: "abc12348" });
+    expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned?.id).toBe("abc12348");
+    // Another job under the same session id is not it.
+    register(`${sleeper.pid}.json`, { name: "claude(ws-a-abc123)", kind: "bg", jobId: "ffff0000" });
+    expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned).toBeNull();
+  });
+
+  test("the user's own session continuing a started session's conversation is theirs", () => {
+    clearRegistry();
+    // `claude --resume <id>` in a terminal keeps the session id: same id,
+    // an interactive session, the user's.
+    register(`${sleeper.pid}.json`, { name: "the-users-own", kind: "interactive" });
+    const stateDir = join(root, "state-user-resumed");
+    recordSpawnedSession(stateDir, {
+      id: "abc12349", pid: 4242, name: "claude(ws-a-abc123)", startedAt: "2026-09-13T00:00:00.000Z", lingerSec: 60,
+      procStart: "123", sessionId: "00000000-0000-4000-8000-000000000001",
+    });
+    expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned).toBeNull();
   });
 });
 
@@ -345,7 +414,7 @@ describeUnix("stopped sessions and resuming", () => {
     register(`${sleeper.pid}.json`, { name: "someone-elses" });
     const stateDir = join(root, "state-stale-pid");
     // The pid a stopped session once had now belongs to another session.
-    recordSpawnedSession(stateDir, rec("dddd4444", { pid: sleeper.pid! }));
+    recordSpawnedSession(stateDir, rec("dddd4444", { pid: sleeper.pid!, procStart: sleeperStart }));
     expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned?.id).toBe("dddd4444");
     markSpawnedSessionStopped(stateDir, "dddd4444");
     expect(listClaudeSessions({ cwd: wsA, stateDir })[0].spawned).toBeNull();
@@ -387,6 +456,45 @@ describeUnix("spawn helpers", () => {
   test("parseBackgroundId reads claude --bg's announcement", () => {
     expect(parseBackgroundId("Starting background service…\nbackgrounded · f1c306d5 · codex-probe\n  claude agents")).toBe("f1c306d5");
     expect(parseBackgroundId("something else")).toBeNull();
+    // With FORCE_COLOR set Claude Code colours the id even into a pipe, and
+    // the session is running by then: unread, it would have no record.
+    expect(parseBackgroundId("backgrounded · \x1b[36mf1c306d5\x1b[39m · codex-probe")).toBe("f1c306d5");
+  });
+
+  test("what a job's state file says: its session, and the work Claude Code counts in flight", () => {
+    const jobs = join(root, "jobs-helpers");
+    const previous = process.env.CODEX_COLLAB_JOBS_DIR;
+    process.env.CODEX_COLLAB_JOBS_DIR = jobs;
+    const job = (id: string, state: unknown) => {
+      mkdirSync(join(jobs, id), { recursive: true });
+      writeFileSync(join(jobs, id, "state.json"), JSON.stringify(state));
+    };
+    try {
+      job("aaaa0001", { sessionId: "aaaa0001-0000-4000-8000-000000000000", inFlight: { tasks: 0, queued: 0, kinds: [], drainableMonitors: 0 } });
+      expect(jobSessionId("aaaa0001")).toBe("aaaa0001-0000-4000-8000-000000000000");
+      expect(jobHasWorkInFlight("aaaa0001")).toBe(false);
+      // A monitor or an MCP task leaves the registry saying idle; this is
+      // where it shows.
+      job("aaaa0002", { inFlight: { tasks: 1, queued: 0, kinds: ["monitor_mcp"], drainableMonitors: 0 } });
+      expect(jobHasWorkInFlight("aaaa0002")).toBe(true);
+      // Monitors Claude Code would drain on retiring the session do not hold it.
+      job("aaaa0003", { inFlight: { tasks: 1, queued: 0, kinds: ["monitor_mcp"], drainableMonitors: 1 } });
+      expect(jobHasWorkInFlight("aaaa0003")).toBe(false);
+      job("aaaa0004", { inFlight: { tasks: 0, queued: 1, kinds: [] } });
+      expect(jobHasWorkInFlight("aaaa0004")).toBe(true);
+      // A session cron (a /loop, a scheduled wakeup) holds it with nothing running.
+      job("aaaa0005", { inFlight: { tasks: 0, queued: 0, kinds: ["session_cron"] } });
+      expect(jobHasWorkInFlight("aaaa0005")).toBe(true);
+      // No file, no field, or a shape we do not know: no evidence either way.
+      expect(jobHasWorkInFlight("aaaa0006")).toBe(false);
+      job("aaaa0007", { state: "idle" });
+      expect(jobHasWorkInFlight("aaaa0007")).toBe(false);
+      expect(jobSessionId("aaaa0007")).toBeNull();
+      expect(jobHasWorkInFlight("../../etc")).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.CODEX_COLLAB_JOBS_DIR;
+      else process.env.CODEX_COLLAB_JOBS_DIR = previous;
+    }
   });
 
   test("a model is a name `claude --model` can take, an effort one of Claude's levels, and a choice reads plainly", () => {
@@ -437,8 +545,11 @@ describeUnix("spawn helpers", () => {
 });
 
 /** A fake `claude` on PATH: `--bg` announces an id and registers a live
- *  entry (backed by a sleeper it starts); `stop <id>` records the call. */
-function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean }): { bin: string; stopLog: string; pidFile: string; argsLog: string } {
+ *  entry (backed by a sleeper it starts); `stop <id>` records the call.
+ *  `onStop` runs after the record — what a real stop would do to the session,
+ *  such as removing its entry. `jobSessionId` is written to the job's state
+ *  file, as Claude Code writes the session a job runs. */
+function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean; onStop?: string; jobSessionId?: string; refuseAutocompact?: string }): { bin: string; stopLog: string; pidFile: string; argsLog: string } {
   const stopLog = join(dir, "stop.log");
   const pidFile = join(dir, "sleeper.pid");
   // One argument per line, as `--bg` received them.
@@ -463,12 +574,16 @@ case "$1" in
   --bg)
     name="$3"
     cwd="$(pwd)"
-    for a in "$@"; do printf '%s\\n' "$a"; done > "${argsLog}"
+    for a in "$@"; do printf '%s\\n' "$a"; done > "${argsLog}"${opts.refuseAutocompact ? `
+    for a in "$@"; do if [ "$a" = "--autocompact" ]; then echo '${opts.refuseAutocompact}' >&2; exit 1; fi; done` : ""}
     echo "Starting background service…"
-    echo "backgrounded · deadbeef · $name"${registerBlock}
+    echo "backgrounded · deadbeef · $name"${opts.jobSessionId ? `
+    mkdir -p "$CODEX_COLLAB_JOBS_DIR/deadbeef"
+    printf '{"sessionId":"%s"}' "${opts.jobSessionId}" > "$CODEX_COLLAB_JOBS_DIR/deadbeef/state.json"` : ""}${registerBlock}
     ;;
   stop)
     echo "stop $2" >> "${stopLog}"
+    ${opts.onStop ?? ""}
     ;;
 esac
 `);
@@ -557,6 +672,53 @@ describeUnix("spawnClaudeSession", () => {
     expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\n");
   });
 
+  test("the entry waited for is the new job's own session, whatever else wears its name", async () => {
+    clearRegistry();
+    // Another entry under the same name, listed ahead of the new one — a
+    // session this workspace started earlier that Claude Code brought back.
+    register(`${sleeper.pid}.json`, { name: spawnedSessionName(wsA), kind: "interactive", sessionId: "00000000-0000-4000-8000-00000000dead" });
+    const dir = join(root, "fake-claude-job-session");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: true, jobSessionId: "s" });
+    try {
+      const session = await spawnClaudeSession({
+        cwd: wsA, stateDir: join(root, "state-spawn-job"), lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000,
+      });
+      expect(session.sessionId).toBe("s");
+      expect(session.pid).not.toBe(sleeper.pid);
+      expect(session.spawned?.sessionId).toBe("s");
+    } finally {
+      killSleeper(fake.pidFile);
+    }
+  });
+
+  test("a Claude Code without --autocompact starts the session without it; another failure is not taken for that", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-old");
+    mkdirSync(dir, { recursive: true });
+    const old = installFakeClaude(dir, { register: true, refuseAutocompact: "error: unknown option '--autocompact'" });
+    try {
+      const session = await spawnClaudeSession({ cwd: wsA, stateDir: join(root, "state-spawn-old"), lingerSec: 60, claudeBin: old.bin, startReaper: () => {}, registerTimeoutMs: 5000 });
+      expect(session.spawned?.id).toBe("deadbeef");
+      expect(readFileSync(old.argsLog, "utf-8").split("\n")).not.toContain("--autocompact");
+    } finally {
+      killSleeper(old.pidFile);
+    }
+    // The settings on the same command line say autoCompactEnabled: an error
+    // that echoes them is some other failure, and is reported as itself.
+    clearRegistry();
+    const dir2 = join(root, "fake-claude-bad-settings");
+    mkdirSync(dir2, { recursive: true });
+    const bad = installFakeClaude(dir2, { register: true, refuseAutocompact: "Invalid settings: autoCompactEnabled is not allowed here" });
+    try {
+      await expect(spawnClaudeSession({ cwd: wsA, stateDir: join(root, "state-spawn-bad"), lingerSec: 60, claudeBin: bad.bin, startReaper: () => {}, registerTimeoutMs: 5000 }))
+        .rejects.toThrow(/Invalid settings: autoCompactEnabled/);
+      expect(readFileSync(bad.argsLog, "utf-8").split("\n")).toContain("--autocompact");
+    } finally {
+      killSleeper(bad.pidFile);
+    }
+  });
+
   test("a missing claude binary is a plain message, not a stack", async () => {
     await expect(spawnClaudeSession({ cwd: wsA, stateDir: join(root, "state-spawn-none"), claudeBin: join(root, "no-such-claude"), startReaper: () => {} }))
       .rejects.toThrow(/`claude` is not on PATH/);
@@ -611,7 +773,7 @@ describeUnix("reaper", () => {
       procStart: ownStart, sessionId: "00000000-0000-4000-8000-000000000001",
     };
     recordSpawnedSession(stateDir, session);
-    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, statusUpdatedAt: Date.now() - 5000 });
+    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, kind: "bg", statusUpdatedAt: Date.now() - 5000 });
     expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
     expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\n");
     // Stopped, not forgotten: Claude Code keeps the conversation, and the
@@ -627,13 +789,14 @@ describeUnix("reaper", () => {
     clearRegistry();
     const dir = join(root, "fake-claude-foreign");
     mkdirSync(dir, { recursive: true });
-    const fake = installFakeClaude(dir, { register: false });
     const stateDir = join(root, "state-reap-foreign");
     // Stands in for whatever process owns this pid number in OUR domain: the
     // session itself lives in another one, where the number means something
     // else. It must survive the reaper.
     const bystander = spawn("sleep", ["300"], { stdio: "ignore" });
     await new Promise((r) => setTimeout(r, 50));
+    // A real `claude stop` ends the session, and its entry goes with it.
+    const fake = installFakeClaude(dir, { register: false, onStop: `rm -f '${join(registry, `${bystander.pid}.json`)}'` });
     const socket = join(root, "foreign-reap.sock");
     writeFileSync(socket, "");
     const session: SpawnedSession = {
@@ -648,14 +811,254 @@ describeUnix("reaper", () => {
     setProcProbesForTests({ ownDomain: () => "linux:m:pid:[4026533467]" });
     try {
       expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
-      // Asked to stop by id — the one handle that means the same everywhere…
+      // Asked to stop by id — the one handle that means the same everywhere —
+      // and no signal for a pid it cannot verify.
       expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\n");
-      // …and the fake only logs, so the entry is still there for the
-      // confirming look: no signal follows for a pid it cannot verify.
       expect(() => process.kill(bystander.pid!, 0)).not.toThrow();
     } finally {
       setProcProbesForTests(null);
       bystander.kill();
+    }
+  });
+
+  test("a stop that did not take is not recorded as one, and is tried again", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-stop-fails");
+    mkdirSync(dir, { recursive: true });
+    // `claude stop` that does nothing, for a session in another pid domain:
+    // no signal can be sent, and the session stays.
+    const fake = installFakeClaude(dir, { register: false });
+    const stateDir = join(root, "state-reap-stop-fails");
+    const bystander = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const socket = join(root, "stop-fails.sock");
+    writeFileSync(socket, "");
+    const session: SpawnedSession = {
+      id: "deadbeef", pid: bystander.pid!, name: "claude(ws-a-x)", startedAt: new Date().toISOString(), lingerSec: 1,
+      procStart: "236353382", sessionId: "00000000-0000-4000-8000-000000000001",
+    };
+    recordSpawnedSession(stateDir, session);
+    register(`${bystander.pid}.json`, {
+      pid: bystander.pid, procStart: "236353382", pidDomain: "linux:m:pid:[4026531836]",
+      messagingSocketPath: socket, statusUpdatedAt: Date.now() - 5000,
+    });
+    setProcProbesForTests({ ownDomain: () => "linux:m:pid:[4026533467]" });
+    try {
+      await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 2 });
+      // Marked stopped while it runs, it would read as the user's own session.
+      expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\nstop deadbeef\n");
+    } finally {
+      setProcProbesForTests(null);
+      bystander.kill();
+    }
+  });
+
+  test("a session Claude Code brought back under a new pid is followed, recorded under it, and stopped once idle", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-respawned");
+    mkdirSync(dir, { recursive: true });
+    const stateDir = join(root, "state-reap-respawned");
+    const sid = "00000000-0000-4000-8000-000000000003";
+    // The process it was recorded under has exited…
+    const before = spawn("true", [], { stdio: "ignore" });
+    await new Promise((r) => before.on("exit", r));
+    // …and the same session runs on as another one.
+    const now = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const nowStart = procStartOf(now.pid!);
+    const fake = installFakeClaude(dir, { register: false, onStop: `rm -f '${join(registry, `${now.pid}.json`)}'` });
+    const session: SpawnedSession = {
+      id: "deadbee3", pid: before.pid!, name: "claude(ws-a-x)", startedAt: new Date().toISOString(), lingerSec: 1,
+      procStart: "1", sessionId: sid,
+    };
+    recordSpawnedSession(stateDir, session);
+    const entry = { pid: now.pid, procStart: nowStart, sessionId: sid, name: "claude(ws-a-x)", kind: "bg", jobId: "deadbee3" };
+    try {
+      register(`${now.pid}.json`, { ...entry, status: "busy", statusUpdatedAt: Date.now() });
+      await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 });
+      // Not taken for gone: still running, under the pid it has now.
+      const [followed] = readSpawnedSessions(stateDir);
+      expect(followed).toEqual(expect.objectContaining({ id: "deadbee3", pid: now.pid, procStart: nowStart }));
+      expect(followed.stoppedAt).toBeUndefined();
+      expect(existsSync(fake.stopLog)).toBe(false);
+      // Idle past its linger, it is stopped like any other.
+      register(`${now.pid}.json`, { ...entry, status: "idle", statusUpdatedAt: Date.now() - 5000 });
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbee3\n");
+      expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeDefined();
+    } finally {
+      now.kill();
+    }
+  });
+
+  test("the user's own session continuing the conversation is never followed, listed as ours, or signalled", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-user-resumed");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: false });
+    const stateDir = join(root, "state-reap-user-resumed");
+    const sid = "00000000-0000-4000-8000-000000000006";
+    // The session codex-collab started was stopped outside codex-collab, and
+    // the user picked its conversation up in a terminal: same session id.
+    const before = spawn("true", [], { stdio: "ignore" });
+    await new Promise((r) => before.on("exit", r));
+    const users = spawn("sleep", ["300"], { stdio: "ignore" });
+    const signalled = new Promise((r) => users.on("exit", () => r(true)));
+    await new Promise((r) => setTimeout(r, 50));
+    const session: SpawnedSession = {
+      id: "deadbee6", pid: before.pid!, name: "claude(ws-a-x)", startedAt: new Date().toISOString(), lingerSec: 1,
+      procStart: "1", sessionId: sid,
+    };
+    recordSpawnedSession(stateDir, session);
+    register(`${users.pid}.json`, { pid: users.pid, procStart: procStartOf(users.pid!), sessionId: sid, name: "the-users-own", kind: "interactive", status: "idle", statusUpdatedAt: Date.now() - 600_000 });
+    try {
+      expect(listClaudeSessions({ cwd: wsA, stateDir }).find((s) => s.name === "the-users-own")?.spawned).toBeNull();
+      // Ours is gone; theirs is left alone.
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 6 })).toBe("gone");
+      expect(existsSync(fake.stopLog)).toBe(false);
+      expect(await Promise.race([signalled, new Promise((r) => setTimeout(() => r(false), 200))])).toBe(false);
+    } finally {
+      users.kill();
+    }
+  });
+
+  test("at its real poll, the reaper records a stop it made", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-real-poll");
+    mkdirSync(dir, { recursive: true });
+    const stateDir = join(root, "state-reap-real-poll");
+    const own = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const ownStart = procStartOf(own.pid!);
+    const fake = installFakeClaude(dir, { register: false, onStop: `rm -f '${join(registry, `${own.pid}.json`)}'` });
+    const session: SpawnedSession = {
+      id: "deadbee8", pid: own.pid!, name: "claude(ws-a-x)", startedAt: new Date().toISOString(), lingerSec: 1,
+      procStart: ownStart, sessionId: "00000000-0000-4000-8000-000000000008",
+    };
+    recordSpawnedSession(stateDir, session);
+    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, kind: "bg", status: "idle", statusUpdatedAt: Date.now() - 600_000 });
+    try {
+      // Polling ten seconds apart, as the reaper does: stopped, and recorded
+      // as stopped at once — the next `send` resumes it.
+      expect(await runReaper(session, stateDir, { pollMs: 10_000, claudeBin: fake.bin, maxRounds: 1 })).toBe("stopped");
+      expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeDefined();
+    } finally {
+      own.kill();
+    }
+  }, 30_000);
+
+  test("a session that had to be signalled is not stopped if Claude Code brings it back", async () => {
+    clearRegistry();
+    const sid = "00000000-0000-4000-8000-000000000009";
+    const first = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const firstStart = procStartOf(first.pid!);
+    const session: SpawnedSession = {
+      id: "deadbee9", pid: first.pid!, name: "claude(ws-a-x)", startedAt: new Date().toISOString(), lingerSec: 1,
+      procStart: firstStart, sessionId: sid,
+    };
+    register(`${first.pid}.json`, { pid: first.pid, procStart: firstStart, sessionId: sid, kind: "bg", jobId: "deadbee9", status: "waiting" });
+    let second: ChildProcess | null = null;
+    try {
+      // No `claude` to ask: a signal, which Claude Code takes for a crash —
+      // and it brings the job back as a new process.
+      const stopping = stopSpawnedSession(session, { claudeBin: "/nonexistent", confirmAfterMs: 20, spacingMs: 20 });
+      await new Promise((r) => setTimeout(r, 150));
+      second = spawn("sleep", ["300"], { stdio: "ignore" });
+      await new Promise((r) => setTimeout(r, 50));
+      register(`${second.pid}.json`, { pid: second.pid, procStart: procStartOf(second.pid!), sessionId: sid, kind: "bg", jobId: "deadbee9", status: "waiting" });
+      expect(await stopping).toEqual({ gone: false, signalled: true });
+    } finally {
+      first.kill();
+      second?.kill();
+    }
+  });
+
+  test("a reaper whose record another has stopped or replaced leaves", async () => {
+    clearRegistry();
+    const stateDir = join(root, "state-reap-replaced");
+    // Whatever answers to that session now: idle past the linger and past the
+    // cap, so a reaper still at work would stop it — by signal, `claude` being
+    // unavailable.
+    const now = spawn("sleep", ["300"], { stdio: "ignore" });
+    const signalled = new Promise((r) => now.on("exit", () => r(true)));
+    await new Promise((r) => setTimeout(r, 50));
+    const nowStart = procStartOf(now.pid!);
+    const session: SpawnedSession = {
+      id: "deadbee7", pid: now.pid!, name: "claude(ws-a-x)", startedAt: new Date(Date.now() - 5 * 3600_000).toISOString(), lingerSec: 1,
+      procStart: nowStart, sessionId: "00000000-0000-4000-8000-000000000007",
+    };
+    recordSpawnedSession(stateDir, session);
+    register(`${now.pid}.json`, { pid: now.pid, procStart: nowStart, sessionId: session.sessionId, kind: "bg", status: "idle", statusUpdatedAt: Date.now() - 600_000 });
+    try {
+      // `peers stop`, or a task that found it at a prompt, stopped it.
+      markSpawnedSessionStopped(stateDir, "deadbee7");
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: "/nonexistent", maxRounds: 3 })).toBe("gone");
+      expect(await Promise.race([signalled, new Promise((r) => setTimeout(() => r(false), 200))])).toBe(false);
+    } finally {
+      now.kill();
+    }
+  });
+
+  test("work Claude Code counts in flight holds a session the registry calls idle, at its linger and at its cap", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-inflight");
+    mkdirSync(dir, { recursive: true });
+    const stateDir = join(root, "state-reap-inflight");
+    const own = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const ownStart = procStartOf(own.pid!);
+    const fake = installFakeClaude(dir, { register: false, onStop: `rm -f '${join(registry, `${own.pid}.json`)}'` });
+    const session: SpawnedSession = {
+      id: "deadbee4", pid: own.pid!, name: "claude(ws-a-x)", startedAt: new Date(Date.now() - (SPAWN_MAX_LIFETIME_SEC + 60) * 1000).toISOString(),
+      lingerSec: 1, procStart: ownStart, sessionId: "00000000-0000-4000-8000-000000000004",
+    };
+    recordSpawnedSession(stateDir, session);
+    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, status: "idle", statusUpdatedAt: Date.now() - 600_000 });
+    const inFlight = (state: Record<string, unknown>) => {
+      mkdirSync(join(jobs, "deadbee4"), { recursive: true });
+      writeFileSync(join(jobs, "deadbee4", "state.json"), JSON.stringify({ inFlight: state }));
+    };
+    try {
+      // A monitor it set, which the registry does not show.
+      inFlight({ tasks: 1, queued: 0, kinds: ["monitor_mcp"], drainableMonitors: 0 });
+      await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 });
+      expect(existsSync(fake.stopLog)).toBe(false);
+      expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
+      // Nothing in flight any more: reaped.
+      inFlight({ tasks: 0, queued: 0, kinds: [], drainableMonitors: 0 });
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
+    } finally {
+      own.kill();
+    }
+  });
+
+  test("the lifetime cap stops a session its linger never reaches, and never one that is busy", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-cap");
+    mkdirSync(dir, { recursive: true });
+    const stateDir = join(root, "state-reap-cap");
+    const own = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const ownStart = procStartOf(own.pid!);
+    const fake = installFakeClaude(dir, { register: false, onStop: `rm -f '${join(registry, `${own.pid}.json`)}'` });
+    // An hour's linger that was never reached, four hours after it started.
+    const session: SpawnedSession = {
+      id: "deadbee5", pid: own.pid!, name: "claude(ws-a-x)", startedAt: new Date(Date.now() - (SPAWN_MAX_LIFETIME_SEC + 60) * 1000).toISOString(),
+      lingerSec: 3600, procStart: ownStart, sessionId: "00000000-0000-4000-8000-000000000005",
+    };
+    recordSpawnedSession(stateDir, session);
+    const entry = { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, statusUpdatedAt: Date.now() - 5000 };
+    try {
+      register(`${own.pid}.json`, { ...entry, status: "busy" });
+      await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 });
+      expect(existsSync(fake.stopLog)).toBe(false);
+      register(`${own.pid}.json`, { ...entry, status: "idle" });
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbee5\n");
+    } finally {
+      own.kill();
     }
   });
 
@@ -675,7 +1078,7 @@ describeUnix("reaper", () => {
     recordSpawnedSession(stateDir, session);
     // Idle long past its linger, and started long past its lifetime cap: on
     // both counts the reaper would stop it.
-    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, statusUpdatedAt: Date.now() - 600_000 });
+    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, kind: "bg", statusUpdatedAt: Date.now() - 600_000 });
     const target = { pid: own.pid!, socketPath: "/s", sessionId: session.sessionId!, procStart: ownStart, spawned: session, name: session.name };
     const task = createTask(stateDir, { cwd: wsA, threadId: null, message: "long job", target, maxWaitSec: 3600 });
     updateTask(stateDir, task.id, { status: "running", deliveredAt: new Date().toISOString(), receiver: { pid: process.pid, procStart: null, pidDomain: null } });
@@ -698,18 +1101,38 @@ describeUnix("reaper", () => {
     }
   });
 
-  test("runReaper waits while the session is busy, and exits once it is gone", async () => {
+  test("runReaper waits while the session is busy, and exits once it is gone — on several looks, not one", async () => {
     clearRegistry();
     const stateDir = join(root, "state-reap-busy");
-    const session: SpawnedSession = { id: "deadbeef", pid: sleeper.pid!, name: "claude(ws-a-x)", startedAt: "t", lingerSec: 1 };
+    const session: SpawnedSession = {
+      id: "deadbeef", pid: sleeper.pid!, name: "claude(ws-a-x)", startedAt: "t", lingerSec: 1,
+      procStart: sleeperStart, sessionId: "00000000-0000-4000-8000-000000000001",
+    };
     recordSpawnedSession(stateDir, session);
     register(`${sleeper.pid}.json`, { status: "busy", statusUpdatedAt: Date.now() - 5000 });
     expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: "/nonexistent", maxRounds: 2 })).toBe("gone");
     // Still recorded: the rounds ran out with it busy, nothing was stopped.
-    expect(readSpawnedSessions(stateDir)).toHaveLength(1);
+    expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
     clearRegistry();
-    expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: "/nonexistent", maxRounds: 2 })).toBe("gone");
-    expect(readSpawnedSessions(stateDir)).toEqual([]);
+    // Claude Code rewrites an entry in place, and brings a lost background
+    // session back after ten seconds: missing for a few looks is a moment,
+    // and gone is final for the reaper.
+    await runReaper(session, stateDir, { pollMs: 10, claudeBin: "/nonexistent", maxRounds: 3 });
+    expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
+    expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: "/nonexistent", maxRounds: 4 })).toBe("gone");
+    expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeDefined();
+  });
+
+  test("an entry caught half written reads as the entry", () => {
+    clearRegistry();
+    const file = join(registry, `${sleeper.pid}.json`);
+    register(`${sleeper.pid}.json`, { status: "busy" });
+    const whole = readFileSync(file, "utf-8");
+    // Truncated, as Claude Code's rewrite leaves it for a moment, and written
+    // back while the reader is still looking.
+    writeFileSync(file, "");
+    spawn("sh", ["-c", `printf '%s' '${whole.replace(/'/g, "'\\''")}' > '${file}'`], { stdio: "ignore" });
+    expect(sessionStatusNow(sleeper.pid!)).toBe("busy");
   });
 
   test("the default linger is half an hour", () => {

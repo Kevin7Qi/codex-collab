@@ -123,7 +123,7 @@ export function taskSocketPath(id: string): string {
 /** Said when something fails that a sandbox would explain. Codex does not
  *  mark its sandbox the same way on every platform, so a failure under
  *  Codex gets the hint even when CODEX_SANDBOX is absent. */
-function sandboxHint(): string {
+export function sandboxHint(): string {
   return underCodex()
     ? "\nIf Codex ran this command in its sandbox, that is the cause: the sandbox blocks local sockets and the session registry. Rerun it outside the sandbox (with escalated permissions)."
     : "";
