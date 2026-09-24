@@ -50,6 +50,7 @@ import {
   isAutocompactWindow,
   isClaudeEffort,
   isModelName,
+  isSpawnEffortSetting,
   listClaudeSessions,
   markSpawnedSessionStopped,
   resolveSession,
@@ -57,6 +58,7 @@ import {
   findRestartedSession,
   sessionStatusNow,
   spawnClaudeSession,
+  spawnEffortFor,
   spawnEnv,
   spawnedSessionName,
   stopSpawnedSession,
@@ -283,16 +285,20 @@ export async function handleSend(args: string[]): Promise<void> {
       }
     }
     // Flag, then the user's configured default, then nothing — which leaves
-    // the session on the user's Claude Code default.
+    // the session on the user's Claude Code default model.
     let model = askedModel;
     if (model === undefined && cfg["spawn-model"] !== undefined) {
       if (isModelName(cfg["spawn-model"])) model = cfg["spawn-model"];
       else console.error(`[codex] Warning: ignoring invalid spawn-model in config: ${cfg["spawn-model"]}`);
     }
-    let effort = askedEffort;
-    if (effort === undefined && cfg["spawn-effort"] !== undefined) {
-      if (isClaudeEffort(cfg["spawn-effort"])) effort = cfg["spawn-effort"];
-      else console.error(`[codex] Warning: ignoring invalid spawn-effort in config: ${cfg["spawn-effort"]}`);
+    // The effort: flag, then the configured default, then ours
+    // (DEFAULT_SPAWN_EFFORT); `spawn-effort auto` passes none.
+    let effort: string | undefined = askedEffort;
+    if (effort === undefined) {
+      if (cfg["spawn-effort"] !== undefined && !isSpawnEffortSetting(cfg["spawn-effort"])) {
+        console.error(`[codex] Warning: ignoring invalid spawn-effort in config: ${cfg["spawn-effort"]}`);
+      }
+      effort = spawnEffortFor(cfg["spawn-effort"]);
     }
     let autocompact: string | undefined;
     if (cfg["spawn-autocompact"] !== undefined) {

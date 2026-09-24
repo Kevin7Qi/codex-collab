@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
 import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
-import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isAutocompactWindow, isClaudeEffort, isModelName } from "../claude-sessions";
+import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_SPAWN_EFFORT, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isAutocompactWindow, isModelName, isSpawnEffortSetting, spawnEffortFor } from "../claude-sessions";
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
@@ -91,7 +91,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     "spawn-models": { validate: v => v.split(",").every((name) => isModelName(name.trim())), hint: "comma-separated full model names to offer a Codex session besides the aliases, e.g. claude-opus-4-6,claude-sonnet-4-6 (shown by `codex-collab models --claude`; any model name works with `send --model` whether listed or not)" },
     "spawn-autocompact": { validate: isAutocompactWindow, hint: `how much context a started Claude Code session fills before it compacts itself: 100k-1M tokens (\`500k\`, \`200000\`), or auto for Claude Code's own window (default ${DEFAULT_SPAWN_AUTOCOMPACT})` },
     "spawn-resume": { validate: v => v === "off" || (Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) <= MAX_TIMEOUT_SECONDS), hint: `seconds after it was stopped that a started Claude Code session is still resumed, with its conversation, by the next \`send\`, 1-${MAX_TIMEOUT_SECONDS}, or off to always start a new one (default ${DEFAULT_SPAWN_RESUME_SEC}, a week; \`send --fresh\` starts a new one once)` },
-    "spawn-effort": { validate: isClaudeEffort, hint: `the effort a started Claude Code session runs at when \`send\` names none: ${CLAUDE_EFFORTS.join(", ")} (default: your Claude Code default)` },
+    "spawn-effort": { validate: isSpawnEffortSetting, hint: `the effort a started Claude Code session runs at when \`send\` names none: ${CLAUDE_EFFORTS.join(", ")}, or auto for your Claude Code settings (default ${DEFAULT_SPAWN_EFFORT})` },
   };
 
   const cfg = loadUserConfig();
@@ -183,7 +183,8 @@ export async function handleConfig(args: string[]): Promise<void> {
 export function formatClaudeModels(cfg: UserConfig): string {
   const width = Math.max(...CLAUDE_MODEL_TIERS.map((t) => t.alias.length));
   const model = typeof cfg["spawn-model"] === "string" ? cfg["spawn-model"] : undefined;
-  const effort = typeof cfg["spawn-effort"] === "string" ? cfg["spawn-effort"] : undefined;
+  // As `send` reads it: unset is our default, `auto` leaves it to Claude Code.
+  const effort = spawnEffortFor(cfg["spawn-effort"]);
   // Specific versions are the user's to offer (`config spawn-models`): a
   // list kept here would name models that age and retire.
   const extra = typeof cfg["spawn-models"] === "string"
@@ -196,6 +197,7 @@ export function formatClaudeModels(cfg: UserConfig): string {
     "",
     "An alias always means the latest model of its tier; a full model name works as well.",
     `Effort, lowest first: ${CLAUDE_EFFORTS.join(", ")}`,
+    "On a model without xhigh or max (claude-opus-4-6, for one), Claude Code runs those at high.",
     "",
     `With nothing chosen, a started session runs on: ${describeModelChoice(model, effort)}`,
     "  per message:  codex-collab send \"…\" --model <model> --effort <level>",

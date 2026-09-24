@@ -641,7 +641,8 @@ export interface UserConfig {
   /** Seconds a started Claude session may idle before it is stopped. */
   linger?: number;
   /** Model and effort a started Claude session runs on when `send` names
-   *  none; unset, the user's Claude Code default. */
+   *  none. Unset, the model is the user's Claude Code default and the
+   *  effort `high`; `spawn-effort auto` leaves the effort to Claude Code. */
   "spawn-model"?: string;
   "spawn-effort"?: string;
   /** Full model names `models --claude` offers besides the tier aliases,

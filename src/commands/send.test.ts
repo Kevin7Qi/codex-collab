@@ -222,6 +222,21 @@ function killFakeSleepers(binDir: string): void {
   } catch { /* none started */ }
 }
 
+/** End the fake session a spawn-path test started, and leave its record
+ *  stopped at `when` — as if its reaper had stopped it then. */
+async function stopSpawnedAt(binDir: string, when: Date): Promise<void> {
+  killFakeSleepers(binDir);
+  for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+  await new Promise((r) => setTimeout(r, 900)); // its reaper sees it gone
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  for (const d of readdirSync(root)) {
+    const f = join(root, d, "spawned-claude.json");
+    if (!existsSync(f)) continue;
+    const records = JSON.parse(readFileSync(f, "utf-8")) as Array<Record<string, unknown>>;
+    writeFileSync(f, JSON.stringify(records.map((r) => ({ ...r, stoppedAt: when.toISOString() }))));
+  }
+}
+
 /** Spawn-path tests share one workspace, and a reaper an earlier test left
  *  behind (polling every 500ms) still writes to its records when it finds
  *  its session gone: it marks it stopped — which the next test's `send`
@@ -780,15 +795,17 @@ describeUnix("send", () => {
       const r = await runCli(["send", "are you there?"], { PATH: `${binDir}:${process.env.PATH}` });
       expect(r.code).toBe(0);
       expect(r.stdout).toContain("No Claude Code session is live in this workspace — starting one in the background…");
-      expect(r.stdout).toContain(`Started ${fake.name} (a background Claude Code session on the user's Claude Code default model and effort; it stops after 2s idle).`);
+      expect(r.stdout).toContain(`Started ${fake.name} (a background Claude Code session on the user's Claude Code default model, high effort; it stops after 2s idle).`);
       expect(r.stdout).toContain(`REPLY FROM ${fake.name}`);
       expect(r.stdout).toContain("  spawned says: are you there?");
       expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
-      // Nothing chosen, nothing passed: the session is left on the user's
-      // own Claude Code default rather than on one picked for them.
+      // Nothing chosen: the model is left on the user's own Claude Code
+      // default, and the effort is ours — not whatever the user set for
+      // their own sessions.
       const args = readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
       expect(args).not.toContain("--model");
-      expect(args).not.toContain("--effort");
+      expect(args[args.indexOf("--effort") + 1]).toBe("high");
+      expect(spawnedRecords()).toContainEqual(expect.objectContaining({ effort: "high" }));
       // The detached reaper stops it once it has idled for the linger —
       // through `claude stop`, then a signal when that did not take — and
       // keeps its record, as stopped: the conversation is still Claude Code's.
@@ -806,7 +823,7 @@ describeUnix("send", () => {
       const again = await runCli(["send", "still there?"], { PATH: `${binDir}:${process.env.PATH}` });
       expect(again.code).toBe(0);
       expect(again.stdout).toMatch(new RegExp(`No Claude Code session is live in this workspace — resuming ${fake.name.replace(/[()]/g, "\\$&")}, stopped \\S+ ago, with its conversation so far…`));
-      expect(again.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model and effort;`);
+      expect(again.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model, high effort;`);
       expect(again.stdout).toContain("  spawned says: still there?");
       const resumeArgs = readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
       expect(resumeArgs[resumeArgs.indexOf("--resume") + 1]).toBe("s");
@@ -865,6 +882,34 @@ describeUnix("send", () => {
     }
   });
 
+  test("spawn-effort auto leaves the effort to Claude Code, and a setting that is no level gives way to ours", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-effort");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    const argsOf = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+    writeConfig({ linger: 60, "spawn-model": "opus", "spawn-effort": "auto" });
+    try {
+      const auto = await runCli(["send", "one"], env);
+      expect(auto.code).toBe(0);
+      expect(auto.stdout).toContain(`Started ${fake.name} (a background Claude Code session on opus, the user's Claude Code default effort;`);
+      expect(argsOf()[argsOf().indexOf("--model") + 1]).toBe("opus");
+      expect(argsOf()).not.toContain("--effort");
+      // A value hand-edited into the config that Claude has no level for.
+      await stopSpawnedAt(binDir, new Date());
+      writeConfig({ linger: 60, "spawn-effort": "ultra" });
+      const bad = await runCli(["send", "two"], env);
+      expect(bad.code).toBe(0);
+      expect(bad.stderr).toContain("ignoring invalid spawn-effort in config: ultra");
+      expect(bad.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model, high effort;`);
+      expect(argsOf()[argsOf().indexOf("--effort") + 1]).toBe("high");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
   test("a choice of model cannot change the user's own session, and send says so; an effort Claude has no level for is refused", async () => {
     const fake = startFake("fake-claude");
     registerFake(fake);
@@ -887,19 +932,7 @@ describeUnix("send", () => {
     writeFakeClaude(binDir, fake.socketPath);
     const env = { PATH: `${binDir}:${process.env.PATH}` };
     const argsOf = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
-    /** End the running fake session and leave its record stopped at `when`. */
-    const stopAt = async (when: Date) => {
-      killFakeSleepers(binDir);
-      for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
-      await new Promise((r) => setTimeout(r, 900)); // its reaper sees it gone
-      const root = join(TEST_HOME, ".codex-collab", "workspaces");
-      for (const d of readdirSync(root)) {
-        const f = join(root, d, "spawned-claude.json");
-        if (!existsSync(f)) continue;
-        const records = JSON.parse(readFileSync(f, "utf-8")) as Array<Record<string, unknown>>;
-        writeFileSync(f, JSON.stringify(records.map((r) => ({ ...r, stoppedAt: when.toISOString() }))));
-      }
-    };
+    const stopAt = (when: Date) => stopSpawnedAt(binDir, when);
     writeConfig({ linger: 60 });
     try {
       expect((await runCli(["send", "one"], env)).stdout).toContain(`Started ${fake.name}`);
@@ -923,7 +956,7 @@ describeUnix("send", () => {
       // since a resumed session is a new process.
       await stopAt(new Date(Date.now() - 600_000));
       const resumed = await runCli(["send", "five", "--model", "haiku"], env);
-      expect(resumed.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on haiku, default effort;`);
+      expect(resumed.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on haiku, high effort;`);
       expect(resumed.stdout).not.toContain("did not apply");
       expect(argsOf()[argsOf().indexOf("--resume") + 1]).toBe("s");
       expect(argsOf()[argsOf().indexOf("--model") + 1]).toBe("haiku");
@@ -932,12 +965,12 @@ describeUnix("send", () => {
       await stopAt(new Date(Date.now() - 600_000));
       writeConfig({ linger: 60, "spawn-model": "sonnet" });
       const byDefault = await runCli(["send", "six"], env);
-      expect(byDefault.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on sonnet, default effort;`);
+      expect(byDefault.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on sonnet, high effort;`);
       expect(argsOf()[argsOf().indexOf("--model") + 1]).toBe("sonnet");
       await stopAt(new Date(Date.now() - 600_000));
       writeConfig({ linger: 60 });
       const unset = await runCli(["send", "seven"], env);
-      expect(unset.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model and effort;`);
+      expect(unset.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model, high effort;`);
       expect(argsOf()).not.toContain("--model");
     } finally {
       removeConfig();
@@ -967,7 +1000,7 @@ describeUnix("send", () => {
       expect(r.code).toBe(5);
       expect(Date.now() - started).toBeLessThan(30_000);
       expect(r.stdout).toMatch(/task: [0-9a-f]{8}  status: blocked/);
-      expect(r.stdout).toContain(`${fake.name} stopped at a prompt with nobody attached; it ran on haiku, default effort`);
+      expect(r.stdout).toContain(`${fake.name} stopped at a prompt with nobody attached; it ran on haiku, high effort`);
       expect(r.stdout).toContain("session: stopped by codex-collab, conversation kept");
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001\n");
       // The fake `claude stop` does nothing, as a session wedged at a prompt

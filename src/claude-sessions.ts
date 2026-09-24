@@ -600,6 +600,26 @@ export function isClaudeEffort(value: unknown): value is ClaudeEffort {
   return typeof value === "string" && (CLAUDE_EFFORTS as readonly string[]).includes(value);
 }
 
+/** The effort a started session runs at when neither `send --effort` nor
+ *  `config spawn-effort` names one. Left to Claude Code, it would be the
+ *  user's setting for their own sessions, or else the model's default, which
+ *  differs from model to model — and neither shows in what `send` reports.
+ *  Every model with effort levels has `high`. */
+export const DEFAULT_SPAWN_EFFORT: ClaudeEffort = "high";
+
+/** What `config spawn-effort` takes: one of Claude's levels, or `auto` to
+ *  leave the effort to Claude Code. */
+export function isSpawnEffortSetting(value: unknown): boolean {
+  return value === "auto" || isClaudeEffort(value);
+}
+
+/** The effort a `spawn-effort` setting gives a started session: its level;
+ *  none for `auto`, so Claude Code decides; ours when unset or unreadable. */
+export function spawnEffortFor(setting: unknown): ClaudeEffort | undefined {
+  if (setting === "auto") return undefined;
+  return isClaudeEffort(setting) ? setting : DEFAULT_SPAWN_EFFORT;
+}
+
 /** A model name safe to hand to `claude --model`: an alias or a full name. */
 export function isModelName(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && !/[^a-zA-Z0-9._\-\/:\[\]]/.test(value);
@@ -609,7 +629,7 @@ export function isModelName(value: unknown): value is string {
  *  asked for, and the user's Claude Code default for whatever was not. */
 export function describeModelChoice(model?: string, effort?: string): string {
   if (!model && !effort) return "the user's Claude Code default model and effort";
-  return `${model ?? "default model"}, ${effort ? `${effort} effort` : "default effort"}`;
+  return `${model ?? "the user's Claude Code default model"}, ${effort ? `${effort} effort` : "the user's Claude Code default effort"}`;
 }
 
 /** How long to wait for a started session to register a socket. Claude

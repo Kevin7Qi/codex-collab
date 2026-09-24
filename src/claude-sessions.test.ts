@@ -18,11 +18,13 @@ import {
   CLAUDE_EFFORTS,
   CLAUDE_MODEL_TIERS,
   CODEX_COMMAND_MARKERS,
+  DEFAULT_SPAWN_EFFORT,
   DEFAULT_SPAWN_LINGER_SEC,
   describeModelChoice,
   isAutocompactWindow,
   isClaudeEffort,
   isModelName,
+  isSpawnEffortSetting,
   forgetSpawnedSession,
   jobHasWorkInFlight,
   jobSessionId,
@@ -39,6 +41,7 @@ import {
   sessionStatusNow,
   SPAWN_MAX_LIFETIME_SEC,
   spawnClaudeSession,
+  spawnEffortFor,
   spawnEnv,
   spawnedSessionBrief,
   spawnedSessionName,
@@ -505,8 +508,17 @@ describeUnix("spawn helpers", () => {
     for (const bad of ["none", "minimal", "ultra", "", undefined]) expect(isClaudeEffort(bad)).toBe(false);
     expect(describeModelChoice()).toBe("the user's Claude Code default model and effort");
     expect(describeModelChoice("opus", "high")).toBe("opus, high effort");
-    expect(describeModelChoice("haiku")).toBe("haiku, default effort");
-    expect(describeModelChoice(undefined, "low")).toBe("default model, low effort");
+    expect(describeModelChoice("haiku")).toBe("haiku, the user's Claude Code default effort");
+    expect(describeModelChoice(undefined, "low")).toBe("the user's Claude Code default model, low effort");
+    // `config spawn-effort`: unset is ours, `auto` is Claude Code's, and a
+    // value that is no level (hand-edited) is ours as well.
+    expect(DEFAULT_SPAWN_EFFORT).toBe("high");
+    expect(spawnEffortFor(undefined)).toBe("high");
+    expect(spawnEffortFor("xhigh")).toBe("xhigh");
+    expect(spawnEffortFor("auto")).toBeUndefined();
+    expect(spawnEffortFor("ultra")).toBe("high");
+    for (const ok of [...CLAUDE_EFFORTS, "auto"]) expect(isSpawnEffortSetting(ok)).toBe(true);
+    for (const bad of ["ultra", "", 3, undefined]) expect(isSpawnEffortSetting(bad)).toBe(false);
     // Most capable first, by alias: nothing here names a version.
     expect(CLAUDE_MODEL_TIERS.map((t) => t.alias)).toEqual(["fable", "opus", "sonnet"]);
   });

@@ -330,7 +330,7 @@ codex-collab config --unset             # 取消所有设置
 
 `spawn`（默认 `on`；`--no-spawn` 可逐次覆盖）决定 `send` 在无存活会话时是否启动后台 Claude Code 会话。`linger` 是该会话可空闲多少秒后被停止（默认 1800）；此外，会话启动四小时后，只要手头没有工作、也没有任务在等它，同样会被停止。被停止的会话保留其对话：若停止时间在 `spawn-resume` 秒之内（默认一周；`off` 表示从不恢复，`send --fresh` 可单次启动新会话），下一次 `send`（或点名该会话的 `send`）会恢复它。
 
-Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型与推理强度；`spawn-model` 与 `spawn-effort` 设置 Codex 未指定时启动或恢复的会话所用的模型与推理强度，未设置时沿用你的 Claude Code 默认值。`codex-collab models --claude` 列出可选项：各档位别名 `fable`、`opus`、`sonnet`（始终指向该档位的最新模型），以及你在 `spawn-models` 中列出的完整模型名（逗号分隔，如 `claude-opus-4-6`）。无论是否列出，任何模型名都可用于 `--model`。
+Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型与推理强度；`spawn-model` 与 `spawn-effort` 设置 Codex 未指定时启动或恢复的会话所用的模型与推理强度。未设置时，模型沿用你的 Claude Code 默认值，推理强度为 `high`；`spawn-effort auto` 让推理强度也沿用你的 Claude Code 设置。`codex-collab models --claude` 列出可选项：各档位别名 `fable`、`opus`、`sonnet`（始终指向该档位的最新模型），以及你在 `spawn-models` 中列出的完整模型名（逗号分隔，如 `claude-opus-4-6`）。无论是否列出，任何模型名都可用于 `--model`。
 
 自动启动的会话以 Claude Code 的 `auto` 权限模式运行，直接编辑与 Codex 共享的工作目录，并在上下文达到 `spawn-autocompact` 时自行压缩（100k–1M tokens，或 `auto` 沿用 Claude Code 自身的窗口；默认 500k）。这些设置只传给该会话（`claude --settings`），你自己的会话仍沿用你的设置，包括你已关闭的自动压缩。若所选模型不支持 `auto` 模式，`send` 会发现会话停在无人应答的确认提示上，将其停止并如实说明；下一次 `send` 会以其指定的模型恢复该对话。
 

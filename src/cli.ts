@@ -222,8 +222,9 @@ Commands:
                           disables both) — on the model and effort given with
                           -m <model> and -r/--effort <level>, else config
                           spawn-model / spawn-effort, else your Claude Code
-                          default ('models --claude' lists the choices). Any
-                          other name that is not live is refused
+                          default model at high effort ('models --claude'
+                          lists the choices). Any other name that is not
+                          live is refused
   task status <id>        (for Codex) Where a task stands: whom it went to,
                           when, what that session is doing now (--json: the
                           whole record). Works inside the sandbox, as do:
