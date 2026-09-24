@@ -9,7 +9,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
@@ -930,8 +930,10 @@ describeUnix("send", () => {
       expect(resume.code).toBe(1);
       expect(resume.stdout).toContain(`resuming ${fake.name}`);
       expect(resume.stdout).not.toContain("starting a new session instead");
-      expect(resume.stderr).toContain(`Error: Claude Code will not start a session in ${WS}, because the folder is not trusted.`);
-      expect(resume.stderr).toContain(`Claude Code says: Workspace not trusted. Run \`claude\` in ${WS} once and accept the trust prompt, then retry.`);
+      // The folder as it is on disk (on macOS, /var is /private/var).
+      const folder = realpathSync(WS);
+      expect(resume.stderr).toContain(`Error: Claude Code will not start a session in ${folder}, because the folder is not trusted.`);
+      expect(resume.stderr).toContain(`Claude Code says: Workspace not trusted. Run \`claude\` in ${folder} once and accept the trust prompt, then retry.`);
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", stoppedAt: expect.any(String) }));
       // A new session is refused the same way, and says the same.
       const fresh = await runCli(["send", "three", "--fresh"], env);

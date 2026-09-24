@@ -6,7 +6,7 @@
 // a real `claude`.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -743,7 +743,9 @@ describeUnix("spawnClaudeSession", () => {
     const stateDir = join(root, "state-spawn-untrusted");
     const refused = spawnClaudeSession({ cwd: wsA, stateDir, lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000 });
     await expect(refused).rejects.toBeInstanceOf(WorkspaceNotTrustedError);
-    await expect(refused).rejects.toThrow(`Claude Code will not start a session in ${wsA}, because the folder is not trusted.`);
+    // Named as it is on disk — as Claude Code names it — which on macOS is
+    // under /private: /var, where the temp folders are, links there.
+    await expect(refused).rejects.toThrow(`Claude Code will not start a session in ${realpathSync(wsA)}, because the folder is not trusted.`);
     await expect(refused).rejects.toThrow("only they can agree to that, in a terminal");
     await expect(refused).rejects.toThrow(`Claude Code says: ${said}`);
     expect(readSpawnedSessions(stateDir)).toEqual([]);
