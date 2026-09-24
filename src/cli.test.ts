@@ -79,6 +79,26 @@ describe("CLI valid commands", () => {
     expect(stdout).toContain("Usage:");
   });
 
+  it("send, peers, task and tasks --help print the page for working with Claude Code; other commands print the general help", () => {
+    for (const command of ["send", "peers", "task", "tasks"]) {
+      const { stdout, exitCode } = run(command, "--help");
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("Claude Code sessions, from Codex");
+      // Which session a message reaches, the forms side by side.
+      expect(stdout).toContain("Which session send reaches");
+      expect(stdout).toContain("the user's\n                        own, if that is the one live");
+      expect(stdout).toContain('send --new "…"        A new session of codex-collab\'s own');
+      expect(stdout).toContain("--fresh is the same");
+      expect(stdout).toContain("5  a session codex-collab started stopped at a prompt nobody could answer;");
+      expect(stdout).not.toContain("Usage: codex-collab <command>");
+      // Fits a narrow terminal.
+      for (const line of stdout.split("\n")) expect(line.length).toBeLessThanOrEqual(80);
+    }
+    const general = run("run", "--help");
+    expect(general.stdout).toContain("Usage: codex-collab <command>");
+    expect(general.stdout).toContain("'codex-collab send --help' covers");
+  });
+
   it("no args prints help and exits 0", () => {
     const { stdout, exitCode } = run();
     expect(exitCode).toBe(0);

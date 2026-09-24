@@ -328,7 +328,7 @@ codex-collab config --unset             # 取消所有设置
 
 <details><summary>Codex 启动的会话：<code>spawn</code>、<code>linger</code>、<code>spawn-*</code>、<code>codex-rule</code></summary>
 
-`spawn`（默认 `on`；`--no-spawn` 可逐次覆盖）决定 `send` 在无存活会话时是否启动后台 Claude Code 会话。`linger` 是该会话可空闲多少秒后被停止（默认 1800）；此外，会话启动四小时后，只要手头没有工作、也没有任务在等它，同样会被停止。被停止的会话保留其对话：若停止时间在 `spawn-resume` 秒之内（默认一周；`off` 表示从不恢复，`send --fresh` 可单次启动新会话），下一次 `send`（或点名该会话的 `send`）会恢复它。
+`spawn`（默认 `on`；`--no-spawn` 可逐次覆盖）决定 `send` 在无存活会话时是否启动后台 Claude Code 会话。`linger` 是该会话可空闲多少秒后被停止（默认 1800）；此外，会话启动四小时后，只要手头没有工作、也没有任务在等它，同样会被停止。被停止的会话保留其对话：若停止时间在 `spawn-resume` 秒之内（默认一周；`off` 表示从不恢复），下一次 `send`（或点名该会话的 `send`）会恢复它。`send --new` 则会新建一个会话，即使你自己的会话正在运行也可以，且绝不会把消息发给你的会话；`codex-collab send --help` 列出了每种 `send` 写法会发给哪个会话。
 
 Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型与推理强度；`spawn-model` 与 `spawn-effort` 设置 Codex 未指定时启动或恢复的会话所用的模型与推理强度。未设置时，模型沿用你的 Claude Code 默认值，推理强度为 `high`；`spawn-effort auto` 让推理强度也沿用你的 Claude Code 设置。`codex-collab models --claude` 列出可选项：各档位别名 `fable`、`opus`、`sonnet`（始终指向该档位的最新模型），以及你在 `spawn-models` 中列出的完整模型名（逗号分隔，如 `claude-opus-4-6`）。无论是否列出，任何模型名都可用于 `--model`。
 

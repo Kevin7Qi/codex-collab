@@ -132,8 +132,9 @@ export interface Options {
   noWait: boolean;
   /** send: never start a Claude session when none is live. */
   noSpawn: boolean;
-  /** send: start a new Claude session even when a stopped one could be resumed. */
-  fresh: boolean;
+  /** send: a new session of codex-collab's own, with a new conversation,
+   *  whatever else is live (`--new`, or `--fresh`). */
+  newSession: boolean;
   /** peers: every workspace, not only this one (also lifts `threads`' limit). */
   all: boolean;
   /** skill render: the Codex-side skill instead of Claude's. */
@@ -327,7 +328,7 @@ export function defaultOptions(): Options {
     to: null,
     noWait: false,
     noSpawn: false,
-    fresh: false,
+    newSession: false,
     all: false,
     codex: false,
     rules: false,
@@ -590,8 +591,8 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.noWait = true;
     } else if (arg === "--no-spawn") {
       options.noSpawn = true;
-    } else if (arg === "--fresh") {
-      options.fresh = true;
+    } else if (arg === "--new" || arg === "--fresh") {
+      options.newSession = true;
     } else if (arg === "--codex") {
       options.codex = true;
     } else if (arg === "--rules") {

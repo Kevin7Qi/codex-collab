@@ -592,7 +592,7 @@ describeUnix("send", () => {
     const before = new Set(readdirSync(REGISTRY));
     const r = await runCli(["send", "hello there"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("Sending to fake-claude — the only Claude Code session in this workspace.");
+    expect(r.stdout).toContain("Sending to fake-claude — the only Claude Code session in this workspace; `send --new` starts a session of codex-collab's own instead.");
     expect(r.stdout).toMatch(/Sent to fake-claude as task [0-9a-f]{8}\. Waiting up to 10m/);
     const id = taskIdOf(r.stdout);
     // The outcome leads with a line a caller can match without reading prose.
@@ -820,7 +820,7 @@ describeUnix("send", () => {
       for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
       const listed = await runCli(["peers"]);
       expect(listed.stdout).toContain(`resumes ${fake.name}, stopped`);
-      expect(listed.stdout).toContain("with its conversation so far (`--fresh` starts a new session instead)");
+      expect(listed.stdout).toContain("with its conversation so far (`--new` starts a new session instead)");
       // The next send picks the conversation up again instead of starting over.
       const again = await runCli(["send", "still there?"], { PATH: `${binDir}:${process.env.PATH}` });
       expect(again.code).toBe(0);
@@ -948,12 +948,92 @@ describeUnix("send", () => {
     }
   });
 
+  test("--new starts a session of codex-collab's own beside the user's, never messages theirs, and is refused while its own is live", async () => {
+    await settleSpawnState();
+    // The user's own session, at work in this workspace.
+    const users = startFake("CIMantics-narrative", { reply: () => "from the user's session" });
+    registerFake(users);
+    const binDir = join(TEST_HOME, "bin-spawn-new");
+    const own = startFake(spawnedSessionName(WS), { reply: () => "from codex-collab's own" });
+    writeFakeClaude(binDir, own.socketPath);
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    const argsOf = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+    writeConfig({ linger: 60 });
+    try {
+      // What peers offers while only the user's session is live.
+      expect((await runCli(["peers"])).stdout).toContain(`A new session of codex-collab's own, beside these: codex-collab send --new "…"`);
+      // --new goes with no other session's name.
+      const named = await runCli(["send", "--new", users.name, "review this"], env);
+      expect(named.code).toBe(1);
+      expect(named.stderr).toContain(`--new starts a new session of codex-collab's own, so it takes no other session's name ("${users.name}")`);
+      const r = await runCli(["send", "--new", "review this"], env);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("Starting a new session of codex-collab's own for this workspace, in the background…");
+      expect(r.stdout).toContain(`Started ${own.name}`);
+      expect(r.stdout).toContain("from codex-collab's own");
+      expect(own.received).toHaveLength(1);
+      // Its own is live now: --new cannot start a second under that name,
+      // and says how to message it or start afresh.
+      const again = await runCli(["send", "--new", "another"], env);
+      expect(again.code).toBe(1);
+      expect(again.stderr).toContain(`${own.name}, codex-collab's own session for this workspace, is live, and there is one per workspace.`);
+      expect(again.stderr).toContain(`codex-collab send ${JSON.stringify(own.name)} "…"`);
+      expect(again.stderr).toContain(`codex-collab peers stop ${JSON.stringify(own.name)}, then send --new again`);
+      // Two live and no name: refused, with both names and --new.
+      const unnamed = await runCli(["send", "which one?"], env);
+      expect(unnamed.code).toBe(1);
+      expect(unnamed.stderr).toContain(`codex-collab send ${JSON.stringify(users.name)} "…"`);
+      expect(unnamed.stderr).toContain(`codex-collab send --new "…"`);
+      // Its own stops, the user's stays: peers says how to resume it, and
+      // --new starts a new conversation instead of resuming that one.
+      killFakeSleepers(binDir);
+      for (const f of readdirSync(REGISTRY)) {
+        const entry = JSON.parse(readFileSync(join(REGISTRY, f), "utf-8"));
+        if (entry.name === own.name) unlinkSync(join(REGISTRY, f));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 900)); // its reaper sees it gone
+      const root = join(TEST_HOME, ".codex-collab", "workspaces");
+      for (const d of readdirSync(root)) {
+        const f = join(root, d, "spawned-claude.json");
+        if (!existsSync(f)) continue;
+        const records = JSON.parse(readFileSync(f, "utf-8")) as Array<Record<string, unknown>>;
+        writeFileSync(f, JSON.stringify(records.map((rec) => ({ ...rec, stoppedAt: new Date().toISOString() }))));
+      }
+      const listed = await runCli(["peers"]);
+      expect(listed.stdout).toContain(`codex-collab's own session here, ${own.name}, stopped`);
+      expect(listed.stdout).toContain(`resume it, with its conversation: codex-collab send ${JSON.stringify(own.name)} "…"`);
+      const fresh = await runCli(["send", "--new", "start over"], env);
+      expect(fresh.code).toBe(0);
+      expect(fresh.stdout).toContain("Starting a new session of codex-collab's own for this workspace");
+      expect(argsOf()).not.toContain("--resume");
+      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\nbg\n");
+      expect(users.received).toHaveLength(0);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("--new starts nothing where starting sessions is off", async () => {
+    writeConfig({ spawn: "off" });
+    try {
+      const off = await runCli(["send", "--new", "hello"]);
+      expect(off.code).toBe(1);
+      expect(off.stderr).toContain("--new starts a session, and starting one is off: `codex-collab config spawn on` enables it.");
+    } finally {
+      removeConfig();
+    }
+    const refused = await runCli(["send", "--new", "--no-spawn", "hello"]);
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("--new starts a session, which --no-spawn rules out.");
+  });
+
   test("a choice of model cannot change the user's own session, and send says so; an effort Claude has no level for is refused", async () => {
     const fake = startFake("fake-claude");
     registerFake(fake);
     const r = await runCli(["send", "hello", "--model", "haiku"]);
     expect(r.code).toBe(0);
-    expect(r.stdout).toContain("fake-claude is the user's own session and runs on what they chose: --model and --effort apply only to a session `send` starts, so yours did not apply.");
+    expect(r.stdout).toContain("fake-claude is the user's own session and runs on what they chose: --model and --effort apply only to a session `send` starts, so yours did not apply (`send --new` starts one).");
     expect(r.stdout).toContain("REPLY FROM fake-claude");
     // `ultra` is a Codex reasoning level; `claude --effort` has none by that name.
     const bad = await runCli(["send", "hello", "--effort", "ultra"]);
@@ -975,9 +1055,10 @@ describeUnix("send", () => {
     try {
       expect((await runCli(["send", "one"], env)).stdout).toContain(`Started ${fake.name}`);
       // Codex wants a clean start: the stopped conversation is not resumed.
+      // (--fresh is --new under its older name.)
       await stopAt(new Date());
       const fresh = await runCli(["send", "two", "--fresh"], env);
-      expect(fresh.stdout).toContain("starting one in the background…");
+      expect(fresh.stdout).toContain("Starting a new session of codex-collab's own for this workspace, in the background…");
       expect(fresh.stdout).toContain(`Started ${fake.name}`);
       expect(argsOf()).not.toContain("--resume");
       // The user turned resuming off.

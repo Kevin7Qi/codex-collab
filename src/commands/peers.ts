@@ -6,7 +6,7 @@
 // reads.
 
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, resolveSession, resumableSession, runReaper, stopSpawnedSession, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { outstandingTasksFor } from "../claude-tasks";
 import { insideCodexSandbox, resumeWindowSec, sandboxHint } from "./send";
 import { die, formatDuration, loadUserConfig, parseOptions } from "./shared";
@@ -175,7 +175,7 @@ export async function handlePeers(args: string[]): Promise<void> {
       const stopped = resumableSession(stateDir, resumeWindowSec(loadUserConfig()));
       if (stopped) {
         const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
-        console.log(`\`codex-collab send "…"\` resumes ${stopped.name}, stopped ${ago} ago, with its conversation so far (\`--fresh\` starts a new session instead).`);
+        console.log(`\`codex-collab send "…"\` resumes ${stopped.name}, stopped ${ago} ago, with its conversation so far (\`--new\` starts a new session instead).`);
       } else {
         console.log("`codex-collab send \"…\"` starts one in the background and messages it.");
       }
@@ -189,6 +189,17 @@ export async function handlePeers(args: string[]): Promise<void> {
   const notice = unverifiedNotice(sessions);
   if (notice) console.log(notice);
   console.log('Message one and wait for its reply: codex-collab send <name> "…"');
+  // Whoever is live may be the user, at work: say how Codex gets a session
+  // of codex-collab's own instead, when it has none live here.
+  if (options.all || loadUserConfig().spawn === "off") return;
+  const ownName = spawnedSessionName(cwd);
+  if (sessions.some((s) => s.name === ownName)) return;
+  const stopped = resumableSession(stateDir, resumeWindowSec(loadUserConfig()));
+  if (stopped) {
+    const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
+    console.log(`codex-collab's own session here, ${stopped.name}, stopped ${ago} ago; resume it, with its conversation: codex-collab send ${JSON.stringify(stopped.name)} "…"`);
+  }
+  console.log('A new session of codex-collab\'s own, beside these: codex-collab send --new "…"');
 }
 
 // ---------------------------------------------------------------------------
