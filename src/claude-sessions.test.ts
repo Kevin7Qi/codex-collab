@@ -550,10 +550,16 @@ describeUnix("spawn helpers", () => {
     expect(env.CODEX_HOME).toBe("/h/.codex");
   });
 
-  test("the brief names the workspace and asks for a reply by SendMessage", () => {
+  test("the brief names the workspace and asks for a reply by SendMessage that carries everything, and little after it", () => {
     const brief = spawnedSessionBrief("/work/repo");
     expect(brief).toContain("/work/repo");
-    expect(brief).toContain("SendMessage");
+    expect(brief).toContain("Answer by replying to the sender with SendMessage.");
+    // Resumed or new, the session is told the reply is all the Codex
+    // session gets, and to end its turn with a line at most after it.
+    for (const said of [brief, resumedSessionBrief()]) {
+      expect(said).toContain("The reply is all the Codex session receives, so put everything the answer needs in it; after sending it, end your turn with one short line at most, such as \"Replied.\"");
+    }
+    expect(resumedSessionBrief()).toContain("you answer with SendMessage as before");
   });
 });
 

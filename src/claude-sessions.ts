@@ -417,11 +417,19 @@ export function spawnedSessionName(cwd: string): string {
  *  it, and how to answer. It goes idle afterwards and receives messages
  *  as its later turns. Mechanics only — what to answer, and how much to
  *  look into before answering, is the session's own judgment. */
+/** How a started session answers, in both briefs. The Codex session
+ *  receives the reply and nothing else, so the reply carries the whole
+ *  answer; what the session writes in its own transcript after sending it
+ *  reaches nobody working with it, and is output the user pays for. Said
+ *  again on resuming, since a long or compacted conversation may have lost
+ *  the first brief. */
+const REPLY_RULE = "The reply is all the Codex session receives, so put everything the answer needs in it; after sending it, end your turn with one short line at most, such as \"Replied.\"";
+
 export function spawnedSessionBrief(wsRoot: string): string {
   return [
     `You are a Claude Code session started by codex-collab for the Codex sessions working in ${wsRoot}.`,
     "Codex sessions message you through codex-collab; each message says which Codex thread it comes from.",
-    "Answer by replying to the sender with SendMessage — the reply is what the Codex session receives.",
+    `Answer by replying to the sender with SendMessage. ${REPLY_RULE}`,
     "Read the workspace as needed. Do not change files unless a message asks you to.",
     // Whatever Claude Code's settings decide about where a background
     // session's edits land, the Codex session only knows what the reply says.
@@ -435,7 +443,7 @@ export function spawnedSessionBrief(wsRoot: string): string {
 export function resumedSessionBrief(): string {
   return [
     "You were stopped by codex-collab after a while with no messages, and have now been resumed; your conversation so far is intact.",
-    "Codex sessions will message you as before, and you answer as before.",
+    `Codex sessions will message you as before, and you answer with SendMessage as before. ${REPLY_RULE}`,
     "The workspace may have changed while you were stopped — look again before relying on what you saw earlier.",
     "Reply now with one line saying you are ready, then wait.",
   ].join(" ");
