@@ -636,6 +636,24 @@ export function describeModelChoice(model?: string, effort?: string): string {
  *  Code binds it during startup, well before the first turn ends. */
 export const SPAWN_REGISTER_TIMEOUT_MS = 45_000;
 
+/** `claude --bg` refused the folder. From Claude Code 2.1.281 a background
+ *  session starts only in a folder the user has trusted in Claude Code — the
+ *  folder itself, or one above it, no higher than its git repository's root
+ *  when it is in one — and the
+ *  trust prompt is answered in a terminal, by the user. A resumed session is
+ *  refused the same as a new one, so whoever catches this keeps a stopped
+ *  session's record: its conversation is there once the folder is trusted. */
+export class WorkspaceNotTrustedError extends Error {
+  constructor(folder: string, said: string) {
+    super(
+      `Claude Code will not start a session in ${folder}, because the folder is not trusted. ` +
+      "A background session runs only in a folder the user has trusted in Claude Code: the folder's settings, hooks and MCP servers then run under their account, and only they can agree to that, in a terminal. " +
+      `Claude Code says: ${said}`,
+    );
+    this.name = "WorkspaceNotTrustedError";
+  }
+}
+
 export interface SpawnClaudeOptions {
   cwd: string;
   stateDir: string;
@@ -691,6 +709,8 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
     const err = e as NodeJS.ErrnoException & { stderr?: string };
     if (err.code === "ENOENT") throw new Error("Could not start a Claude Code session: `claude` is not on PATH.");
     const detail = (err.stderr ?? err.message ?? "").toString().trim();
+    const untrusted = /^Workspace not trusted\b.*$/m.exec(detail);
+    if (untrusted) throw new WorkspaceNotTrustedError(wsRoot, untrusted[0].trim());
     // A Claude Code without `--autocompact` refuses the whole command line.
     // Its own window is a worse fit than ours, and no session at all is worse
     // than either, so it starts without the flag and says so once.

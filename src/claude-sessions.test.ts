@@ -48,6 +48,7 @@ import {
   stopSpawnedSession,
   setProcProbesForTests,
   setProcStartReaderForTests,
+  WorkspaceNotTrustedError,
   type SpawnedSession,
 } from "./claude-sessions";
 
@@ -561,7 +562,7 @@ describeUnix("spawn helpers", () => {
  *  `onStop` runs after the record — what a real stop would do to the session,
  *  such as removing its entry. `jobSessionId` is written to the job's state
  *  file, as Claude Code writes the session a job runs. */
-function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean; onStop?: string; jobSessionId?: string; refuseAutocompact?: string }): { bin: string; stopLog: string; pidFile: string; argsLog: string } {
+function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean; onStop?: string; jobSessionId?: string; refuseAutocompact?: string; refuse?: string }): { bin: string; stopLog: string; pidFile: string; argsLog: string } {
   const stopLog = join(dir, "stop.log");
   const pidFile = join(dir, "sleeper.pid");
   // One argument per line, as `--bg` received them.
@@ -587,7 +588,8 @@ case "$1" in
     name="$3"
     cwd="$(pwd)"
     for a in "$@"; do printf '%s\\n' "$a"; done > "${argsLog}"${opts.refuseAutocompact ? `
-    for a in "$@"; do if [ "$a" = "--autocompact" ]; then echo '${opts.refuseAutocompact}' >&2; exit 1; fi; done` : ""}
+    for a in "$@"; do if [ "$a" = "--autocompact" ]; then echo '${opts.refuseAutocompact}' >&2; exit 1; fi; done` : ""}${opts.refuse ? `
+    printf '%s\\n' '${opts.refuse}' >&2; exit 1` : ""}
     echo "Starting background service…"
     echo "backgrounded · deadbeef · $name"${opts.jobSessionId ? `
     mkdir -p "$CODEX_COLLAB_JOBS_DIR/deadbeef"
@@ -729,6 +731,22 @@ describeUnix("spawnClaudeSession", () => {
     } finally {
       killSleeper(bad.pidFile);
     }
+  });
+
+  test("a folder Claude Code has not trusted is refused with the folder and the reason, and nothing is recorded", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-untrusted");
+    mkdirSync(dir, { recursive: true });
+    // What Claude Code 2.1.281 prints for `claude --bg` in such a folder.
+    const said = `Workspace not trusted. Run \`claude\` in ${wsA} once and accept the trust prompt, then retry.`;
+    const fake = installFakeClaude(dir, { register: false, refuse: said });
+    const stateDir = join(root, "state-spawn-untrusted");
+    const refused = spawnClaudeSession({ cwd: wsA, stateDir, lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000 });
+    await expect(refused).rejects.toBeInstanceOf(WorkspaceNotTrustedError);
+    await expect(refused).rejects.toThrow(`Claude Code will not start a session in ${wsA}, because the folder is not trusted.`);
+    await expect(refused).rejects.toThrow("only they can agree to that, in a terminal");
+    await expect(refused).rejects.toThrow(`Claude Code says: ${said}`);
+    expect(readSpawnedSessions(stateDir)).toEqual([]);
   });
 
   test("a missing claude binary is a plain message, not a stack", async () => {

@@ -341,6 +341,8 @@ Codex chooses the model and effort per message with `send --model <model> --effo
 
 A started session runs in Claude Code's `auto` permission mode, edits files in the working directory it shares with Codex, and compacts itself at `spawn-autocompact` (100k–1M tokens, or `auto` for Claude Code's own window; default 500k). These settings reach that session alone (`claude --settings`); your own sessions keep yours, including an auto-compact you have turned off. Where a model has no `auto` mode, `send` notices the session stopped at a prompt nobody can answer, stops it, and says so; the next `send` resumes the conversation on the model it names.
 
+From Claude Code 2.1.281, a background session starts only in a folder you have trusted in Claude Code, or one below it; inside a git repository, a trusted folder counts only up to the repository's root. Elsewhere (a new folder under `/tmp`, say) `send` is refused with the folder and the reason; running `claude` there once and accepting the trust prompt allows it.
+
 `codex-rule` (`on` / `off`, default `off`) writes or removes a Codex exec-policy rule that lets Codex run `codex-collab send` and `codex-collab peers stop` without asking each time; `off` or `--unset` removes it. With it on, any Codex session — including one steered by content it read — can message your Claude Code sessions, start one, and stop one it started. The installer asks once on an interactive terminal and records the answer. Not available on Windows.
 
 </details>

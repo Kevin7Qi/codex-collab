@@ -192,13 +192,15 @@ function removeConfig(): void {
  *  registers a live entry (a sleeper it starts) whose socket is `socketPath`
  *  — a fake session this test serves. `stop <id>` only logs, so a reaper's
  *  confirming look finds the entry still live and signals the sleeper. */
-function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s", opts: { stopDelaySec?: number } = {}): void {
+function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s", opts: { stopDelaySec?: number; untrusted?: boolean } = {}): void {
   mkdirSync(binDir, { recursive: true });
   writeFileSync(join(binDir, "claude"), `#!/bin/sh
 case "$1" in
   --bg)
     echo bg >> "${binDir}/bg.log"
-    for a in "$@"; do printf '%s\\n' "$a"; done > "${binDir}/args.log"
+    for a in "$@"; do printf '%s\\n' "$a"; done > "${binDir}/args.log"${opts.untrusted ? `
+    echo "Workspace not trusted. Run \\\`claude\\\` in $(pwd) once and accept the trust prompt, then retry." >&2
+    exit 1` : ""}
     echo "backgrounded · cafe0001 · $3"
     sleep 300 </dev/null >/dev/null 2>&1 &
     pid=$!
@@ -904,6 +906,40 @@ describeUnix("send", () => {
       expect(bad.stderr).toContain("ignoring invalid spawn-effort in config: ultra");
       expect(bad.stdout).toContain(`Resumed ${fake.name} (its conversation so far is intact; on the user's Claude Code default model, high effort;`);
       expect(argsOf()[argsOf().indexOf("--effort") + 1]).toBe("high");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a folder Claude Code has not trusted refuses the session with the reason, and a stopped session there stays resumable", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-untrusted");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    writeConfig({ linger: 60 });
+    try {
+      // A session started while the folder was trusted, then stopped.
+      expect((await runCli(["send", "one"], env)).stdout).toContain(`Started ${fake.name}`);
+      await stopSpawnedAt(binDir, new Date());
+      // Now Claude Code refuses the folder. A new session would be refused
+      // as well, so none is tried, and the stopped record is kept.
+      writeFakeClaude(binDir, fake.socketPath, "s", { untrusted: true });
+      const resume = await runCli(["send", "two"], env);
+      expect(resume.code).toBe(1);
+      expect(resume.stdout).toContain(`resuming ${fake.name}`);
+      expect(resume.stdout).not.toContain("starting a new session instead");
+      expect(resume.stderr).toContain(`Error: Claude Code will not start a session in ${WS}, because the folder is not trusted.`);
+      expect(resume.stderr).toContain(`Claude Code says: Workspace not trusted. Run \`claude\` in ${WS} once and accept the trust prompt, then retry.`);
+      expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", stoppedAt: expect.any(String) }));
+      // A new session is refused the same way, and says the same.
+      const fresh = await runCli(["send", "three", "--fresh"], env);
+      expect(fresh.code).toBe(1);
+      expect(fresh.stderr).toContain("because the folder is not trusted");
+      expect(fresh.stderr).not.toContain("sandbox");
+      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\nbg\nbg\n");
+      expect(fake.received).toHaveLength(1);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);

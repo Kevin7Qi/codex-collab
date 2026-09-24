@@ -63,6 +63,7 @@ import {
   spawnedSessionName,
   stopSpawnedSession,
   transientSessionId,
+  WorkspaceNotTrustedError,
   type ClaudeSession,
 } from "../claude-sessions";
 import { conversationMovedSince, describeTrouble, firstSaidSince, turnEndedOnError, turnTrouble } from "../claude-transcript";
@@ -319,11 +320,18 @@ export async function handleSend(args: string[]): Promise<void> {
     } catch {
       die("Another `codex-collab send` is still starting a Claude Code session for this workspace — retry in a moment.");
     }
+    // `die` exits there and then, and the lock would be broken only once it
+    // is stale — two minutes, which the next `send` here would spend waiting
+    // for it. So every way out of here lets go of it first.
+    const fail = (message: string): never => {
+      release();
+      return die(message);
+    };
     try {
       const again = listClaudeSessions({ cwd, stateDir });
       const startedMeanwhile = start === "named" ? again.find((s) => s.name === startedName) : again.length === 1 ? again[0] : undefined;
       if (start === "any" && again.length > 1) {
-        die("Several Claude Code sessions are live in this workspace — name one:\n" + again.map((s) => `  codex-collab send ${JSON.stringify(s.name)} "…"`).join("\n"));
+        fail("Several Claude Code sessions are live in this workspace — name one:\n" + again.map((s) => `  codex-collab send ${JSON.stringify(s.name)} "…"`).join("\n"));
       } else if (startedMeanwhile) {
         target = startedMeanwhile;
         notes.push(`Sending to ${target.name} — a background Claude Code session started for this workspace just now.`);
@@ -344,6 +352,10 @@ export async function handleSend(args: string[]): Promise<void> {
             resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact, resume: stopped });
             notes.push(`Resumed ${resumed.name} (its conversation so far is intact; on ${describeModelChoice(model, effort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
           } catch (e) {
+            // A folder Claude Code will not run in refuses a new session
+            // too. Stop here, and keep the record: the conversation is there
+            // to resume once the user has trusted the folder.
+            if (e instanceof WorkspaceNotTrustedError) fail(e.message);
             console.log(`Could not resume it (${(e instanceof Error ? e.message : String(e)).split("\n")[0]}) — starting a new session instead.`);
             forgetSpawnedSession(stateDir, stopped.id);
           }
@@ -356,7 +368,8 @@ export async function handleSend(args: string[]): Promise<void> {
           try {
             target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact });
           } catch (e) {
-            die((e instanceof Error ? e.message : String(e)) + sandboxHint());
+            if (e instanceof WorkspaceNotTrustedError) fail(e.message);
+            fail((e instanceof Error ? e.message : String(e)) + sandboxHint());
           }
           notes.push(`Started ${target.name} (a background Claude Code session on ${describeModelChoice(model, effort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
         }
