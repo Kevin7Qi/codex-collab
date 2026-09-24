@@ -136,6 +136,85 @@ function printVersion() {
   console.log(`codex-collab ${config.clientVersion}`);
 }
 
+/** `send --help`, and the same for `peers`, `task` and `tasks`: the
+ *  commands a Codex session works with Claude Code through, on one page —
+ *  which session a message reaches above all, since a wrong guess there
+ *  lands the message in the user's own session. */
+function showClaudeHelp() {
+  console.log(`codex-collab ${config.clientVersion} — Claude Code sessions, from Codex
+
+  codex-collab peers                 Who is live in this workspace
+  codex-collab send [<session>] "…"  Hand a session a message as a task, and
+                                     print its reply
+  codex-collab task wait <id>        Go on waiting for a task's reply
+  codex-collab task result <id>      Print a task's reply if it has come
+  codex-collab task status <id>      Where a task stands (--json: the record)
+  codex-collab tasks                 The tasks sent from this workspace
+  codex-collab peers stop [<session>]
+                                     Stop a session codex-collab started; its
+                                     conversation is kept
+
+send and peers stop run outside the Codex sandbox; peers, task and tasks work
+inside it.
+
+Which session send reaches
+  send "<session>" "…"  That live session (or --to <session>; a unique prefix
+                        will do). codex-collab's own session,
+                        claude(<workspace>-…), is resumed by its name when it
+                        has stopped, with its conversation.
+  send "…"              The only live session in this workspace — the user's
+                        own, if that is the one live. With none live:
+                        codex-collab's own, resumed if it stopped within a week
+                        (config spawn-resume), else started. With several live:
+                        refused, with their names.
+  send --new "…"        A new session of codex-collab's own, with a new
+                        conversation, even while the user's sessions are live;
+                        never one of theirs. Refused while codex-collab's own
+                        session is live, as there is one per workspace: message
+                        it by name, or stop it first. --fresh is the same.
+
+A session codex-collab starts works in this workspace in Claude Code's auto
+permission mode, can edit files and run commands, and stops after 30 idle
+minutes (config linger), keeping its conversation. Claude Code starts it only in
+a folder the user has trusted in Claude Code.
+
+Options for send
+  --timeout <sec>       How long this command waits (default 600). The task
+                        goes on for four hours from sending, or the --timeout
+                        if longer, and a reply in that time is kept.
+  --no-wait             Return once the message is delivered.
+  -m, --model <model>   For a session send starts or resumes: fable, opus,
+                        sonnet, or a full model name ('models --claude').
+  -r, --effort <level>  low, medium, high, xhigh or max (default high, or
+                        config spawn-effort).
+  --no-spawn            Never start or resume a session.
+  -                     In place of the message: read it from stdin.
+
+Other options
+  task wait --timeout <sec>   How long to wait (default 600)
+  peers --all, tasks --all    Every workspace (--json: as JSON)
+
+Outcome: the last line is 'task: <id>  status: <status>'. Exit codes (send,
+task wait, task result):
+  0  the session replied
+  3  no reply yet; the task goes on and keeps a later reply
+     ('task wait <id>', 'task result <id>')
+  5  a session codex-collab started stopped at a prompt nobody could answer;
+     it was stopped, and the next send resumes its conversation (when it would
+     not stop, the error says so)
+  1  no reply will come: undeliverable, the session went away, the turn of a
+     session codex-collab started ended on an error, or the task expired; the
+     error says which
+
+Examples
+  codex-collab send "What does src/auth.ts do?"
+  codex-collab send --new -m fable -r xhigh "Review paper/ for argument gaps"
+  codex-collab send "claude(myrepo-a1b2c3)" "And the tests?"
+  codex-collab send "claude(myrepo-a1b2c3)" - < prompt.md
+  codex-collab send --no-wait "Run the benchmarks"      (then: task wait <id>)
+`);
+}
+
 function showHelp() {
   console.log(`codex-collab ${config.clientVersion} — Claude + Codex collaboration tool
 
@@ -161,7 +240,9 @@ Commands:
   progress <id>           Show recent activity for thread
   peek <id>               Show recent conversation slice from server
   config [key] [value]    Show or set persistent defaults
-  models                  List available models
+  models [--claude]       List available Codex models (--claude: the Claude
+                          models and efforts a session 'send' starts can
+                          run on)
   templates               List available prompt templates
   ask "question"          (for Codex, mid-turn) Post a question to the
                           collaborator and wait for the answer; --timeout <sec>
@@ -180,10 +261,14 @@ Commands:
   clean                   Delete old logs and stale mappings
   delete <id> [--purge]   Archive thread (recoverable) and delete local files;
                           --purge permanently deletes it server-side instead
-  skill sync [--yes]      Regenerate the installed SKILL.md if stale — shows
-                          the diff and asks before writing (--yes: apply
-                          without prompting; skill render: print the
-                          generated SKILL.md to stdout, used by installers)
+  skill sync [--yes]      Regenerate the installed skill files if stale —
+                          Claude's SKILL.md and the Codex-side one — shows
+                          the diffs and asks before writing (--yes: apply
+                          without prompting)
+  skill render [--codex|--rules]
+                          Print the generated SKILL.md to stdout (--codex:
+                          the Codex-side skill; --rules: the opt-in Codex
+                          exec-policy rule); used by the installers
   update                  Check GitHub for a newer release and show its
                           changelog; with consent (prompt or --yes) download,
                           build, and reinstall (--check: report only;
@@ -193,6 +278,26 @@ Commands:
                           registry entry, socket — or start one with 'up'
                           (peer messaging is off entirely under
                           'config mode cli', and unavailable on Windows)
+  peers [--all]           (for Codex) List the Claude Code sessions live in
+                          this workspace — the ones 'send' can reach
+                          (--all: every workspace; --json)
+  peers stop [<peer>]     Stop a session codex-collab started, the way it was
+                          started: its conversation is kept, so the next
+                          'send' picks it up. A session it did not start is
+                          its user's to close, and is refused
+  send [<peer>] "message" (for Codex, outside its sandbox) Hand a message to a
+                          Claude Code session as a task and print its reply.
+                          With none live, codex-collab resumes or starts a
+                          session of its own; --new starts a new one beside
+                          whoever is live. 'codex-collab send --help' covers
+                          which session gets it, the options and exit codes
+  task status <id>        (for Codex) Where a task stands: whom it went to,
+                          when, what that session is doing now (--json: the
+                          whole record). Works inside the sandbox, as do:
+  task wait <id>          Wait for a task's reply and print it (--timeout
+                          <sec>, default 600)
+  task result <id>        Print a task's reply if it is there; never waits
+  tasks [--all]           List the tasks sent from this workspace (--json)
   version                 Print version
 
 Options:
@@ -254,6 +359,8 @@ created by Codex mid-turn or by you with run --goal — a run follows the
 server's continuation turns until the goal completes, is paused, or gets
 blocked: the run IS the goal, not just its first turn.
 
+Exit codes (send, task wait, task result): see 'codex-collab send --help'.
+
 Exit codes (next):
   0  event delivered           3  --timeout elapsed with no event
   10 workspace idle — nothing running, nothing pending
@@ -283,7 +390,7 @@ const rawArgs = process.argv.slice(2);
 // validation happens in commands/shared.ts parseOptions. Keep in sync with
 // the value-taking branches there.
 const VALUE_FLAGS = new Set([
-  "-r", "--reasoning",
+  "-r", "--reasoning", "--effort",
   "-m", "--model",
   "-s", "--sandbox",
   "--approval",
@@ -297,6 +404,7 @@ const VALUE_FLAGS = new Set([
   "--template",
   "--goal",
   "--budget",
+  "--to",
 ]);
 
 // Boolean flags recognized by commands/shared.ts parseOptions. Combined with
@@ -319,6 +427,13 @@ const BOOLEAN_FLAGS = new Set([
   "--session",
   "--yes",
   "--check",
+  "--no-wait",
+  "--no-spawn",
+  "--new",
+  "--fresh",
+  "--codex",
+  "--rules",
+  "--claude",
   "--skip",
 ]);
 
@@ -390,7 +505,7 @@ async function main() {
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
-    "peer",
+    "peer", "peers", "send", "task", "tasks", "reap-claude", "recv-task",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -402,7 +517,8 @@ async function main() {
   // not past a `--` terminator, where it is positional prompt text.
   const optionTokens = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
   if (optionTokens.includes("-h") || optionTokens.includes("--help")) {
-    showHelp();
+    if (["send", "peers", "task", "tasks"].includes(command)) showClaudeHelp();
+    else showHelp();
     process.exit(0);
   }
 
@@ -466,6 +582,22 @@ async function main() {
       return (await import("./commands/peek")).handlePeek(rest);
     case "peer":
       return (await import("./commands/peer")).handlePeer(rest);
+    case "peers":
+      return (await import("./commands/peers")).handlePeers(rest);
+    case "send":
+      return (await import("./commands/send")).handleSend(rest);
+    case "task":
+      return (await import("./commands/task")).handleTask(rest);
+    case "tasks":
+      return (await import("./commands/task")).handleTasks(rest);
+    case "reap-claude":
+      // Private: the detached reaper `send` starts for a Claude session it
+      // spawned (see claude-sessions.ts). Not in --help.
+      return (await import("./commands/peers")).handleReapClaude(rest);
+    case "recv-task":
+      // Private: the detached receiver `send` starts for each task — it
+      // delivers the message and collects the reply (see commands/send.ts).
+      return (await import("./commands/send")).handleRecvTask(rest);
     case "version":
       return printVersion();
   }

@@ -15,7 +15,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 
 ## 核心优势
 
-- **原生对等消息**：工作区 broker 会将 Codex 注册为 Claude Code 跨会话消息体系中的对等节点，Claude 会话可直接向 Codex 发送消息（`SendMessage`），Codex 也会以消息回复——任务中途还能通过 `collab.consult` 工具向 Claude 提问。热路径上不再经过 CLI。
+- **原生跨会话消息**：工作区 broker 会将 Codex 注册进 Claude Code 的跨会话消息体系，Claude 会话可直接向 Codex 发送消息（`SendMessage`），Codex 也会以消息回复——任务中途还能通过 `collab.consult` 工具向 Claude 提问。热路径上不再经过 CLI。
 - **结构化通信**：与 Codex 之间通过 stdio JSON-RPC 通信，每个事件都有完整的类型定义，可解析、可追踪。
 - **实时进度反馈**：Codex 工作时实时推送进度，Claude 随时掌握运行状态。
 - **一键代码审查**：一条命令即可在只读沙箱中审查 PR、未提交更改或特定 commit。
@@ -122,30 +122,6 @@ codex-collab run "大规模重构" --detach --approval auto
 codex-collab follow --watch
 ```
 
-## 原生对等消息
-
-在 macOS/Linux 上，若所用 Claude Code 支持跨会话消息，工作区 broker 会把 Codex 注册进 Claude Code 的会话注册表：
-
-```bash
-codex-collab peer up      # 启动 broker 与对等节点；单独执行 `peer` 查看状态
-```
-
-此后，任意 Claude 会话的 `ListAgents` 中都会出现名为 `codex(<工作区>-<哈希>)` 的对等节点（尾部六位哈希派生自工作区路径，因代理注册表为全机共享，需借此避免不同仓库间的地址冲突）——向它发送消息，Codex 即接手任务，完成后以对等消息回复。每个对话还会以独立节点出现。消息首行的 `topic:` 用于选择对话：`topic: auth refactor` 会接续名为 `codex(auth-refactor-<哈希>)` 的对话，若不存在则新建——因此多个对话可并行进行，按 topic 自由切换（该行会在送达 Codex 前剥离）。后续的头部行可设置该对话的 `model:`、`effort:`、`timeout:`（每回合秒数；超时的回合会被终止并告知发送方）、`sandbox:` 与 `approval:`。未写 topic 时则接续自己最近的一次对话；未命名的对话由消息文本加线程短 ID 派生名称。回复来自该对话的地址，向其回信即延续该对话。
-
-任务进行中，Codex 可通过 `collab.consult` 工具调用向 Claude 提问：问题以 `[consult]` 消息送达，该会话的下一条回复会直接送回 Codex 正在运行的回合。consult 采取超时放行策略：无人应答时超时后 Codex 自行判断并继续。
-
-Claude Code 会依据发送方声明的权限类别对入站对等消息设卡：对话仅在 `sandbox: danger-full-access` 下声明为 `bypass`，其余情况一律为 `prompting`。因此，以 `bypassPermissions` 模式运行的 Claude 会话会将 Codex 的回复暂扣待审，除非其 `crossSessionInbound` 设置为 `accept`。被暂扣的回复仍可通过 `codex-collab output <id> --last` 查看。若以命令行在某个消息对话上显式指定 `-s` 运行回合，该对话此后运行并声明的沙箱即随之改变——Codex 会将逐回合的覆盖保留至后续回合。
-
-该机制可平滑降级：在 Windows 上、无会话注册表时、或设置 `CODEX_COLLAB_PEER=off` 后，下述各项功能与从前完全一致（`CODEX_COLLAB_PEER=on` 则在单次调用中强制启用对等节点，效果同持久化的 `config mode peer`）。只要有 Claude 会话在运行，broker 就保持常驻；最后一个会话退出后按常规空闲超时退场。
-
-## Codex 的 app-server
-
-Codex 支持在每台机器上运行一个共享的多客户端 app-server。`codex app-server daemon start` 将其绑定在 `~/.codex/app-server-control/app-server-control.sock`；`codex` 终端界面和 Codex 桌面应用（通过 SSH 连接的 Linux 主机）会自动接入该 server。Mac 上桌面应用运行的是独立的私有 server，无法被外部接入。
-
-当该 socket 可用时，codex-collab 的工作区 broker 会接入共享 app-server，而非自行启动私有实例。共享 server 上的一切构成统一空间：codex-collab 发起的回合会实时呈现在同一 server 上的 Codex 应用或终端界面中，`threads --discover` 会标注其他客户端打开或正在运行的会话，`run --resume <id>` 可加入这些会话。向正在运行回合的会话发送提示时，提示会并入当前回合而非另起一个，该回合仍归原客户端所有：其审批提示由用户当前查看的客户端响应，codex-collab 不会代为应答。若提示携带了覆盖参数（`-m`、`-s`、`--approval`、`--dir`）或 `--goal`，codex-collab 会拒绝发送——这些设置无法应用于他方回合。`codex` 终端界面会拒绝其监视的会话上的所有动态工具调用，因此对 Claude 的 consult 问询在 Claude 作答前即被拒绝；codex-collab 随后将 Claude 的回答作为注入消息送入运行中的回合。codex-collab 在空闲会话上发起的回合则一如既往由其自行处理。`health` 显示 broker 当前连接的 server 类型。Windows 上不可用。
-
-在没有共享 server 的情况下，Codex 0.145+ 对每个会话仅允许一个写入进程。在 Codex 应用或 `codex` 终端会话中打开的会话无法被 codex-collab 接管，直到对方释放——此时以退出码 8 报告，消息列出可能持有该会话的进程类型（Codex 应用、`codex` 终端会话或 app-server daemon），但无法判断实际持有者。broker 使用过的会话，会在 broker 放手约七分钟后（0.153.4）释放——命令行运行的会话在回合结束时放手，消息对话的会话则在其对话节点闲置 30 分钟后退休时放手。共享同一 app-server 可彻底消除此冲突。
-
 ## CLI 命令
 
 | 命令 | 说明 |
@@ -156,7 +132,9 @@ Codex 支持在每台机器上运行一个共享的多客户端 app-server。`co
 | `follow [id]` | 在你自己的终端分屏中实时查看运行中的会话。不带 ID 时自动附着到活跃运行；`--watch` 会持续跟踪每一次新运行 |
 | `output <id> [--last]` | 查看会话完整日志（`--last`: 只输出最近一轮的结果） |
 | `kill <id> [--clear]` | 中断运行中的会话。若存在进行中的 goal 会先暂停；`--clear` 表示直接放弃 |
-| `peer [up]` | 查看原生消息对等节点的状态；`peer up` 启动 broker（对等节点随之注册） |
+| `peer [up]` | 查看 Codex 在跨会话消息中的注册状态；`peer up` 启动 broker 并完成注册 |
+
+Codex 用来联系 Claude 的命令（`peers`、`send`、`task`）见[跨会话消息](#跨会话消息)。
 
 <details>
 <summary>提问与审批</summary>
@@ -194,7 +172,7 @@ Codex 支持在每台机器上运行一个共享的多客户端 app-server。`co
 | `clean` | 清理过期日志和失效映射 |
 | `skill sync [--yes]` | 当已安装的 SKILL.md 与可执行文件或模板集不一致时重新生成。先打印 diff，确认后才写入 |
 | `update` | 检查是否有新版本，确认后下载安装。详见[升级](#升级) |
-| `health` | 检查依赖项、登录状态，并显示 broker 当前连接的 app-server |
+| `health` | 检查依赖项、登录状态，显示 broker 当前连接的 app-server，并报告 Codex 端技能安装与执行策略状态 |
 | `version` | 打印版本号（也可在命令前使用 `-v`/`--version`） |
 
 </details>
@@ -277,6 +255,7 @@ Codex 支持在每台机器上运行一个共享的多客户端 app-server。`co
 | `5` | 因等待审批而中止；该审批请求已失效，请用更长的 `--timeout` 恢复，或改用 `--approval auto` |
 | `6` | broker 占用且无可用回退；瞬态问题，可重试 |
 | `7` | goal 因受阻或用量/预算达到上限而结束；用 `run --resume` 恢复并给出指引，或用 `kill --clear` 放弃 |
+| `8` | 该线程被其他 Codex 进程持有（桌面应用或终端会话）——等其释放或在相应界面关闭即可，不会丢失数据 |
 
 `next`：`0` 收到事件（内容完整打印到标准输出）、`3` `--timeout` 时限内没有事件、`10` 工作区空闲（没有运行中的任务，也没有待处理的事件）。
 
@@ -286,6 +265,36 @@ Codex 支持在每台机器上运行一个共享的多客户端 app-server。`co
 <summary>Goal 模式</summary>
 
 在 `~/.codex/config.toml` 中设置 `goals = true` 后，goal（由 Codex 在任务中途自行创建，或用 `run "首轮指令" --goal "objective" [--budget <tokens>]` 显式设置）会让 app server 不断启动后续轮次，直到目标完成；`run` 会在同一份运行记录和日志中跟踪整个 goal，退出码反映 goal 的最终状态。目标文本会在每个后续轮次重新注入；内容较复杂的目标，可以改为指向仓库中的规格或计划文档。`threads` 会显示每个会话最新的 goal 状态（`[goal active: 45k/100k tokens]`）。
+
+</details>
+
+## 跨会话消息
+
+同一工作区的 Claude 与 Codex 会话可互发消息，需 macOS 或 Linux 及 Claude Code ≥ 2.1.224；Windows 仅限 CLI。
+
+```bash
+codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 查看状态
+```
+
+<details>
+<summary>在 Claude 中联系 Codex</summary>
+
+执行 `peer up` 后，`ListAgents` 列出 `codex(myproject-a1b2c3)`——向它发消息即可派发任务，Codex 完成后将结果回传。首行写 `topic: <name>` 可开启或接续某个主题，多个主题可并行；亦可在首行设置 `model:`、`effort:`、`timeout:`、`sandbox:`、`approval:`。执行中 Codex 可向 Claude 提问，无人应答时自行继续。
+
+</details>
+
+<details>
+<summary>在 Codex 中联系 Claude</summary>
+
+在 Codex 会话中，`codex-collab send <name> "message"` 将消息作为一项任务交给工作区内的某个 Claude Code 会话并等待回复（默认 600 秒）。等待时限只约束命令本身：发出后四小时内到达的回复同样会被保存，可用 `task wait` / `task result` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 不会再有回复：失败、会话已结束或任务过期）。无存活会话时 `send` 自动启动后台会话，空闲 30 分钟后停止。每次 `send` 与 `peers stop` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
+
+| 命令 | 说明 |
+|------|------|
+| `peers [--all] [--json]` | 列出当前工作区内存活的 Claude Code 会话 |
+| `send [<peer>] "message"` | 将消息作为一项任务交给某个会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`send -` 从标准输入读取） |
+| `task status\|wait\|result <id>` | 查看任务状态、等待其回复或打印回复 |
+| `tasks` | 列出本工作区发出的任务 |
+| `peers stop [<peer>]` | 停止由 codex-collab 启动的会话（对话内容保留）；非其启动的会话会被拒绝 |
 
 </details>
 
@@ -305,11 +314,31 @@ codex-collab config model --unset       # 取消单个设置（恢复自动检�
 codex-collab config --unset             # 取消所有设置
 ```
 
-可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`
+可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`spawn-model`、`spawn-effort`、`spawn-models`、`spawn-autocompact`、`spawn-resume`、`codex-rule`
 
-`mode` 决定 codex-collab 与 Claude 的协作方式：`auto`（默认）在平台支持时采用对等消息通信，否则退回命令行路径；`peer` 强制使用对等消息；`cli` 则彻底关闭对等机制——不注册代理节点、不生成会话地址、不提供 consult 工具——一切交互均经由命令行完成。对等消息需要 macOS 或 Linux 且 Claude Code 版本不低于 2.1.224；在 Windows 或更早版本下，`auto` 会自行退回命令行路径，无需额外配置。broker 在启动时读取该模式，并在重启前保持原有的对等节点状态，因此修改模式后需在工作区内执行 `codex-collab peer up` 以使其生效——仅在没有回合运行时才会替换 broker。
+**实验性功能：** `codex-rule` 默认关闭；开启后，任何 Codex 会话执行 `codex-collab send` 与 `peers stop` 时都无需审批（详见下文）。
 
-`server` 控制 broker 连接 app-server 的方式：`auto`（默认）在共享 app-server 的控制 socket 可用时接入，否则启动私有 server；`shared` 强制使用共享 server，不可用时报错；`private` 始终启动私有 server。broker 在启动时读取该配置，因此修改后需在对应工作区中执行 `codex-collab peer up` 使之生效——broker 仅在无回合运行时才会被替换。环境变量 `CODEX_COLLAB_SERVER`（取值 `auto`、`shared`、`private`）可在单次调用中覆盖该配置；`CODEX_COLLAB_SERVER_SOCKET` 可覆盖 Codex 控制 socket 的路径（默认 `~/.codex/app-server-control/app-server-control.sock`，若设置了 `$CODEX_HOME` 则位于其下）。
+<details><summary><code>mode</code> 与 <code>server</code></summary>
+
+`mode` 控制 codex-collab 与 Claude 的通信方式：`auto`（默认）在平台支持时采用跨会话消息，否则走命令行路径；`peer` 强制使用跨会话消息；`cli` 则完全关闭该机制。修改后执行 `codex-collab peer up` 使之生效。
+
+`server` 控制 broker 连接 Codex app-server 的方式：`auto`（默认）在共享 app-server 运行时（`codex app-server daemon start`）接入，否则启动私有实例；`shared` 强制使用共享 server；`private` 始终启动私有实例。`health` 显示当前连接的类型。修改后执行 `codex-collab peer up` 使之生效；`CODEX_COLLAB_SERVER` 可在单次调用中覆盖此设置。
+
+</details>
+
+<details><summary>Codex 启动的会话：<code>spawn</code>、<code>linger</code>、<code>spawn-*</code>、<code>codex-rule</code></summary>
+
+`spawn`（默认 `on`；`--no-spawn` 可逐次覆盖）决定 `send` 在无存活会话时是否启动后台 Claude Code 会话。`linger` 是该会话可空闲多少秒后被停止（默认 1800）；此外，会话启动四小时后，只要手头没有工作、也没有任务在等它，同样会被停止。被停止的会话保留其对话：若停止时间在 `spawn-resume` 秒之内（默认一周；`off` 表示从不恢复），下一次 `send`（或点名该会话的 `send`）会恢复它。`send --new` 则会新建一个会话，即使你自己的会话正在运行也可以，且绝不会把消息发给你的会话；`codex-collab send --help` 列出了每种 `send` 写法会发给哪个会话。
+
+Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型与推理强度；`spawn-model` 与 `spawn-effort` 设置 Codex 未指定时启动或恢复的会话所用的模型与推理强度。未设置时，模型沿用你的 Claude Code 默认值，推理强度为 `high`；`spawn-effort auto` 让推理强度也沿用你的 Claude Code 设置。`codex-collab models --claude` 列出可选项：各档位别名 `fable`、`opus`、`sonnet`（始终指向该档位的最新模型），以及你在 `spawn-models` 中列出的完整模型名（逗号分隔，如 `claude-opus-4-6`）。无论是否列出，任何模型名都可用于 `--model`。
+
+自动启动的会话以 Claude Code 的 `auto` 权限模式运行，直接编辑与 Codex 共享的工作目录，并在上下文达到 `spawn-autocompact` 时自行压缩（100k–1M tokens，或 `auto` 沿用 Claude Code 自身的窗口；默认 500k）。这些设置只传给该会话（`claude --settings`），你自己的会话仍沿用你的设置，包括你已关闭的自动压缩。若所选模型不支持 `auto` 模式，`send` 会发现会话停在无人应答的确认提示上，将其停止并如实说明；下一次 `send` 会以其指定的模型恢复该对话。
+
+自 Claude Code 2.1.281 起，后台会话只能在你已于 Claude Code 中信任的文件夹或其子文件夹内启动；在 git 仓库内，受信任的上级文件夹只在仓库根目录以内有效。在其他位置（例如 `/tmp` 下新建的文件夹），`send` 会被拒绝，并说明文件夹与原因；在该处运行一次 `claude` 并接受信任提示后即可使用。
+
+`codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。Windows 上不可用。
+
+</details>
 
 优先级: `CLI 参数 > 配置文件 > 自动检测`
 

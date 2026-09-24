@@ -9,7 +9,105 @@ import {
   renderSkillMd,
   unifiedDiff,
   installedSkillMd,
+  CODEX_SKILL_SOURCE,
+  codexSkillInSync,
+  codexSkillInstallDir,
+  expectedCodexSkillMd,
+  installedCodexSkillMd,
+  codexRulesInSync,
+  codexRulesInstallPath,
+  expectedCodexRules,
+  installCodexRules,
+  removeCodexRules,
 } from "./skill";
+
+describe("Codex exec-policy rule (opt-in)", () => {
+  test("allows the two commands that must leave the sandbox, and nothing wider", () => {
+    const rules = expectedCodexRules();
+    expect(rules).toContain('prefix_rule(pattern=["codex-collab", "send"], decision="allow")');
+    // `peers stop` ends the session through Claude Code, which the sandbox
+    // blocks as surely as it blocks `send`'s socket.
+    expect(rules).toContain('prefix_rule(pattern=["codex-collab", "peers", "stop"], decision="allow")');
+    // Narrow prefixes only: nothing here allows `codex-collab` wholesale.
+    expect(rules.split("\n").filter((l) => l.startsWith("prefix_rule"))).toHaveLength(2);
+    expect(rules).not.toContain('prefix_rule(pattern=["codex-collab"]');
+  });
+
+  test("path: override, then $CODEX_HOME/rules, then ~/.codex/rules", () => {
+    const saved = { path: process.env.CODEX_COLLAB_CODEX_RULES_PATH, home: process.env.CODEX_HOME };
+    try {
+      process.env.CODEX_COLLAB_CODEX_RULES_PATH = "/tmp/override.rules";
+      expect(codexRulesInstallPath()).toBe("/tmp/override.rules");
+      delete process.env.CODEX_COLLAB_CODEX_RULES_PATH;
+      process.env.CODEX_HOME = "/tmp/codex-home";
+      expect(codexRulesInstallPath()).toBe(join("/tmp/codex-home", "rules", "codex-collab.rules"));
+      delete process.env.CODEX_HOME;
+      expect(codexRulesInstallPath().endsWith(join(".codex", "rules", "codex-collab.rules"))).toBe(true);
+    } finally {
+      if (saved.path === undefined) delete process.env.CODEX_COLLAB_CODEX_RULES_PATH; else process.env.CODEX_COLLAB_CODEX_RULES_PATH = saved.path;
+      if (saved.home === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = saved.home;
+    }
+  });
+
+  test("install, in-sync, stale, remove", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-rules-test-"));
+    const path = join(dir, "rules", "codex-collab.rules");
+    try {
+      expect(codexRulesInSync(path)).toBeNull();
+      expect(installCodexRules(path)).toBe(path);
+      expect(codexRulesInSync(path)).toBe(true);
+      writeFileSync(path, "stale\n");
+      expect(codexRulesInSync(path)).toBe(false);
+      expect(removeCodexRules(path)).toBe(true);
+      expect(codexRulesInSync(path)).toBeNull();
+      expect(removeCodexRules(path)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── the Codex-side skill ───────────────────────────────────────────────────
+
+describe("Codex skill", () => {
+  test("is embedded, names the two commands, and says where send must run", () => {
+    expect(CODEX_SKILL_SOURCE).toContain("name: claude-collab");
+    expect(CODEX_SKILL_SOURCE).toContain("codex-collab peers");
+    expect(CODEX_SKILL_SOURCE).toContain("codex-collab send");
+    expect(CODEX_SKILL_SOURCE).toContain("outside the sandbox");
+    expect(expectedCodexSkillMd()).not.toContain("\r\n");
+  });
+
+  test("install dir: override, then $CODEX_HOME, then ~/.codex", () => {
+    const saved = { dir: process.env.CODEX_COLLAB_CODEX_SKILL_DIR, home: process.env.CODEX_HOME };
+    try {
+      process.env.CODEX_COLLAB_CODEX_SKILL_DIR = "/tmp/override-skill";
+      expect(codexSkillInstallDir()).toBe("/tmp/override-skill");
+      delete process.env.CODEX_COLLAB_CODEX_SKILL_DIR;
+      process.env.CODEX_HOME = "/tmp/codex-home";
+      expect(codexSkillInstallDir()).toBe(join("/tmp/codex-home", "skills", "claude-collab"));
+      delete process.env.CODEX_HOME;
+      expect(codexSkillInstallDir().endsWith(join(".codex", "skills", "claude-collab"))).toBe(true);
+    } finally {
+      if (saved.dir === undefined) delete process.env.CODEX_COLLAB_CODEX_SKILL_DIR; else process.env.CODEX_COLLAB_CODEX_SKILL_DIR = saved.dir;
+      if (saved.home === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = saved.home;
+    }
+  });
+
+  test("in-sync: null when absent, true when identical (CRLF tolerated), false when stale", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-skill-test-"));
+    try {
+      expect(installedCodexSkillMd(dir)).toBeNull();
+      expect(codexSkillInSync(dir)).toBeNull();
+      writeFileSync(join(dir, "SKILL.md"), expectedCodexSkillMd().replace(/\n/g, "\r\n"));
+      expect(codexSkillInSync(dir)).toBe(true);
+      writeFileSync(join(dir, "SKILL.md"), "stale\n");
+      expect(codexSkillInSync(dir)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 // ─── embedded source ────────────────────────────────────────────────────────
 

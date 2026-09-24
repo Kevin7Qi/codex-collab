@@ -6,6 +6,55 @@ import { join } from "node:path";
 import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
 import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
+import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_SPAWN_EFFORT, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isAutocompactWindow, isModelName, isSpawnEffortSetting, spawnEffortFor } from "../claude-sessions";
+import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
+
+/** `config codex-rule on|off` is applied as it is set: the setting IS the
+ *  consent to write (or remove) the Codex exec-policy rule. */
+function applyCodexRule(on: boolean): void {
+  if (on) {
+    const path = installCodexRules();
+    console.log(`Wrote ${path} — Codex runs \`codex-collab send\` and \`codex-collab peers stop\` without asking, outside its sandbox (new Codex sessions pick it up).`);
+  } else if (removeCodexRules()) {
+    console.log(`Removed ${codexRulesInstallPath()} — Codex asks again before running \`codex-collab send\` or \`codex-collab peers stop\` outside its sandbox.`);
+  }
+}
+
+function applyCodexRuleOrDie(on: boolean): void {
+  try {
+    applyCodexRule(on);
+  } catch (e) {
+    die(`Could not ${on ? "write" : "remove"} ${codexRulesInstallPath()}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** Apply the rule change and record the setting as one step. The setting
+ *  is what `health` and `skill sync` go by, so a rule the config does not
+ *  claim — or the absence of one it does — must not outlive a failed save:
+ *  the change is undone before the failure is reported. */
+function setCodexRuleAndSave(cfg: UserConfig, on: boolean): void {
+  const hadRule = existsSync(codexRulesInstallPath());
+  applyCodexRuleOrDie(on);
+  try {
+    saveUserConfigOrThrow(cfg);
+  } catch (e) {
+    let undone: string;
+    try {
+      if (on) {
+        removeCodexRules();
+        undone = "the rule was removed again";
+      } else if (hadRule) {
+        installCodexRules();
+        undone = "the rule was put back";
+      } else {
+        undone = "no rule was in place";
+      }
+    } catch (u) {
+      undone = `and the rule could not be ${on ? "removed again" : "put back"}: ${u instanceof Error ? u.message : String(u)}`;
+    }
+    die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)} — ${undone}.`);
+  }
+}
 import type { Model, AccountRead } from "../types";
 import {
   die,
@@ -14,6 +63,8 @@ import {
   fetchAllPages,
   loadUserConfig,
   saveUserConfig,
+  saveUserConfigOrThrow,
+  type UserConfig,
   MAX_TIMEOUT_SECONDS,
 } from "./shared";
 
@@ -33,6 +84,14 @@ export async function handleConfig(args: string[]): Promise<void> {
     memory:    { validate: v => v === "true" || v === "false", hint: "true, false (let Codex memory learn from created threads)" },
     mode:      { validate: v => (COLLAB_MODES as readonly string[]).includes(v), hint: `${COLLAB_MODES.join(", ")} (auto: peer messaging where supported, CLI otherwise)` },
     server:    { validate: v => (SERVER_PREFERENCES as readonly string[]).includes(v), hint: `${SERVER_PREFERENCES.join(", ")} (auto: attach to Codex's own app-server when its socket answers, else run a private one)` },
+    spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
+    "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` and `codex-collab peers stop` without asking, outside its sandbox; default off)" },
+    linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
+    "spawn-model":  { validate: isModelName, hint: `the model a started Claude Code session runs on when \`send\` names none: ${CLAUDE_MODEL_TIERS.map((t) => t.alias).join(", ")}, or a full model name (default: your Claude Code default; see \`codex-collab models --claude\`)` },
+    "spawn-models": { validate: v => v.split(",").every((name) => isModelName(name.trim())), hint: "comma-separated full model names to offer a Codex session besides the aliases, e.g. claude-opus-4-6,claude-sonnet-4-6 (shown by `codex-collab models --claude`; any model name works with `send --model` whether listed or not)" },
+    "spawn-autocompact": { validate: isAutocompactWindow, hint: `how much context a started Claude Code session fills before it compacts itself: 100k-1M tokens (\`500k\`, \`200000\`), or auto for Claude Code's own window (default ${DEFAULT_SPAWN_AUTOCOMPACT})` },
+    "spawn-resume": { validate: v => v === "off" || (Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) <= MAX_TIMEOUT_SECONDS), hint: `seconds after it was stopped that a started Claude Code session is still resumed, with its conversation, by the next \`send\`, 1-${MAX_TIMEOUT_SECONDS}, or off to always start a new one (default ${DEFAULT_SPAWN_RESUME_SEC}, a week; \`send --new\` starts a new one once)` },
+    "spawn-effort": { validate: isSpawnEffortSetting, hint: `the effort a started Claude Code session runs at when \`send\` names none: ${CLAUDE_EFFORTS.join(", ")}, or auto for your Claude Code settings (default ${DEFAULT_SPAWN_EFFORT})` },
   };
 
   const cfg = loadUserConfig();
@@ -40,7 +99,8 @@ export async function handleConfig(args: string[]): Promise<void> {
   // No args -> show current config, or --unset to clear all
   if (positional.length === 0) {
     if (options.explicit.has("unset")) {
-      saveUserConfig({});
+      if ((cfg as Record<string, unknown>)["codex-rule"] === "on") setCodexRuleAndSave({}, false);
+      else saveUserConfig({});
       console.log("All config values cleared. Using auto-detected defaults.");
       return;
     }
@@ -67,7 +127,8 @@ export async function handleConfig(args: string[]): Promise<void> {
   // Unset
   if (options.explicit.has("unset")) {
     delete (cfg as Record<string, unknown>)[key];
-    saveUserConfig(cfg);
+    if (key === "codex-rule") setCodexRuleAndSave(cfg, false);
+    else saveUserConfig(cfg);
     console.log(`Unset ${key} (will use auto-detected default)`);
     return;
   }
@@ -91,9 +152,13 @@ export async function handleConfig(args: string[]): Promise<void> {
     die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
   }
 
+  if (key === "codex-rule" && value === "on" && process.platform === "win32") {
+    die("codex-rule is unavailable on Windows: Claude Code's cross-session messaging, which `codex-collab send` rides on, does not exist there.");
+  }
   (cfg as Record<string, unknown>)[key] =
-    key === "timeout" ? Number(value) : key === "memory" ? value === "true" : value;
-  saveUserConfig(cfg);
+    key === "timeout" || key === "linger" || (key === "spawn-resume" && value !== "off") ? Number(value) : key === "memory" ? value === "true" : value;
+  if (key === "codex-rule") setCodexRuleAndSave(cfg, value === "on");
+  else saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
   if (key === "mode") {
     // The mode is read when a broker starts. One already running keeps its
@@ -111,10 +176,46 @@ export async function handleConfig(args: string[]): Promise<void> {
 // models
 // ---------------------------------------------------------------------------
 
+/** `models --claude`: what a Claude Code session `send` starts can run on —
+ *  for a Codex session choosing `--model` / `--effort`, which is a choice
+ *  about the user's money as much as about capability. Reads nothing but the
+ *  user config, so it works inside Codex's sandbox. Exported for tests. */
+export function formatClaudeModels(cfg: UserConfig): string {
+  const width = Math.max(...CLAUDE_MODEL_TIERS.map((t) => t.alias.length));
+  const model = typeof cfg["spawn-model"] === "string" ? cfg["spawn-model"] : undefined;
+  // As `send` reads it: unset is our default, `auto` leaves it to Claude Code.
+  const effort = spawnEffortFor(cfg["spawn-effort"]);
+  // Specific versions are the user's to offer (`config spawn-models`): a
+  // list kept here would name models that age and retire.
+  const extra = typeof cfg["spawn-models"] === "string"
+    ? cfg["spawn-models"].split(",").map((name) => name.trim()).filter(isModelName)
+    : [];
+  return [
+    "Models for a Claude Code session that `codex-collab send` starts (most capable first):",
+    ...CLAUDE_MODEL_TIERS.map((t) => `  ${t.alias.padEnd(width)}  ${t.description}`),
+    ...(extra.length ? ["", "Specific versions the user also offers:", ...extra.map((name) => `  ${name}`)] : []),
+    "",
+    "An alias always means the latest model of its tier; a full model name works as well.",
+    `Effort, lowest first: ${CLAUDE_EFFORTS.join(", ")}`,
+    "On a model without xhigh or max (claude-opus-4-6, for one), Claude Code runs those at high.",
+    "",
+    `With nothing chosen, a started session runs on: ${describeModelChoice(model, effort)}`,
+    "  per message:  codex-collab send \"…\" --model <model> --effort <level>",
+    "  the default:  codex-collab config spawn-model <model> · codex-collab config spawn-effort <level>",
+    "",
+    "The choice is made when `send` starts a session, or resumes one it stopped, and holds until that session",
+    "next stops. A session that is already live keeps what it runs on — the user's own sessions are theirs to set.",
+  ].join("\n");
+}
+
 export async function handleModels(args: string[]): Promise<void> {
   // Parse for -d/--dir support and so unknown flags error like every other
   // command instead of being silently ignored.
   const { options } = parseOptions(args);
+  if (options.claude) {
+    console.log(formatClaudeModels(loadUserConfig()));
+    return;
+  }
   const allModels = await withClient((client) =>
     fetchAllPages<Model>(client, "model/list", { includeHidden: true }),
   options.dir);
@@ -232,6 +333,24 @@ export function describeServer(
     : `private app-server${pid} — Codex's socket at ${socket} exists but this invocation did not attach (under \`auto\`, tried the socket and fell back)`;
 }
 
+/** One line on the Codex-side skill: where it is, and whether it is
+ *  current (`inSync` null: not installed). */
+export function describeCodexSkill(inSync: boolean | null, dir: string): string {
+  const file = join(dir, "SKILL.md");
+  if (inSync === null) return `not installed — 'codex-collab skill sync' installs it at ${file}`;
+  if (!inSync) return `${file} (out of date — run 'codex-collab skill sync')`;
+  return `${file} (up to date)`;
+}
+
+/** One line on the opt-in exec-policy rule: on and current, on but the
+ *  file drifted or vanished, or off (Codex asks before each `send`). */
+export function describeCodexRule(enabled: boolean, inSync: boolean | null, path: string): string {
+  if (!enabled) return "off — Codex asks before each `codex-collab send` and `peers stop` ('codex-collab config codex-rule on' lets it run them without asking)";
+  if (inSync === null) return `on, but ${path} is missing — run 'codex-collab skill sync'`;
+  if (!inSync) return `on, but ${path} is out of date — run 'codex-collab skill sync'`;
+  return `on (${path}) — Codex runs \`codex-collab send\` and \`peers stop\` without asking`;
+}
+
 export async function handleHealth(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
   const findCmd = process.platform === "win32" ? "where" : "which";
@@ -267,6 +386,13 @@ export async function handleHealth(args: string[]): Promise<void> {
   const auth = describeAuth(account);
   console.log(`  account: ${auth.detail}`);
   console.log(`  peer: ${describePeer(options.dir)}`);
+  // Codex's side of the channel: whether a Codex session in this workspace
+  // can find `peers`/`send`, and whether it may run `send` without asking.
+  // Not on Windows, where neither exists.
+  if (process.platform !== "win32") {
+    console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
+    console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
+  }
 
   // Missing auth is reported, never fatal. This command's exit code answers
   // "is the installation sound?" — install.sh runs it as its own final check,

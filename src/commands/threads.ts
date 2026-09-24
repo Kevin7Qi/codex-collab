@@ -15,6 +15,7 @@ import {
 import { getCurrentSessionId } from "../broker";
 import { resolveWorkspaceDir, resolveMailboxDir } from "../config";
 import { sweepQuestions } from "../questions";
+import { sweepTasks } from "../claude-tasks";
 import type { AppServerClient } from "../client";
 import type { Thread, RunRecord } from "../types";
 import {
@@ -630,6 +631,10 @@ export async function handleClean(args: string[]): Promise<void> {
   // Ask-channel mailbox: answered questions delete themselves; this catches
   // expired ones (kept for the audit trail) and orphans from killed askers.
   const questionsDeleted = sweepQuestions(resolveMailboxDir(options.dir), oneDayMs);
+  // Tasks handed to Claude Code sessions: finished ones, once old. One still
+  // waited on is kept however old it is.
+  const tasksDeleted = sweepTasks(ws.stateDir);
+  const receiversSwept = await (await import("./send")).sweepDeadReceivers();
 
   // Clean stale thread mappings — use log file mtime as proxy for last
   // activity so recently-used threads aren't pruned just because they
@@ -666,6 +671,10 @@ export async function handleClean(args: string[]): Promise<void> {
     parts.push(`${pidsDeleted} stale PID files deleted`);
   if (questionsDeleted > 0)
     parts.push(`${questionsDeleted} old question files deleted`);
+  if (tasksDeleted > 0)
+    parts.push(`${tasksDeleted} old task records deleted`);
+  if (receiversSwept > 0)
+    parts.push(`${receiversSwept} dead task receivers unregistered`);
   if (mappingsRemoved > 0)
     parts.push(`${mappingsRemoved} stale mappings removed`);
 

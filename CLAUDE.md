@@ -10,6 +10,7 @@ CLI tool for Claude + Codex collaboration via the Codex app server JSON-RPC prot
 ./install.sh --dev    # symlink for live iteration
 bun run src/cli.ts --help
 codex-collab health
+bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) — before every push
 ```
 
 ## Key Files
@@ -18,7 +19,7 @@ codex-collab health
 |------|---------|
 | `src/cli.ts` | CLI router, argument parsing, signal handlers |
 | `src/client.ts` | JSON-RPC client for Codex app server (spawn, handshake, request routing) |
-| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve) |
+| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve; `send` with its detached receiver, `task`/`tasks`, `peers` with `peers stop` and the reaper entry point) |
 | `src/threads.ts` | Thread index, run ledger, short ID mapping |
 | `src/turns.ts` | Turn lifecycle (runTurn, runReview), event wiring |
 | `src/events.ts` | Event dispatcher (progress lines, log writer, output accumulator) |
@@ -28,6 +29,9 @@ codex-collab health
 | `src/config.ts` | Configuration constants, workspace resolution |
 | `src/broker.ts` | Shared app-server lifecycle (connection pooling) |
 | `src/peer.ts` | Native peer messaging (Claude session-registry entries, messaging sockets, consult bridge, per-thread peers) |
+| `src/claude-sessions.ts` | Codex's side of peer messaging: the Claude Code sessions `peers` lists and `send` reaches, sessions `send` starts (`claude --bg`), their records and reaper |
+| `src/claude-transcript.ts` | Reads a Claude Code session's own transcript for why a turn failed (API errors); fails open, undocumented format |
+| `src/claude-tasks.ts` | Task records for `send`: one per message, written by a detached receiver, read by `task status\|wait\|result` and `tasks` |
 | `src/broker-client.ts` | Socket-based client for connecting to the broker server |
 | `src/shared-server.ts` | Attach to Codex's shared app-server over its control socket (WebSocket client, attach/spawn decision) |
 | `src/models.ts` | Model and effort defaults shared by the CLI and the peer |
@@ -35,9 +39,10 @@ codex-collab health
 | `src/process.ts` | Process spawn/lifecycle utilities |
 | `src/lock.ts` | Advisory file locks (sync/async, single-winner stale breaking) |
 | `src/git.ts` | Git operations (default-branch detection for reviews) |
-| `src/skill.ts` | Installed-skill rendering (embedded SKILL.md source), drift detection, unified diff |
+| `src/skill.ts` | Installed-skill rendering for both skills (embedded SKILL.md sources), the opt-in Codex exec-policy rule (`CODEX_RULES_SOURCE`), drift detection, unified diff |
 | `src/update.ts` | Release checking, update notices (`skill sync` / `update` commands live in `src/commands/update.ts`) |
 | `SKILL.md` | Claude Code skill definition |
+| `codex-skill/SKILL.md` | Codex-side skill (`claude-collab`): how Codex reaches Claude Code sessions (`peers`, `send`, `task`, `peers stop`) |
 
 ## Dependencies
 
@@ -47,7 +52,7 @@ codex-collab health
 
 - Communicates with Codex via the `codex app-server` JSON-RPC protocol: over Codex's control socket (`$CODEX_HOME/app-server-control/app-server-control.sock`, WebSocket) when a shared app-server is running, else over stdio to a private child (`config server auto|shared|private`)
 - Codex 0.145+ allows one writer per thread (flock in `~/.codex/thread-writer-locks/`), released only when the holding process unloads the thread or exits. The broker unsubscribes idle threads it does not keep; Codex unloads an unsubscribed idle thread after a delay (observed ~7 min on 0.153.4 — `-c thread_unload_delay_secs` did not shorten it) and releases the lock then. A thread held by another process is reported as exit code 8
-- Per-workspace state under `~/.codex-collab/workspaces/{slug}-{hash}/` (threads, logs, runs, approvals, kill signals, PIDs)
+- Per-workspace state under `~/.codex-collab/workspaces/{slug}-{hash}/` (threads, logs, runs, approvals, kill signals, PIDs, tasks)
 - User defaults stored in `~/.codex-collab/config.json` (model, reasoning, sandbox, approval, timeout)
 - Broker manages one app-server connection per workspace via Unix socket / named pipe with thread-scoped routing: parallel runs on different threads multiplex over it; same-thread contention is refused (-32001) — a second app-server could no longer take the thread anyway — and only an unavailable broker falls back to a direct connection
 - Short IDs are 8-char hex, support prefix resolution

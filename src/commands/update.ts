@@ -5,14 +5,21 @@
 // invocation without --yes prints exactly what would change and exits 1 —
 // that invocation IS the "show me first" step for an agent-driven session.
 
-import { join } from "path";
+import { basename, dirname, join } from "path";
 import { homedir } from "os";
 import { spawnSync } from "child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync, writeFileSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "fs";
 import { config } from "../config";
 import { acquireLockSync } from "../lock";
 import {
+  codexRuleEnabled,
+  codexRulesInstallPath,
+  expectedCodexRules,
+  installedCodexRules,
+  codexSkillInstallDir,
+  expectedCodexSkillMd,
   expectedSkillMd,
+  installedCodexSkillMd,
   installedSkillMd,
   skillInstallDir,
   unifiedDiff,
@@ -57,45 +64,68 @@ export async function handleSkill(args: string[]): Promise<void> {
   // plus a stray "false" positional; silently ignoring it would treat an
   // explicitly withheld consent as granted.
   if (positional.length > 1) {
-    die(`Unexpected argument: ${positional[1]}\nUsage: codex-collab skill <sync|render> [--yes]`);
+    die(`Unexpected argument: ${positional[1]}\nUsage: codex-collab skill <sync|render> [--codex] [--yes]`);
   }
 
   // render: print the SKILL.md this binary generates (embedded source +
-  // current template table). Pure output — the installers pipe it to a file.
+  // current template table), or with --codex the Codex-side skill. Pure
+  // output — the installers pipe it to a file.
   if (sub === "render") {
-    process.stdout.write(expectedSkillMd());
+    process.stdout.write(options.rules ? expectedCodexRules() : options.codex ? expectedCodexSkillMd() : expectedSkillMd());
     return;
   }
 
   if (sub !== "sync") {
-    die(`Unknown skill subcommand: ${sub ?? "(none)"}\nUsage: codex-collab skill <sync|render> [--yes]`);
+    die(`Unknown skill subcommand: ${sub ?? "(none)"}\nUsage: codex-collab skill <sync|render> [--codex] [--yes]`);
   }
 
+  if (options.codex || options.rules) {
+    die("--codex and --rules apply to `skill render`; `skill sync` covers every file codex-collab installs.");
+  }
   const dir = skillInstallDir();
   if (!existsSync(dir)) {
     die(`No installed skill at ${dir} — run the installer first (install.sh / install.ps1).`);
   }
 
-  const expected = expectedSkillMd();
-  const installed = installedSkillMd(dir);
+  // Two files, one consent: Claude's skill (must already be installed) and
+  // Codex's (created when missing — installs that predate it have none).
+  // Not on Windows: Claude Code messaging does not exist there, so the
+  // Codex skill would teach commands that cannot work (install.ps1 skips
+  // it for the same reason).
+  const normalize = (s: string) => s.replace(/\r\n/g, "\n");
+  const targets: Array<{ label: string; dir: string; file: string; expected: string; installed: string | null; create: boolean; effect: string }> = [
+    { label: "SKILL.md", dir, file: "SKILL.md", expected: expectedSkillMd(), installed: installedSkillMd(dir), create: false, effect: "takes effect in new Claude Code sessions" },
+  ];
+  if (process.platform !== "win32") {
+    targets.push({ label: "Codex SKILL.md", dir: codexSkillInstallDir(), file: "SKILL.md", expected: expectedCodexSkillMd(), installed: installedCodexSkillMd(), create: true, effect: "takes effect in new Codex sessions" });
+    // The exec-policy rule only for a user who opted in (config codex-rule on).
+    if (codexRuleEnabled()) {
+      const rules = codexRulesInstallPath();
+      targets.push({ label: "Codex rule", dir: dirname(rules), file: basename(rules), expected: expectedCodexRules(), installed: installedCodexRules(rules), create: true, effect: "Codex runs `codex-collab send` and `peers stop` without asking; takes effect in new Codex sessions" });
+    }
+  }
   // Up-to-date is content equality (same normalization as the drift notice),
   // NOT diff emptiness: a drift in line endings or the end-of-file newline
   // produces an empty line diff, and deciding by the diff would leave the
   // staleness notice firing forever with sync claiming nothing to do.
-  const normalize = (s: string) => s.replace(/\r\n/g, "\n");
-  if (installed !== null && normalize(installed) === normalize(expected)) {
-    console.log("Installed SKILL.md is already up to date.");
+  const stale = targets.filter((t) => t.installed === null || normalize(t.installed) !== normalize(t.expected));
+  if (stale.length === 0) {
+    console.log(`Installed ${targets.map((t) => t.label).join(", ")} ${targets.length === 1 ? "is" : "are"} already up to date.`);
     return;
   }
-  const diff =
-    unifiedDiff(installed ?? "", expected, "SKILL.md (installed)", "SKILL.md (regenerated)") ||
-    "(no visible line changes — line-ending or end-of-file whitespace difference)";
-
-  console.log(diff);
-  console.log("");
+  for (const t of stale) {
+    const where = join(t.dir, t.file);
+    if (t.installed === null) console.log(`${t.label} is not installed — it will be created at ${where}:\n`);
+    else console.log(`${t.label} at ${where}:\n`);
+    console.log(
+      unifiedDiff(t.installed ?? "", t.expected, `${t.label} (installed)`, `${t.label} (regenerated)`) ||
+      "(no visible line changes — line-ending or end-of-file whitespace difference)",
+    );
+    console.log("");
+  }
   requireConsent(
     options.yes,
-    "Apply these changes to the installed SKILL.md?",
+    stale.length === 1 ? `Apply these changes to the installed ${stale[0].label}?` : "Apply these changes to the installed files above?",
     "Review the diff above with the user, then re-run 'codex-collab skill sync --yes' to apply.",
   );
   // Serialize with self-update: an installer running concurrently replaces
@@ -113,27 +143,43 @@ export async function handleSkill(args: string[]): Promise<void> {
     die("A codex-collab update is in progress — retry 'skill sync' after it finishes.");
   }
   try {
-    // Revalidate under the lock: the diff above may predate an interactive
-    // wait at the consent prompt, during which another sync or an update
-    // can have replaced the file — writing the stale plan would overwrite
-    // newer content (throw, not die: the lock must release via finally).
-    if (installedSkillMd(dir) !== installed) {
-      throw new Error(
-        "The installed SKILL.md changed while waiting for confirmation — re-run 'codex-collab skill sync' to review the current diff.",
-      );
+    // Revalidate EVERY target under the lock before writing any: the diffs
+    // above may predate an interactive wait at the consent prompt, during
+    // which another sync or an update can have replaced a file — writing
+    // the stale plan would overwrite newer content (throw, not die: the
+    // lock must release via finally). Directories are created up front for
+    // the same reason: a target that cannot be created must fail before
+    // its sibling is written and reported updated.
+    for (const t of stale) {
+      let now: string | null = null;
+      try { now = readFileSync(join(t.dir, t.file), "utf-8"); } catch { now = null; }
+      if (now !== t.installed) {
+        throw new Error(
+          `The installed ${t.label} changed while waiting for confirmation — re-run 'codex-collab skill sync' to review the current diff.`,
+        );
+      }
+      if (t.create) {
+        try {
+          mkdirSync(t.dir, { recursive: true });
+        } catch (e) {
+          throw new Error(`Could not create ${t.dir} for the ${t.label}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     }
-    // Write-then-rename: a straight write truncates first, so a failure
-    // mid-write (disk full) would leave the installed skill broken.
-    const target = join(dir, "SKILL.md");
-    const tmp = join(dir, `.SKILL.md.tmp-${process.pid}`);
-    try {
-      writeFileSync(tmp, expected);
-      renameSync(tmp, target);
-    } catch (e) {
-      rmSync(tmp, { force: true });
-      throw e;
+    for (const t of stale) {
+      // Write-then-rename: a straight write truncates first, so a failure
+      // mid-write (disk full) would leave the installed skill broken.
+      const target = join(t.dir, t.file);
+      const tmp = join(t.dir, `.${t.file}.tmp-${process.pid}`);
+      try {
+        writeFileSync(tmp, t.expected);
+        renameSync(tmp, target);
+      } catch (e) {
+        rmSync(tmp, { force: true });
+        throw e;
+      }
+      console.log(`Updated ${target} — ${t.effect}.`);
     }
-    console.log(`Updated ${target} — takes effect in new Claude Code sessions.`);
   } finally {
     releaseLock();
   }

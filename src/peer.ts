@@ -27,10 +27,11 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { homedir } from "node:os";
 import {
   registerThread,
@@ -44,7 +45,7 @@ import {
   pruneRuns,
 } from "./threads";
 import { EventDispatcher } from "./events";
-import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
+import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode, mailboxRoot } from "./config";
 import { resolveModelDefaults } from "./models";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -265,6 +266,94 @@ export function procStartOf(pid: number): string {
   }).toString().replace(/^\s+|\s+$/g, "");
 }
 
+/** A pid's start time as Claude Code records it for its OWN sessions on
+ *  Linux: field 22 of /proc/<pid>/stat (`starttime`, clock ticks since boot),
+ *  kept as the decimal string it is. null anywhere that cannot be read — not
+ *  Linux, the pid gone, or a pid from another namespace.
+ *
+ *  `comm` (field 2) is the executable's name in parentheses and may itself
+ *  hold spaces and parentheses, so the fields are counted from the LAST ")". */
+export function procStartTicksOf(pid: number, statPath = `/proc/${pid}/stat`): string | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = readFileSync(statPath, "utf-8");
+    const close = stat.lastIndexOf(")");
+    if (close === -1) return null;
+    // After ") " comes field 3 (state); starttime is field 22, index 19 here.
+    const ticks = stat.slice(close + 2).split(" ")[19];
+    return ticks !== undefined && /^\d+$/.test(ticks) ? ticks : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The pid domain this process lives in, in the form Claude Code writes to
+ *  its registry entries on Linux (`pidDomain`): the machine id and the PID
+ *  namespace. A pid means something only inside its own domain — a command
+ *  Codex runs in its sandbox (its own PID namespace from 0.154) sees none of
+ *  the host's pids. Built exactly as Claude Code builds it, a part it cannot
+ *  read left empty (a container often has no /etc/machine-id): two domains
+ *  are compared as strings, and one written differently would read as
+ *  another machine's. null where there is no such thing (not Linux). */
+export function ownPidDomain(): string | null {
+  if (process.platform !== "linux") return null;
+  let machine = "";
+  try { machine = readFileSync("/etc/machine-id", "utf-8").trim(); } catch { /* none */ }
+  let ns = "";
+  try { ns = readlinkSync("/proc/self/ns/pid"); } catch { /* none */ }
+  return `linux:${machine}:${ns}`;
+}
+
+/** What one look at a registry entry's process says: it is the process that
+ *  registered, it is not, or this process has no means to tell. */
+export type ProcIdentity = "live" | "dead" | "unverifiable";
+
+/** Test seams: the three probes `procIdentity` makes. */
+export interface ProcProbes {
+  ownDomain?: () => string | null;
+  ticksOf?: (pid: number) => string | null;
+  lstartOf?: (pid: number) => string;
+  signal?: (pid: number) => void;
+}
+
+/** Whether the process a registry entry names is alive AND the one that
+ *  registered. The one place this is decided, for every reader of Claude
+ *  Code's entries.
+ *
+ *  `procStart` comes in two representations: Claude Code on Linux writes
+ *  /proc clock ticks, and where there is no /proc (macOS) — as in the
+ *  entries codex-collab writes itself — it is `ps -o lstart=`. A match on
+ *  either is a match; comparing one against the other made every Linux
+ *  session look dead.
+ *
+ *  `unverifiable` is for an entry from another pid domain, or one whose
+ *  start time nothing here can read (Codex's pre-0.154 sandbox forbids `ps`
+ *  and answers `kill -0` with EPERM). Callers may take other evidence for
+ *  such an entry — never a reason to signal its pid. */
+export function procIdentity(entry: Record<string, unknown>, probes: ProcProbes = {}): ProcIdentity {
+  const pid = entry.pid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return "dead";
+  // Domain first: in another domain the pid names a different process, or
+  // none, and neither answer says anything about the session.
+  if (typeof entry.pidDomain === "string") {
+    const own = (probes.ownDomain ?? ownPidDomain)();
+    if (own !== null && own !== entry.pidDomain) return "unverifiable";
+  }
+  try {
+    (probes.signal ?? ((p: number) => { process.kill(p, 0); }))(pid);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ESRCH") return "dead";
+    // EPERM: it exists and is someone else's — the start time decides.
+  }
+  if (typeof entry.procStart !== "string") return "live";
+  const ticks = (probes.ticksOf ?? procStartTicksOf)(pid);
+  if (ticks !== null && /^\d+$/.test(entry.procStart)) return entry.procStart === ticks ? "live" : "dead";
+  let lstart: string | null = null;
+  try { lstart = (probes.lstartOf ?? procStartOf)(pid); } catch { lstart = null; }
+  if (lstart === null) return "unverifiable";
+  return entry.procStart === lstart ? "live" : "dead";
+}
+
 /** Lowest Claude Code that binds a cross-session messaging socket. From its
  *  changelog: 2.1.224 "Added cross-session SendMessage … (macOS and Linux)".
  *  Later releases fixed bugs around it, but this is where the capability
@@ -356,7 +445,14 @@ export function sniffRegistryVersion(): string {
 export function isCodexCollabSocket(socketPath: unknown): boolean {
   if (typeof socketPath !== "string" || socketPath.length === 0) return false;
   const root = config.dataDir;
-  return socketPath === root || socketPath.startsWith(root + sep);
+  if (socketPath === root || socketPath.startsWith(root + sep)) return true;
+  // A task's receiver (see `send`) registers a socket under the temp root
+  // (short enough for any home directory); it is a Codex session's, not
+  // Claude's. The temp root follows TMPDIR, which differs between processes —
+  // a sandboxed shell, a login that sets its own — so it is recognised by its
+  // own name wherever it sits, not only where this process would put it.
+  const tmpRoot = mailboxRoot();
+  return socketPath.startsWith(tmpRoot + sep) || basename(dirname(socketPath)) === basename(tmpRoot);
 }
 
 export function peerNameFor(cwd: string): string {
@@ -2685,10 +2781,11 @@ export function createPeer(host: PeerHost): Peer {
           // resident. Ours are identifiable by where their socket lives
           // (~/.codex-collab/...); Claude's are under /tmp/cc-socks/.
           if (isCodexCollabSocket(entry?.messagingSocketPath)) continue;
-          process.kill(pid, 0);
-          if (typeof entry?.procStart === "string" && entry.procStart !== procStartOf(pid)) continue;
+          // Only a verified session keeps the broker resident: one it cannot
+          // verify (another pid domain) is no reason to stay.
+          if (procIdentity(entry) !== "live") continue;
           return true;
-        } catch { /* dead, unreadable, or ps failed — not a live session */ }
+        } catch { /* unreadable — not a live session */ }
       }
     } catch { /* registry gone */ }
     return false;
