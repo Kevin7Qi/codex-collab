@@ -173,10 +173,17 @@ Which session send reaches
                         session is live, as there is one per workspace: message
                         it by name, or stop it first. --fresh is the same.
 
-A session codex-collab starts works in this workspace in Claude Code's auto
+codex-collab keeps one session of its own per workspace: a git repository
+(each worktree apart), or outside any repository, the folder itself. Outside a
+repository, then, each folder can have a session of its own (-d <folder>).
+Several tasks sent to one session share its conversation and take turns.
+
+A session codex-collab starts works in its workspace in Claude Code's auto
 permission mode, can edit files and run commands, and stops after 30 idle
 minutes (config linger), keeping its conversation. Claude Code starts it only in
-a folder the user has trusted in Claude Code.
+a folder the user has trusted in Claude Code. A session started any other way
+(claude --bg) can be messaged while live, but codex-collab never stops or
+resumes it, and peers stop refuses it.
 
 Options for send
   --timeout <sec>       How long this command waits (default 600). The task
@@ -188,6 +195,7 @@ Options for send
   -r, --effort <level>  low, medium, high, xhigh or max (default high, or
                         config spawn-effort).
   --no-spawn            Never start or resume a session.
+  -d, --dir <folder>    Send as if from <folder>: its workspace, its session.
   -                     In place of the message: read it from stdin.
 
 Other options
@@ -212,6 +220,7 @@ Examples
   codex-collab send "claude(myrepo-a1b2c3)" "And the tests?"
   codex-collab send "claude(myrepo-a1b2c3)" - < prompt.md
   codex-collab send --no-wait "Run the benchmarks"      (then: task wait <id>)
+  codex-collab send -d figures/fig2 --new --no-wait - < fig2-task.md
 `);
 }
 

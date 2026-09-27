@@ -75,6 +75,12 @@ describe("Codex skill", () => {
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab peers");
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab send");
     expect(CODEX_SKILL_SOURCE).toContain("outside the sandbox");
+    // What a Codex session needs to hand work off without going around
+    // codex-collab: the path, the background recipe, and what a task is.
+    expect(CODEX_SKILL_SOURCE).toContain("A session started any other way (`claude --bg`, a terminal) is outside most of that");
+    expect(CODEX_SKILL_SOURCE).toContain("codex-collab send --new --no-wait --model <model> --effort <level> - < task.md");
+    expect(CODEX_SKILL_SOURCE).toContain("tasks sent to the same session share its context and are taken one after another");
+    expect(CODEX_SKILL_SOURCE).toContain("codex-collab keeps one session of its own per workspace");
     expect(expectedCodexSkillMd()).not.toContain("\r\n");
   });
 

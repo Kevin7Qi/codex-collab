@@ -7,6 +7,8 @@ description: Use when the user asks to invoke, delegate to, or collaborate with 
 
 Claude Code sessions in this workspace are peers you can collaborate with: delegate a task, divide implementation work, or review each other's output. Each is a separate agent with its own context, working in the same directory — often the session the user is talking to in another terminal.
 
+codex-collab is the whole path to them: it records every message as a task and keeps its reply, and it starts, resumes and stops the sessions it hands work to. A session started any other way (`claude --bg`, a terminal) is outside most of that: `send` can message it while it is live, but codex-collab never stops it, `peers stop` refuses it, and it is never resumed.
+
 ## Commands
 
     codex-collab peers                    # who is live here: name, idle or busy, kind
@@ -18,8 +20,23 @@ Claude Code sessions in this workspace are peers you can collaborate with: deleg
     codex-collab task status <id>         # where a task stands
     codex-collab tasks                    # all tasks sent from this workspace
     codex-collab peers stop [<name>]      # stop a session codex-collab started
+    codex-collab send --help              # which session each form of send reaches; every option
 
 Every `send` is a task with an id, printed when the message is delivered. `--timeout <sec>` (default 600) bounds how long the command waits. The task continues past it for four hours from sending (or the `--timeout`, if longer), and a reply in that time is kept under the id; after that the task is `expired`. `--no-wait` returns once the message is delivered; `task wait <id>` collects the reply afterwards. `codex-collab send <name> -` reads the message from stdin.
+
+## Handing work off without waiting
+
+    # a new session, on the model and effort the task calls for
+    codex-collab send --new --no-wait --model <model> --effort <level> - < task.md
+
+    # a session that is already live, by its name
+    codex-collab send "<name>" --no-wait - < task.md
+
+    # later: where it stands, and the reply once it has come
+    codex-collab task status <id>
+    codex-collab task result <id>         # or task wait <id>, which waits for it
+
+`send --no-wait` returns once the message is delivered, printing the task id; the reply is kept under it. `run --detach` belongs to codex-collab's other side, the runs Claude starts in Codex.
 
 Simple questions usually return quickly; reviews, implementations and experiments can take minutes to tens of minutes while the session reads, edits and tests. `send` and `task wait` block until the reply lands. A second `send` of the same message delivers it twice.
 
@@ -36,7 +53,8 @@ Simple questions usually return quickly; reviews, implementations and experiment
 ## Working with a session
 
 - Neither agent sees the other's conversation. Both share the same working directory and can write the same files.
-- A busy session receives a message during its current turn and replies when it gets to it.
+- Each `send` is one task, and a session has one conversation: tasks sent to the same session share its context and are taken one after another. A message to a busy session joins the turn in progress, and is answered when the session gets to it.
+- codex-collab keeps one session of its own per workspace. A workspace is a git repository (each worktree of it apart), whichever of its folders `send` runs in; outside any repository, it is the folder itself. So outside a repository, a folder of its own gives a task a session of its own: `codex-collab send -d <folder> --new …` starts one working there, and tasks that need separate contexts at the same time can each have one. Inside a repository, there is one.
 
 ## Mechanics
 
