@@ -270,6 +270,25 @@ function taskRecord(id: string): Record<string, unknown> | null {
   return null;
 }
 
+/** The pids of the reapers running for the session `id`. */
+function reapersOf(id: string): number[] {
+  const table = spawnSync("ps", ["-x", "-o", "pid=,args="], { encoding: "utf-8" }).stdout ?? "";
+  return table.split("\n").filter((line) => line.includes(`reap-claude ${id} `)).map((line) => Number(line.trim().split(/\s+/)[0]));
+}
+
+/** The reaper logs under the test HOME: one left behind is a reaper that died. */
+function reaperLogs(): string[] {
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  try {
+    return readdirSync(root).flatMap((d) => {
+      const dir = join(root, d, "reapers");
+      return existsSync(dir) ? readdirSync(dir).map((f) => join(dir, f)) : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
 /** The CLI's spawned-session records, under the test HOME. */
 function spawnedRecords(): unknown[] {
   const root = join(TEST_HOME, ".codex-collab", "workspaces");
@@ -787,6 +806,30 @@ describeUnix("send", () => {
     expect(r.stdout).not.toContain("not for you");
   });
 
+  test("a reaper that dies leaves its log, which says how it ended", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-reaper-dies");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 60 });
+    try {
+      expect((await runCli(["send", "hello"], { PATH: `${binDir}:${process.env.PATH}` })).code).toBe(0);
+      await waitFor(() => reapersOf("cafe0001").length === 1, 10_000);
+      const [reaper] = reapersOf("cafe0001");
+      process.kill(reaper, "SIGTERM");
+      await waitFor(() => reapersOf("cafe0001").length === 0, 10_000);
+      const logs = reaperLogs();
+      expect(logs.map((f) => basename(f))).toEqual([`cafe0001-${reaper}.log`]);
+      const said = readFileSync(logs[0], "utf-8");
+      expect(said).toContain(`watching ${fake.name} (pid `);
+      expect(said).toContain("exited (code 143) before it saw its session through");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+      for (const f of reaperLogs()) rmSync(f, { force: true });
+    }
+  });
+
   test("with no session live, one is started, messaged, and stopped again once idle", async () => {
     await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-spawn");
@@ -814,6 +857,8 @@ describeUnix("send", () => {
       await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toBe("stop cafe0001\n");
       await waitFor(() => (spawnedRecords() as Array<{ stoppedAt?: string }>).some((r) => r.stoppedAt), 15_000);
+      // A reaper that saw its session through leaves no log behind.
+      await waitFor(() => reaperLogs().length === 0, 10_000);
       const sleeperPid = Number(readFileSync(join(binDir, "sleepers"), "utf-8").trim());
       await waitFor(() => { try { process.kill(sleeperPid, 0); return false; } catch { return true; } }, 15_000);
       // Nobody is live now, and `peers` says what the next `send` will do.

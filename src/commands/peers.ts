@@ -6,7 +6,7 @@
 // reads.
 
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, reaperLog, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { outstandingTasksFor } from "../claude-tasks";
 import { insideCodexSandbox, resumeWindowSec, sandboxHint } from "./send";
 import { die, formatDuration, loadUserConfig, parseOptions } from "./shared";
@@ -229,5 +229,21 @@ export async function handleReapClaude(args: string[]): Promise<void> {
     console.error(`No Claude Code session with id ${id} and pid ${pid} was started by codex-collab for this workspace — nothing to reap.`);
     process.exit(1);
   }
-  await runReaper({ ...known, lingerSec }, stateDir);
+  const { log, remove } = reaperLog(stateDir, id);
+  log(`watching ${known.name} (pid ${pid}); it is stopped after ${lingerSec}s idle`);
+  // How a reaper died is the one thing it cannot tell afterwards, and it
+  // runs detached, with nowhere else to say it: its log keeps the reason.
+  let finished = false;
+  const died = (e: unknown) => {
+    log(`error: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+    process.exit(1);
+  };
+  process.on("uncaughtException", died);
+  process.on("unhandledRejection", died);
+  process.on("exit", (code) => {
+    if (!finished) log(`exited (code ${code}) before it saw its session through`);
+  });
+  await runReaper({ ...known, lingerSec }, stateDir, { log });
+  finished = true;
+  remove();
 }

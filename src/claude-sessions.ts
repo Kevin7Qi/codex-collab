@@ -16,7 +16,7 @@
 // nothing else of ours has to be running for that to happen.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -523,15 +523,29 @@ export function jobSessionId(jobId: string): string | null {
  *  Code's own retirement waits for — it will retire a settled session with a
  *  shell command still running — and on purpose: a command left running is
  *  work, and stopping the session throws it away. No file, or an older
- *  Claude Code, is no evidence either way: the status and the tasks decide. */
+ *  Claude Code, is no evidence either way: the status and the tasks decide.
+ *
+ *  A settled job's counts are no evidence either. Claude Code stops keeping
+ *  them once the job is done, failed or stopped and not active (`Hi()` in
+ *  2.1.283), and they stay what they were: a queued message it has since
+ *  handled stays counted, and read as work it held a finished session for
+ *  good. New work unsettles the job, and the counts are kept again. */
 export function jobHasWorkInFlight(jobId: string): boolean {
-  const inFlight = readJobState(jobId)?.inFlight;
+  const job = readJobState(jobId);
+  if (!job || jobSettled(job)) return false;
+  const inFlight = job.inFlight;
   if (!inFlight || typeof inFlight !== "object") return false;
   const f = inFlight as Record<string, unknown>;
   const count = (v: unknown): number => typeof v === "number" && Number.isFinite(v) ? v : 0;
   if (count(f.queued) > 0) return true;
   if (count(f.tasks) - count(f.drainableMonitors) > 0) return true;
   return Array.isArray(f.kinds) && f.kinds.includes("session_cron");
+}
+
+/** A job Claude Code has finished with: done, failed or stopped, and not
+ *  at work (a job that takes new work goes back to active). */
+function jobSettled(job: Record<string, unknown>): boolean {
+  return (job.state === "done" || job.state === "failed" || job.state === "stopped") && job.tempo !== "active";
 }
 
 /** The permission mode a started session runs in. Nobody is attached to it,
@@ -867,6 +881,27 @@ export function startReaper(session: SpawnedSession, cwd: string): void {
   child.unref();
 }
 
+/** A reaper's own log, `reapers/<id>-<pid>.log` in the workspace's state:
+ *  what it did and why, a line per change. A reaper that sees its session
+ *  through removes it; one that dies leaves it, and its last lines say how
+ *  far it got. */
+export function reaperLog(stateDir: string, id: string): { log: (line: string) => void; remove: () => void; file: string } {
+  const dir = join(stateDir, "reapers");
+  const file = join(dir, `${id}-${process.pid}.log`);
+  return {
+    file,
+    log(line) {
+      try {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        appendFileSync(file, `${new Date().toISOString()} ${line}\n`);
+      } catch { /* a log it cannot write is no reason to stop watching */ }
+    },
+    remove() {
+      try { unlinkSync(file); } catch { /* none */ }
+    },
+  };
+}
+
 /** What the reaper decides from one look at the registry: keep waiting,
  *  stop the session, or give up because it is gone or no longer ours. */
 export function reaperVerdict(
@@ -953,9 +988,21 @@ const REAPER_RECHECK_MS = 10_000;
 export async function runReaper(
   recorded: SpawnedSession,
   stateDir: string,
-  opts: { pollMs?: number; claudeBin?: string; maxRounds?: number } = {},
+  opts: {
+    pollMs?: number;
+    claudeBin?: string;
+    maxRounds?: number;
+    /** What the reaper does and why, a line at a time (see reaperLog). */
+    log?: (line: string) => void;
+  } = {},
 ): Promise<"stopped" | "gone"> {
   let session = recorded;
+  // Said once per change: a reaper holding a session for hours says so once.
+  let said = "";
+  const say = (line: string) => {
+    if (line !== said) opts.log?.(line);
+    said = line;
+  };
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_REAP_POLL_MS) || 30_000);
   // A second look at a session that seemed gone comes sooner than the next
   // poll: gone is final for the reaper, and a moment's absence is not.
@@ -969,13 +1016,17 @@ export async function runReaper(
     // there is nothing left here for this reaper to watch, and a session that
     // now answers to the same id is another reaper's.
     const own = readSpawnedSessions(stateDir).find((r) => r.id === session.id);
-    if (!own || own.stoppedAt) return "gone";
+    if (!own || own.stoppedAt) {
+      say(own ? "its record says it was stopped: nothing left to watch" : "its record is gone: nothing left to watch");
+      return "gone";
+    }
     const entry = locateSpawnedSession(session);
     if (entry && entry.pid !== session.pid) {
       // Brought back as a new process: the same session, its work and its
       // conversation — and still ours to watch, and to stop.
       session = { ...session, pid: entry.pid as number, procStart: typeof entry.procStart === "string" ? entry.procStart : undefined };
       updateSpawnedSessionProcess(stateDir, session.id, session.pid, session.procStart);
+      say(`Claude Code brought it back as pid ${session.pid}: watching that`);
     }
     let verdict = reaperVerdict(entry, session.pid, session.lingerSec, Date.now(), { procStart: session.procStart, sessionId: session.sessionId });
     if (verdict === "gone") {
@@ -987,6 +1038,7 @@ export async function runReaper(
       // and a person may have. Its conversation is kept all the same, so the
       // record stays, as stopped: the next `send` can pick it up again.
       markSpawnedSessionStopped(stateDir, session.id);
+      say("the session went away by itself: recorded as stopped");
       return "gone";
     }
     missing = 0;
@@ -1000,9 +1052,14 @@ export async function runReaper(
     const inFlight = jobHasWorkInFlight(session.id);
     // Old enough to retire, and nothing to interrupt: a session in the middle
     // of a turn is working, and its age is no reason to stop it there.
-    if (verdict === "wait" && Date.now() >= retireAt && !owed && !inFlight && !statusHasWorkInHand(entry?.status)) verdict = "stop";
+    const retiring = verdict === "wait" && Date.now() >= retireAt && !owed && !inFlight && !statusHasWorkInHand(entry?.status);
+    if (retiring) verdict = "stop";
+    if (verdict === "stop" && owed) say("idle, but a task is waiting on it: holding it");
+    else if (verdict === "stop" && inFlight) say("idle, but Claude Code counts work in flight for it: holding it");
     if (verdict === "stop" && (owed || inFlight)) verdict = "wait";
+    if (verdict === "wait" && !owed && !inFlight) say("watching");
     if (verdict === "stop") {
+      say(retiring ? "four hours old and idle: stopping it" : `idle for ${session.lingerSec}s: stopping it`);
       // Recorded as stopped only once it is: a record marked stopped while
       // its session runs makes that session read as the user's own, with
       // nothing of ours left watching it. A stop that did not take is tried
@@ -1010,8 +1067,10 @@ export async function runReaper(
       if ((await stopSpawnedSession(session, { claudeBin: opts.claudeBin, confirmAfterMs: Math.min(pollMs, 5000), spacingMs: Math.min(pollMs, 250) })).gone) {
         // `claude stop` keeps the conversation; keep the record that finds it.
         markSpawnedSessionStopped(stateDir, session.id);
+        say("stopped; its conversation is kept");
         return "stopped";
       }
+      say("the stop did not take: trying again at the next look");
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }

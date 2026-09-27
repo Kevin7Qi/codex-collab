@@ -32,6 +32,7 @@ import {
   markSpawnedSessionStopped,
   parseBackgroundId,
   readSpawnedSessions,
+  reaperLog,
   reaperVerdict,
   recordSpawnedSession,
   resolveSession,
@@ -494,6 +495,17 @@ describeUnix("spawn helpers", () => {
       job("aaaa0007", { state: "idle" });
       expect(jobHasWorkInFlight("aaaa0007")).toBe(false);
       expect(jobSessionId("aaaa0007")).toBeNull();
+      // A job Claude Code has settled — done, failed or stopped, and not at
+      // work — keeps the counts it had: a message it has since handled stays
+      // queued there. Those hold nothing. New work makes the job active again.
+      for (const state of ["done", "failed", "stopped"]) {
+        job("aaaa0008", { state, tempo: "idle", inFlight: { tasks: 0, queued: 1, kinds: [] } });
+        expect(jobHasWorkInFlight("aaaa0008")).toBe(false);
+      }
+      job("aaaa0009", { state: "done", tempo: "active", inFlight: { tasks: 0, queued: 1, kinds: [] } });
+      expect(jobHasWorkInFlight("aaaa0009")).toBe(true);
+      job("aaaa000a", { state: "working", tempo: "idle", inFlight: { tasks: 0, queued: 1, kinds: [] } });
+      expect(jobHasWorkInFlight("aaaa000a")).toBe(true);
       expect(jobHasWorkInFlight("../../etc")).toBe(false);
     } finally {
       if (previous === undefined) delete process.env.CODEX_COLLAB_JOBS_DIR;
@@ -812,7 +824,9 @@ describeUnix("reaper", () => {
     };
     recordSpawnedSession(stateDir, session);
     register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, kind: "bg", statusUpdatedAt: Date.now() - 5000 });
-    expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
+    const said: string[] = [];
+    expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, log: (line) => said.push(line) })).toBe("stopped");
+    expect(said).toEqual(["idle for 1s: stopping it", "stopped; its conversation is kept"]);
     expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbeef\n");
     // Stopped, not forgotten: Claude Code keeps the conversation, and the
     // record is what lets the next `send` resume it.
@@ -1054,22 +1068,38 @@ describeUnix("reaper", () => {
     };
     recordSpawnedSession(stateDir, session);
     register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, status: "idle", statusUpdatedAt: Date.now() - 600_000 });
-    const inFlight = (state: Record<string, unknown>) => {
+    const inFlight = (state: Record<string, unknown>, job: Record<string, unknown> = {}) => {
       mkdirSync(join(jobs, "deadbee4"), { recursive: true });
-      writeFileSync(join(jobs, "deadbee4", "state.json"), JSON.stringify({ inFlight: state }));
+      writeFileSync(join(jobs, "deadbee4", "state.json"), JSON.stringify({ ...job, inFlight: state }));
     };
     try {
-      // A monitor it set, which the registry does not show.
-      inFlight({ tasks: 1, queued: 0, kinds: ["monitor_mcp"], drainableMonitors: 0 });
-      await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 });
+      // A monitor it set, which the registry does not show. Held, and said
+      // once for as long as it holds.
+      inFlight({ tasks: 1, queued: 0, kinds: ["monitor_mcp"], drainableMonitors: 0 }, { state: "working", tempo: "idle" });
+      const said: string[] = [];
+      await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, log: (line) => said.push(line) });
       expect(existsSync(fake.stopLog)).toBe(false);
       expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
-      // Nothing in flight any more: reaped.
-      inFlight({ tasks: 0, queued: 0, kinds: [], drainableMonitors: 0 });
+      expect(said).toEqual(["idle, but Claude Code counts work in flight for it: holding it"]);
+      // The job is done, and still counts a message queued that it has since
+      // handled: Claude Code keeps no counts for a settled job. A session
+      // held on that ran for days. Reaped.
+      inFlight({ tasks: 0, queued: 1, kinds: [], drainableMonitors: 0 }, { state: "done", tempo: "idle" });
       expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
     } finally {
       own.kill();
     }
+  });
+
+  test("a reaper's log has a line per change, and goes when the reaper sees its session through", () => {
+    const stateDir = join(root, "state-reaper-log");
+    const { log, remove, file } = reaperLog(stateDir, "abcdef31");
+    expect(file).toBe(join(stateDir, "reapers", `abcdef31-${process.pid}.log`));
+    log("watching");
+    log("stopped");
+    expect(readFileSync(file, "utf-8")).toMatch(/^\S+ watching\n\S+ stopped\n$/);
+    remove();
+    expect(existsSync(file)).toBe(false);
   });
 
   test("the lifetime cap stops a session its linger never reaches, and never one that is busy", async () => {
