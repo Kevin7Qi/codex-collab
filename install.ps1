@@ -65,6 +65,11 @@ try {
 # SKILL.md generation lives in the CLI itself (`skill render`: embedded
 # SKILL.md source + current template table) so the installers and
 # `codex-collab skill sync` share one implementation.
+#
+# The Codex-side skill (`skill render --codex`, installed by install.sh under
+# ~/.codex/skills) is deliberately not installed here: it teaches Codex the
+# `peers`/`send` commands, which need Claude Code's cross-session messaging —
+# unavailable on Windows.
 function Generate-SkillMd {
     param([string]$Entry, [string]$OutPath)
     # PowerShell 5.1 decodes captured native stdout with the CONSOLE code page,

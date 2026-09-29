@@ -118,6 +118,11 @@ describe("parseOptions", () => {
     expect(options.model).toBe("org/gpt-5.1:latest");
   });
 
+  test("--model allows Claude Code's context suffix, which `config spawn-model` accepts too", () => {
+    expect(parseOptions(["--model", "opus[1m]"]).options.model).toBe("opus[1m]");
+    expect(parseOptions(["-m", "claude-opus-4-6[1m]"]).options.model).toBe("claude-opus-4-6[1m]");
+  });
+
   test("--model rejects shell chars (calls process.exit)", () => {
     // Model names with shell metacharacters trigger process.exit(1).
     // We verify via subprocess to avoid killing the test runner.

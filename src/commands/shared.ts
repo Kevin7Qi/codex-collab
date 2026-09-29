@@ -126,6 +126,23 @@ export interface Options {
   dir: string;
   contentOnly: boolean;
   json: boolean;
+  /** send: the Claude session to message, by name (see `peers`). */
+  to: string | null;
+  /** send: deliver and return without waiting for a reply. */
+  noWait: boolean;
+  /** send: never start a Claude session when none is live. */
+  noSpawn: boolean;
+  /** send: a new session of codex-collab's own, with a new conversation,
+   *  whatever else is live (`--new`, or `--fresh`). */
+  newSession: boolean;
+  /** peers: every workspace, not only this one (also lifts `threads`' limit). */
+  all: boolean;
+  /** skill render: the Codex-side skill instead of Claude's. */
+  codex: boolean;
+  /** skill render: the opt-in Codex exec-policy rule. */
+  rules: boolean;
+  /** models: the Claude models a started session can run on, not Codex's. */
+  claude: boolean;
   timeout: number;
   limit: number;
   reviewMode: string | null;
@@ -308,6 +325,14 @@ export function defaultOptions(): Options {
     session: false,
     contentOnly: false,
     json: false,
+    to: null,
+    noWait: false,
+    noSpawn: false,
+    newSession: false,
+    all: false,
+    codex: false,
+    rules: false,
+    claude: false,
     timeout: config.defaultTimeout,
     limit: config.threadsListLimit,
     reviewMode: null,
@@ -373,7 +398,9 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
 
     if (arg === "-h" || arg === "--help") {
       options.help = true;
-    } else if (arg === "-r" || arg === "--reasoning") {
+    } else if (arg === "-r" || arg === "--reasoning" || arg === "--effort") {
+      // `--effort` is the same flag under the name the `claude` CLI uses —
+      // what `send` passes to a session it starts.
       if (!hasFlagValue(argv, i)) {
         console.error("Error: --reasoning requires a value");
         process.exit(1);
@@ -394,7 +421,9 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
         process.exit(1);
       }
       const model = argv[++i];
-      if (!model || /[^a-zA-Z0-9._\-\/:]/.test(model)) {
+      // Brackets for Claude Code's context suffix (`opus[1m]`), which `send`
+      // passes on and `config spawn-model` accepts.
+      if (!model || /[^a-zA-Z0-9._\-\/:\[\]]/.test(model)) {
         console.error(`Error: Invalid model name: ${model}`);
         process.exit(1);
       }
@@ -537,6 +566,7 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       }
       options.resumeId = argv[++i];
     } else if (arg === "--all") {
+      options.all = true;
       options.limit = Infinity;
       options.explicit.add("limit");
     } else if (arg === "--discover") {
@@ -551,6 +581,24 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.template = argv[++i];
     } else if (arg === "--unset") {
       options.explicit.add("unset");
+    } else if (arg === "--to") {
+      if (!hasFlagValue(argv, i)) {
+        console.error("Error: --to requires a session name (see `codex-collab peers`)");
+        process.exit(1);
+      }
+      options.to = argv[++i];
+    } else if (arg === "--no-wait") {
+      options.noWait = true;
+    } else if (arg === "--no-spawn") {
+      options.noSpawn = true;
+    } else if (arg === "--new" || arg === "--fresh") {
+      options.newSession = true;
+    } else if (arg === "--codex") {
+      options.codex = true;
+    } else if (arg === "--rules") {
+      options.rules = true;
+    } else if (arg === "--claude") {
+      options.claude = true;
     } else if (arg === "--yes") {
       options.yes = true;
     } else if (arg === "--check") {
@@ -589,6 +637,24 @@ export interface UserConfig {
   mode?: string;
   /** Which app-server to run on; read at broker start (see shared-server.ts). */
   server?: string;
+  /** Whether a Codex `send` with no live Claude session starts one (on|off). */
+  spawn?: string;
+  /** Seconds a started Claude session may idle before it is stopped. */
+  linger?: number;
+  /** Model and effort a started Claude session runs on when `send` names
+   *  none. Unset, the model is the user's Claude Code default and the
+   *  effort `high`; `spawn-effort auto` leaves the effort to Claude Code. */
+  "spawn-model"?: string;
+  "spawn-effort"?: string;
+  /** Full model names `models --claude` offers besides the tier aliases,
+   *  comma-separated. */
+  "spawn-models"?: string;
+  /** How long after it was stopped a started Claude session is still
+   *  resumed, in seconds, or "off" to always start a new one. */
+  "spawn-resume"?: number | string;
+  "spawn-autocompact"?: string;
+  /** Opt-in Codex exec-policy rule for `send` (on|off; see skill.ts). */
+  "codex-rule"?: string;
 }
 
 export function loadUserConfig(): UserConfig {
@@ -613,11 +679,17 @@ export function loadUserConfig(): UserConfig {
 
 export function saveUserConfig(cfg: UserConfig): void {
   try {
-    mkdirSync(dirname(config.configFile), { recursive: true, mode: 0o700 });
-    writeFileSync(config.configFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+    saveUserConfigOrThrow(cfg);
   } catch (e) {
     die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/** The same write, throwing instead of exiting — for a caller that has
+ *  something to undo when the setting cannot be recorded. */
+export function saveUserConfigOrThrow(cfg: UserConfig): void {
+  mkdirSync(dirname(config.configFile), { recursive: true, mode: 0o700 });
+  writeFileSync(config.configFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
 }
 
 /** Apply user config to parsed options — only for fields not set via CLI flags.

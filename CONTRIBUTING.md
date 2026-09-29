@@ -25,6 +25,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 ```bash
 bun test              # run all tests (integration tests are skipped by default)
 bun run typecheck     # type checking
+bun run test:ci       # typecheck + tests the way CI runs them: no `claude` on PATH (Windows is not emulated)
 
 RUN_INTEGRATION=1 bun test   # include integration tests (requires codex CLI + credentials)
 RUN_UPDATE_E2E=1 bun test src/update-e2e.test.ts   # self-update E2E against a local mock release host (POSIX, requires codex CLI)
@@ -78,6 +79,6 @@ The tag must be `v<version>` matching `package.json` — `update` compares the r
 ## Pull Requests
 
 - Keep PRs focused — one feature or fix per PR
-- Run `bun test` and `bun run typecheck` before submitting
+- Run `bun run test:ci` before submitting — it runs `bun run typecheck` and `bun test` with `claude` hidden from PATH, as CI's hosts have it
 - Write tests for new functionality
 - Follow existing code style and patterns
