@@ -1127,8 +1127,12 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       });
     }
     if (answer === "expired") {
-      // Whatever moved the end since, it is worked out afresh here.
-      const at = nextExpiryLook(Date.now(), endsAt(), blockedWatch?.atAnswerablePrompt() ?? false);
+      // Whatever moved the end since, it is worked out afresh here. A prompt
+      // is looked for now as well: one that opened since the watch last
+      // looked, seconds before the end, is the late question this is for.
+      const openNow = blockedWatch !== null && (blockedWatch.atAnswerablePrompt()
+        || (!!target.spawned && promptNow(target.pid) !== null && remoteControlReaches(target.spawned.id)));
+      const at = nextExpiryLook(Date.now(), endsAt(), openNow);
       if (at !== null) {
         expiry = nextExpiry();
         armExpiry(at);

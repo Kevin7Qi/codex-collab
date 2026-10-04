@@ -1367,13 +1367,13 @@ describeUnix("send", () => {
    *  the given seconds after the task was created — without a CLI start in
    *  between, which would blur the timing. Resolves with the task's outcome,
    *  and its record as it stood just after the answer. */
-  async function questionThenReply(name: string, o: { maxSec: number; linger: number; open: number; answer: number; reply: number | null }): Promise<{ outcome: string; afterAnswer: { createdAt: string; expiresAt: string }; endedSec: number }> {
+  async function questionThenReply(name: string, o: { maxSec: number; linger: number; open: number; answer: number; reply: number | null; pollMs?: number }): Promise<{ outcome: string; afterAnswer: { createdAt: string; expiresAt: string }; endedSec: number }> {
     await settleSpawnState();
     const binDir = join(TEST_HOME, `bin-${name}`);
     const fake = startFake(spawnedSessionName(WS), { reply: null });
     writeFakeClaude(binDir, fake.socketPath);
     writeConfig({ linger: o.linger });
-    const env = { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50", CODEX_COLLAB_TASK_MAX_WAIT_SEC: String(o.maxSec) };
+    const env = { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: String(o.pollMs ?? 50), CODEX_COLLAB_TASK_MAX_WAIT_SEC: String(o.maxSec) };
     try {
       // The task's own time is the longer of its maximum and the --timeout,
       // so the --timeout is kept below it.
@@ -1440,6 +1440,14 @@ describeUnix("send", () => {
     expect(r.endedSec).toBeLessThan(15);
     expect(Date.parse(r.afterAnswer.expiresAt) - Date.parse(r.afterAnswer.createdAt)).toBeGreaterThanOrEqual(5900);
   }, 40_000);
+
+  test("a question that opens after the watch last looked, just before the task's end, still keeps it open", async () => {
+    // The watch looks every 20s here, so it never sees the question, open
+    // from 1s to 3s; the task's own time ends at 2s, and the reply comes at
+    // 3.5s.
+    const r = await questionThenReply("paused-unseen", { maxSec: 2, linger: 60, open: 1, answer: 3, reply: 3.5, pollMs: 20_000 });
+    expect(r.outcome).toBe("replied");
+  });
 
   test("a question still open when the task's time runs out keeps it open, and the reply after the answer counts", async () => {
     const r = await questionThenReply("paused-open", { maxSec: 3, linger: 60, open: 1.5, answer: 5, reply: 5.5 });
