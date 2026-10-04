@@ -276,7 +276,13 @@ function taskRecord(id: string): Record<string, unknown> | null {
 /** The pids of the reapers running for the session `id`. */
 function reapersOf(id: string): number[] {
   const table = spawnSync("ps", ["-x", "-o", "pid=,args="], { encoding: "utf-8" }).stdout ?? "";
-  return table.split("\n").filter((line) => line.includes(`reap-claude ${id} `)).map((line) => Number(line.trim().split(/\s+/)[0]));
+  // This run's own: every fake session has the same job id, and another
+  // run of these tests on the machine has reapers of its own. A reaper's
+  // command line names its folder, which is under this run's HOME.
+  const home = [TEST_HOME, realpathSync(TEST_HOME)];
+  return table.split("\n")
+    .filter((line) => line.includes(`reap-claude ${id} `) && home.some((h) => line.includes(h)))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
 }
 
 /** The reaper logs under the test HOME: one left behind is a reaper that died. */

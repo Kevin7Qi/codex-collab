@@ -6,7 +6,7 @@
 // away. The whole flow against a fake session is in commands/send.test.ts.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -77,8 +77,10 @@ describe("task records", () => {
   test("tasks list newest first, and an id resolves exactly or by a unique prefix", () => {
     const stateDir = freshStateDir();
     const record = (id: string, createdAt: string): TaskRecord => ({ id, status: "running", cwd: "/ws", threadId: null, message: "m", target, createdAt, expiresAt: createdAt });
-    // writeTask needs the directory createTask makes.
-    createTask(stateDir, fields, new Date("2026-09-20T00:00:00Z"));
+    // writeTask needs the directory createTask makes; made here directly,
+    // since a task createTask makes has a random id, and one that began
+    // with "ab" would be a third match for the prefix below.
+    mkdirSync(tasksDir(stateDir), { recursive: true, mode: 0o700 });
     writeTask(stateDir, record("abc12345", "2026-09-21T08:00:00Z"));
     writeTask(stateDir, record("abd00000", "2026-09-21T09:00:00Z"));
     expect(listTasks(stateDir).map((t) => t.id).slice(0, 2)).toEqual(["abd00000", "abc12345"]);
