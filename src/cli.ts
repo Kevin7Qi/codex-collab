@@ -179,7 +179,7 @@ repository, then, each folder can have a session of its own (-d <folder>).
 Several tasks sent to one session share its conversation and take turns.
 
 A session codex-collab starts works in its workspace in Claude Code's auto
-permission mode, can edit files and run commands, and stops after 30 idle
+permission mode, can edit files and run commands, and stops after 60 idle
 minutes (config linger), keeping its conversation. Claude Code starts it only in
 a folder the user has trusted in Claude Code. A session started any other way
 (claude --bg) can be messaged while live, but codex-collab never stops or
