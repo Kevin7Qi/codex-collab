@@ -100,7 +100,9 @@ export const DEFAULT_SPAWN_LINGER_SEC = 30 * 60;
  *  the linger — flipping between busy and idle for days would otherwise keep
  *  it, and its reaper, alive forever. It is never a deadline on work: a
  *  session that is busy, or that a task is still waiting on, is left alone
- *  however old it is. */
+ *  however old it is. So is one the user can reach through Remote Control:
+ *  its quiet moments may be the user's pauses, and a prompt in it the user's
+ *  to answer. It stops after the linger like any other. */
 export const SPAWN_MAX_LIFETIME_SEC = 4 * 3600;
 
 /** A registry entry, or null when there is none. Claude Code rewrites an
@@ -261,7 +263,7 @@ export function spawnedRecordFor(records: SpawnedSession[], entry: EntryIdentity
 }
 
 /** Whether a reported status means the session has work in hand. Only `idle`
- *  and `waiting` (stopped at a prompt nobody will answer) are doing nothing:
+ *  and `waiting` (stopped at a prompt until someone answers it) are doing nothing:
  *  `busy` is a turn in progress, and `shell` is Claude Code's word for idle
  *  WITH a shell command of its own still running — the background command a
  *  turn left behind and will report on when it finishes. A status we do not
@@ -279,6 +281,29 @@ export function sessionStatusNow(pid: number): string | null {
   const entry = readEntry(join(sessionsDir(), `${pid}.json`));
   if (!entry || entry.pid !== pid) return null;
   return typeof entry.status === "string" ? entry.status : "unknown";
+}
+
+/** A session at a prompt, as its registry entry says: since its last status
+ *  change, and what for, in Claude Code's words (`waitingFor`: "input
+ *  needed", "dialog open", …). Null when it is not at one, or its entry is
+ *  gone. */
+export function promptNow(pid: number): { since: number | null; waitingFor: string | null } | null {
+  const entry = readEntry(join(sessionsDir(), `${pid}.json`));
+  if (!entry || entry.pid !== pid || entry.status !== "waiting") return null;
+  return {
+    since: typeof entry.statusUpdatedAt === "number" ? entry.statusUpdatedAt : null,
+    waitingFor: typeof entry.waitingFor === "string" && entry.waitingFor ? entry.waitingFor : null,
+  };
+}
+
+/** Whether the user can answer a started session's prompts through Remote
+ *  Control: Claude Code keeps the job's bridge in the job's state while one
+ *  is up (`bridgeSessionId`, cleared when it goes), and a bridge that only
+ *  mirrors the session (`bridgeOutboundOnly`) takes no input. Whether anyone
+ *  is looking at it is recorded nowhere. */
+export function remoteControlReaches(jobId: string): boolean {
+  const job = readJobState(jobId);
+  return !!job && typeof job.bridgeSessionId === "string" && job.bridgeSessionId !== "" && job.bridgeOutboundOnly !== true;
 }
 
 /** Resolve a session by the name Codex gave: exact match first, then a
@@ -548,7 +573,7 @@ function jobSettled(job: Record<string, unknown>): boolean {
   return (job.state === "done" || job.state === "failed" || job.state === "stopped") && job.tempo !== "active";
 }
 
-/** The permission mode a started session runs in. Nobody is attached to it,
+/** The permission mode a started session runs in. Nobody is at its terminal,
  *  so it must never wait on a prompt — and it exists for Codex to hand work
  *  to, which `dontAsk` (deny whatever would prompt: every edit, most
  *  commands) reduced to reading and answering. In `auto` Claude Code's
@@ -556,9 +581,10 @@ function jobSettled(job: Record<string, unknown>): boolean {
  *  runs with a safety check and without a prompt. Where auto mode is
  *  unavailable to the session (a setting turns it off, or the model lacks
  *  it) Claude Code starts it in Manual instead: an action that needs
- *  approval then waits on a prompt nobody sees. The receiver of the task
- *  that led there notices (`watchForBlocked`), stops the session, and
- *  records the task as `blocked`. */
+ *  approval then waits on a prompt. The receiver of the task that led
+ *  there notices (`watchForBlocked`), stops the session, and records the
+ *  task as `blocked`: at once when nobody can answer the prompt, or after
+ *  the linger when the user could have, through Remote Control. */
 export const SPAWN_PERMISSION_MODE = "auto";
 
 /** Settings a started session runs with, passed to that session alone
@@ -1010,6 +1036,10 @@ export async function runReaper(
   const born = Date.parse(session.startedAt);
   const retireAt = Number.isFinite(born) ? born + SPAWN_MAX_LIFETIME_SEC * 1000 : Infinity;
   let missing = 0;
+  // Remote Control, once the session is old enough for it to matter: seen
+  // at a look, and how many looks since have missed a bridge seen before.
+  let bridgeSeen = false;
+  let bridgeMisses = 0;
   for (let round = 0; opts.maxRounds === undefined || round < opts.maxRounds; round++) {
     // Stopped by someone else (`peers stop`, a task that found it at a
     // prompt), or its record replaced by a session started or resumed since:
@@ -1051,15 +1081,32 @@ export async function runReaper(
     const owed = outstandingTasksFor(stateDir, session).length > 0;
     const inFlight = jobHasWorkInFlight(session.id);
     // Old enough to retire, and nothing to interrupt: a session in the middle
-    // of a turn is working, and its age is no reason to stop it there.
-    const retiring = verdict === "wait" && Date.now() >= retireAt && !owed && !inFlight && !statusHasWorkInHand(entry?.status);
+    // of a turn is working, and its age is no reason to stop it there. Nor is
+    // it for one the user can reach through Remote Control, whose question
+    // to them, or pause between their messages, is no quiet moment. A look
+    // that misses a bridge seen before — reconnecting, or its state file
+    // caught mid-write — is not taken for its end until the next look agrees.
+    const pastAge = Date.now() >= retireAt;
+    let reachable = false;
+    if (pastAge) {
+      if (remoteControlReaches(session.id)) {
+        bridgeSeen = true;
+        bridgeMisses = 0;
+        reachable = true;
+      } else if (bridgeSeen && ++bridgeMisses < 2) {
+        reachable = true;
+      } else {
+        bridgeSeen = false;
+      }
+    }
+    const retiring = verdict === "wait" && pastAge && !reachable && !owed && !inFlight && !statusHasWorkInHand(entry?.status);
     if (retiring) verdict = "stop";
     if (verdict === "stop" && owed) say("idle, but a task is waiting on it: holding it");
     else if (verdict === "stop" && inFlight) say("idle, but Claude Code counts work in flight for it: holding it");
     if (verdict === "stop" && (owed || inFlight)) verdict = "wait";
-    if (verdict === "wait" && !owed && !inFlight) say("watching");
+    if (verdict === "wait" && !owed && !inFlight) say(reachable ? `four hours old, but the user can reach it through Remote Control: it stops after ${session.lingerSec}s idle instead` : "watching");
     if (verdict === "stop") {
-      say(retiring ? "four hours old and idle: stopping it" : `idle for ${session.lingerSec}s: stopping it`);
+      say(retiring ? "four hours old and idle: stopping it" : entry?.status === "waiting" ? `at a prompt nobody answered for ${session.lingerSec}s: stopping it` : `idle for ${session.lingerSec}s: stopping it`);
       // Recorded as stopped only once it is: a record marked stopped while
       // its session runs makes that session read as the user's own, with
       // nothing of ours left watching it. A stop that did not take is tried

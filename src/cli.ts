@@ -207,9 +207,10 @@ task wait, task result):
   0  the session replied
   3  no reply yet; the task goes on and keeps a later reply
      ('task wait <id>', 'task result <id>')
-  5  a session codex-collab started stopped at a prompt nobody could answer;
-     it was stopped, and the next send resumes its conversation (when it would
-     not stop, the error says so)
+  5  a session codex-collab started stopped at a prompt nobody could answer,
+     or one the user could answer through Remote Control and had not for the
+     linger; it was stopped, and the next send resumes its conversation (when
+     it would not stop, the error says so)
   1  no reply will come: undeliverable, the session went away, the turn of a
      session codex-collab started ended on an error, or the task expired; the
      error says which

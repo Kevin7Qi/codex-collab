@@ -24,7 +24,8 @@ import type { SpawnedSession } from "./claude-sessions";
 /** `pending`: recorded, the receiver has not delivered yet. `running`:
  *  delivered, and the receiver is listening for the reply. The rest are
  *  final: `replied`; `blocked` — a session codex-collab started stopped at a
- *  prompt nobody could answer; `lost` — the session went away without
+ *  prompt nobody could answer, or one the user could have answered through
+ *  Remote Control and had not for the linger; `lost` — the session went away without
  *  replying; `failed` — the message never got there, or the receiver died;
  *  `expired` — the receiver gave up after its longest wait. */
 export type TaskStatus = "pending" | "running" | "replied" | "blocked" | "lost" | "failed" | "expired";
@@ -76,11 +77,16 @@ export interface TaskRecord {
   senderName?: string;
   reply?: { text: string; fromName: string };
   error?: string;
+  /** For a `blocked` task: the session was at a prompt the user could answer
+   *  through Remote Control, and nobody had for this many seconds. Absent,
+   *  nobody could have answered it. */
+  unansweredSec?: number;
 }
 
-/** How long a receiver listens before it gives up (seconds): the longest a
- *  session codex-collab starts is allowed to live (SPAWN_MAX_LIFETIME_SEC). A
- *  `send --timeout` beyond it extends it for that task. */
+/** How long a receiver listens before it gives up (seconds): the age at
+ *  which a session codex-collab starts is retired at its next quiet moment
+ *  (SPAWN_MAX_LIFETIME_SEC). A `send --timeout` beyond it extends it for
+ *  that task. */
 export const TASK_MAX_WAIT_SEC = 4 * 3600;
 
 /** TASK_MAX_WAIT_SEC, or what CODEX_COLLAB_TASK_MAX_WAIT_SEC says — a test
