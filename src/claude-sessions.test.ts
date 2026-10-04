@@ -1130,6 +1130,69 @@ describeUnix("reaper", () => {
     }
   });
 
+  test("a session the user can reach through Remote Control is not retired for its age; a prompt nobody answers stops it after its linger", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-remote");
+    mkdirSync(dir, { recursive: true });
+    const stateDir = join(root, "state-reap-remote");
+    const own = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const ownStart = procStartOf(own.pid!);
+    const fake = installFakeClaude(dir, { register: false, onStop: `rm -f '${join(registry, `${own.pid}.json`)}'` });
+    const session: SpawnedSession = {
+      id: "deadbee7", pid: own.pid!, name: "claude(ws-a-x)", startedAt: new Date(Date.now() - (SPAWN_MAX_LIFETIME_SEC + 60) * 1000).toISOString(),
+      lingerSec: 3600, procStart: ownStart, sessionId: "00000000-0000-4000-8000-000000000007",
+    };
+    recordSpawnedSession(stateDir, session);
+    // Claude Code's job state while a Remote Control bridge is up.
+    const bridge = (outboundOnly: boolean) => {
+      mkdirSync(join(jobs, session.id), { recursive: true });
+      writeFileSync(join(jobs, session.id, "state.json"), JSON.stringify({ state: "running", tempo: "idle", bridgeSessionId: "cse_01TEST", bridgeOutboundOnly: outboundOnly }));
+    };
+    const entry = { pid: own.pid, procStart: ownStart, sessionId: session.sessionId, kind: "bg" };
+    const lines: string[] = [];
+    try {
+      bridge(false);
+      // Four hours old: a question to the user, and a pause between their
+      // messages, are no quiet moments to stop it in.
+      for (const status of [{ status: "waiting", waitingFor: "input needed" }, { status: "idle" }, { status: "busy" }]) {
+        register(`${own.pid}.json`, { ...entry, ...status, statusUpdatedAt: Date.now() - 5000 });
+        await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, log: (l) => lines.push(l) });
+        expect(existsSync(fake.stopLog)).toBe(false);
+      }
+      // One line for it, at work or not: a session steered for days writes
+      // it once per reaper, never once per exchange.
+      expect([...new Set(lines)]).toEqual(["four hours old, but the user can reach it through Remote Control: it stops after 3600s idle instead"]);
+      // A prompt left unanswered for the linger stops it, and says so.
+      register(`${own.pid}.json`, { ...entry, status: "waiting", waitingFor: "input needed", statusUpdatedAt: Date.now() - 3601_000 });
+      expect(await runReaper(session, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, log: (l) => lines.push(l) })).toBe("stopped");
+      expect(lines).toContain("at a prompt nobody answered for 3600s: stopping it");
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbee7\n");
+      // A bridge that only mirrors the session takes no answer: retired as before.
+      rmSync(fake.stopLog);
+      const again = join(root, "state-reap-remote-outbound");
+      recordSpawnedSession(again, session);
+      bridge(true);
+      register(`${own.pid}.json`, { ...entry, status: "waiting", statusUpdatedAt: Date.now() - 5000 });
+      expect(await runReaper(session, again, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("stopped");
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbee7\n");
+      // Its work done and idle for its linger, it is stopped like any other,
+      // Remote Control or not: nothing keeps a finished session running.
+      rmSync(fake.stopLog);
+      const finished = join(root, "state-reap-remote-finished");
+      recordSpawnedSession(finished, session);
+      bridge(false);
+      register(`${own.pid}.json`, { ...entry, status: "idle", statusUpdatedAt: Date.now() - 3601_000 });
+      const finishedLines: string[] = [];
+      expect(await runReaper(session, finished, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, log: (l) => finishedLines.push(l) })).toBe("stopped");
+      expect(finishedLines).toContain("idle for 3600s: stopping it");
+      expect(readFileSync(fake.stopLog, "utf-8")).toBe("stop deadbee7\n");
+    } finally {
+      own.kill();
+      rmSync(join(jobs, session.id), { recursive: true, force: true });
+    }
+  });
+
   test("a session a task is still waiting on is never reaped for idling, nor at its lifetime cap", async () => {
     clearRegistry();
     const dir = join(root, "fake-claude-owed");

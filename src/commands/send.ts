@@ -56,6 +56,8 @@ import {
   resolveSession,
   resumableSession,
   findRestartedSession,
+  promptNow,
+  remoteControlReaches,
   sessionStatusNow,
   spawnClaudeSession,
   spawnEffortFor,
@@ -173,23 +175,56 @@ export function splitTarget(
   return { targetName: null, message: positional.join(" ") };
 }
 
-/** Watch a started session for the one state it cannot leave by itself:
- *  `waiting`, at a prompt, with nobody attached. Resolves "blocked" once the
- *  registry has said so on several looks in a row (a prompt a hook or the
- *  classifier answers is gone again within a moment). */
-export function watchForBlocked(target: { pid: number }, opts: { pollMs?: number; looks?: number } = {}): { blocked: Promise<"blocked">; stop(): void } {
+/** Watch a started session for a prompt nobody will answer. Resolves
+ *  "blocked" once the registry has said `waiting` on several looks in a row
+ *  (a prompt a hook or the classifier answers is gone again within a moment)
+ *  and either nobody can answer it — no Remote Control reaches the session —
+ *  or the user could, through Remote Control, and has not for `answerSec`.
+ *  `unansweredSec()` then says which: null, or how long it waited. */
+export function watchForBlocked(
+  target: { pid: number; spawned?: { id: string } | null },
+  opts: { pollMs?: number; looks?: number; answerSec?: number } = {},
+): { blocked: Promise<"blocked">; unansweredSec(): number | null; stop(): void } {
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_BLOCKED_POLL_MS) || 2000);
   const looks = opts.looks ?? 5;
+  const answerSec = opts.answerSec ?? DEFAULT_SPAWN_LINGER_SEC;
   let timer: ReturnType<typeof setInterval> | null = null;
+  const stop = () => { if (timer) clearInterval(timer); timer = null; };
+  let unanswered: number | null = null;
   const blocked = new Promise<"blocked">((resolve) => {
     let seen = 0;
+    let seenSince = 0;
+    let reachable = false;
     timer = setInterval(() => {
       // Read at every look: the session may have become another process.
-      seen = sessionStatusNow(target.pid) === "waiting" ? seen + 1 : 0;
-      if (seen >= looks) resolve("blocked");
+      const prompt = promptNow(target.pid);
+      if (!prompt) {
+        seen = 0;
+        reachable = false;
+        return;
+      }
+      if (seen++ === 0) seenSince = Date.now();
+      // Seen once for this prompt, Remote Control counts until the prompt
+      // goes: one look that misses the bridge — reconnecting, or its state
+      // file caught mid-write — is no reason to stop a session whose user is
+      // about to answer.
+      if (!reachable && target.spawned) reachable = remoteControlReaches(target.spawned.id);
+      if (seen < looks) return;
+      // Where the user can answer, theirs is the answer it waits for — a
+      // question they were asked, often, when they steer the session
+      // themselves — for as long as an idle session lingers.
+      if (reachable) {
+        const waited = Date.now() - (prompt.since ?? seenSince);
+        if (waited < answerSec * 1000) return;
+        unanswered = Math.round(waited / 1000);
+      }
+      // Decided: what is recorded is what was seen now, whatever the stop
+      // that follows takes.
+      stop();
+      resolve("blocked");
     }, pollMs);
   });
-  return { blocked, stop() { if (timer) clearInterval(timer); } };
+  return { blocked, unansweredSec: () => unanswered, stop };
 }
 
 /** How long after it was stopped a started session is still resumed:
@@ -923,12 +958,14 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   }, Number(process.env.CODEX_COLLAB_BUSY_POLL_MS) || 1000);
 
   // ── Listen ──
-  // A session codex-collab started has nobody attached. If it stops at a
-  // prompt no reply will ever come — and it does stop at one when it is not
-  // in auto mode after all: Claude Code falls back to asking where that mode
-  // is unavailable to the session, which depends on the model. Watching for
-  // it turns hours of silence into an answer Codex can act on.
-  const blockedWatch = target.spawned ? watchForBlocked(target) : null;
+  // A session codex-collab started has nobody at its terminal. If it stops at
+  // a prompt nobody can answer, no reply will ever come — and it does stop at
+  // one when it is not in auto mode after all: Claude Code falls back to
+  // asking where that mode is unavailable to the session, which depends on
+  // the model. Watching for it turns hours of silence into an answer Codex
+  // can act on. The user may be there all the same, through Remote Control:
+  // a prompt they can answer gets as long as an idle session lingers.
+  const blockedWatch = target.spawned ? watchForBlocked(target, { answerSec: target.spawned.lingerSec }) : null;
   // Brought back as a new process mid-turn, the session is followed there:
   // the record says so, and says where it is now.
   const lostWatch = watchForLost(target, {
@@ -995,7 +1032,12 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       // It may have got past the prompt and answered while it was being
       // stopped: an answer that came is the task's answer.
       if (arrived) done({ status: "replied", reply: arrived, error: undefined });
-      done({ status: "blocked", ...(stillThere ? { error: `${target.name} did not stop when told to, and is still at the prompt` } : {}) });
+      const unansweredSec = blockedWatch?.unansweredSec() ?? null;
+      done({
+        status: "blocked",
+        ...(unansweredSec !== null ? { unansweredSec } : {}),
+        ...(stillThere ? { error: `${target.name} did not stop when told to, and is still at the prompt` } : {}),
+      });
     }
     if (answer === "lost" || answer === "expired") {
       // Why, while the transcript is still at hand: the record outlives the

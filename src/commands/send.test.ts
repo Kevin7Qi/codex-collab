@@ -14,12 +14,13 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
-import { codexThreadId, composeMessage, insideCodexSandbox, senderName, splitTarget, watchForLost, watchForStalledTurn } from "./send";
+import { codexThreadId, composeMessage, insideCodexSandbox, senderName, splitTarget, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
 const TEST_HOME = mkdtempSync(join(tmpdir(), "codex-collab-send-home-"));
 const REGISTRY = join(TEST_HOME, "sessions");
+const JOBS = join(TEST_HOME, "jobs");
 const WS = join(TEST_HOME, "ws");
 const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
 
@@ -137,7 +138,9 @@ function cliEnv(extra: Record<string, string>): Record<string, string> {
   // and ends, within a moment of that test's cleanup.
   // A background session that goes is looked for again for Claude Code's
   // restart window: a moment, here, not half a minute.
-  return { ...env, HOME: TEST_HOME, CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_COLLAB_CONTINUE_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
+  // Claude Code's job states too: whether Remote Control reaches a session
+  // is read there.
+  return { ...env, HOME: TEST_HOME, CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_JOBS_DIR: JOBS, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_COLLAB_CONTINUE_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
 }
 
 /** Speak to a sender's advertised reply address as `fake`. */
@@ -1176,6 +1179,141 @@ describeUnix("send", () => {
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
+    }
+  });
+
+  /** The fake session's registry entry, as Claude Code rewrites it at a
+   *  prompt; and its job's state, as Claude Code keeps it while a Remote
+   *  Control bridge is up. */
+  function atPrompt(name: string, since: number): void {
+    for (const f of readdirSync(REGISTRY)) {
+      const file = join(REGISTRY, f);
+      const entry = JSON.parse(readFileSync(file, "utf-8"));
+      if (entry.name === name) writeFileSync(file, JSON.stringify({ ...entry, status: "waiting", waitingFor: "input needed", statusUpdatedAt: since }));
+    }
+  }
+  function bridged(jobId: string, outboundOnly = false): void {
+    mkdirSync(join(JOBS, jobId), { recursive: true });
+    writeFileSync(join(JOBS, jobId, "state.json"), JSON.stringify({ state: "running", tempo: "blocked", bridgeSessionId: "cse_01TEST", bridgeOutboundOnly: outboundOnly }));
+  }
+
+  test("watchForBlocked: Remote Control seen once holds for the prompt, and what it decides stays decided", async () => {
+    const saved = { sessions: process.env.CODEX_COLLAB_SESSIONS_DIR, jobs: process.env.CODEX_COLLAB_JOBS_DIR };
+    process.env.CODEX_COLLAB_SESSIONS_DIR = REGISTRY;
+    process.env.CODEX_COLLAB_JOBS_DIR = JOBS;
+    const pid = 4_190_001;
+    const entryFile = join(REGISTRY, `${pid}.json`);
+    const prompt = (since: number) => writeFileSync(entryFile, JSON.stringify({ pid, status: "waiting", waitingFor: "input needed", statusUpdatedAt: since }));
+    const watches: Array<{ stop(): void }> = [];
+    try {
+      mkdirSync(REGISTRY, { recursive: true });
+      // No bridge: nobody can answer, and the look count alone decides.
+      prompt(Date.now());
+      const nobody = watchForBlocked({ pid, spawned: { id: "feed0001" } }, { pollMs: 20, looks: 3, answerSec: 60 });
+      watches.push(nobody);
+      expect(await Promise.race([nobody.blocked, new Promise((r) => setTimeout(() => r("timeout"), 2000))])).toBe("blocked");
+      expect(nobody.unansweredSec()).toBeNull();
+
+      // A bridge, seen at the first look, then missing at every look after:
+      // the user is still the one to answer, for the whole answer window.
+      bridged("feed0002");
+      prompt(Date.now());
+      const reachable = watchForBlocked({ pid, spawned: { id: "feed0002" } }, { pollMs: 20, looks: 3, answerSec: 1 });
+      watches.push(reachable);
+      await new Promise((r) => setTimeout(r, 30));
+      rmSync(join(JOBS, "feed0002"), { recursive: true, force: true });
+      expect(await Promise.race([reachable.blocked, new Promise((r) => setTimeout(() => r("held"), 600))])).toBe("held");
+      expect(await reachable.blocked).toBe("blocked");
+      const recorded = reachable.unansweredSec();
+      expect(recorded).toBeGreaterThanOrEqual(1);
+      // Decided: the watch stops looking, and the wait it recorded holds
+      // however long the stop that follows takes.
+      await new Promise((r) => setTimeout(r, 1200));
+      expect(reachable.unansweredSec()).toBe(recorded);
+    } finally {
+      for (const w of watches) w.stop();
+      rmSync(entryFile, { force: true });
+      rmSync(JOBS, { recursive: true, force: true });
+      if (saved.sessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR; else process.env.CODEX_COLLAB_SESSIONS_DIR = saved.sessions;
+      if (saved.jobs === undefined) delete process.env.CODEX_COLLAB_JOBS_DIR; else process.env.CODEX_COLLAB_JOBS_DIR = saved.jobs;
+    }
+  });
+
+  test("a started session at a prompt the user can answer through Remote Control is waited on, and its answer is the task's", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-remote");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 60 });
+    const env = { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50" };
+    try {
+      const live = runCliLive(["send", "redo the title line", "--timeout", "3"], env);
+      await waitFor(() => fake.received.length === 1, 15_000);
+      bridged("cafe0001");
+      // It asks the user — who steers it through Remote Control — a question.
+      atPrompt(fake.name, Date.now());
+      const r = await live.done;
+      expect(r.code).toBe(3);
+      expect(r.stdout).toContain(`session: ${fake.name} is at a prompt (input needed) the user can answer through Remote Control; codex-collab stops it once it has gone unanswered for 1m 0s`);
+      expect(existsSync(join(binDir, "stop.log"))).toBe(false);
+      const id = /task: ([0-9a-f]{8})/.exec(r.stdout)![1];
+      const status = await runCli(["task", "status", id], env);
+      expect(status.stdout).toContain("  session   waiting, at a prompt (input needed) the user can answer through Remote Control");
+      // Answered: the turn goes on, and its reply is the task's.
+      speak(fake, fake.received[0].replyPath, "title line redone");
+      const done = await runCli(["task", "wait", id, "--timeout", "10"], env);
+      expect(done.code).toBe(0);
+      expect(done.stdout).toContain("title line redone");
+      expect(existsSync(join(binDir, "stop.log"))).toBe(false);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+      rmSync(JOBS, { recursive: true, force: true });
+    }
+  });
+
+  test("a prompt the user could answer through Remote Control and has not, for the linger, is stopped and said so", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-unanswered");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 2 });
+    try {
+      const live = runCliLive(["send", "edit the file", "--timeout", "60"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
+      await waitFor(() => fake.received.length === 1, 15_000);
+      bridged("cafe0001");
+      atPrompt(fake.name, Date.now() - 10_000);
+      const r = await live.done;
+      expect(r.code).toBe(5);
+      expect(r.stdout).toMatch(/task: [0-9a-f]{8}  status: blocked/);
+      expect(r.stdout).toMatch(new RegExp(`${fake.name.replace(/[()]/g, "\\$&")} stopped at a prompt the user could answer through Remote Control, and nobody had for 1\\ds; it ran on`));
+      expect(r.stdout).toContain("session: stopped by codex-collab, conversation kept");
+      expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001\n");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+      rmSync(JOBS, { recursive: true, force: true });
+    }
+  });
+
+  test("a bridge that only mirrors the session takes no answer: a prompt there is nobody's, as before", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-outbound");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: 60 });
+    try {
+      const live = runCliLive(["send", "edit the file", "--timeout", "60"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
+      await waitFor(() => fake.received.length === 1, 15_000);
+      bridged("cafe0001", true);
+      atPrompt(fake.name, Date.now());
+      const r = await live.done;
+      expect(r.code).toBe(5);
+      expect(r.stdout).toContain(`${fake.name} stopped at a prompt with nobody attached`);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+      rmSync(JOBS, { recursive: true, force: true });
     }
   });
 

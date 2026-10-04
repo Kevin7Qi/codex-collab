@@ -89,7 +89,7 @@ describe("CLI valid commands", () => {
       expect(stdout).toContain("the user's\n                        own, if that is the one live");
       expect(stdout).toContain('send --new "…"        A new session of codex-collab\'s own');
       expect(stdout).toContain("--fresh is the same");
-      expect(stdout).toContain("5  a session codex-collab started stopped at a prompt nobody could answer;");
+      expect(stdout).toContain("5  a session codex-collab started stopped at a prompt nobody could answer,\n     or one the user could answer through Remote Control and had not for the\n     linger;");
       expect(stdout).not.toContain("Usage: codex-collab <command>");
       // Fits a narrow terminal.
       for (const line of stdout.split("\n")) expect(line.length).toBeLessThanOrEqual(80);

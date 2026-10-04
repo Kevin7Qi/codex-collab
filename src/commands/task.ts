@@ -9,7 +9,7 @@
 import { resolve } from "node:path";
 import { resolveStateDir } from "../config";
 import { shellQuote } from "../approvals";
-import { describeModelChoice, sessionStatusNow } from "../claude-sessions";
+import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow } from "../claude-sessions";
 import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
@@ -100,7 +100,9 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
       return;
     }
     case "blocked":
-      console.log(`${target.name} stopped at a prompt with nobody attached; it ran on ${describeModelChoice(target.spawned?.model, target.spawned?.effort)}`);
+      console.log(record.unansweredSec !== undefined
+        ? `${target.name} stopped at a prompt the user could answer through Remote Control, and nobody had for ${formatDuration(record.unansweredSec * 1000)}; it ran on ${describeModelChoice(target.spawned?.model, target.spawned?.effort)}`
+        : `${target.name} stopped at a prompt with nobody attached; it ran on ${describeModelChoice(target.spawned?.model, target.spawned?.effort)}`);
       // Recorded only when it did not stop: what the line below would claim.
       if (record.error) console.log(`error: ${record.error}`);
       else console.log("session: stopped by codex-collab, conversation kept");
@@ -150,10 +152,24 @@ function printSessionFacts(record: TaskRecord, opts: { skipError?: boolean; stat
   if (failure) console.log(`error: ${failure}`);
   if (record.restartedAt) console.log(`restarted: by Claude Code ${since(record.restartedAt)} ago, after its process exited`);
   if (record.status === "pending" || record.status === "running") {
-    if (sessionStatusNow(record.target.pid) === "waiting") console.log(`session: ${record.target.name} is at a prompt in its own terminal`);
+    const prompt = describePrompt(record.target);
+    if (prompt) console.log(`session: ${record.target.name} is ${prompt}`);
     return;
   }
   if (record.target.spawned) console.log("session: started by codex-collab, conversation kept");
+}
+
+/** Where a session at a prompt stands, or null when it is at none: what the
+ *  prompt is for, in Claude Code's words, and who can answer it. */
+export function describePrompt(target: TaskRecord["target"]): string | null {
+  const prompt = promptNow(target.pid);
+  if (!prompt) return null;
+  const what = prompt.waitingFor ? ` (${prompt.waitingFor})` : "";
+  if (!target.spawned) return `at a prompt${what} in its own terminal`;
+  if (remoteControlReaches(target.spawned.id)) {
+    return `at a prompt${what} the user can answer through Remote Control; codex-collab stops it once it has gone unanswered for ${formatDuration(target.spawned.lingerSec * 1000)}`;
+  }
+  return `at a prompt${what} with nobody attached`;
 }
 
 /** The record behind an id a caller typed, or a usage error. */
@@ -194,7 +210,8 @@ function printStatus(record: TaskRecord, hint: string, stateDir: string): void {
     // One look at the registry: `busy` is a turn in progress, `shell` a turn
     // that has ended with a command of its own still running, `idle` a session
     // with nothing in hand, `waiting` one stopped at a prompt.
-    console.log(`  session   ${sessionStatusNow(record.target.pid) ?? "not registered"}`);
+    const prompt = describePrompt(record.target);
+    console.log(`  session   ${prompt ? `waiting, ${prompt}` : sessionStatusNow(record.target.pid) ?? "not registered"}`);
   }
   if (record.restartedAt) console.log(`  restarted ${since(record.restartedAt)} ago, by Claude Code after its process exited`);
   // One line, whether it was recorded when it happened or read from the
