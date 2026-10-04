@@ -188,7 +188,10 @@ resumes it, and peers stop refuses it.
 Options for send
   --timeout <sec>       How long this command waits (default 600). The task
                         goes on for four hours from sending, or the --timeout
-                        if longer, and a reply in that time is kept.
+                        if longer, and a reply in that time is kept. For a
+                        session send started, time at a prompt the user can
+                        answer through Remote Control does not count, and an
+                        answer leaves it at least the linger to reply.
   --no-wait             Return once the message is delivered.
   -m, --model <model>   For a session send starts or resumes: fable, opus,
                         sonnet, or a full model name ('models --claude').

@@ -284,7 +284,7 @@ After `peer up`, `ListAgents` shows `codex(myproject-a1b2c3)` — message it and
 
 <details><summary>From Codex: message Claude</summary>
 
-From Codex's own sessions, `codex-collab send <name> "message"` hands a Claude Code session in the workspace a message as a task and waits for its reply (default 600 s). The wait bounds the command only: a reply that comes within four hours of sending is kept for `task wait` / `task result` (exit 0 replied, 3 still running, 5 stopped at a prompt, 1 no reply will come: failed, lost or expired). With none live, `send` starts a background session that stops after 30 idle minutes. Codex asks before each `send` and `peers stop` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
+From Codex's own sessions, `codex-collab send <name> "message"` hands a Claude Code session in the workspace a message as a task and waits for its reply (default 600 s). The wait bounds the command only: a reply that comes within four hours of sending is kept for `task wait` / `task result` (exit 0 replied, 3 still running, 5 stopped at a prompt, 1 no reply will come: failed, lost or expired). For a session `send` started, time it waits at a prompt you can answer through Remote Control does not count toward those hours, and once you answer one it has at least `linger` seconds to reply. With none live, `send` starts a background session that stops after 30 idle minutes. Codex asks before each `send` and `peers stop` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
 
 | Command | Description |
 |---------|-------------|

@@ -22,7 +22,7 @@ codex-collab is the whole path to them: it records every message as a task and k
     codex-collab peers stop [<name>]      # stop a session codex-collab started
     codex-collab send --help              # which session each form of send reaches; every option
 
-Every `send` is a task with an id, printed when the message is delivered. `--timeout <sec>` (default 600) bounds how long the command waits. The task continues past it for four hours from sending (or the `--timeout`, if longer), and a reply in that time is kept under the id; after that the task is `expired`. `--no-wait` returns once the message is delivered; `task wait <id>` collects the reply afterwards. `codex-collab send <name> -` reads the message from stdin.
+Every `send` is a task with an id, printed when the message is delivered. `--timeout <sec>` (default 600) bounds how long the command waits. The task continues past it for four hours from sending (or the `--timeout`, if longer), not counting time a session codex-collab started spends at a prompt the user can answer through Remote Control, and with at least 30 minutes (`config linger`) after the user answers one; a reply in that time is kept under the id; after that the task is `expired`. `--no-wait` returns once the message is delivered; `task wait <id>` collects the reply afterwards. `codex-collab send <name> -` reads the message from stdin.
 
 ## Handing work off without waiting
 

@@ -68,7 +68,10 @@ export interface TaskRecord {
   /** When the turn this message is in was first seen running. */
   busySeenAt?: string;
   finishedAt?: string;
-  /** When the receiver stops listening, reply or none. */
+  /** When the receiver stops listening, reply or none. Moved back by the
+   *  time a started session spends at prompts the user can answer through
+   *  Remote Control, and to no sooner than the session's linger after the
+   *  latest one is answered (see watchForBlocked). */
   expiresAt: string;
   /** The process collecting the reply, with what identifies it (see
    *  `procIdentity`): a reader can tell a receiver that died from one at work. */

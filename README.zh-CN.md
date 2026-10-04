@@ -286,7 +286,7 @@ codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 
 <details>
 <summary>在 Codex 中联系 Claude</summary>
 
-在 Codex 会话中，`codex-collab send <name> "message"` 将消息作为一项任务交给工作区内的某个 Claude Code 会话并等待回复（默认 600 秒）。等待时限只约束命令本身：发出后四小时内到达的回复同样会被保存，可用 `task wait` / `task result` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 不会再有回复：失败、会话已结束或任务过期）。无存活会话时 `send` 自动启动后台会话，空闲 30 分钟后停止。每次 `send` 与 `peers stop` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
+在 Codex 会话中，`codex-collab send <name> "message"` 将消息作为一项任务交给工作区内的某个 Claude Code 会话并等待回复（默认 600 秒）。等待时限只约束命令本身：发出后四小时内到达的回复同样会被保存，可用 `task wait` / `task result` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 不会再有回复：失败、会话已结束或任务过期）。对于由 `send` 启动的会话，它停在你可通过 Remote Control 应答的提示上等待的时间不计入这四小时；你应答之后，它至少还有 `linger` 秒用于回复。无存活会话时 `send` 自动启动后台会话，空闲 30 分钟后停止。每次 `send` 与 `peers stop` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
 
 | 命令 | 说明 |
 |------|------|
