@@ -179,7 +179,7 @@ repository, then, each folder can have a session of its own (-d <folder>).
 Several tasks sent to one session share its conversation and take turns.
 
 A session codex-collab starts works in its workspace in Claude Code's auto
-permission mode, can edit files and run commands, and stops after 30 idle
+permission mode, can edit files and run commands, and stops after 60 idle
 minutes (config linger), keeping its conversation. Claude Code starts it only in
 a folder the user has trusted in Claude Code. A session started any other way
 (claude --bg) can be messaged while live, but codex-collab never stops or
@@ -188,7 +188,10 @@ resumes it, and peers stop refuses it.
 Options for send
   --timeout <sec>       How long this command waits (default 600). The task
                         goes on for four hours from sending, or the --timeout
-                        if longer, and a reply in that time is kept.
+                        if longer, and a reply in that time is kept. For a
+                        session send started, time at a prompt the user can
+                        answer through Remote Control does not count, and an
+                        answer leaves it at least the linger to reply.
   --no-wait             Return once the message is delivered.
   -m, --model <model>   For a session send starts or resumes: fable, opus,
                         sonnet, or a full model name ('models --claude').

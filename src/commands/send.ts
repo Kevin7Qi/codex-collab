@@ -175,22 +175,52 @@ export function splitTarget(
   return { targetName: null, message: positional.join(" ") };
 }
 
+/** How often a receiver whose task's time is up looks again while the
+ *  session sits at a prompt the user can answer. */
+const EXPIRY_RECHECK_MS = 60_000;
+
+/** When a receiver whose task's time has come looks again, or null when the
+ *  task ends now. `end` is when it ends as things stand. While a prompt the
+ *  user can answer is open, its end keeps moving, so the next look is no
+ *  sooner than the recheck: a prompt that opened a moment before the end
+ *  would otherwise have it look again every few milliseconds. */
+export function nextExpiryLook(now: number, end: number, atAnswerablePrompt: boolean, recheckMs = EXPIRY_RECHECK_MS): number | null {
+  const at = atAnswerablePrompt ? Math.max(end, now + recheckMs) : end;
+  return at > now ? at : null;
+}
+
 /** Watch a started session for a prompt nobody will answer. Resolves
  *  "blocked" once the registry has said `waiting` on several looks in a row
  *  (a prompt a hook or the classifier answers is gone again within a moment)
  *  and either nobody can answer it — no Remote Control reaches the session —
  *  or the user could, through Remote Control, and has not for `answerSec`.
- *  `unansweredSec()` then says which: null, or how long it waited. */
+ *  `unansweredSec()` then says which: null, or how long it waited.
+ *
+ *  It also keeps count of the time the session has spent at prompts the user
+ *  could answer, from when each appeared (the entry's last status change, or
+ *  the watch's start if that is later) to when it went: `answerableMs()`,
+ *  with the one still open, if any (`atAnswerablePrompt()`), counted to now;
+ *  `lastAnsweredAt()` is when the latest of them went, and `onAnswered` is
+ *  told when one goes. That time is the user's, and what follows an answer
+ *  is the session's work on it. */
 export function watchForBlocked(
   target: { pid: number; spawned?: { id: string } | null },
-  opts: { pollMs?: number; looks?: number; answerSec?: number } = {},
-): { blocked: Promise<"blocked">; unansweredSec(): number | null; stop(): void } {
+  opts: { pollMs?: number; looks?: number; answerSec?: number; onAnswered?: () => void } = {},
+): { blocked: Promise<"blocked">; unansweredSec(): number | null; answerableMs(): number; atAnswerablePrompt(): boolean; lastAnsweredAt(): number | null; stop(): void } {
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_BLOCKED_POLL_MS) || 2000);
   const looks = opts.looks ?? 5;
   const answerSec = opts.answerSec ?? DEFAULT_SPAWN_LINGER_SEC;
+  const watchedFrom = Date.now();
   let timer: ReturnType<typeof setInterval> | null = null;
   const stop = () => { if (timer) clearInterval(timer); timer = null; };
   let unanswered: number | null = null;
+  // Time at answerable prompts that have gone, and when the open one began.
+  let answeredMs = 0;
+  let openSince: number | null = null;
+  let answeredAt: number | null = null;
+  // When a prompt was last seen gone: one that is back with the same start
+  // is counted from here, never twice.
+  let goneAt = watchedFrom;
   const blocked = new Promise<"blocked">((resolve) => {
     let seen = 0;
     let seenSince = 0;
@@ -199,6 +229,20 @@ export function watchForBlocked(
       // Read at every look: the session may have become another process.
       const prompt = promptNow(target.pid);
       if (!prompt) {
+        // Gone since the last look: counted to now, a look's length at most
+        // past its going, which errs on the user's side.
+        if (openSince !== null) {
+          goneAt = Date.now();
+          answeredMs += goneAt - openSince;
+          openSince = null;
+          // Answered, if it stood long enough to be one: the same several
+          // looks that tell a prompt from one a hook or the classifier
+          // clears, or a moment's unreadable entry.
+          if (seen >= looks) {
+            answeredAt = goneAt;
+            try { opts.onAnswered?.(); } catch { /* the record is a report; the wait goes on without it */ }
+          }
+        }
         seen = 0;
         reachable = false;
         return;
@@ -209,6 +253,7 @@ export function watchForBlocked(
       // file caught mid-write — is no reason to stop a session whose user is
       // about to answer.
       if (!reachable && target.spawned) reachable = remoteControlReaches(target.spawned.id);
+      if (reachable && openSince === null) openSince = Math.max(prompt.since ?? seenSince, goneAt);
       if (seen < looks) return;
       // Where the user can answer, theirs is the answer it waits for — a
       // question they were asked, often, when they steer the session
@@ -224,7 +269,14 @@ export function watchForBlocked(
       resolve("blocked");
     }, pollMs);
   });
-  return { blocked, unansweredSec: () => unanswered, stop };
+  return {
+    blocked,
+    unansweredSec: () => unanswered,
+    answerableMs: () => answeredMs + (openSince !== null ? Date.now() - openSince : 0),
+    atAnswerablePrompt: () => openSince !== null,
+    lastAnsweredAt: () => answeredAt,
+    stop,
+  };
 }
 
 /** How long after it was stopped a started session is still resumed:
@@ -965,7 +1017,18 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   // the model. Watching for it turns hours of silence into an answer Codex
   // can act on. The user may be there all the same, through Remote Control:
   // a prompt they can answer gets as long as an idle session lingers.
-  const blockedWatch = target.spawned ? watchForBlocked(target, { answerSec: target.spawned.lingerSec }) : null;
+  const blockedWatch = target.spawned
+    ? watchForBlocked(target, {
+      answerSec: target.spawned.lingerSec,
+      // An answer moves the end: the wait in progress, and the record that
+      // says when it comes.
+      onAnswered: () => {
+        const end = endsAt();
+        armExpiry(end);
+        updateTask(stateDir, task.id, { expiresAt: new Date(end).toISOString() });
+      },
+    })
+    : null;
   // Brought back as a new process mid-turn, the session is followed there:
   // the record says so, and says where it is now.
   const lostWatch = watchForLost(target, {
@@ -974,9 +1037,33 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       updateTask(stateDir, task.id, { target: { ...target }, restartedAt });
     },
   });
-  const remaining = Math.max(0, Date.parse(task.expiresAt) - Date.now());
-  const expiry = new Promise<"expired">((r) => setTimeout(() => r("expired"), Number.isFinite(remaining) ? remaining : TASK_MAX_WAIT_SEC * 1000));
+  // The task's time runs while the session works, and stands still while it
+  // waits at a prompt the user can answer: a question they take an hour
+  // over, or one asked near the end, must not cost the reply that follows
+  // their answer. So its end moves back by the time such prompts were open,
+  // does not come while one is open, and leaves the session at least the
+  // linger to reply after the latest is answered. One left unanswered for
+  // the linger ends the task by itself (blocked).
+  const recorded = Date.parse(task.expiresAt);
+  const baseEnd = Number.isFinite(recorded) ? recorded : Date.now() + TASK_MAX_WAIT_SEC * 1000;
+  const afterAnswerMs = (target.spawned?.lingerSec ?? DEFAULT_SPAWN_LINGER_SEC) * 1000;
+  const endsAt = (): number => {
+    const paused = baseEnd + (blockedWatch?.answerableMs() ?? 0);
+    const answered = blockedWatch?.lastAnsweredAt() ?? null;
+    return answered === null ? paused : Math.max(paused, answered + afterAnswerMs);
+  };
+  // One timer, which the wait in progress is on and an answer can move.
+  let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+  let fireExpiry: (value: "expired") => void = () => {};
+  const armExpiry = (at: number) => {
+    if (expiryTimer) clearTimeout(expiryTimer);
+    expiryTimer = setTimeout(() => fireExpiry("expired"), Math.max(0, at - Date.now()));
+  };
+  const nextExpiry = () => new Promise<"expired">((r) => { fireExpiry = r; });
+  let expiry = nextExpiry();
+  armExpiry(baseEnd);
   const done: (patch: Partial<TaskRecord>) => never = (patch) => {
+    if (expiryTimer) clearTimeout(expiryTimer);
     blockedWatch?.stop();
     lostWatch.stop();
     if (busyWatch) clearInterval(busyWatch);
@@ -1038,6 +1125,20 @@ export async function handleRecvTask(args: string[]): Promise<void> {
         ...(unansweredSec !== null ? { unansweredSec } : {}),
         ...(stillThere ? { error: `${target.name} did not stop when told to, and is still at the prompt` } : {}),
       });
+    }
+    if (answer === "expired") {
+      // Whatever moved the end since, it is worked out afresh here. A prompt
+      // is looked for now as well: one that opened since the watch last
+      // looked, seconds before the end, is the late question this is for.
+      const openNow = blockedWatch !== null && (blockedWatch.atAnswerablePrompt()
+        || (!!target.spawned && promptNow(target.pid) !== null && remoteControlReaches(target.spawned.id)));
+      const at = nextExpiryLook(Date.now(), endsAt(), openNow);
+      if (at !== null) {
+        expiry = nextExpiry();
+        armExpiry(at);
+        updateTask(stateDir, task.id, { expiresAt: new Date(at).toISOString() });
+        continue;
+      }
     }
     if (answer === "lost" || answer === "expired") {
       // Why, while the transcript is still at hand: the record outlives the

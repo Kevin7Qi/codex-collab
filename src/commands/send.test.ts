@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
-import { codexThreadId, composeMessage, insideCodexSandbox, senderName, splitTarget, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
+import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
@@ -276,7 +276,13 @@ function taskRecord(id: string): Record<string, unknown> | null {
 /** The pids of the reapers running for the session `id`. */
 function reapersOf(id: string): number[] {
   const table = spawnSync("ps", ["-x", "-o", "pid=,args="], { encoding: "utf-8" }).stdout ?? "";
-  return table.split("\n").filter((line) => line.includes(`reap-claude ${id} `)).map((line) => Number(line.trim().split(/\s+/)[0]));
+  // This run's own: every fake session has the same job id, and another
+  // run of these tests on the machine has reapers of its own. A reaper's
+  // command line names its folder, which is under this run's HOME.
+  const home = [TEST_HOME, realpathSync(TEST_HOME)];
+  return table.split("\n")
+    .filter((line) => line.includes(`reap-claude ${id} `) && home.some((h) => line.includes(h)))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
 }
 
 /** The reaper logs under the test HOME: one left behind is a reaper that died. */
@@ -1237,6 +1243,215 @@ describeUnix("send", () => {
       if (saved.sessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR; else process.env.CODEX_COLLAB_SESSIONS_DIR = saved.sessions;
       if (saved.jobs === undefined) delete process.env.CODEX_COLLAB_JOBS_DIR; else process.env.CODEX_COLLAB_JOBS_DIR = saved.jobs;
     }
+  });
+
+  test("nextExpiryLook: a task ends at its end; while a prompt is open it looks again, never sooner than the recheck", () => {
+    const now = 1_000_000;
+    expect(nextExpiryLook(now, now - 1, false)).toBeNull();
+    expect(nextExpiryLook(now, now, false)).toBeNull();
+    expect(nextExpiryLook(now, now + 5000, false)).toBe(now + 5000);
+    // A prompt that opened a moment before the end moves it a moment on:
+    // the next look waits for the recheck all the same.
+    expect(nextExpiryLook(now, now + 5, true)).toBe(now + 60_000);
+    expect(nextExpiryLook(now, now - 5, true)).toBe(now + 60_000);
+    expect(nextExpiryLook(now, now + 3_600_000, true)).toBe(now + 3_600_000);
+  });
+
+  test("watchForBlocked: a prompt gone within a few looks is no answer, and one back with the same start is not counted twice", async () => {
+    const saved = { sessions: process.env.CODEX_COLLAB_SESSIONS_DIR, jobs: process.env.CODEX_COLLAB_JOBS_DIR };
+    process.env.CODEX_COLLAB_SESSIONS_DIR = REGISTRY;
+    process.env.CODEX_COLLAB_JOBS_DIR = JOBS;
+    const pid = 4_190_003;
+    const entryFile = join(REGISTRY, `${pid}.json`);
+    const entry = (status: string, since: number) => writeFileSync(entryFile, JSON.stringify({ pid, status, statusUpdatedAt: since }));
+    const watches: Array<{ stop(): void }> = [];
+    try {
+      mkdirSync(REGISTRY, { recursive: true });
+      bridged("feed0004");
+      entry("busy", Date.now());
+      let answers = 0;
+      const w = watchForBlocked({ pid, spawned: { id: "feed0004" } }, { pollMs: 40, looks: 5, answerSec: 60, onAnswered: () => answers++ });
+      watches.push(w);
+      // Waiting for two looks, then gone: what a hook or the classifier
+      // clears, or a moment's misread. Its time counts; it answered nothing.
+      entry("waiting", Date.now());
+      await new Promise((r) => setTimeout(r, 90));
+      entry("busy", Date.now());
+      await new Promise((r) => setTimeout(r, 120));
+      expect(answers).toBe(0);
+      expect(w.lastAnsweredAt()).toBeNull();
+
+      // A real prompt, gone for one look and back with the same start: the
+      // time before the gap is counted once, so never more than the time
+      // that passed.
+      const before = w.answerableMs();
+      const since = Date.now();
+      entry("waiting", since);
+      await new Promise((r) => setTimeout(r, 400));
+      entry("busy", since);
+      await new Promise((r) => setTimeout(r, 60));
+      entry("waiting", since);
+      await new Promise((r) => setTimeout(r, 400));
+      entry("busy", Date.now());
+      await new Promise((r) => setTimeout(r, 100));
+      const counted = w.answerableMs() - before;
+      // Counted twice, it would be the time that passed plus the 400ms
+      // before the gap.
+      expect(counted).toBeGreaterThanOrEqual(700);
+      expect(counted).toBeLessThanOrEqual(Date.now() - since + 40);
+      expect(answers).toBeGreaterThanOrEqual(1);
+    } finally {
+      for (const x of watches) x.stop();
+      rmSync(entryFile, { force: true });
+      rmSync(JOBS, { recursive: true, force: true });
+      if (saved.sessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR; else process.env.CODEX_COLLAB_SESSIONS_DIR = saved.sessions;
+      if (saved.jobs === undefined) delete process.env.CODEX_COLLAB_JOBS_DIR; else process.env.CODEX_COLLAB_JOBS_DIR = saved.jobs;
+    }
+  });
+
+  test("watchForBlocked counts the time at prompts the user can answer, and none at prompts nobody can", async () => {
+    const saved = { sessions: process.env.CODEX_COLLAB_SESSIONS_DIR, jobs: process.env.CODEX_COLLAB_JOBS_DIR };
+    process.env.CODEX_COLLAB_SESSIONS_DIR = REGISTRY;
+    process.env.CODEX_COLLAB_JOBS_DIR = JOBS;
+    const pid = 4_190_002;
+    const entryFile = join(REGISTRY, `${pid}.json`);
+    const entry = (status: string) => writeFileSync(entryFile, JSON.stringify({ pid, status, statusUpdatedAt: Date.now() }));
+    const watches: Array<{ stop(): void }> = [];
+    try {
+      mkdirSync(REGISTRY, { recursive: true });
+      bridged("feed0003");
+      entry("busy");
+      let answers = 0;
+      const w = watchForBlocked({ pid, spawned: { id: "feed0003" } }, { pollMs: 20, looks: 3, answerSec: 60, onAnswered: () => answers++ });
+      watches.push(w);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(w.answerableMs()).toBe(0);
+      expect(w.lastAnsweredAt()).toBeNull();
+      // A question, open for about 400ms, then answered.
+      entry("waiting");
+      await new Promise((r) => setTimeout(r, 400));
+      expect(w.atAnswerablePrompt()).toBe(true);
+      entry("busy");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(w.atAnswerablePrompt()).toBe(false);
+      expect(answers).toBe(1);
+      expect(Date.now() - w.lastAnsweredAt()!).toBeLessThan(200);
+      const counted = w.answerableMs();
+      expect(counted).toBeGreaterThanOrEqual(350);
+      expect(counted).toBeLessThan(1000);
+      // Nothing more is counted while it works.
+      await new Promise((r) => setTimeout(r, 200));
+      expect(w.answerableMs()).toBe(counted);
+
+      // Where nobody can answer, no time is the user's.
+      rmSync(join(JOBS, "feed0003"), { recursive: true, force: true });
+      entry("busy");
+      const nobody = watchForBlocked({ pid, spawned: { id: "feed0003" } }, { pollMs: 20, looks: 50, answerSec: 60 });
+      watches.push(nobody);
+      entry("waiting");
+      await new Promise((r) => setTimeout(r, 300));
+      expect(nobody.atAnswerablePrompt()).toBe(false);
+      expect(nobody.answerableMs()).toBe(0);
+    } finally {
+      for (const x of watches) x.stop();
+      rmSync(entryFile, { force: true });
+      rmSync(JOBS, { recursive: true, force: true });
+      if (saved.sessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR; else process.env.CODEX_COLLAB_SESSIONS_DIR = saved.sessions;
+      if (saved.jobs === undefined) delete process.env.CODEX_COLLAB_JOBS_DIR; else process.env.CODEX_COLLAB_JOBS_DIR = saved.jobs;
+    }
+  });
+
+  /** A task to a started session that asks the user a question through
+   *  Remote Control: `maxSec` is all the task's own time, `linger` the
+   *  session's. The question opens and is answered, and the reply comes, at
+   *  the given seconds after the task was created — without a CLI start in
+   *  between, which would blur the timing. Resolves with the task's outcome,
+   *  and its record as it stood just after the answer. */
+  async function questionThenReply(name: string, o: { maxSec: number; linger: number; open: number; answer: number; reply: number | null; pollMs?: number }): Promise<{ outcome: string; afterAnswer: { createdAt: string; expiresAt: string }; endedSec: number }> {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, `bin-${name}`);
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath);
+    writeConfig({ linger: o.linger });
+    const env = { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: String(o.pollMs ?? 50), CODEX_COLLAB_TASK_MAX_WAIT_SEC: String(o.maxSec) };
+    try {
+      // The task's own time is the longer of its maximum and the --timeout,
+      // so the --timeout is kept below it.
+      const sent = await runCli(["send", "redo the title line", "--no-wait", "--timeout", "1"], env);
+      const id = / as task ([0-9a-f]{8})\./.exec(sent.stdout)![1];
+      const record = () => {
+        const ws = readdirSync(join(TEST_HOME, ".codex-collab", "workspaces")).find((d) => existsSync(join(TEST_HOME, ".codex-collab", "workspaces", d, "tasks", `${id}.json`)))!;
+        return JSON.parse(readFileSync(join(TEST_HOME, ".codex-collab", "workspaces", ws, "tasks", `${id}.json`), "utf-8"));
+      };
+      const t0 = Date.parse(record().createdAt);
+      expect(Date.parse(record().expiresAt) - t0).toBe(o.maxSec * 1000);
+      const at = async (sec: number) => {
+        const wait = t0 + sec * 1000 - Date.now();
+        if (wait < 0) throw new Error(`${name}: ${sec}s was already past when it came (${-wait}ms late)`);
+        await new Promise((r) => setTimeout(r, wait));
+      };
+      bridged("cafe0001");
+      await at(o.open);
+      atPrompt(fake.name, Date.now());
+      await at(o.answer);
+      for (const f of readdirSync(REGISTRY)) {
+        const file = join(REGISTRY, f);
+        const entry = JSON.parse(readFileSync(file, "utf-8"));
+        if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, status: "busy", statusUpdatedAt: Date.now() }));
+      }
+      await new Promise((r) => setTimeout(r, 300));
+      const afterAnswer = record();
+      if (o.reply !== null) {
+        await at(o.reply);
+        speak(fake, fake.received[0].replyPath, "title line redone");
+      }
+      const done = await runCli(["task", "wait", id, "--timeout", "20"], env);
+      return { outcome: /status: (\w+)/.exec(done.stdout)![1], afterAnswer, endedSec: (Date.now() - t0) / 1000 };
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+      rmSync(JOBS, { recursive: true, force: true });
+    }
+  }
+
+  test("a task's time stands still while a question to the user is open: answered before its end, the reply after it still counts", async () => {
+    // Six seconds of the task's own; the question is open for two of them.
+    // Its end moves from 6s to 8s; the reply comes at 7.2s.
+    const r = await questionThenReply("paused-answered", { maxSec: 6, linger: 3, open: 1.5, answer: 3.5, reply: 7.2 });
+    expect(r.outcome).toBe("replied");
+    // The record says so as soon as the question is answered.
+    expect(Date.parse(r.afterAnswer.expiresAt) - Date.parse(r.afterAnswer.createdAt)).toBeGreaterThan(7500);
+  });
+
+  test("an answered question leaves the session at least the linger to reply, however little of the task's time was left", async () => {
+    // Four seconds of the task's own, a question open for one: that alone
+    // would end it at 5s. Answered at 2.5s, the session has the linger (4s)
+    // from then: until 6.5s. The reply comes at 5.8s.
+    const r = await questionThenReply("paused-floor", { maxSec: 4, linger: 4, open: 1.5, answer: 2.5, reply: 5.8 });
+    expect(r.outcome).toBe("replied");
+  });
+
+  test("an answer moves the wait in progress: past its own time, a task ends at the answer plus the linger, even under a minute", async () => {
+    // Two seconds of the task's own, a question open across them: at 2s it
+    // looks again a minute on. Answered at 3s with a linger of 3s, it ends
+    // at 6s, and no reply comes.
+    const r = await questionThenReply("paused-rearm", { maxSec: 2, linger: 3, open: 1, answer: 3, reply: null });
+    expect(r.outcome).toBe("expired");
+    expect(r.endedSec).toBeLessThan(15);
+    expect(Date.parse(r.afterAnswer.expiresAt) - Date.parse(r.afterAnswer.createdAt)).toBeGreaterThanOrEqual(5900);
+  }, 40_000);
+
+  test("a question that opens after the watch last looked, just before the task's end, still keeps it open", async () => {
+    // The watch looks every 20s here, so it never sees the question, open
+    // from 1s to 3s; the task's own time ends at 2s, and the reply comes at
+    // 3.5s.
+    const r = await questionThenReply("paused-unseen", { maxSec: 2, linger: 60, open: 1, answer: 3, reply: 3.5, pollMs: 20_000 });
+    expect(r.outcome).toBe("replied");
+  });
+
+  test("a question still open when the task's time runs out keeps it open, and the reply after the answer counts", async () => {
+    const r = await questionThenReply("paused-open", { maxSec: 3, linger: 60, open: 1.5, answer: 5, reply: 5.5 });
+    expect(r.outcome).toBe("replied");
   });
 
   test("a started session at a prompt the user can answer through Remote Control is waited on, and its answer is the task's", async () => {
