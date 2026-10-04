@@ -653,6 +653,10 @@ export interface UserConfig {
    *  resumed, in seconds, or "off" to always start a new one. */
   "spawn-resume"?: number | string;
   "spawn-autocompact"?: string;
+  /** Whether `send` marks a folder Codex trusts as trusted in Claude Code
+   *  when Claude Code refuses it (off|codex; see claude-trust.ts). Only the
+   *  user turns it on: `config` refuses `codex` when Codex runs it. */
+  "spawn-trust"?: string;
   /** Opt-in Codex exec-policy rule for `send` (on|off; see skill.ts). */
   "codex-rule"?: string;
 }

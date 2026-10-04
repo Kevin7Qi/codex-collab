@@ -1,6 +1,6 @@
 // src/commands/config.ts — config, models, health command handlers
 
-import { config, listTemplates, resolveStateDir } from "../config";
+import { config, listTemplates, resolveStateDir, resolveWorkspaceDir } from "../config";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
@@ -8,6 +8,8 @@ import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreferenc
 import { readPeerState, isAlive, type PeerState } from "./peer";
 import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_SPAWN_EFFORT, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isAutocompactWindow, isModelName, isSpawnEffortSetting, spawnEffortFor } from "../claude-sessions";
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
+import { claudeConfigFile, claudeTrusts, codexConfigFile, codexTrust, isSpawnTrustSetting, trustReachesHome } from "../claude-trust";
+import { underCodex } from "./send";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
  *  consent to write (or remove) the Codex exec-policy rule. */
@@ -92,6 +94,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     "spawn-autocompact": { validate: isAutocompactWindow, hint: `how much context a started Claude Code session fills before it compacts itself: 100k-1M tokens (\`500k\`, \`200000\`), or auto for Claude Code's own window (default ${DEFAULT_SPAWN_AUTOCOMPACT})` },
     "spawn-resume": { validate: v => v === "off" || (Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) <= MAX_TIMEOUT_SECONDS), hint: `seconds after it was stopped that a started Claude Code session is still resumed, with its conversation, by the next \`send\`, 1-${MAX_TIMEOUT_SECONDS}, or off to always start a new one (default ${DEFAULT_SPAWN_RESUME_SEC}, a week; \`send --new\` starts a new one once)` },
     "spawn-effort": { validate: isSpawnEffortSetting, hint: `the effort a started Claude Code session runs at when \`send\` names none: ${CLAUDE_EFFORTS.join(", ")}, or auto for your Claude Code settings (default ${DEFAULT_SPAWN_EFFORT})` },
+    "spawn-trust": { validate: isSpawnTrustSetting, hint: "off, codex (codex: when Claude Code will not start a session in a folder because it is not trusted, and Codex trusts that folder, `send` marks it trusted in Claude Code too; yours to turn on, from your own terminal; default off)" },
   };
 
   const cfg = loadUserConfig();
@@ -155,11 +158,20 @@ export async function handleConfig(args: string[]): Promise<void> {
   if (key === "codex-rule" && value === "on" && process.platform === "win32") {
     die("codex-rule is unavailable on Windows: Claude Code's cross-session messaging, which `codex-collab send` rides on, does not exist there.");
   }
+  // Turning it on is the user's consent to having folders trusted in Claude
+  // Code on their behalf, so it cannot come from the agent it serves.
+  // Turning it off, or unsetting it, is anyone's to do.
+  if (key === "spawn-trust" && value === "codex" && underCodex()) {
+    die("spawn-trust codex is the user's to turn on, from their own terminal: with it, codex-collab marks folders trusted in Claude Code, and their settings, hooks and MCP servers then run under the user's account. It is not turned on from a command Codex runs.");
+  }
   (cfg as Record<string, unknown>)[key] =
     key === "timeout" || key === "linger" || (key === "spawn-resume" && value !== "off") ? Number(value) : key === "memory" ? value === "true" : value;
   if (key === "codex-rule") setCodexRuleAndSave(cfg, value === "on");
   else saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
+  if (key === "spawn-trust" && value === "codex") {
+    console.log(`When Claude Code will not start a session in a folder because it is not trusted, and Codex trusts that folder (${codexConfigFile()}), \`send\` marks it trusted in ${claudeConfigFile()}, as accepting Claude Code's trust prompt there would, and starts the session. The folder's settings, hooks and MCP servers then run in Claude Code under your account.`);
+  }
   if (key === "mode") {
     // The mode is read when a broker starts. One already running keeps its
     // peer (or its lack of one) until it restarts, so the setting alone
@@ -351,6 +363,20 @@ export function describeCodexRule(enabled: boolean, inSync: boolean | null, path
   return `on (${path}) — Codex runs \`codex-collab send\` and \`peers stop\` without asking`;
 }
 
+/** One line on whether `send` can start a Claude Code session in this
+ *  workspace: whether Claude Code trusts the folder, and when it does not,
+ *  whether Codex does and what `spawn-trust` makes of that. Claude Code has
+ *  the last word when it starts the session; this reads the same config. */
+export function describeClaudeTrust(folder: string, claude: boolean | undefined, codex: "trusted" | "untrusted" | undefined, setting: unknown, reachesHome = false): string {
+  if (claude === undefined) return `${folder} — Claude Code's config (${claudeConfigFile()}) could not be read`;
+  if (claude) return `${folder} is trusted in Claude Code`;
+  const refused = `${folder} is not trusted in Claude Code, so \`send\` cannot start a session here until it is ('claude' run there once, with its trust prompt accepted)`;
+  if (codex !== "trusted") return codex === "untrusted" ? `${refused}; Codex has it as untrusted` : `${refused}; Codex has not trusted it either`;
+  if (reachesHome) return `${refused}; Codex trusts it, but codex-collab carries no trust over to the home directory or a folder above it`;
+  if (setting === "codex") return `${folder} is not trusted in Claude Code yet; Codex trusts it, so \`send\` marks it trusted when it starts a session here (spawn-trust codex)`;
+  return `${refused}. Codex trusts it: 'codex-collab config spawn-trust codex' has \`send\` carry that over`;
+}
+
 export async function handleHealth(args: string[]): Promise<void> {
   const { options } = parseOptions(args);
   const findCmd = process.platform === "win32" ? "where" : "which";
@@ -392,6 +418,8 @@ export async function handleHealth(args: string[]): Promise<void> {
   if (process.platform !== "win32") {
     console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
     console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
+    const ws = resolveWorkspaceDir(options.dir);
+    console.log(`  claude trust: ${describeClaudeTrust(ws, claudeTrusts(ws), codexTrust(ws), loadUserConfig()["spawn-trust"], trustReachesHome(ws))}`);
   }
 
   // Missing auth is reported, never fatal. This command's exit code answers

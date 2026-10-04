@@ -72,6 +72,7 @@ import { conversationMovedSince, describeTrouble, firstSaidSince, turnEndedOnErr
 import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
+import { isSpawnTrustSetting, type SpawnTrustSetting } from "../claude-trust";
 import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
@@ -367,6 +368,12 @@ export async function handleSend(args: string[]): Promise<void> {
       if (isAutocompactWindow(cfg["spawn-autocompact"])) autocompact = cfg["spawn-autocompact"];
       else console.error(`[codex] Warning: ignoring invalid spawn-autocompact in config: ${cfg["spawn-autocompact"]}`);
     }
+    // Off unless the user turned it on: anything else carries nothing over.
+    let spawnTrust: SpawnTrustSetting = "off";
+    if (cfg["spawn-trust"] !== undefined) {
+      if (isSpawnTrustSetting(cfg["spawn-trust"])) spawnTrust = cfg["spawn-trust"];
+      else console.error(`[codex] Warning: ignoring invalid spawn-trust in config: ${cfg["spawn-trust"]}`);
+    }
     // One spawn per workspace at a time: two sends racing here would each
     // start a session under the same name. The second waits, then finds the
     // first's session live and uses it.
@@ -414,7 +421,7 @@ export async function handleSend(args: string[]): Promise<void> {
           // now, as a new one would: the flags, else the configured defaults.
           // What it ran on before was chosen for the work it had then.
           try {
-            resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact, resume: stopped });
+            resumed = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact, spawnTrust, resume: stopped });
             notes.push(`Resumed ${resumed.name} (its conversation so far is intact; on ${describeModelChoice(model, effort)}; it stops after ${formatDuration(lingerSec * 1000)} idle).`);
           } catch (e) {
             // A folder Claude Code will not run in refuses a new session
@@ -433,7 +440,7 @@ export async function handleSend(args: string[]): Promise<void> {
           target = resumed;
         } else {
           try {
-            target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact });
+            target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact, spawnTrust });
           } catch (e) {
             if (e instanceof WorkspaceNotTrustedError) fail(e.message);
             fail((e instanceof Error ? e.message : String(e)) + sandboxHint());
