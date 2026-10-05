@@ -1385,7 +1385,7 @@ describeUnix("reaper", () => {
     expect(sessionStatusNow(sleeper.pid!)).toBe("busy");
   });
 
-  test("the default linger is half an hour", () => {
-    expect(DEFAULT_SPAWN_LINGER_SEC).toBe(1800);
+  test("the default linger is an hour", () => {
+    expect(DEFAULT_SPAWN_LINGER_SEC).toBe(3600);
   });
 });

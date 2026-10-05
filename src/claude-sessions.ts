@@ -91,10 +91,11 @@ export interface SpawnedSession {
  *  Long enough for work that spans days; `config spawn-resume` changes it. */
 export const DEFAULT_SPAWN_RESUME_SEC = 7 * 24 * 3600;
 
-/** Default idle linger for a spawned session (seconds). Claude Code stops
- *  an unattached background session itself after about an hour; this is
- *  the shorter bound we enforce for sessions nobody asked for by name. */
-export const DEFAULT_SPAWN_LINGER_SEC = 30 * 60;
+/** Default idle linger for a spawned session (seconds): an hour, which is
+ *  also how long a prompt in it waits for a user who can reach it through
+ *  Remote Control, and the least time it has to reply after they answer
+ *  one. `config linger` changes all three. */
+export const DEFAULT_SPAWN_LINGER_SEC = 60 * 60;
 
 /** How long a started session may live before the reaper stops it at the
  *  next quiet moment. It catches a session that never idles long enough for
