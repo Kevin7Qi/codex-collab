@@ -138,9 +138,10 @@ function cliEnv(extra: Record<string, string>): Record<string, string> {
   // and ends, within a moment of that test's cleanup.
   // A background session that goes is looked for again for Claude Code's
   // restart window: a moment, here, not half a minute.
-  // Claude Code's job states too: whether Remote Control reaches a session
-  // is read there.
-  return { ...env, HOME: TEST_HOME, CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_JOBS_DIR: JOBS, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_COLLAB_CONTINUE_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
+  // Codex's and Claude Code's own configs, where each keeps the folders it
+  // trusts, are the test's: `send` may write Claude Code's. Claude Code's
+  // job states too: whether Remote Control reaches a session is read there.
+  return { ...env, HOME: TEST_HOME, CODEX_HOME: join(TEST_HOME, ".codex"), CODEX_COLLAB_CLAUDE_CONFIG: join(TEST_HOME, ".claude.json"), CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_JOBS_DIR: JOBS, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_COLLAB_CONTINUE_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
 }
 
 /** Speak to a sender's advertised reply address as `fake`. */
@@ -195,13 +196,16 @@ function removeConfig(): void {
  *  registers a live entry (a sleeper it starts) whose socket is `socketPath`
  *  — a fake session this test serves. `stop <id>` only logs, so a reaper's
  *  confirming look finds the entry still live and signals the sleeper. */
-function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s", opts: { stopDelaySec?: number; untrusted?: boolean } = {}): void {
+function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s", opts: { stopDelaySec?: number; untrusted?: boolean; trustGate?: boolean } = {}): void {
   mkdirSync(binDir, { recursive: true });
   writeFileSync(join(binDir, "claude"), `#!/bin/sh
 case "$1" in
   --bg)
     echo bg >> "${binDir}/bg.log"
-    for a in "$@"; do printf '%s\\n' "$a"; done > "${binDir}/args.log"${opts.untrusted ? `
+    for a in "$@"; do printf '%s\\n' "$a"; done > "${binDir}/args.log"${opts.trustGate ? `
+    if ! FAKE_CWD="$(pwd)" bun -e 'const c = JSON.parse(require("fs").readFileSync(process.env.CODEX_COLLAB_CLAUDE_CONFIG, "utf8")); process.exit(c.projects?.[process.env.FAKE_CWD]?.hasTrustDialogAccepted === true ? 0 : 1)'; then
+      echo "Workspace not trusted. Run \\\`claude\\\` in $(pwd) once and accept the trust prompt, then retry." >&2; exit 1
+    fi` : ""}${opts.untrusted ? `
     echo "Workspace not trusted. Run \\\`claude\\\` in $(pwd) once and accept the trust prompt, then retry." >&2
     exit 1` : ""}
     echo "backgrounded · cafe0001 · $3"
@@ -999,6 +1003,70 @@ describeUnix("send", () => {
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
+    }
+  });
+
+  test("with spawn-trust codex, send marks a folder Codex trusts as trusted in Claude Code, and starts the session there", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-spawn-trust");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath, "s", { trustGate: true });
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    const folder = realpathSync(WS);
+    const codexConfig = join(TEST_HOME, ".codex", "config.toml");
+    const claudeConfig = join(TEST_HOME, ".claude.json");
+    mkdirSync(join(TEST_HOME, ".codex"), { recursive: true });
+    writeFileSync(codexConfig, `[projects.${JSON.stringify(folder)}]\ntrust_level = "trusted"\n`);
+    writeFileSync(claudeConfig, JSON.stringify({ projects: {} }, null, 2));
+    try {
+      // Off, as it is unless the user turns it on: refused, and Codex's
+      // trust named.
+      writeConfig({ linger: 60 });
+      const off = await runCli(["send", "one"], env);
+      expect(off.code).toBe(1);
+      expect(off.stderr).toContain("because the folder is not trusted");
+      expect(off.stderr).toContain("`codex-collab config spawn-trust codex` in their own terminal");
+      expect(JSON.parse(readFileSync(claudeConfig, "utf-8"))).toEqual({ projects: {} });
+
+      writeConfig({ linger: 60, "spawn-trust": "codex" });
+      const on = await runCli(["send", "two"], env);
+      expect(on.code).toBe(0);
+      expect(on.stderr).toContain(`Claude Code had not trusted ${folder}; Codex does, so codex-collab marked it trusted in ${claudeConfig} (spawn-trust codex).`);
+      expect(on.stdout).toContain(`Started ${fake.name}`);
+      expect(JSON.parse(readFileSync(claudeConfig, "utf-8")).projects[folder]).toEqual({ hasTrustDialogAccepted: true });
+      // Refused twice (off, then on), then started.
+      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\nbg\nbg\n");
+      expect(fake.received).toHaveLength(1);
+      expect(fake.received[0].text.startsWith("two\n")).toBe(true);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+      rmSync(codexConfig, { force: true });
+      rmSync(claudeConfig, { force: true });
+    }
+  });
+
+  test("config spawn-trust codex is refused when Codex runs it, and taken from the user's terminal", () => {
+    removeConfig();
+    const run = (args: string[], env: Record<string, string>) => spawnSync("bun", ["run", CLI, ...args], { cwd: WS, env, encoding: "utf-8" });
+    const underCodex = cliEnv({});
+    const terminal = cliEnv({});
+    delete terminal.CODEX_THREAD_ID;
+    try {
+      const refused = run(["config", "spawn-trust", "codex"], underCodex);
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain("spawn-trust codex is the user's to turn on, from their own terminal");
+      expect(existsSync(join(TEST_HOME, ".codex-collab", "config.json"))).toBe(false);
+
+      const set = run(["config", "spawn-trust", "codex"], terminal);
+      expect(set.status).toBe(0);
+      expect(set.stdout).toContain("Set spawn-trust: codex");
+      expect(set.stdout).toContain(`marks it trusted in ${join(TEST_HOME, ".claude.json")}`);
+      // Turning it off is anyone's to do.
+      expect(run(["config", "spawn-trust", "off"], underCodex).status).toBe(0);
+      expect(run(["config", "spawn-trust", "on"], terminal).stderr).toContain("Valid: off, codex");
+    } finally {
+      removeConfig();
     }
   });
 

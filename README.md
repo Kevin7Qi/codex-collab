@@ -321,7 +321,7 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `spawn-model`, `spawn-effort`, `spawn-models`, `spawn-autocompact`, `spawn-resume`, `codex-rule`
+Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `spawn-model`, `spawn-effort`, `spawn-models`, `spawn-autocompact`, `spawn-resume`, `spawn-trust`, `codex-rule`
 
 **Experimental:** `codex-rule` is off by default. Turned on, it lets any Codex session run `codex-collab send` and `peers stop` without asking (details below).
 
@@ -341,7 +341,9 @@ Codex chooses the model and effort per message with `send --model <model> --effo
 
 A started session runs in Claude Code's `auto` permission mode, edits files in the working directory it shares with Codex, and compacts itself at `spawn-autocompact` (100k–1M tokens, or `auto` for Claude Code's own window; default 500k). These settings reach that session alone (`claude --settings`); your own sessions keep yours, including an auto-compact you have turned off. Where a model has no `auto` mode, `send` notices the session stopped at a prompt nobody can answer, stops it, and says so; the next `send` resumes the conversation on the model it names. A prompt you can answer through Remote Control, such as a question the session asks you while you steer it, is left for you; one unanswered for `linger` seconds stops the session the same way.
 
-From Claude Code 2.1.281, a background session starts only in a folder you have trusted in Claude Code, or one below it; inside a git repository, a trusted folder counts only up to the repository's root. Elsewhere (a new folder under `/tmp`, say) `send` is refused with the folder and the reason; running `claude` there once and accepting the trust prompt allows it.
+From Claude Code 2.1.281, a background session starts only in a folder you have trusted in Claude Code, or one below it; inside a git repository, a trusted folder counts only up to the repository's root. Elsewhere (a new folder under `/tmp`, say) `send` is refused with the folder and the reason; running `claude` there once and accepting the trust prompt allows it. `codex-collab health` says whether the current folder is trusted.
+
+`spawn-trust` (`off` / `codex`, default `off`) saves that step for folders you have already trusted in Codex. With `codex`, when Claude Code refuses a folder that Codex trusts (the folder itself or its repository, worktrees included; a trusted folder above it does not count), `send` marks it trusted in `~/.claude.json`, as accepting Claude Code's trust prompt there would, and starts the session. That folder's Claude Code settings, hooks and MCP servers then run under your account. Only you can turn it on: `config spawn-trust codex` is refused when Codex runs it. The home directory is never trusted this way, since Claude Code never keeps trust for it.
 
 `codex-rule` (`on` / `off`, default `off`) writes or removes a Codex exec-policy rule that lets Codex run `codex-collab send` and `codex-collab peers stop` without asking each time; `off` or `--unset` removes it. With it on, any Codex session — including one steered by content it read — can message your Claude Code sessions, start one, and stop one it started. The installer asks once on an interactive terminal and records the answer. Not available on Windows.
 

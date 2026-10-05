@@ -28,7 +28,9 @@ function run(...args: string[]): { stdout: string; stderr: string; exitCode: num
     timeout: 5000,
     // No-update-check: run/review/health would otherwise do a live GitHub
     // fetch (and stamp update-check state) on their first spawn per test HOME.
-    env: { ...process.env, HOME: TEST_HOME, CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000", CODEX_COLLAB_NO_UPDATE_CHECK: "1" },
+    // Codex's and Claude Code's configs (`health` reads the folders each
+    // trusts) are the test HOME's, whatever the environment names.
+    env: { ...process.env, HOME: TEST_HOME, CODEX_HOME: join(TEST_HOME, ".codex"), CODEX_COLLAB_CLAUDE_CONFIG: join(TEST_HOME, ".claude.json"), CODEX_COLLAB_BROKER_IDLE_TIMEOUT_MS: "5000", CODEX_COLLAB_NO_UPDATE_CHECK: "1" },
   });
   return {
     stdout: (result.stdout ?? "") as string,
@@ -579,5 +581,22 @@ describe("health: the Codex-side lines", () => {
     expect(describeCodexRule(true, true, path)).toBe("on (/h/.codex/rules/codex-collab.rules) — Codex runs `codex-collab send` and `peers stop` without asking");
     expect(describeCodexRule(true, false, path)).toContain("out of date — run 'codex-collab skill sync'");
     expect(describeCodexRule(true, null, path)).toContain("is missing — run 'codex-collab skill sync'");
+  });
+
+  it("describeClaudeTrust: whether send can start a session here, and what spawn-trust makes of Codex's trust", async () => {
+    const { describeClaudeTrust } = await import("./commands/config");
+    const ws = "/w/proj";
+    expect(describeClaudeTrust(ws, true, undefined, undefined)).toBe("/w/proj is trusted in Claude Code");
+    expect(describeClaudeTrust(ws, undefined, "trusted", "codex")).toContain("could not be read");
+    // Not trusted: what it takes, and how Codex's trust stands.
+    const refused = "/w/proj is not trusted in Claude Code, so `send` cannot start a session here until it is ('claude' run there once, with its trust prompt accepted)";
+    expect(describeClaudeTrust(ws, false, undefined, "codex")).toBe(`${refused}; Codex has not trusted it either`);
+    expect(describeClaudeTrust(ws, false, "untrusted", undefined)).toBe(`${refused}; Codex has it as untrusted`);
+    expect(describeClaudeTrust(ws, false, "trusted", undefined)).toBe(`${refused}. Codex trusts it: 'codex-collab config spawn-trust codex' has \`send\` carry that over`);
+    expect(describeClaudeTrust(ws, false, "trusted", "codex")).toBe("/w/proj is not trusted in Claude Code yet; Codex trusts it, so `send` marks it trusted when it starts a session here (spawn-trust codex)");
+    // The home directory, or a folder above it, is never carried over to.
+    for (const setting of ["codex", undefined]) {
+      expect(describeClaudeTrust(ws, false, "trusted", setting, true)).toBe(`${refused}; Codex trusts it, but codex-collab carries no trust over to the home directory or a folder above it`);
+    }
   });
 });

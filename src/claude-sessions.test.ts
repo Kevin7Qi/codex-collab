@@ -66,6 +66,8 @@ let sleeperStart: string;
 const previousRegistry = process.env.CODEX_COLLAB_SESSIONS_DIR;
 const previousJobs = process.env.CODEX_COLLAB_JOBS_DIR;
 const previousRestartGrace = process.env.CODEX_COLLAB_RESTART_GRACE_MS;
+const previousCodexHome = process.env.CODEX_HOME;
+const previousClaudeConfig = process.env.CODEX_COLLAB_CLAUDE_CONFIG;
 let jobs: string;
 
 beforeAll(async () => {
@@ -85,6 +87,11 @@ beforeAll(async () => {
   // Claude Code's restart window, which a signalled session must stay gone
   // past: a moment, here, not half a minute.
   process.env.CODEX_COLLAB_RESTART_GRACE_MS = "300";
+  // Codex's and Claude Code's configs, where trust is kept: a spawn refused
+  // for trust reads both, and may write Claude Code's.
+  process.env.CODEX_HOME = join(root, "codex-home");
+  mkdirSync(process.env.CODEX_HOME, { recursive: true });
+  process.env.CODEX_COLLAB_CLAUDE_CONFIG = join(root, "claude.json");
   // A live process that is not this one: listClaudeSessions skips our own pid
   // (that is where a `send` registers itself).
   sleeper = spawn("sleep", ["300"], { stdio: "ignore" });
@@ -101,6 +108,10 @@ afterAll(() => {
   else process.env.CODEX_COLLAB_JOBS_DIR = previousJobs;
   if (previousRestartGrace === undefined) delete process.env.CODEX_COLLAB_RESTART_GRACE_MS;
   else process.env.CODEX_COLLAB_RESTART_GRACE_MS = previousRestartGrace;
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
+  if (previousClaudeConfig === undefined) delete process.env.CODEX_COLLAB_CLAUDE_CONFIG;
+  else process.env.CODEX_COLLAB_CLAUDE_CONFIG = previousClaudeConfig;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -580,8 +591,18 @@ describeUnix("spawn helpers", () => {
  *  `onStop` runs after the record — what a real stop would do to the session,
  *  such as removing its entry. `jobSessionId` is written to the job's state
  *  file, as Claude Code writes the session a job runs. */
-function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean; onStop?: string; jobSessionId?: string; refuseAutocompact?: string; refuse?: string }): { bin: string; stopLog: string; pidFile: string; argsLog: string } {
+function installFakeClaude(dir: string, opts: { register: boolean; ticks?: boolean; onStop?: string; jobSessionId?: string; refuseAutocompact?: string; refuse?: string; trustGate?: boolean }): { bin: string; stopLog: string; pidFile: string; argsLog: string; bgLog: string } {
   const stopLog = join(dir, "stop.log");
+  // One line per `--bg`, refused or not.
+  const bgLog = join(dir, "bg.log");
+  // `trustGate`: refuse, as Claude Code 2.1.281 does, unless its config
+  // (the test's) trusts the folder.
+  const gate = opts.trustGate
+    ? `
+    if ! FAKE_CWD="$cwd" bun -e 'const c = JSON.parse(require("fs").readFileSync(process.env.CODEX_COLLAB_CLAUDE_CONFIG, "utf8")); process.exit(c.projects?.[process.env.FAKE_CWD]?.hasTrustDialogAccepted === true ? 0 : 1)'; then
+      echo "Workspace not trusted. Run \\\`claude\\\` in $cwd once and accept the trust prompt, then retry." >&2; exit 1
+    fi`
+    : "";
   const pidFile = join(dir, "sleeper.pid");
   // One argument per line, as `--bg` received them.
   const argsLog = join(dir, "args.log");
@@ -605,7 +626,8 @@ case "$1" in
   --bg)
     name="$3"
     cwd="$(pwd)"
-    for a in "$@"; do printf '%s\\n' "$a"; done > "${argsLog}"${opts.refuseAutocompact ? `
+    echo bg >> "${bgLog}"
+    for a in "$@"; do printf '%s\\n' "$a"; done > "${argsLog}"${gate}${opts.refuseAutocompact ? `
     for a in "$@"; do if [ "$a" = "--autocompact" ]; then echo '${opts.refuseAutocompact}' >&2; exit 1; fi; done` : ""}${opts.refuse ? `
     printf '%s\\n' '${opts.refuse}' >&2; exit 1` : ""}
     echo "Starting background service…"
@@ -620,7 +642,20 @@ case "$1" in
 esac
 `);
   chmodSync(bin, 0o755);
-  return { bin, stopLog, pidFile, argsLog };
+  return { bin, stopLog, pidFile, argsLog, bgLog };
+}
+
+/** The test's Codex config: each folder's trust level. */
+function writeCodexTrust(entries: Record<string, string>): void {
+  writeFileSync(join(process.env.CODEX_HOME!, "config.toml"), Object.entries(entries).map(([path, level]) => `[projects.${JSON.stringify(path)}]\ntrust_level = "${level}"\n`).join("\n"));
+}
+
+/** The test's Claude Code config, written and read back. */
+function writeClaudeConfig(config: Record<string, unknown>): void {
+  writeFileSync(process.env.CODEX_COLLAB_CLAUDE_CONFIG!, JSON.stringify(config, null, 2));
+}
+function readClaudeConfig(): { projects: Record<string, unknown>; [key: string]: unknown } {
+  return JSON.parse(readFileSync(process.env.CODEX_COLLAB_CLAUDE_CONFIG!, "utf-8"));
 }
 
 function killSleeper(pidFile: string): void {
@@ -764,9 +799,93 @@ describeUnix("spawnClaudeSession", () => {
     // Named as it is on disk — as Claude Code names it — which on macOS is
     // under /private: /var, where the temp folders are, links there.
     await expect(refused).rejects.toThrow(`Claude Code will not start a session in ${realpathSync(wsA)}, because the folder is not trusted.`);
-    await expect(refused).rejects.toThrow("only they can agree to that, in a terminal");
+    await expect(refused).rejects.toThrow("only they can agree to that.");
     await expect(refused).rejects.toThrow(`Claude Code says: ${said}`);
     expect(readSpawnedSessions(stateDir)).toEqual([]);
+  });
+
+  test("with spawn-trust codex, a folder Codex trusts is marked trusted in Claude Code, and the session starts", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-trust-carried");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: true, trustGate: true });
+    const folder = realpathSync(wsA);
+    writeCodexTrust({ [folder]: "trusted" });
+    writeClaudeConfig({ numStartups: 7, projects: { [wsB]: { hasTrustDialogAccepted: true } } });
+    try {
+      const session = await spawnClaudeSession({ cwd: join(wsA, "sub"), stateDir: join(root, "state-spawn-carried"), lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000, spawnTrust: "codex" });
+      expect(session.spawned?.id).toBe("deadbeef");
+      // The workspace's root, as Claude Code is started in it; the rest of
+      // the file as it was.
+      expect(readClaudeConfig()).toEqual({ numStartups: 7, projects: { [wsB]: { hasTrustDialogAccepted: true }, [folder]: { hasTrustDialogAccepted: true } } });
+      // Refused once; started on the second try.
+      expect(readFileSync(fake.bgLog, "utf-8")).toBe("bg\nbg\n");
+    } finally {
+      killSleeper(fake.pidFile);
+    }
+  });
+
+  test("with spawn-trust codex, a folder Codex has not trusted is refused, says so, and nothing is written", async () => {
+    clearRegistry();
+    const folder = realpathSync(wsA);
+    for (const [name, codex, says] of [
+      ["none", {}, `Codex has not trusted ${folder} either`],
+      ["untrusted", { [folder]: "untrusted" }, `Codex has ${folder} as untrusted`],
+    ] as const) {
+      const dir = join(root, `fake-claude-trust-${name}`);
+      mkdirSync(dir, { recursive: true });
+      const fake = installFakeClaude(dir, { register: true, trustGate: true });
+      writeCodexTrust(codex);
+      writeClaudeConfig({ projects: {} });
+      const refused = spawnClaudeSession({ cwd: wsA, stateDir: join(root, `state-spawn-trust-${name}`), lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000, spawnTrust: "codex" });
+      await expect(refused).rejects.toBeInstanceOf(WorkspaceNotTrustedError);
+      await expect(refused).rejects.toThrow(says);
+      expect(readClaudeConfig()).toEqual({ projects: {} });
+      expect(readFileSync(fake.bgLog, "utf-8")).toBe("bg\n");
+    }
+  });
+
+  test("a folder Claude Code refuses after its trust was carried over is reported as such, and not tried a third time", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-trust-still");
+    mkdirSync(dir, { recursive: true });
+    const folder = realpathSync(wsA);
+    const fake = installFakeClaude(dir, { register: true, refuse: `Workspace not trusted. Run \`claude\` in ${folder} once and accept the trust prompt, then retry.` });
+    writeCodexTrust({ [folder]: "trusted" });
+    writeClaudeConfig({ projects: {} });
+    const refused = spawnClaudeSession({ cwd: wsA, stateDir: join(root, "state-spawn-trust-still"), lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000, spawnTrust: "codex" });
+    await expect(refused).rejects.toBeInstanceOf(WorkspaceNotTrustedError);
+    await expect(refused).rejects.toThrow(`codex-collab had just marked it trusted in ${process.env.CODEX_COLLAB_CLAUDE_CONFIG}, as Codex trusts it (spawn-trust codex), and Claude Code refused it all the same.`);
+    expect(readFileSync(fake.bgLog, "utf-8")).toBe("bg\nbg\n");
+  });
+
+  test("a folder Claude Code's config already marks trusted, refused all the same, is said so and not tried again", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-trust-already");
+    mkdirSync(dir, { recursive: true });
+    const folder = realpathSync(wsA);
+    const fake = installFakeClaude(dir, { register: true, refuse: `Workspace not trusted. Run \`claude\` in ${folder} once and accept the trust prompt, then retry.` });
+    writeCodexTrust({ [folder]: "trusted" });
+    writeClaudeConfig({ projects: { [folder]: { hasTrustDialogAccepted: true } } });
+    const refused = spawnClaudeSession({ cwd: wsA, stateDir: join(root, "state-spawn-trust-already"), lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000, spawnTrust: "codex" });
+    await expect(refused).rejects.toThrow(`Codex trusts ${folder}, and ${process.env.CODEX_COLLAB_CLAUDE_CONFIG} already marks it trusted, yet Claude Code refused it (spawn-trust codex).`);
+    await expect(refused).rejects.not.toThrow("marked it trusted in");
+    expect(readFileSync(fake.bgLog, "utf-8")).toBe("bg\n");
+  });
+
+  test("with spawn-trust off, nothing is written, and the refusal says Codex trusts the folder", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-trust-off");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: true, trustGate: true });
+    const folder = realpathSync(wsA);
+    writeCodexTrust({ [folder]: "trusted" });
+    writeClaudeConfig({ projects: {} });
+    for (const spawnTrust of [undefined, "off"] as const) {
+      const refused = spawnClaudeSession({ cwd: wsA, stateDir: join(root, "state-spawn-trust-off"), lingerSec: 60, claudeBin: fake.bin, startReaper: () => {}, registerTimeoutMs: 5000, spawnTrust });
+      await expect(refused).rejects.toThrow("Codex trusts this folder; the user can have codex-collab mark the folders Codex trusts as trusted in Claude Code by running `codex-collab config spawn-trust codex` in their own terminal.");
+    }
+    expect(readClaudeConfig()).toEqual({ projects: {} });
   });
 
   test("a missing claude binary is a plain message, not a stack", async () => {

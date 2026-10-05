@@ -181,9 +181,11 @@ Several tasks sent to one session share its conversation and take turns.
 A session codex-collab starts works in its workspace in Claude Code's auto
 permission mode, can edit files and run commands, and stops after 60 idle
 minutes (config linger), keeping its conversation. Claude Code starts it only in
-a folder the user has trusted in Claude Code. A session started any other way
-(claude --bg) can be messaged while live, but codex-collab never stops or
-resumes it, and peers stop refuses it.
+a folder the user has trusted in Claude Code; with config spawn-trust codex,
+which only the user turns on, send marks a folder Codex trusts as trusted in
+Claude Code first. A session started any other way (claude --bg) can be
+messaged while live, but codex-collab never stops or resumes it, and peers stop
+refuses it.
 
 Options for send
   --timeout <sec>       How long this command waits (default 600). The task

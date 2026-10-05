@@ -24,6 +24,7 @@ import { resolveWorkspaceDir } from "./config";
 import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./peer";
 import { outstandingTasksFor } from "./claude-tasks";
 import { acquireLockSync } from "./lock";
+import { carryCodexTrust, codexTrustNote, type SpawnTrustSetting } from "./claude-trust";
 
 /** A live Claude Code session as the registry describes it. */
 export interface ClaudeSession {
@@ -689,15 +690,19 @@ export const SPAWN_REGISTER_TIMEOUT_MS = 45_000;
  *  session starts only in a folder the user has trusted in Claude Code — the
  *  folder itself, or one above it, no higher than its git repository's root
  *  when it is in one — and the
- *  trust prompt is answered in a terminal, by the user. A resumed session is
- *  refused the same as a new one, so whoever catches this keeps a stopped
- *  session's record: its conversation is there once the folder is trusted. */
+ *  trust prompt is answered in a terminal, by the user, unless they have had
+ *  codex-collab carry Codex's trust over (`config spawn-trust codex`). A
+ *  resumed session is refused the same as a new one, so whoever catches this
+ *  keeps a stopped session's record: its conversation is there once the
+ *  folder is trusted. `beyond` says how Codex's trust stands, when it bears
+ *  on the refusal. */
 export class WorkspaceNotTrustedError extends Error {
-  constructor(folder: string, said: string) {
+  constructor(folder: string, said: string, beyond?: string) {
     super(
       `Claude Code will not start a session in ${folder}, because the folder is not trusted. ` +
-      "A background session runs only in a folder the user has trusted in Claude Code: the folder's settings, hooks and MCP servers then run under their account, and only they can agree to that, in a terminal. " +
-      `Claude Code says: ${said}`,
+      "A background session runs only in a folder the user has trusted in Claude Code: the folder's settings, hooks and MCP servers then run under their account, and only they can agree to that. " +
+      `Claude Code says: ${said}` +
+      (beyond ? ` ${beyond}` : ""),
     );
     this.name = "WorkspaceNotTrustedError";
   }
@@ -716,6 +721,11 @@ export interface SpawnClaudeOptions {
   /** A stopped session (see `resumableSession`) to continue instead of
    *  starting a new one: same conversation, new process. */
   resume?: SpawnedSession;
+  /** `config spawn-trust`: with `codex`, a folder Claude Code refuses is
+   *  marked trusted in Claude Code when Codex trusts it, and tried again. */
+  spawnTrust?: SpawnTrustSetting;
+  /** Set on that second try: the file the trust was written to. */
+  trustCarriedTo?: string;
   /** Test seam: the claude binary. */
   claudeBin?: string;
   /** Test seam: how the reaper is started. */
@@ -759,7 +769,21 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
     if (err.code === "ENOENT") throw new Error("Could not start a Claude Code session: `claude` is not on PATH.");
     const detail = (err.stderr ?? err.message ?? "").toString().trim();
     const untrusted = /^Workspace not trusted\b.*$/m.exec(detail);
-    if (untrusted) throw new WorkspaceNotTrustedError(wsRoot, untrusted[0].trim());
+    if (untrusted) {
+      const said = untrusted[0].trim();
+      if (opts.trustCarriedTo) {
+        throw new WorkspaceNotTrustedError(wsRoot, said, `codex-collab had just marked it trusted in ${opts.trustCarriedTo}, as Codex trusts it (spawn-trust codex), and Claude Code refused it all the same.`);
+      }
+      if (opts.spawnTrust !== "codex") throw new WorkspaceNotTrustedError(wsRoot, said, codexTrustNote(wsRoot));
+      // The user's consent, given twice: at Codex's trust prompt for this
+      // folder, and in turning `spawn-trust codex` on. Claude Code's refusal
+      // comes first, so its config is written only when it has to be, and
+      // the second try says whether the write took.
+      const carry = await carryCodexTrust(wsRoot);
+      if (!carry.carried) throw new WorkspaceNotTrustedError(wsRoot, said, carry.detail);
+      process.stderr.write(`[codex] Claude Code had not trusted ${wsRoot}; Codex does, so codex-collab marked it trusted in ${carry.file} (spawn-trust codex).\n`);
+      return spawnClaudeSession({ ...opts, trustCarriedTo: carry.file });
+    }
     // A Claude Code without `--autocompact` refuses the whole command line.
     // Its own window is a worse fit than ours, and no session at all is worse
     // than either, so it starts without the flag and says so once.

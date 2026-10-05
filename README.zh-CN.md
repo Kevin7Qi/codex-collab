@@ -314,7 +314,7 @@ codex-collab config model --unset       # 取消单个设置（恢复自动检�
 codex-collab config --unset             # 取消所有设置
 ```
 
-可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`spawn-model`、`spawn-effort`、`spawn-models`、`spawn-autocompact`、`spawn-resume`、`codex-rule`
+可配置项: `model`、`mode`、`server`、`reasoning`、`sandbox`、`approval`、`timeout`、`memory`、`spawn`、`linger`、`spawn-model`、`spawn-effort`、`spawn-models`、`spawn-autocompact`、`spawn-resume`、`spawn-trust`、`codex-rule`
 
 **实验性功能：** `codex-rule` 默认关闭；开启后，任何 Codex 会话执行 `codex-collab send` 与 `peers stop` 时都无需审批（详见下文）。
 
@@ -334,7 +334,9 @@ Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型
 
 自动启动的会话以 Claude Code 的 `auto` 权限模式运行，直接编辑与 Codex 共享的工作目录，并在上下文达到 `spawn-autocompact` 时自行压缩（100k–1M tokens，或 `auto` 沿用 Claude Code 自身的窗口；默认 500k）。这些设置只传给该会话（`claude --settings`），你自己的会话仍沿用你的设置，包括你已关闭的自动压缩。若所选模型不支持 `auto` 模式，`send` 会发现会话停在无人应答的确认提示上，将其停止并如实说明；下一次 `send` 会以其指定的模型恢复该对话。你能通过 Remote Control 应答的提示（例如你操控会话时它向你提出的问题）会留给你处理；若超过 `linger` 秒仍无人应答，会话同样会被停止。
 
-自 Claude Code 2.1.281 起，后台会话只能在你已于 Claude Code 中信任的文件夹或其子文件夹内启动；在 git 仓库内，受信任的上级文件夹只在仓库根目录以内有效。在其他位置（例如 `/tmp` 下新建的文件夹），`send` 会被拒绝，并说明文件夹与原因；在该处运行一次 `claude` 并接受信任提示后即可使用。
+自 Claude Code 2.1.281 起，后台会话只能在你已于 Claude Code 中信任的文件夹或其子文件夹内启动；在 git 仓库内，受信任的上级文件夹只在仓库根目录以内有效。在其他位置（例如 `/tmp` 下新建的文件夹），`send` 会被拒绝，并说明文件夹与原因；在该处运行一次 `claude` 并接受信任提示后即可使用。`codex-collab health` 会显示当前文件夹是否受信任。
+
+`spawn-trust`（`off` / `codex`，默认 `off`）可为你已在 Codex 中信任的文件夹省去这一步。设为 `codex` 后，当 Claude Code 拒绝一个 Codex 已信任的文件夹（该文件夹本身或其所在仓库，含 worktree；信任其上级文件夹不算）时，`send` 会在 `~/.claude.json` 中将其标记为受信任，效果与在该处接受 Claude Code 的信任提示相同，然后启动会话。此后该文件夹的 Claude Code 设置、hooks 与 MCP 服务器都以你的账户运行。只有你本人能开启此项：由 Codex 执行的 `config spawn-trust codex` 会被拒绝。主目录不会以这种方式被信任，因为 Claude Code 从不保存对主目录的信任。
 
 `codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。Windows 上不可用。
 
