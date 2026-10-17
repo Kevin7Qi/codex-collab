@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { shellOperators } from "./test-helpers";
 import { mkdtempSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -78,10 +79,20 @@ describe("Codex skill", () => {
     // What a Codex session needs to hand work off without going around
     // codex-collab: the path, the background recipe, and what a task is.
     expect(CODEX_SKILL_SOURCE).toContain("A session started any other way (`claude --bg`, a terminal) is outside most of that");
-    expect(CODEX_SKILL_SOURCE).toContain("codex-collab send --new --no-wait --model <model> --effort <level> - < task.md");
+    expect(CODEX_SKILL_SOURCE).toContain("codex-collab send --new --no-wait --model <model> --effort <level> --file task.md");
     expect(CODEX_SKILL_SOURCE).toContain("tasks sent to the same session share its context and are taken one after another");
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab keeps one session of its own per workspace");
     expect(expectedCodexSkillMd()).not.toContain("\r\n");
+  });
+
+  test("every send the Codex skill shows is a plain command, which the codex-rule covers", () => {
+    // Codex applies an exec-policy rule to a `bash -lc` script only when it
+    // is one plain command: a redirect, heredoc or pipe makes it a script,
+    // and Codex asks before running it, rule or no rule.
+    const sends = CODEX_SKILL_SOURCE.split("\n").filter((l) => /^ {4}codex-collab send\b/.test(l));
+    expect(sends.length).toBeGreaterThan(1);
+    for (const line of sends) expect(shellOperators(line), line).toEqual([]);
+    expect(CODEX_SKILL_SOURCE).toContain("`--file` keeps it plain");
   });
 
   test("install dir: override, then $CODEX_HOME, then ~/.codex", () => {

@@ -291,7 +291,7 @@ codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 
 | 命令 | 说明 |
 |------|------|
 | `peers [--all] [--json]` | 列出当前工作区内存活的 Claude Code 会话 |
-| `send [<peer>] "message"` | 将消息作为一项任务交给某个会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`send -` 从标准输入读取） |
+| `send [<peer>] "message"` | 将消息作为一项任务交给某个会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`--file <path>` 从文件读取消息，`send -` 从标准输入读取） |
 | `task status\|wait\|result <id>` | 查看任务状态、等待其回复或打印回复 |
 | `tasks` | 列出本工作区发出的任务 |
 | `peers stop [<peer>]` | 停止由 codex-collab 启动的会话（对话内容保留）；非其启动的会话会被拒绝 |
@@ -338,7 +338,7 @@ Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型
 
 `spawn-trust`（`off` / `codex`，默认 `off`）可为你已在 Codex 中信任的文件夹省去这一步。设为 `codex` 后，当 Claude Code 拒绝一个 Codex 已信任的文件夹（该文件夹本身或其所在仓库，含 worktree；信任其上级文件夹不算）时，`send` 会在 `~/.claude.json` 中将其标记为受信任，效果与在该处接受 Claude Code 的信任提示相同，然后启动会话。此后该文件夹的 Claude Code 设置、hooks 与 MCP 服务器都以你的账户运行。只有你本人能开启此项：由 Codex 执行的 `config spawn-trust codex` 会被拒绝。主目录不会以这种方式被信任，因为 Claude Code 从不保存对主目录的信任。
 
-`codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。Windows 上不可用。
+`codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。Codex 只对单条普通命令应用该规则：带重定向、heredoc 或管道的写法（`send - < task.md`）是一段 shell 脚本，Codex 仍会先征求同意；`send --file task.md` 则保持为普通命令。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。Windows 上不可用。
 
 </details>
 

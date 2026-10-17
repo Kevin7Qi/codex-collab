@@ -289,7 +289,7 @@ From Codex's own sessions, `codex-collab send <name> "message"` hands a Claude C
 | Command | Description |
 |---------|-------------|
 | `peers [--all] [--json]` | List the Claude Code sessions live in this workspace |
-| `send [<peer>] "message"` | Hand a session a message as a task and wait for the reply (`--no-wait` returns the task id once delivered; `send -` reads from stdin) |
+| `send [<peer>] "message"` | Hand a session a message as a task and wait for the reply (`--no-wait` returns the task id once delivered; `--file <path>` reads the message from a file, `send -` from stdin) |
 | `task status\|wait\|result <id>` | Where a task stands, wait for its reply, or print it |
 | `tasks` | List the tasks sent from this workspace |
 | `peers stop [<peer>]` | Stop a session codex-collab started (its conversation is kept); a session it did not start is refused |
@@ -345,7 +345,7 @@ From Claude Code 2.1.281, a background session starts only in a folder you have 
 
 `spawn-trust` (`off` / `codex`, default `off`) saves that step for folders you have already trusted in Codex. With `codex`, when Claude Code refuses a folder that Codex trusts (the folder itself or its repository, worktrees included; a trusted folder above it does not count), `send` marks it trusted in `~/.claude.json`, as accepting Claude Code's trust prompt there would, and starts the session. That folder's Claude Code settings, hooks and MCP servers then run under your account. Only you can turn it on: `config spawn-trust codex` is refused when Codex runs it. The home directory is never trusted this way, since Claude Code never keeps trust for it.
 
-`codex-rule` (`on` / `off`, default `off`) writes or removes a Codex exec-policy rule that lets Codex run `codex-collab send` and `codex-collab peers stop` without asking each time; `off` or `--unset` removes it. With it on, any Codex session — including one steered by content it read — can message your Claude Code sessions, start one, and stop one it started. The installer asks once on an interactive terminal and records the answer. Not available on Windows.
+`codex-rule` (`on` / `off`, default `off`) writes or removes a Codex exec-policy rule that lets Codex run `codex-collab send` and `codex-collab peers stop` without asking each time; `off` or `--unset` removes it. Codex applies the rule to a plain command only: written with a redirect, heredoc or pipe (`send - < task.md`), it is a shell script, which Codex asks about first. `send --file task.md` keeps it plain. With it on, any Codex session — including one steered by content it read — can message your Claude Code sessions, start one, and stop one it started. The installer asks once on an interactive terminal and records the answer. Not available on Windows.
 
 </details>
 

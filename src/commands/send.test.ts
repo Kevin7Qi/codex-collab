@@ -1938,6 +1938,47 @@ describeUnix("send", () => {
     expect(fake.received[0].text.startsWith("from stdin\nline two\n\n(From Codex thread")).toBe(true);
   });
 
+  test("`send <peer> --file <path>` reads the message from a file", async () => {
+    const fake = startFake("fake-claude");
+    registerFake(fake);
+    const file = join(TEST_HOME, "task-from-file.md");
+    writeFileSync(file, "from a file\nline two\n");
+    const r = await runCli(["send", "fake-claude", "--file", file]);
+    expect(r.code).toBe(0);
+    expect(fake.received[0].text.startsWith("from a file\nline two\n\n(From Codex thread")).toBe(true);
+    // With --to, and with the path given relative to where send runs.
+    const second = startFake("second-claude");
+    registerFake(second);
+    writeFileSync(join(WS, "relative-task.md"), "relative path");
+    const rel = await runCli(["send", "--to", "second-claude", "--file", "relative-task.md"]);
+    expect(rel.code).toBe(0);
+    expect(second.received[0].text.startsWith("relative path\n\n(From Codex thread")).toBe(true);
+  });
+
+  test("with --file, a lone argument is the session's name even when it is not live, and the rest is refused", async () => {
+    const file = join(TEST_HOME, "task-for-nobody.md");
+    writeFileSync(file, "the task");
+    // Read as a name: refused as a session that is not live, never sent as
+    // the message.
+    const missing = await runCli(["send", "nobody-claude", "--file", file, "--no-spawn"]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain('No live Claude Code session named "nobody-claude"');
+    const extra = await runCli(["send", "nobody-claude", "and more", "--file", file]);
+    expect(extra.code).toBe(1);
+    expect(extra.stderr).toContain(`--file reads the message from ${file}, so the command line takes at most the session's name: "and more" is left over.`);
+    const gone = await runCli(["send", "--file", join(TEST_HOME, "no-such-task.md")]);
+    expect(gone.code).toBe(1);
+    expect(gone.stderr).toContain(`Could not read the message from ${join(TEST_HOME, "no-such-task.md")}: no such file`);
+    const empty = join(TEST_HOME, "empty-task.md");
+    writeFileSync(empty, "  \n");
+    const blank = await runCli(["send", "--file", empty]);
+    expect(blank.code).toBe(1);
+    expect(blank.stderr).toContain(`${empty} holds no message`);
+    const noPath = await runCli(["send", "--file"]);
+    expect(noPath.code).toBe(1);
+    expect(noPath.stderr).toContain("--file requires the path of a file holding the message");
+  });
+
   test("a --to prefix that matches several sessions lists them", async () => {
     registerFake(startFake("alpha-claude"));
     registerFake(startFake("alpha-two"));

@@ -201,7 +201,11 @@ Options for send
                         config spawn-effort).
   --no-spawn            Never start or resume a session.
   -d, --dir <folder>    Send as if from <folder>: its workspace, its session.
-  -                     In place of the message: read it from stdin.
+  --file <path>         Read the message from a file. With config codex-rule
+                        on, Codex runs send without asking only as a plain
+                        command; this keeps it one.
+  -                     In place of the message: read it from stdin, which
+                        takes a redirect or a pipe, so Codex asks first.
 
 Other options
   task wait --timeout <sec>   How long to wait (default 600)
@@ -224,9 +228,9 @@ Examples
   codex-collab send "What does src/auth.ts do?"
   codex-collab send --new -m fable -r xhigh "Review paper/ for argument gaps"
   codex-collab send "claude(myrepo-a1b2c3)" "And the tests?"
-  codex-collab send "claude(myrepo-a1b2c3)" - < prompt.md
+  codex-collab send "claude(myrepo-a1b2c3)" --file prompt.md
   codex-collab send --no-wait "Run the benchmarks"      (then: task wait <id>)
-  codex-collab send -d figures/fig2 --new --no-wait - < fig2-task.md
+  codex-collab send -d figures/fig2 --new --no-wait --file fig2-task.md
 `);
 }
 
@@ -420,6 +424,7 @@ const VALUE_FLAGS = new Set([
   "--goal",
   "--budget",
   "--to",
+  "--file",
 ]);
 
 // Boolean flags recognized by commands/shared.ts parseOptions. Combined with

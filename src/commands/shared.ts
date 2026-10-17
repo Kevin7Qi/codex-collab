@@ -128,6 +128,8 @@ export interface Options {
   json: boolean;
   /** send: the Claude session to message, by name (see `peers`). */
   to: string | null;
+  /** send: a file the message is read from. */
+  file: string | null;
   /** send: deliver and return without waiting for a reply. */
   noWait: boolean;
   /** send: never start a Claude session when none is live. */
@@ -326,6 +328,7 @@ export function defaultOptions(): Options {
     contentOnly: false,
     json: false,
     to: null,
+    file: null,
     noWait: false,
     noSpawn: false,
     newSession: false,
@@ -587,6 +590,12 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
         process.exit(1);
       }
       options.to = argv[++i];
+    } else if (arg === "--file") {
+      if (!hasFlagValue(argv, i)) {
+        console.error("Error: --file requires the path of a file holding the message");
+        process.exit(1);
+      }
+      options.file = argv[++i];
     } else if (arg === "--no-wait") {
       options.noWait = true;
     } else if (arg === "--no-spawn") {

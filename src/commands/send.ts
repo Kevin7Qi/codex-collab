@@ -27,7 +27,7 @@
 import { connect, createServer, type Server } from "node:net";
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
   buildEnvelope,
@@ -333,15 +333,33 @@ export async function handleSend(args: string[]): Promise<void> {
   }
 
   const sessions = listClaudeSessions({ cwd, stateDir });
-  const { targetName, message: rawMessage } = splitTarget(positional, options.to, sessions);
-  let message = rawMessage;
-  if (message === "-") {
-    if (process.stdin.isTTY) console.error("[codex] Reading message from stdin — end with Ctrl-D.");
-    message = readFileSync(0, "utf-8");
+  let targetName: string | null;
+  let message: string;
+  if (options.file !== null) {
+    // The message comes from the file, so what is left on the command line
+    // can only be the session's name — read as a name even when that session
+    // is not live, so that it is resumed or refused as itself.
+    const named = options.to ? positional : positional.slice(1);
+    if (named.length > 0) {
+      die(`--file reads the message from ${options.file}, so the command line takes at most the session's name: "${named.join(" ")}" is left over.`);
+    }
+    targetName = options.to ?? positional[0] ?? null;
+    const path = resolve(options.file);
+    try {
+      message = readFileSync(path, "utf-8");
+    } catch (e) {
+      die(`Could not read the message from ${path}: ${(e as NodeJS.ErrnoException).code === "ENOENT" ? "no such file" : e instanceof Error ? e.message : String(e)}`);
+    }
+  } else {
+    ({ targetName, message } = splitTarget(positional, options.to, sessions));
+    if (message === "-") {
+      if (process.stdin.isTTY) console.error("[codex] Reading message from stdin — end with Ctrl-D.");
+      message = readFileSync(0, "utf-8");
+    }
   }
   message = sanitizeForTerminal(message).trim();
   if (!message) {
-    die('No message provided\nUsage: codex-collab send [<peer>] "message" [--to <peer>] [--timeout <sec>] [--no-wait] [--model <model>] [--effort <level>] [--new]\n`codex-collab send --help` explains each.');
+    die(`${options.file !== null ? `${resolve(options.file)} holds no message` : "No message provided"}\nUsage: codex-collab send [<peer>] "message" | --file <path> [--to <peer>] [--timeout <sec>] [--no-wait] [--model <model>] [--effort <level>] [--new]\n\`codex-collab send --help\` explains each.`);
   }
 
   // ── Whom to send to ──
