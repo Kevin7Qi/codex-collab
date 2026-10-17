@@ -291,7 +291,7 @@ codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 
 | 命令 | 说明 |
 |------|------|
 | `peers [--all] [--json]` | 列出当前工作区内存活的 Claude Code 会话 |
-| `send [<peer>] "message"` | 将消息作为一项任务交给某个会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`--file <path>` 从文件读取消息，`send -` 从标准输入读取） |
+| `send [<peer>] "message"` | 将消息作为一项任务交给某个会话并等待回复（`--no-wait` 在送达后即返回任务 ID；`--file <path>` 从工作区或 Codex 会话自身目录中的文件读取消息，`send -` 从标准输入读取） |
 | `task status\|wait\|result <id>` | 查看任务状态、等待其回复或打印回复 |
 | `tasks` | 列出本工作区发出的任务 |
 | `peers stop [<peer>]` | 停止由 codex-collab 启动的会话（对话内容保留）；非其启动的会话会被拒绝 |

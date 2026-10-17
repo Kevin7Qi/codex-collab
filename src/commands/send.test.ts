@@ -9,7 +9,7 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
@@ -1941,7 +1941,7 @@ describeUnix("send", () => {
   test("`send <peer> --file <path>` reads the message from a file", async () => {
     const fake = startFake("fake-claude");
     registerFake(fake);
-    const file = join(TEST_HOME, "task-from-file.md");
+    const file = join(WS, "task-from-file.md");
     writeFileSync(file, "from a file\nline two\n");
     const r = await runCli(["send", "fake-claude", "--file", file]);
     expect(r.code).toBe(0);
@@ -1956,7 +1956,7 @@ describeUnix("send", () => {
   });
 
   test("with --file, a lone argument is the session's name even when it is not live, and the rest is refused", async () => {
-    const file = join(TEST_HOME, "task-for-nobody.md");
+    const file = join(WS, "task-for-nobody.md");
     writeFileSync(file, "the task");
     // Read as a name: refused as a session that is not live, never sent as
     // the message.
@@ -1966,10 +1966,10 @@ describeUnix("send", () => {
     const extra = await runCli(["send", "nobody-claude", "and more", "--file", file]);
     expect(extra.code).toBe(1);
     expect(extra.stderr).toContain(`--file reads the message from ${file}, so the command line takes at most the session's name: "and more" is left over.`);
-    const gone = await runCli(["send", "--file", join(TEST_HOME, "no-such-task.md")]);
+    const gone = await runCli(["send", "--file", join(WS, "no-such-task.md")]);
     expect(gone.code).toBe(1);
-    expect(gone.stderr).toContain(`Could not read the message from ${join(TEST_HOME, "no-such-task.md")}: no such file`);
-    const empty = join(TEST_HOME, "empty-task.md");
+    expect(gone.stderr).toContain(`Could not read the message from ${join(WS, "no-such-task.md")}: no such file`);
+    const empty = join(WS, "empty-task.md");
     writeFileSync(empty, "  \n");
     const blank = await runCli(["send", "--file", empty]);
     expect(blank.code).toBe(1);
@@ -1977,6 +1977,49 @@ describeUnix("send", () => {
     const noPath = await runCli(["send", "--file"]);
     expect(noPath.code).toBe(1);
     expect(noPath.stderr).toContain("--file requires the path of a file holding the message");
+  });
+
+  test("--file reads only in this workspace, the folder send runs from, and the Codex session's project folder", async () => {
+    const fake = startFake("fake-claude");
+    registerFake(fake);
+    // Outside all of them: refused, and the file is never read.
+    const elsewhere = join(TEST_HOME, "elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    writeFileSync(join(elsewhere, "secret.md"), "not for sending");
+    const outside = await runCli(["send", "fake-claude", "--file", join(elsewhere, "secret.md")]);
+    expect(outside.code).toBe(1);
+    expect(outside.stderr).toContain(`${join(elsewhere, "secret.md")} is outside the folders --file reads from: ${realpathSync(WS)}`);
+    expect(outside.stderr).toContain("which Codex asks about before running");
+    // A link inside the workspace that leads out is outside too.
+    const link = join(WS, "link-to-secret.md");
+    rmSync(link, { force: true });
+    symlinkSync(join(elsewhere, "secret.md"), link);
+    const linked = await runCli(["send", "fake-claude", "--file", link]);
+    expect(linked.code).toBe(1);
+    expect(linked.stderr).toContain(`${link} is outside the folders --file reads from`);
+    expect(fake.received).toEqual([]);
+
+    // The Codex session works in another folder: its own record says which.
+    const project = join(TEST_HOME, "codex-project");
+    mkdirSync(join(project, "tasks"), { recursive: true });
+    writeFileSync(join(project, "tasks", "TASK.md"), "from the project folder");
+    const day = join(TEST_HOME, ".codex", "sessions", "2026", "10", "17");
+    mkdirSync(day, { recursive: true });
+    const record = join(day, `rollout-2026-10-17T00-00-00-${THREAD}.jsonl`);
+    writeFileSync(record, JSON.stringify({ type: "session_meta", payload: { id: THREAD, cwd: project } }) + "\n");
+    try {
+      const fromProject = await runCli(["send", "fake-claude", "--file", join(project, "tasks", "TASK.md")]);
+      expect(fromProject.code).toBe(0);
+      expect(fake.received[0].text.startsWith("from the project folder\n\n(From Codex thread")).toBe(true);
+      // A session whose folder is the home directory gives no reach at all.
+      writeFileSync(record, JSON.stringify({ type: "session_meta", payload: { id: THREAD, cwd: TEST_HOME } }) + "\n");
+      const fromHome = await runCli(["send", "fake-claude", "--file", join(elsewhere, "secret.md")]);
+      expect(fromHome.code).toBe(1);
+      expect(fromHome.stderr).toContain("is outside the folders --file reads from");
+    } finally {
+      rmSync(join(TEST_HOME, ".codex", "sessions"), { recursive: true, force: true });
+      rmSync(link, { force: true });
+    }
   });
 
   test("a --to prefix that matches several sessions lists them", async () => {

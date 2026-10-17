@@ -101,7 +101,7 @@ describe("CLI valid commands", () => {
       const examples = stdout.split("\n").filter((l) => /^ {2}codex-collab send\b/.test(l));
       expect(examples.length).toBeGreaterThan(3);
       for (const line of examples) expect(shellOperators(line), line).toEqual([]);
-      expect(stdout).toContain("--file <path>         Read the message from a file.");
+      expect(stdout).toContain("--file <path>         Read the message from a file in this workspace, the");
     }
     const general = run("run", "--help");
     expect(general.stdout).toContain("Usage: codex-collab <command>");

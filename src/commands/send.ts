@@ -26,8 +26,8 @@
 
 import { connect, createServer, type Server } from "node:net";
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
   buildEnvelope,
@@ -72,9 +72,39 @@ import { conversationMovedSince, describeTrouble, firstSaidSince, turnEndedOnErr
 import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
-import { isSpawnTrustSetting, type SpawnTrustSetting } from "../claude-trust";
+import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from "../claude-trust";
+import { codexThreadCwd } from "../codex-session";
 import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
+
+/** The folders `send --file` reads from. With `config codex-rule on`, Codex
+ *  runs a plain `codex-collab send` outside its sandbox without asking, so
+ *  `--file` must not reach past what the sandbox already has: the workspace
+ *  send runs for (`-d`), the folder it is run from, and the folder the Codex
+ *  session itself works in, as Codex's own record of the thread says — never
+ *  the home directory or a folder above it. Naming another thread in front
+ *  of the command (`CODEX_THREAD_ID=… codex-collab send`) makes it more than
+ *  a plain command, and Codex asks before running that. Real paths, so a
+ *  link inside them cannot lead out. */
+export function fileRoots(dir: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const roots = [real(resolveWorkspaceDir(dir)), real(resolveWorkspaceDir(process.cwd())), real(process.cwd())];
+  const threadId = codexThreadId(env);
+  const project = threadId ? codexThreadCwd(threadId, env) : null;
+  const projectReal = project ? real(project) : null;
+  if (projectReal && !trustReachesHome(projectReal)) roots.push(projectReal);
+  return [...new Set(roots.filter((r): r is string => r !== null))];
+}
+
+function within(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+}
 
 /** Codex sets CODEX_SANDBOX in every command it runs inside its sandbox,
  *  and in none it runs outside it. CODEX_SANDBOX_NETWORK_DISABLED is not
@@ -345,10 +375,22 @@ export async function handleSend(args: string[]): Promise<void> {
     }
     targetName = options.to ?? positional[0] ?? null;
     const path = resolve(options.file);
-    try {
-      message = readFileSync(path, "utf-8");
-    } catch (e) {
+    const unreadable: (e: unknown) => never = (e) =>
       die(`Could not read the message from ${path}: ${(e as NodeJS.ErrnoException).code === "ENOENT" ? "no such file" : e instanceof Error ? e.message : String(e)}`);
+    let real: string;
+    try {
+      real = realpathSync(path);
+    } catch (e) {
+      unreadable(e);
+    }
+    const roots = fileRoots(cwd);
+    if (!roots.some((root) => within(real, root))) {
+      die(`${path} is outside the folders --file reads from: ${roots.join(", ")}. A message from another file can come on stdin (\`- < <file>\`), which Codex asks about before running.`);
+    }
+    try {
+      message = readFileSync(real, "utf-8");
+    } catch (e) {
+      unreadable(e);
     }
   } else {
     ({ targetName, message } = splitTarget(positional, options.to, sessions));

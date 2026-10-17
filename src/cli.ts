@@ -201,9 +201,11 @@ Options for send
                         config spawn-effort).
   --no-spawn            Never start or resume a session.
   -d, --dir <folder>    Send as if from <folder>: its workspace, its session.
-  --file <path>         Read the message from a file. With config codex-rule
-                        on, Codex runs send without asking only as a plain
-                        command; this keeps it one.
+  --file <path>         Read the message from a file in this workspace, the
+                        folder send runs from, or the folder the Codex
+                        session works in. With config codex-rule on, Codex
+                        runs send without asking only as a plain command;
+                        this keeps it one.
   -                     In place of the message: read it from stdin, which
                         takes a redirect or a pipe, so Codex asks first.
 
