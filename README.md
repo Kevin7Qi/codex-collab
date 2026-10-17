@@ -289,7 +289,7 @@ From Codex's own sessions, `codex-collab send <name> "message"` hands a Claude C
 | Command | Description |
 |---------|-------------|
 | `peers [--all] [--json]` | List the Claude Code sessions live in this workspace |
-| `send [<peer>] "message"` | Hand a session a message as a task and wait for the reply (`--no-wait` returns the task id once delivered; `--file <path>` reads the message from a file in the workspace or the Codex session's own folder, `send -` from stdin) |
+| `send [<peer>] "message"` | Hand a session a message as a task and wait for the reply (`--no-wait` returns the task id once delivered; `--file <path>` reads the message from a file, which run by Codex must be inside the folder its session works in; `send -` reads from stdin) |
 | `task status\|wait\|result <id>` | Where a task stands, wait for its reply, or print it |
 | `tasks` | List the tasks sent from this workspace |
 | `peers stop [<peer>]` | Stop a session codex-collab started (its conversation is kept); a session it did not start is refused |

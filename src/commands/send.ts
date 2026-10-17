@@ -26,7 +26,7 @@
 
 import { connect, createServer, type Server } from "node:net";
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
@@ -77,33 +77,74 @@ import { codexThreadCwd } from "../codex-session";
 import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
-/** The folders `send --file` reads from. With `config codex-rule on`, Codex
- *  runs a plain `codex-collab send` outside its sandbox without asking, so
- *  `--file` must not reach past what the sandbox already has: the workspace
- *  send runs for (`-d`), the folder it is run from, and the folder the Codex
- *  session itself works in, as Codex's own record of the thread says — never
- *  the home directory or a folder above it. Naming another thread in front
- *  of the command (`CODEX_THREAD_ID=… codex-collab send`) makes it more than
- *  a plain command, and Codex asks before running that. Real paths, so a
- *  link inside them cannot lead out. */
-export function fileRoots(dir: string, env: NodeJS.ProcessEnv = process.env): string[] {
-  const real = (p: string) => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return null;
-    }
-  };
-  const roots = [real(resolveWorkspaceDir(dir)), real(resolveWorkspaceDir(process.cwd())), real(process.cwd())];
+/** Where `send --file` may read when Codex runs it: inside the folder the
+ *  Codex session works in, as Codex's own record of the thread says, never
+ *  the home directory or a folder above it. With `config codex-rule on`,
+ *  Codex runs a plain `codex-collab send` outside its sandbox without asking,
+ *  so `--file` must reach no further than the session already works. `-d`
+ *  and the folder a command runs from are Codex's to choose, so they widen
+ *  nothing; and setting CODEX_THREAD_ID or CODEX_HOME in front of the
+ *  command makes it more than a plain command, which Codex asks about.
+ *  Null when the record says nothing usable. */
+export function codexFileRoot(env: NodeJS.ProcessEnv = process.env): string | null {
   const threadId = codexThreadId(env);
   const project = threadId ? codexThreadCwd(threadId, env) : null;
-  const projectReal = project ? real(project) : null;
-  if (projectReal && !trustReachesHome(projectReal)) roots.push(projectReal);
-  return [...new Set(roots.filter((r): r is string => r !== null))];
+  if (!project) return null;
+  let real: string;
+  try {
+    real = realpathSync(project);
+  } catch {
+    return null;
+  }
+  return trustReachesHome(real) ? null : real;
 }
 
 function within(path: string, root: string): boolean {
   return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+/** The message in the file at `path`, read only from inside `root` when one
+ *  is given. The path is resolved through links before the check, and the
+ *  file is checked again once it is open — where Linux says the open file
+ *  is, or elsewhere that it is still the file the path names — so a link
+ *  swapped in between the check and the read leads nowhere. */
+export function readMessageFile(path: string, root: string | null): { ok: true; text: string } | { ok: false; outside: boolean; why: string } {
+  const failed = (e: unknown) => ({ ok: false as const, outside: false, why: (e as NodeJS.ErrnoException).code === "ENOENT" ? "no such file" : e instanceof Error ? e.message : String(e) });
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch (e) {
+    return failed(e);
+  }
+  const outside = { ok: false as const, outside: true, why: "outside" };
+  if (root && !within(real, root)) return outside;
+  let fd: number;
+  try {
+    fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (e) {
+    return failed(e);
+  }
+  try {
+    if (root) {
+      let opened: string | null = null;
+      try {
+        opened = readlinkSync(`/proc/self/fd/${fd}`);
+      } catch { /* no /proc: compare the open file with the path instead */ }
+      if (opened !== null) {
+        if (!within(opened, root)) return outside;
+      } else {
+        const now = realpathSync(path);
+        const a = fstatSync(fd);
+        const b = statSync(now);
+        if (!within(now, root) || a.dev !== b.dev || a.ino !== b.ino) return outside;
+      }
+    }
+    return { ok: true, text: readFileSync(fd, "utf-8") };
+  } catch (e) {
+    return failed(e);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Codex sets CODEX_SANDBOX in every command it runs inside its sandbox,
@@ -369,29 +410,26 @@ export async function handleSend(args: string[]): Promise<void> {
     // The message comes from the file, so what is left on the command line
     // can only be the session's name — read as a name even when that session
     // is not live, so that it is resumed or refused as itself.
+    if (positional.includes("-")) die("--file and - each say where the message comes from: give one of them.");
     const named = options.to ? positional : positional.slice(1);
     if (named.length > 0) {
       die(`--file reads the message from ${options.file}, so the command line takes at most the session's name: "${named.join(" ")}" is left over.`);
     }
     targetName = options.to ?? positional[0] ?? null;
     const path = resolve(options.file);
-    const unreadable: (e: unknown) => never = (e) =>
-      die(`Could not read the message from ${path}: ${(e as NodeJS.ErrnoException).code === "ENOENT" ? "no such file" : e instanceof Error ? e.message : String(e)}`);
-    let real: string;
-    try {
-      real = realpathSync(path);
-    } catch (e) {
-      unreadable(e);
+    // Run by Codex, only inside the folder its session works in; run by
+    // anyone else, any file they can read.
+    const byCodex = underCodex();
+    const root = byCodex ? codexFileRoot() : null;
+    const stdin = "A message from another file can come on stdin (`- < <file>`), which Codex asks about before running.";
+    if (byCodex && !root) {
+      die(`--file, run by Codex, reads only inside the folder this Codex session works in, and Codex's record of the thread (${codexThreadId() ?? "no CODEX_THREAD_ID"}) does not say which folder that is. ${stdin}`);
     }
-    const roots = fileRoots(cwd);
-    if (!roots.some((root) => within(real, root))) {
-      die(`${path} is outside the folders --file reads from: ${roots.join(", ")}. A message from another file can come on stdin (\`- < <file>\`), which Codex asks about before running.`);
+    const read = readMessageFile(path, root);
+    if (!read.ok) {
+      die(read.outside ? `${path} is outside ${root}, the folder this Codex session works in, which is where --file reads when Codex runs it. ${stdin}` : `Could not read the message from ${path}: ${read.why}`);
     }
-    try {
-      message = readFileSync(real, "utf-8");
-    } catch (e) {
-      unreadable(e);
-    }
+    message = read.text;
   } else {
     ({ targetName, message } = splitTarget(positional, options.to, sessions));
     if (message === "-") {
