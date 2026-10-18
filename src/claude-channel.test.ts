@@ -5,14 +5,18 @@
 // host itself, with real sessions' registrations, is in commands/send.test.ts.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   ChannelRefused,
   askHost,
   channelName,
+  channelSocketPath,
+  recordSocketPath,
+  recordedSocketPath,
+  threadSocketPath,
   claudeEntries,
   contactAt,
   contactRunning,
@@ -62,6 +66,33 @@ describe("names", () => {
     expect(name).toMatch(/^codex\(b36a6ba4-[0-9a-f]{6}\)$/);
     // Short enough to show whole wherever Claude Code lists its peers.
     expect(name.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe("where an address listens", () => {
+  test("the socket a thread used before is used again, whatever this process would choose; a folder that went is made again", () => {
+    const state = freshState();
+    const fresh = threadSocketPath(state, ROOT, THREAD);
+    expect(fresh).toBe(channelSocketPath(ROOT, THREAD));
+    const elsewhere = join(ROOT, `tmp-${++n}`, "codex-collab-x", "thread-b36a6ba4-1234.sock");
+    recordSocketPath(state, THREAD, elsewhere);
+    expect(recordedSocketPath(state, THREAD)).toBe(elsewhere);
+    expect(threadSocketPath(state, ROOT, THREAD)).toBe(elsewhere);
+    // Its folder is made again, privately, as temp space empties on a restart.
+    if (process.platform !== "win32") expect(statSync(dirname(elsewhere)).mode & 0o077).toBe(0);
+  });
+
+  test("a recorded socket whose folder others can write to, or that is no socket path, is not used", () => {
+    const state = freshState();
+    const dir = join(ROOT, `open-${++n}`);
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o775);
+    recordSocketPath(state, THREAD, join(dir, "thread-x.sock"));
+    if (process.platform !== "win32") expect(threadSocketPath(state, ROOT, THREAD)).toBe(channelSocketPath(ROOT, THREAD));
+    for (const bad of ["relative/thread.sock", "/abs/not-a-socket.txt"]) {
+      recordSocketPath(state, THREAD, bad);
+      expect(recordedSocketPath(state, THREAD)).toBeNull();
+    }
   });
 });
 

@@ -26,9 +26,10 @@
 import { spawn } from "node:child_process";
 import { closeSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { config, mailboxRoot, workspaceHash } from "./config";
+import { verifyMailboxDir } from "./questions";
 import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix } from "./peer";
 import { acquireLockAsync } from "./lock";
 import { spawnEnv } from "./claude-sessions";
@@ -60,6 +61,48 @@ export function channelName(cwd: string, threadId: string): string {
  *  short enough for a unix socket path wherever the home directory is. */
 export function channelSocketPath(cwd: string, threadId: string): string {
   return join(mailboxRoot(), `thread-${threadTag(threadId)}-${workspaceHash(cwd).slice(0, 8)}.sock`);
+}
+
+function addressFile(stateDir: string, threadId: string): string {
+  return join(threadDir(stateDir, threadId), "address.json");
+}
+
+/** The socket a thread's address has used, as its host recorded it. */
+export function recordedSocketPath(stateDir: string, threadId: string): string | null {
+  try {
+    const a = JSON.parse(readFileSync(addressFile(stateDir, threadId), "utf-8"));
+    return typeof a?.socketPath === "string" && isAbsolute(a.socketPath) && a.socketPath.endsWith(".sock") ? a.socketPath : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Record the socket a thread's address uses. For the host alone. */
+export function recordSocketPath(stateDir: string, threadId: string, socketPath: string): void {
+  const file = addressFile(stateDir, threadId);
+  mkdirSync(threadDir(stateDir, threadId), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ socketPath }) + "\n", { mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+/** The socket for a thread's address: the one it has used before, for as
+ *  long as its folder is still privately ours, so that the `uds:` address
+ *  Claude has been shown — which is where Claude Code sends a reply — stays
+ *  the thread's whatever the environment of the host that opens it now.
+ *  (The temp root follows TMPDIR, which differs between processes.) A folder
+ *  that went, as temp space does on a restart, is made again; one that is no
+ *  longer private is not used. Else the path this host would choose. */
+export function threadSocketPath(stateDir: string, cwd: string, threadId: string): string {
+  const recorded = recordedSocketPath(stateDir, threadId);
+  if (recorded) {
+    try {
+      mkdirSync(dirname(recorded), { recursive: true, mode: 0o700 });
+      verifyMailboxDir(dirname(recorded));
+      return recorded;
+    } catch { /* not ours to use any more */ }
+  }
+  return channelSocketPath(cwd, threadId);
 }
 
 /** Where the host takes requests. A client finds it through the host's

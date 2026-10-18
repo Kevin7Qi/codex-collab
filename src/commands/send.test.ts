@@ -2589,6 +2589,32 @@ describeUnix("a Codex thread's address", () => {
     }
   });
 
+  test.skipIf(process.platform === "win32")("a host started again under another TMPDIR listens where the thread's address always has, which is where Claude replies", async () => {
+    // Short temp roots of their own: a socket path has a ~104-byte ceiling.
+    const [a, b] = [mkdtempSync("/tmp/cca-"), mkdtempSync("/tmp/ccb-")];
+    try {
+      const fake = startFake("steady-claude");
+      registerFake(fake);
+      expect((await runCli(["send", "first"], { TMPDIR: a })).code).toBe(0);
+      // Where the thread's address has listened since it first opened.
+      const first = fake.received[0].replyPath;
+      expect(first.startsWith(b)).toBe(false);
+      // The host goes (stopped, as a restart or a crash would), and the
+      // next task's receiver, in another environment, starts one again.
+      const host = hostState()!;
+      process.kill(host.pid, "SIGTERM");
+      await waitFor(() => !alive(host.pid), 5000);
+      const second = await runCli(["send", "second"], { TMPDIR: b });
+      expect(second.code).toBe(0);
+      expect(second.stdout).toContain("  pong: second");
+      expect(fake.received[1].replyPath).toBe(first);
+      expect(addressEntries().map((e) => e.messagingSocketPath)).toEqual([first]);
+    } finally {
+      rmSync(a, { recursive: true, force: true });
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+
   test("the address goes once no session the thread talks to runs, and the host with it, leaving nothing", async () => {
     const fake = startFake("brief-claude");
     registerFake(fake);

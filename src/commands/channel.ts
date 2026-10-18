@@ -32,8 +32,11 @@ import {
   isThreadId,
   loadContacts,
   readHostState,
+  recordSocketPath,
+  recordedSocketPath,
   sameContact,
   saveContacts,
+  threadSocketPath,
   sweepChannels,
   threadStateDirs,
   writeMessage,
@@ -322,23 +325,42 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     if (pending) return pending;
     const p = (async () => {
       const name = channelName(wsRoot, threadId);
-      const socketPath = channelSocketPath(wsRoot, threadId);
-      sweepEntriesFor(socketPath);
-      try { unlinkSync(socketPath); } catch { /* none */ }
+      // The socket the thread has used before, where Claude sends a reply,
+      // whatever this host's environment would choose.
+      const usual = threadSocketPath(stateDir, wsRoot, threadId);
       const server = createServer();
-      const a: Address = { threadId, name, socketPath, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [] };
+      const a: Address = { threadId, name, socketPath: usual, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [] };
       server.on("connection", inbound(a));
-      // Bound with group/other bits masked: connectable the moment it
-      // exists, before any chmod could run.
-      const prevUmask = process.umask(0o077);
+      const listenAt = async (socketPath: string): Promise<void> => {
+        sweepEntriesFor(socketPath);
+        try { unlinkSync(socketPath); } catch { /* none */ }
+        // Bound with group/other bits masked: connectable the moment it
+        // exists, before any chmod could run.
+        const prevUmask = process.umask(0o077);
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const failed = (e: Error) => { server.off("listening", bound); reject(e); };
+            const bound = () => { server.off("error", failed); resolve(); };
+            server.once("listening", bound);
+            server.once("error", failed);
+            server.listen(socketPath);
+          });
+        } finally {
+          process.umask(prevUmask);
+        }
+      };
       try {
-        await new Promise<void>((resolve, reject) => {
-          server.once("listening", resolve);
-          server.once("error", reject);
-          server.listen(socketPath);
-        });
-      } finally {
-        process.umask(prevUmask);
+        await listenAt(usual);
+      } catch (e) {
+        // Where it used to be cannot be had: where this host would put it.
+        const fresh = channelSocketPath(wsRoot, threadId);
+        if (fresh === usual) throw e;
+        log(`${name}: could not listen at ${usual} again (${e instanceof Error ? e.message : String(e)}); moving to ${fresh}`);
+        a.socketPath = fresh;
+        await listenAt(fresh);
+      }
+      if (recordedSocketPath(stateDir, threadId) !== a.socketPath) {
+        try { recordSocketPath(stateDir, threadId, a.socketPath); } catch (e) { log(`${name}: could not record its socket: ${e instanceof Error ? e.message : String(e)}`); }
       }
       server.on("error", (e) => {
         log(`${name}: socket error: ${e.message}`);
