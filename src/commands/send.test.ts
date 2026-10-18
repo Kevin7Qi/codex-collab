@@ -16,6 +16,7 @@ import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspac
 import { spawnedSessionName } from "../claude-sessions";
 import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
+import { channelName } from "../claude-channel";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
 const TEST_HOME = mkdtempSync(join(tmpdir(), "codex-collab-send-home-"));
@@ -141,7 +142,10 @@ function cliEnv(extra: Record<string, string>): Record<string, string> {
   // Codex's and Claude Code's own configs, where each keeps the folders it
   // trusts, are the test's: `send` may write Claude Code's. Claude Code's
   // job states too: whether Remote Control reaches a session is read there.
-  return { ...env, HOME: TEST_HOME, CODEX_HOME: join(TEST_HOME, ".codex"), CODEX_COLLAB_CLAUDE_CONFIG: join(TEST_HOME, ".claude.json"), CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_JOBS_DIR: JOBS, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_COLLAB_CONTINUE_GRACE_MS: "1500", CODEX_THREAD_ID: THREAD, ...extra };
+  // A thread's mailbox is looked at often, and its channel host looks for
+  // its sessions often: one a test leaves behind goes within a second of
+  // that test's cleanup.
+  return { ...env, HOME: TEST_HOME, CODEX_HOME: join(TEST_HOME, ".codex"), CODEX_COLLAB_CLAUDE_CONFIG: join(TEST_HOME, ".claude.json"), CODEX_COLLAB_SESSIONS_DIR: REGISTRY, CODEX_COLLAB_JOBS_DIR: JOBS, CODEX_COLLAB_NO_UPDATE_CHECK: "1", CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_LOST_POLL_MS: "100", CODEX_COLLAB_TASK_POLL_MS: "50", CODEX_COLLAB_RESTART_GRACE_MS: "1500", CODEX_COLLAB_CONTINUE_GRACE_MS: "1500", CODEX_COLLAB_INBOX_POLL_MS: "50", CODEX_COLLAB_CHANNEL_CHECK_MS: "300", CODEX_THREAD_ID: THREAD, ...extra };
 }
 
 /** Speak to a sender's advertised reply address as `fake`. */
@@ -304,6 +308,53 @@ function taskRecord(id: string): Record<string, unknown> | null {
   return null;
 }
 
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The registry entries of the test thread's address. */
+function addressEntries(): Array<Record<string, unknown>> {
+  return readdirSync(REGISTRY).flatMap((f) => {
+    try {
+      const e = JSON.parse(readFileSync(join(REGISTRY, f), "utf-8"));
+      return e.name === channelName(WS, THREAD) ? [e] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** What the test thread's mailbox holds, oldest first. */
+function inboxTexts(): string[] {
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  try {
+    for (const d of readdirSync(root)) {
+      const dir = join(root, d, "channels", THREAD, "inbox");
+      if (!existsSync(dir)) continue;
+      return readdirSync(dir).filter((f) => f.endsWith(".json")).sort()
+        .map((f) => JSON.parse(readFileSync(join(dir, f), "utf-8")).text as string);
+    }
+  } catch { /* no state yet */ }
+  return [];
+}
+
+/** The channel host's own account of itself, under the test HOME. */
+function hostState(): { pid: number; control: string } | null {
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  try {
+    for (const d of readdirSync(root)) {
+      const f = join(root, d, "channels", "host.json");
+      if (existsSync(f)) return JSON.parse(readFileSync(f, "utf-8"));
+    }
+  } catch { /* no state yet */ }
+  return null;
+}
+
 /** The pids of the reapers running for the session `id`. */
 function reapersOf(id: string): number[] {
   const table = spawnSync("ps", ["-x", "-o", "pid=,args="], { encoding: "utf-8" }).stdout ?? "";
@@ -355,9 +406,36 @@ afterEach(() => {
   for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
 });
 
-afterAll(() => {
+afterAll(async () => {
+  // Every host these tests started has gone by itself once its sessions did
+  // (the case below says so); one still running here is stopped, so that no
+  // run leaves a process behind whatever failed.
+  for (const pid of hostsRunning()) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
+  await waitFor(() => hostsRunning().length === 0, 5000).catch(() => {});
   rmSync(TEST_HOME, { recursive: true, force: true });
 });
+
+/** The channel hosts running for this run's workspaces: their command line
+ *  names the folder, which is under this run's HOME. */
+function hostsRunning(): number[] {
+  const table = spawnSync("ps", ["-x", "-o", "pid=,args="], { encoding: "utf-8" }).stdout ?? "";
+  const home = [TEST_HOME, realpathSync(TEST_HOME)];
+  return table.split("\n")
+    .filter((line) => line.includes(" channel-host ") && home.some((h) => line.includes(h)))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
+}
+
+/** Whom the test thread talks to, as its host last wrote it. */
+function contacts(): Array<{ name: string; sessionId: string | null }> {
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  try {
+    for (const d of readdirSync(root)) {
+      const f = join(root, d, "channels", THREAD, "contacts.json");
+      if (existsSync(f)) return JSON.parse(readFileSync(f, "utf-8"));
+    }
+  } catch { /* none yet */ }
+  return [];
+}
 
 describeUnix("send helpers", () => {
   test("insideCodexSandbox reads Codex's markers", () => {
@@ -645,10 +723,9 @@ describeUnix("a turn that ended on an error", () => {
 });
 
 describeUnix("send", () => {
-  test("delivers to the only live session, prints its reply, and cleans up its registration", async () => {
+  test("delivers to the only live session from the thread's address, prints its reply, and keeps the address while the session runs", async () => {
     const fake = startFake("fake-claude");
     registerFake(fake);
-    const before = new Set(readdirSync(REGISTRY));
     const r = await runCli(["send", "hello there"]);
     expect(r.code).toBe(0);
     expect(r.stdout).toContain("Sending to fake-claude — the only Claude Code session in this workspace; `send --new` starts a session of codex-collab's own instead.");
@@ -660,14 +737,21 @@ describeUnix("send", () => {
     // What the session received: the message, then who sent it — and no
     // word of how long the sender will wait.
     expect(fake.received).toHaveLength(1);
-    expect(fake.received[0].fromName).toBe(`codex(01a0985a-${workspaceSuffix(WS)}-${id})`);
-    expect(fake.received[0].text).toContain(`Codex thread ${THREAD}`);
+    // The thread's random tail and the workspace: a Codex thread id starts
+    // with a clock that two threads a minute apart share.
+    expect(fake.received[0].fromName).toBe(`codex(b36a6ba4-${workspaceSuffix(WS)})`);
+    expect(fake.received[0].fromName).toBe(channelName(WS, THREAD));
+    expect(fake.received[0].text).toContain(`Codex thread ${THREAD}. This peer is that thread's address`);
     expect(fake.received[0].text).not.toContain("waits up to");
-    // The transient registration and socket are gone by the time the reply
-    // is reported, and the record keeps what was said.
-    expect(new Set(readdirSync(REGISTRY))).toEqual(before);
-    expect(existsSync(fake.received[0].replyPath)).toBe(false);
-    expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "replied", threadId: THREAD, reply: { text: "pong: hello there", fromName: "fake-claude" } }));
+    // The record keeps what was said, and where in the thread's mailbox.
+    expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "replied", threadId: THREAD, reply: expect.objectContaining({ text: "pong: hello there", fromName: "fake-claude", id: expect.stringMatching(/^\d{13}-[0-9a-f]{8}$/) }) }));
+    // The receiver is gone, and registered nothing of its own; the thread's
+    // address stays, one entry, while the session it talked to runs.
+    const receiver = (taskRecord(id)!.receiver as { pid: number }).pid;
+    await waitFor(() => !alive(receiver));
+    expect(existsSync(join(REGISTRY, `${receiver}.json`))).toBe(false);
+    expect(addressEntries()).toHaveLength(1);
+    expect(existsSync(fake.received[0].replyPath)).toBe(true);
   });
 
   test("a reply that comes after send stopped waiting is kept: exit 3 says the task goes on, and task wait / result / status collect it", async () => {
@@ -708,7 +792,9 @@ describeUnix("send", () => {
     const result = await runCli(["task", "result", id]);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("  done, at last");
-    expect(existsSync(fake.received[0].replyPath)).toBe(false);
+    // The thread's address, which the reply came to, is the thread's: it
+    // stays while the session runs.
+    expect(existsSync(fake.received[0].replyPath)).toBe(true);
     const listed = await runCli(["tasks"]);
     expect(listed.stdout).toMatch(new RegExp(`${id} +replied +slow-claude .* take your time`));
     expect(JSON.parse((await runCli(["task", "status", id, "--json"])).stdout)).toEqual(expect.objectContaining({ id, status: "replied" }));
@@ -741,28 +827,33 @@ describeUnix("send", () => {
     expect(waited.stdout).toContain("  job done");
   });
 
-  test("each task has an address of its own: a late word sent to a finished task cannot become another task's reply", async () => {
+  test("a thread's messages share its address: a word the session sends before a task was delivered is no reply to it, and what it adds after a reply is kept", async () => {
     const fake = startFake("fake-claude");
     registerFake(fake);
-    expect((await runCli(["send", "one"])).stdout).toContain("  pong: one");
+    const one = await runCli(["send", "one"]);
+    expect(one.stdout).toContain("  pong: one");
+    const firstId = taskIdOf(one.stdout);
     fake.reply = null;
+    // The session thinks of something to add to its first answer, and writes
+    // to the thread: kept for it, and no task is waiting.
+    speak(fake, fake.received[0].replyPath, "one more thing about one");
+    await waitFor(() => inboxTexts().includes("one more thing about one"));
     const second = await runCli(["send", "two", "--no-wait"]);
     const id = taskIdOf(second.stdout);
     const [first, later] = fake.received;
-    expect(later.fromName).not.toBe(first.fromName);
-    expect(later.replyPath).not.toBe(first.replyPath);
-    // The session thinks of something to add to its first answer. Nobody is
-    // at that address any more — and the task now waiting is left waiting.
-    const line = buildEnvelope({ text: "one more thing about one", ourSocketPath: fake.socketPath, ourName: fake.name, mode: "prompting" });
-    const refused = await Bun.connect({ unix: first.replyPath, socket: { open(sock) { sock.write(line); sock.end(); }, data() {}, error() {} } }).then(() => false, () => true);
-    expect(refused).toBe(true);
-    await new Promise((res) => setTimeout(res, 200));
+    expect(later.fromName).toBe(first.fromName);
+    expect(later.replyPath).toBe(first.replyPath);
+    // Said before the second message went, it is no answer to it.
+    await new Promise((res) => setTimeout(res, 300));
     expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "running" }));
     speak(fake, later.replyPath, "answer to two");
     const waited = await runCli(["task", "wait", id]);
     expect(waited.code).toBe(0);
     expect(waited.stdout).toContain("  answer to two");
     expect(waited.stdout).not.toContain("one more thing");
+    // The first task's result has what the session said since its reply.
+    const result = await runCli(["task", "result", firstId]);
+    expect(result.stdout).toMatch(/REPLY FROM fake-claude[^\n]*:\n  pong: one\nLATER FROM fake-claude \([^)]+ ago\):\n  one more thing about one\nLATER FROM fake-claude \([^)]+ ago\):\n  answer to two/);
   });
 
   test("names: a leading positional that is a live session, or --to, or a unique prefix", async () => {
@@ -1644,7 +1735,7 @@ describeUnix("send", () => {
     await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-race");
     // Replies are held until both messages are in, so both sends are live
-    // at once — the case in which one Codex thread needs two addresses.
+    // at once: two tasks of one thread, and one channel host between them.
     const fake = startFake(spawnedSessionName(WS), { reply: null });
     writeFakeClaude(binDir, fake.socketPath);
     writeConfig({ linger: 2 });
@@ -1653,15 +1744,17 @@ describeUnix("send", () => {
       const a = runCli(["send", "first"], env);
       const b = runCli(["send", "second"], env);
       await waitFor(() => fake.received.length === 2, 15_000);
-      expect(new Set(fake.received.map((m) => m.replyPath)).size).toBe(2);
-      expect(new Set(fake.received.map((m) => m.fromName)).size).toBe(2);
-      for (const m of fake.received) speak(fake, m.replyPath, `ok: ${m.text.split("\n")[0]}`);
+      expect(new Set(fake.received.map((m) => m.replyPath)).size).toBe(1);
+      expect(new Set(fake.received.map((m) => m.fromName))).toEqual(new Set([channelName(WS, THREAD)]));
+      expect(addressEntries()).toHaveLength(1);
+      // One reply to both: each is the session's next word after its message.
+      speak(fake, fake.received[0].replyPath, "ok: both");
       const [ra, rb] = await Promise.all([a, b]);
       expect(ra.code).toBe(0);
       expect(rb.code).toBe(0);
       expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
-      expect(ra.stdout + rb.stdout).toContain("  ok: first");
-      expect(ra.stdout + rb.stdout).toContain("  ok: second");
+      expect(ra.stdout).toContain("  ok: both");
+      expect(rb.stdout).toContain("  ok: both");
       // One session, so one record — kept, as stopped, once the reaper is done.
       await waitFor(() => (spawnedRecords() as Array<{ stoppedAt?: string }>).some((r) => r.stoppedAt), 15_000);
       expect(spawnedRecords()).toHaveLength(1);
@@ -1671,26 +1764,42 @@ describeUnix("send", () => {
     }
   });
 
-  test("an interrupted send leaves its task being waited on: the reply is still collected, and the registration goes with it", async () => {
+  test("an interrupted send leaves its task being waited on: the reply is still collected, and the receiver goes with it", async () => {
     const fake = startFake("quiet-claude", { reply: null });
     registerFake(fake);
     const live = runCliLive(["send", "hold on", "--timeout", "60"]);
     await waitFor(() => fake.received.length === 1 && /as task/.test(live.stdout()));
     const id = taskIdOf(live.stdout());
-    const ours = () => readdirSync(REGISTRY).filter((f) => {
-      try { return String(JSON.parse(readFileSync(join(REGISTRY, f), "utf-8")).name).startsWith("codex(01a0985a"); } catch { return false; }
-    });
-    expect(ours()).toHaveLength(1);
+    expect(addressEntries()).toHaveLength(1);
     live.child.kill("SIGINT");
     expect((await live.done).code).toBe(130);
     // The message was delivered and Claude is working on it: interrupting the
     // command that asked cannot take that back, so the answer is kept.
-    expect(ours()).toHaveLength(1);
+    expect(addressEntries()).toHaveLength(1);
+    const receiver = (taskRecord(id)!.receiver as { pid: number }).pid;
+    expect(alive(receiver)).toBe(true);
     speak(fake, fake.received[0].replyPath, "still here");
     const result = await runCli(["task", "wait", id]);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("  still here");
-    expect(ours()).toHaveLength(0);
+    await waitFor(() => !alive(receiver));
+    expect(addressEntries()).toHaveLength(1);
+  });
+
+  test("a message from no Codex thread has an address of its own, which goes with its task", async () => {
+    const fake = startFake("fake-claude");
+    registerFake(fake);
+    const r = await runCli(["send", "from a shell"], { CODEX_THREAD_ID: "" });
+    expect(r.code).toBe(0);
+    const id = taskIdOf(r.stdout);
+    expect(r.stdout).toContain("  pong: from a shell");
+    expect(fake.received[0].fromName).toBe(`codex(shell-${workspaceSuffix(WS)}-${id})`);
+    expect(fake.received[0].text).toContain("(From a Codex session. Reply to this peer when you are done; your reply is kept for it.)");
+    // Its registration and socket are gone by the time the reply is reported.
+    const own = readdirSync(REGISTRY).filter((f) => {
+      try { return String(JSON.parse(readFileSync(join(REGISTRY, f), "utf-8")).name).includes(id); } catch { return false; }
+    });
+    expect(own).toEqual([]);
     expect(existsSync(fake.received[0].replyPath)).toBe(false);
   });
 
@@ -1708,9 +1817,11 @@ describeUnix("send", () => {
     // A tool says what happened; what to do about it is the reader's.
     expect(lost.stdout).not.toMatch(/send again|carry on|--fresh/);
 
+    // A receiver with an address of its own (a message from no Codex thread),
+    // killed outright, leaves it behind.
     const other = startFake("staying-claude", { reply: null });
     registerFake(other);
-    const again = await runCli(["send", "and you?", "--no-wait"]);
+    const again = await runCli(["send", "and you?", "--no-wait"], { CODEX_THREAD_ID: "" });
     const killedId = taskIdOf(again.stdout);
     const receiver = (taskRecord(killedId)!.receiver as { pid: number }).pid;
     process.kill(receiver, "SIGKILL");
@@ -1727,7 +1838,7 @@ describeUnix("send", () => {
     expect(existsSync(join(REGISTRY, `${receiver}.json`))).toBe(true);
     expect(existsSync(leftover)).toBe(true);
     other.reply = () => "here";
-    expect((await runCli(["send", "--to", "staying-claude", "still there?"])).stdout).toContain("  here");
+    expect((await runCli(["send", "--to", "staying-claude", "still there?"], { CODEX_THREAD_ID: "" })).stdout).toContain("  here");
     expect(existsSync(join(REGISTRY, `${receiver}.json`))).toBe(false);
     expect(existsSync(leftover)).toBe(false);
   });
@@ -2288,12 +2399,15 @@ describeUnix("send", () => {
     expect(waited.code).toBe(1);
     expect(waited.stdout).toContain(`task: ${id}  status: expired`);
     expect(waited.stdout).toContain("no reply from silent-claude in");
-    // Nothing left listening: no registration, no socket.
+    // The receiver is gone, with nothing of its own left registered; the
+    // thread's address is there while the session runs.
+    const receiver = (taskRecord(id)!.receiver as { pid: number }).pid;
+    await waitFor(() => !alive(receiver));
     const ours = readdirSync(REGISTRY).filter((f) => {
       try { return String(JSON.parse(readFileSync(join(REGISTRY, f), "utf-8")).name).includes(id); } catch { return false; }
     });
     expect(ours).toEqual([]);
-    expect(existsSync(fake.received[0].replyPath)).toBe(false);
+    expect(addressEntries()).toHaveLength(1);
   });
 
   test("a delivery cut off at the handshake's limit is reported as one that may have reached the session", async () => {
@@ -2373,5 +2487,78 @@ describeUnix("send", () => {
       removeConfig();
       killFakeSleepers(binDir);
     }
+  });
+});
+
+describeUnix("a Codex thread's address", () => {
+  test("follow-ups that join one turn share the thread's address, and one reply answers them all", async () => {
+    const fake = startFake("busy-claude", { reply: null });
+    registerFake(fake, { status: "busy" });
+    const a = taskIdOf((await runCli(["send", "check the intro", "--no-wait"])).stdout);
+    const b = taskIdOf((await runCli(["send", "and the abstract too", "--no-wait"])).stdout);
+    expect(fake.received.map((m) => m.fromName)).toEqual([channelName(WS, THREAD), channelName(WS, THREAD)]);
+    speak(fake, fake.received[0].replyPath, "both read: fine");
+    for (const id of [a, b]) {
+      const r = await runCli(["task", "wait", id, "--timeout", "10"]);
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain("  both read: fine");
+    }
+  });
+
+  test("another session's message to the thread is kept for it, is no reply, and makes that session one the thread talks to", async () => {
+    const asked = startFake("asked-claude", { reply: null });
+    registerFake(asked);
+    const id = taskIdOf((await runCli(["send", "--to", "asked-claude", "a question", "--no-wait"])).stdout);
+    const bystander = startFake("other-claude");
+    registerFake(bystander, { sessionId: "00000000-0000-4000-8000-0000000000bb" });
+    speak(bystander, asked.received[0].replyPath, "fyi from elsewhere");
+    await waitFor(() => inboxTexts().includes("fyi from elsewhere"));
+    await waitFor(() => contacts().some((c) => c.name === "other-claude"));
+    expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "running" }));
+    speak(asked, asked.received[0].replyPath, "the answer");
+    const r = await runCli(["task", "wait", id, "--timeout", "10"]);
+    expect(r.stdout).toContain("  the answer");
+    expect(r.stdout).not.toContain("fyi from elsewhere");
+  });
+
+  test("the address goes once no session the thread talks to runs, and the host with it, leaving nothing", async () => {
+    const fake = startFake("brief-claude");
+    registerFake(fake);
+    expect((await runCli(["send", "hi"])).code).toBe(0);
+    const host = hostState()!;
+    expect(alive(host.pid)).toBe(true);
+    const [entry] = addressEntries();
+    const holder = entry.pid as number;
+    expect(alive(holder)).toBe(true);
+    const socket = fake.received[0].replyPath;
+    expect(existsSync(socket)).toBe(true);
+    // The session exits: Claude Code removes its entry.
+    fake.stop();
+    await waitFor(() => addressEntries().length === 0 && !existsSync(socket) && !alive(holder), 5000);
+    await waitFor(() => !alive(host.pid) && hostState() === null && !existsSync(host.control), 5000);
+  });
+
+  test("a host killed outright is replaced while a task waits: what it left is removed, the address comes back, and the reply still arrives", async () => {
+    const fake = startFake("steady-claude", { reply: null });
+    registerFake(fake);
+    const id = taskIdOf((await runCli(["send", "a long one", "--no-wait"])).stdout);
+    const host = hostState()!;
+    const [entry] = addressEntries();
+    const holder = entry.pid as number;
+    process.kill(host.pid, "SIGKILL");
+    // Its holder reads its stdin from it, and goes with it.
+    await waitFor(() => !alive(holder), 5000);
+    // The task's receiver brings a host back, which takes the address again
+    // and removes the entry the dead one left.
+    await waitFor(() => {
+      const now = hostState();
+      const entries = addressEntries();
+      return !!now && now.pid !== host.pid && alive(now.pid) && entries.length === 1 && entries[0].pid !== holder;
+    }, 10_000);
+    expect(existsSync(join(REGISTRY, `${holder}.json`))).toBe(false);
+    speak(fake, fake.received[0].replyPath, "made it");
+    const r = await runCli(["task", "wait", id, "--timeout", "10"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("  made it");
   });
 });

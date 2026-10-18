@@ -526,7 +526,7 @@ async function main() {
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
-    "peer", "peers", "send", "task", "tasks", "reap-claude", "recv-task",
+    "peer", "peers", "send", "task", "tasks", "reap-claude", "recv-task", "channel-host",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -619,6 +619,10 @@ async function main() {
       // Private: the detached receiver `send` starts for each task — it
       // delivers the message and collects the reply (see commands/send.ts).
       return (await import("./commands/send")).handleRecvTask(rest);
+    case "channel-host":
+      // Private: the detached host of a workspace's Codex thread addresses,
+      // which a task's receiver starts (see claude-channel.ts). Not in --help.
+      return (await import("./commands/channel")).handleChannelHost(rest);
     case "version":
       return printVersion();
   }

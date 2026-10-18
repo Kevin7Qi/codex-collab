@@ -1,0 +1,434 @@
+// src/commands/channel.ts — the channel host: the address of every Codex thread in a workspace
+//
+// `codex-collab channel-host --dir <workspace>` (private). Started detached
+// by a task's receiver when the workspace has no host (`openChannel` in
+// claude-channel.ts). For each Codex thread of the workspace with a Claude
+// Code session to talk to, it holds the thread's address — a socket, and an
+// entry in Claude Code's session registry — and stores whatever is sent
+// there in the thread's mailbox. An address goes once no Claude session the
+// thread has talked to is running; the host goes once it holds none.
+//
+// It leaves nothing behind. Every way out removes its sockets, entries and
+// state file; the small processes that hold its entries read their stdin
+// from it and end when it does, however it ends; and what a host killed
+// outright left in the registry, the next one removes before it registers.
+
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
+import { join } from "node:path";
+import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
+import {
+  askHost,
+  channelName,
+  channelSocketPath,
+  channelsDir,
+  claudeEntries,
+  contactAt,
+  contactRunning,
+  hostControlPath,
+  hostStateFile,
+  isContact,
+  isThreadId,
+  loadContacts,
+  readHostState,
+  sameContact,
+  saveContacts,
+  sweepChannels,
+  writeMessage,
+  type Contact,
+  type HostState,
+} from "../claude-channel";
+import { TASK_KEEP_MS } from "../claude-tasks";
+import { transientSessionId } from "../claude-sessions";
+import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../peer";
+import { verifyMailboxDir } from "../questions";
+import { parseOptions } from "./shared";
+
+/** How often the host looks whether the sessions its threads talk to still
+ *  run. (The variable is a test seam.) */
+const CHECK_MS = Number(process.env.CODEX_COLLAB_CHANNEL_CHECK_MS) || 30_000;
+
+/** Looks in a row that must find a session nowhere before it counts as gone:
+ *  Claude Code rewrites its entries while it runs, and one look that misses a
+ *  session is no evidence. */
+const MISSES = 2;
+
+/** The longest message a sender may write to an address. */
+const INBOUND_LIMIT = 1024 * 1024;
+
+/** How often old messages are swept from the mailboxes. */
+const SWEEP_MS = 3600_000;
+
+interface Address {
+  threadId: string;
+  name: string;
+  socketPath: string;
+  server: Server;
+  /** The process the registry entry is under, and the entry. */
+  holder: ChildProcess | null;
+  entryPath: string | null;
+  contacts: Contact[];
+  /** Looks in a row each contact was found nowhere. */
+  misses: Map<string, number>;
+  /** When the holder last had to be put back: a few times, then the address goes. */
+  respawns: number[];
+}
+
+function contactKey(c: Contact): string {
+  return c.sessionId ?? `pid:${c.pid}:${c.procStart ?? ""}`;
+}
+
+export async function handleChannelHost(args: string[]): Promise<void> {
+  const { options } = parseOptions(args);
+  const wsRoot = resolveWorkspaceDir(options.dir);
+  const stateDir = resolveStateDir(options.dir);
+  const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);
+
+  // One host per workspace: one started while another was getting ready
+  // leaves it the names.
+  const prior = readHostState(stateDir);
+  if (prior && prior.pid !== process.pid) {
+    try {
+      if ((await askHost(prior.control, { op: "ping" }, 2000)).ok === true) {
+        log(`host ${prior.pid} already holds this workspace's addresses`);
+        process.exit(0);
+      }
+    } catch { /* not answering: this host takes over */ }
+  }
+  try {
+    // The temp root must be privately ours before a socket goes in it — the
+    // check the ask mailbox and a task's receiver make, for the same reason.
+    mkdirSync(mailboxRoot(), { recursive: true, mode: 0o700 });
+    verifyMailboxDir(mailboxRoot());
+    mkdirSync(channelsDir(stateDir), { recursive: true, mode: 0o700 });
+  } catch (e) {
+    log(`cannot start: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+
+  const addresses = new Map<string, Address>();
+  const opening = new Map<string, Promise<Address>>();
+  const controlPath = hostControlPath(wsRoot);
+  let control: Server | null = null;
+  let lastRequestAt = Date.now();
+  let exiting = false;
+
+  const persist = (a: Address) => {
+    try { saveContacts(stateDir, a.threadId, a.contacts); } catch (e) { log(`${a.name}: could not record its contacts: ${e instanceof Error ? e.message : String(e)}`); }
+  };
+  const removeEntry = (a: Address) => {
+    if (a.entryPath) { try { unlinkSync(a.entryPath); } catch { /* gone */ } }
+    a.entryPath = null;
+  };
+  const closeAddress = (a: Address, why: string) => {
+    if (addresses.get(a.threadId) === a) addresses.delete(a.threadId);
+    try { a.server.close(); } catch { /* closed */ }
+    try { unlinkSync(a.socketPath); } catch { /* gone */ }
+    removeEntry(a);
+    const holder = a.holder;
+    a.holder = null;
+    try { holder?.kill(); } catch { /* gone */ }
+    log(`closed ${a.name}: ${why}`);
+  };
+  // Synchronous, and run on every exit: SIGINT and SIGTERM reach the CLI's
+  // handlers, which exit; SIGHUP and a crash are sent there below.
+  process.on("exit", () => {
+    exiting = true;
+    for (const a of [...addresses.values()]) closeAddress(a, "the host is stopping");
+    try { control?.close(); } catch { /* closed */ }
+    try { unlinkSync(controlPath); } catch { /* gone */ }
+    if (readHostState(stateDir)?.pid === process.pid) { try { unlinkSync(hostStateFile(stateDir)); } catch { /* gone */ } }
+  });
+  process.on("SIGHUP", () => process.exit(129));
+  const fatal = (e: unknown) => {
+    log(`fatal: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+    process.exit(1);
+  };
+  process.on("uncaughtException", fatal);
+  process.on("unhandledRejection", fatal);
+
+  /** Entries a host killed outright left for this socket: their process is
+   *  gone, and a name Claude Code lists twice reaches whichever it picks. */
+  const sweepEntriesFor = (socketPath: string) => {
+    let files: string[];
+    try { files = readdirSync(sessionsDir()); } catch { return; }
+    for (const file of files) {
+      if (!/^\d+\.json$/.test(file)) continue;
+      const path = join(sessionsDir(), file);
+      try {
+        const e = JSON.parse(readFileSync(path, "utf-8"));
+        if (e?.messagingSocketPath === socketPath && procIdentity(e) === "dead") unlinkSync(path);
+      } catch { /* being written, or gone */ }
+    }
+  };
+
+  /** Put the address in the registry, under a holder of its own. */
+  const register = (a: Address): boolean => {
+    if (exiting || addresses.get(a.threadId) !== a) return false;
+    // A liveness token: an entry's file name, its pid and a live process must
+    // agree, one entry per pid. Its stdin is a pipe from this process, so it
+    // ends when this process does, however that happens.
+    const holder = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    holder.on("error", () => { /* reported by its exit */ });
+    if (!holder.pid) return false;
+    a.holder = holder;
+    holder.once("exit", () => {
+      if (a.holder !== holder) return; // let go on purpose
+      a.holder = null;
+      removeEntry(a);
+      if (exiting || addresses.get(a.threadId) !== a) return;
+      // Gone by itself — something killed it — and the entry with it: both
+      // are put back, a few times at most.
+      const now = Date.now();
+      a.respawns = a.respawns.filter((t) => now - t < 60_000);
+      if (a.respawns.length >= 3) {
+        closeAddress(a, "the process holding its registry entry keeps exiting");
+        return;
+      }
+      a.respawns.push(now);
+      if (!register(a)) closeAddress(a, "it could not be registered again");
+    });
+    if (writeEntry(a, holder.pid)) return true;
+    a.holder = null;
+    try { holder.kill(); } catch { /* gone */ }
+    return false;
+  };
+
+  /** Write the address's registry entry, under its holder's pid. */
+  const writeEntry = (a: Address, pid: number): boolean => {
+    const entryPath = join(sessionsDir(), `${pid}.json`);
+    try {
+      mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
+      writeFileSync(entryPath, JSON.stringify(buildRegistryEntry({
+        pid,
+        cwd: wsRoot,
+        name: a.name,
+        socketPath: a.socketPath,
+        version: sniffRegistryVersion(),
+        // /proc first: `ps` may not list a process this new yet.
+        procStart: procStartTicksOf(pid) ?? procStartOf(pid),
+        sessionId: transientSessionId(),
+      })), { mode: 0o644 });
+      a.entryPath = entryPath;
+      return true;
+    } catch (e) {
+      log(`${a.name}: could not register: ${e instanceof Error ? e.message : String(e)}`);
+      try { unlinkSync(entryPath); } catch { /* not written */ }
+      return false;
+    }
+  };
+
+  /** An entry somebody else removed is written again: without it, Claude
+   *  cannot find the address. */
+  const keepEntry = (a: Address) => {
+    if (!a.holder?.pid || (a.entryPath && existsSync(a.entryPath))) return;
+    log(`${a.name}: its registry entry was gone; writing it again`);
+    if (!writeEntry(a, a.holder.pid)) closeAddress(a, "it could not be registered again");
+  };
+
+  const addContact = (a: Address, c: Contact) => {
+    const i = a.contacts.findIndex((x) => sameContact(x, c));
+    if (i >= 0) {
+      const x = a.contacts[i];
+      // The same session, perhaps as the new process Claude Code brought it back as.
+      if (x.pid === c.pid && x.socketPath === c.socketPath && x.name === c.name && x.procStart === c.procStart) return;
+      a.contacts[i] = c;
+    } else {
+      a.contacts.push(c);
+    }
+    a.misses.delete(contactKey(c));
+    persist(a);
+  };
+
+  /** Store what a sender writes to the address, one envelope per line. */
+  const inbound = (a: Address) => (sock: Socket) => {
+    sock.setEncoding("utf8");
+    sock.setTimeout(60_000, () => sock.destroy());
+    let buffer = "";
+    sock.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (buffer.length > INBOUND_LIMIT) {
+        log(`${a.name}: dropped a message over ${INBOUND_LIMIT} bytes`);
+        sock.destroy();
+        return;
+      }
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        const msg = parseEnvelope(line);
+        if (!msg) continue;
+        try {
+          const stored = writeMessage(stateDir, a.threadId, { fromName: msg.fromName, replyPath: msg.replyPath, text: msg.text });
+          log(`${a.name}: message ${stored.id} from ${msg.fromName}`);
+        } catch (e) {
+          log(`${a.name}: could not store a message from ${msg.fromName}: ${e instanceof Error ? e.message : String(e)}`);
+          continue;
+        }
+        // A session that writes to the thread is one it talks to.
+        const sender = contactAt(msg.replyPath, claudeEntries());
+        if (sender) addContact(a, sender);
+      }
+    });
+    sock.on("error", () => { /* a dropped connection loses nothing stored */ });
+  };
+
+  const openAddress = (threadId: string): Promise<Address> => {
+    const open = addresses.get(threadId);
+    if (open) return Promise.resolve(open);
+    const pending = opening.get(threadId);
+    if (pending) return pending;
+    const p = (async () => {
+      const name = channelName(wsRoot, threadId);
+      const socketPath = channelSocketPath(wsRoot, threadId);
+      sweepEntriesFor(socketPath);
+      try { unlinkSync(socketPath); } catch { /* none */ }
+      const server = createServer();
+      const a: Address = { threadId, name, socketPath, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [] };
+      server.on("connection", inbound(a));
+      // Bound with group/other bits masked: connectable the moment it
+      // exists, before any chmod could run.
+      const prevUmask = process.umask(0o077);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("listening", resolve);
+          server.once("error", reject);
+          server.listen(socketPath);
+        });
+      } finally {
+        process.umask(prevUmask);
+      }
+      server.on("error", (e) => {
+        log(`${name}: socket error: ${e.message}`);
+        if (addresses.get(threadId) === a) closeAddress(a, "its socket failed");
+      });
+      addresses.set(threadId, a);
+      if (!register(a)) {
+        closeAddress(a, "it could not be registered");
+        throw new Error(`could not register ${name} in Claude Code's session registry (${sessionsDir()})`);
+      }
+      log(`opened ${name} for Codex thread ${threadId}`);
+      return a;
+    })();
+    opening.set(threadId, p);
+    p.then(() => opening.delete(threadId), () => opening.delete(threadId));
+    return p;
+  };
+
+  const handle = async (req: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    if (req.op === "ping") return { ok: true, pid: process.pid, addresses: addresses.size };
+    if (req.op !== "open") return { ok: false, error: `unknown request: ${String(req.op)}` };
+    if (!isThreadId(req.threadId)) return { ok: false, error: "not a Codex thread id" };
+    if (!isContact(req.contact)) return { ok: false, error: "no Claude Code session named for the thread to talk to" };
+    try {
+      const a = await openAddress(req.threadId);
+      addContact(a, req.contact);
+      keepEntry(a);
+      if (addresses.get(a.threadId) !== a) return { ok: false, error: `could not register ${a.name} in Claude Code's session registry (${sessionsDir()})` };
+      return { ok: true, name: a.name, socketPath: a.socketPath };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
+  // ── Requests ──
+  control = createServer((sock) => {
+    sock.setEncoding("utf8");
+    sock.setTimeout(10_000, () => sock.destroy());
+    let buffer = "";
+    let taken = false;
+    sock.on("data", (chunk: string) => {
+      if (taken) return;
+      buffer += chunk;
+      if (buffer.length > 64 * 1024) { sock.destroy(); return; }
+      const idx = buffer.indexOf("\n");
+      if (idx === -1) return;
+      taken = true;
+      lastRequestAt = Date.now();
+      let req: unknown;
+      try { req = JSON.parse(buffer.slice(0, idx)); } catch { req = null; }
+      const answer = req && typeof req === "object"
+        ? handle(req as Record<string, unknown>)
+        : Promise.resolve({ ok: false, error: "not a request" });
+      void answer.then((a) => {
+        lastRequestAt = Date.now();
+        try { sock.end(JSON.stringify(a) + "\n"); } catch { /* gone */ }
+      });
+    });
+    sock.on("error", () => { /* the asker went */ });
+  });
+  try { unlinkSync(controlPath); } catch { /* none */ }
+  try {
+    const listening = control;
+    const prevUmask = process.umask(0o077);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        listening.once("listening", resolve);
+        listening.once("error", reject);
+        listening.listen(controlPath);
+      });
+    } finally {
+      process.umask(prevUmask);
+    }
+  } catch (e) {
+    log(`cannot listen at ${controlPath}: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+  control.on("error", (e) => {
+    log(`control socket error: ${e.message}`);
+    process.exit(1);
+  });
+
+  // Ready: from here on a client finds this host by its state file.
+  let procStart: string | null = procStartTicksOf(process.pid);
+  if (procStart === null) { try { procStart = procStartOf(process.pid); } catch { /* ps unavailable */ } }
+  const state: HostState = { pid: process.pid, procStart, pidDomain: ownPidDomain(), control: controlPath, startedAt: new Date().toISOString() };
+  const stateTmp = `${hostStateFile(stateDir)}.${process.pid}.tmp`;
+  writeFileSync(stateTmp, JSON.stringify(state) + "\n", { mode: 0o600 });
+  renameSync(stateTmp, hostStateFile(stateDir));
+  log(`host ${process.pid} ready for ${wsRoot}`);
+
+  // Addresses a host before this one held, for threads that still have a
+  // session to talk to: a host that went must not cost them their address.
+  let threads: string[] = [];
+  try { threads = readdirSync(channelsDir(stateDir)).filter(isThreadId); } catch { /* none */ }
+  const entries = claudeEntries();
+  for (const threadId of threads) {
+    if (!loadContacts(stateDir, threadId).some((c) => contactRunning(c, entries))) continue;
+    try { await openAddress(threadId); } catch (e) { log(`could not reopen the address of ${threadId}: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+
+  const sweep = () => {
+    try { sweepChannels(stateDir, TASK_KEEP_MS, Date.now(), new Set(addresses.keys())); } catch { /* the next sweep */ }
+  };
+  sweep();
+  setInterval(sweep, SWEEP_MS);
+
+  // ── Who is still there ──
+  setInterval(() => {
+    const now = claudeEntries();
+    for (const a of [...addresses.values()]) {
+      let changed = false;
+      a.contacts = a.contacts.filter((c) => {
+        const key = contactKey(c);
+        if (contactRunning(c, now)) { a.misses.delete(key); return true; }
+        const seen = (a.misses.get(key) ?? 0) + 1;
+        if (seen < MISSES) { a.misses.set(key, seen); return true; }
+        a.misses.delete(key);
+        changed = true;
+        return false;
+      });
+      if (changed) persist(a);
+      if (a.contacts.length === 0) closeAddress(a, "no Claude Code session it has talked to is running");
+      else keepEntry(a);
+    }
+    // Nothing held, nothing being opened, nobody asking: done. A task that
+    // asks after this starts a host again.
+    if (addresses.size === 0 && opening.size === 0 && Date.now() - lastRequestAt >= CHECK_MS) {
+      log("no addresses left: stopping");
+      process.exit(0);
+    }
+  }, CHECK_MS);
+}

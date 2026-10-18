@@ -13,6 +13,7 @@ import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow 
 import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
+import { isThreadId, messagesSince, type ChannelMessage } from "../claude-channel";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
 /** Default wait (seconds) of `send` and of `task wait`. It bounds how long the
@@ -56,6 +57,16 @@ function since(iso: string | undefined, now = Date.now()): string {
   return Number.isFinite(t) ? formatDuration(Math.max(1000, now - t)) : "an unknown time";
 }
 
+/** What the session a task went to wrote to the thread after its reply, oldest
+ *  first: none for a reply that did not come through the thread's mailbox. */
+export function laterFromSession(stateDir: string, record: TaskRecord): ChannelMessage[] {
+  const reply = record.reply;
+  if (!reply?.id || !reply.at || !isThreadId(record.threadId)) return [];
+  const replyId = reply.id;
+  return messagesSince(stateDir, record.threadId, Date.parse(reply.at))
+    .filter((m) => m.id > replyId && (m.replyPath === record.target.socketPath || m.fromName === reply.fromName));
+}
+
 /** Poll a task until it is final or `timeoutMs` has passed; returns it as it
  *  then stands. null when the record has disappeared. */
 export async function waitForTask(stateDir: string, id: string, timeoutMs: number): Promise<TaskRecord | null> {
@@ -85,6 +96,12 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
       console.log(`REPLY FROM ${target.name}${took}:`);
       // Indented so no reply line sits at column 0, the way `ask` prints answers.
       for (const l of sanitizeForTerminal(record.reply?.text ?? "").trimEnd().split("\n")) console.log(`  ${l}`);
+      // What the session wrote to the thread after it, kept in the mailbox
+      // the reply came from.
+      for (const m of opts.stateDir ? laterFromSession(opts.stateDir, record) : []) {
+        console.log(`LATER FROM ${m.fromName} (${since(m.at)} ago):`);
+        for (const l of sanitizeForTerminal(m.text).trimEnd().split("\n")) console.log(`  ${l}`);
+      }
       return;
     }
     case "pending":
