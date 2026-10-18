@@ -668,6 +668,13 @@ export interface UserConfig {
   "spawn-trust"?: string;
   /** Opt-in Codex exec-policy rule for `send` (on|off; see skill.ts). */
   "codex-rule"?: string;
+  /** Opt-in Codex hooks that hand a thread what Claude sent it (on|off; see
+   *  codex-hooks.ts). */
+  "codex-hook"?: string;
+  /** Opt-in: start a turn on a Codex thread idle on the shared app-server
+   *  when a message reaches it (on|off; see codex-wake.ts). Read by the
+   *  channel host at each message. */
+  "codex-wake"?: string;
 }
 
 export function loadUserConfig(): UserConfig {

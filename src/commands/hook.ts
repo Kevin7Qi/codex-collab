@@ -91,51 +91,69 @@ function header(m: ChannelMessage, replyTo: TaskRecord | undefined, now: number)
   return `[message from ${m.fromName}${of}${ago}]`;
 }
 
-/** The text a hook hands Codex for these messages, or null when there are
- *  none to hand over. Each message is claimed as it is taken: one that
- *  another hook claimed first is left to it, and one that does not fit is
- *  left for the next. */
-export function compose(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now()): string | null {
+/** A message taken for handing to Codex: its opening line, and its text,
+ *  cut to fit when it had to be. */
+export interface Taken {
+  dir: string;
+  message: ChannelMessage;
+  part: string;
+}
+
+/** Take what fits of these messages for handing to Codex, oldest first.
+ *  Each is claimed as it is taken: one another hook claimed first is left to
+ *  it, and one that does not fit is left for the next. [] when none is. */
+export function take(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now()): Taken[] {
   const replies = new Map<string, TaskRecord>();
   for (const dir of new Set(items.map((i) => i.dir))) {
     for (const t of listTasks(dir)) if (t.reply?.id && t.threadId === threadId) replies.set(t.reply.id, t);
   }
-  // What the envelopes may take: the budget, less the line before them.
+  // What the messages may take: the budget, less the line before them.
   let budget = HOOK_BUDGET_TOKENS - 30;
-  const envelopes: string[] = [];
+  const taken: Taken[] = [];
   for (const { dir, message: m } of items) {
     const head = header(m, replies.get(m.id), now);
+    const part = (body: string) => `${head}\n\n${body}`;
     // Counted as Codex gets it, escaped and enveloped.
-    const build = (body: string) => buildDelegation(`${head}\n\n${body}`);
-    let envelope = build(m.text);
-    let cost = estimateTokens(envelope);
-    if (cost > budget) {
+    const cost = (text: string) => estimateTokens(buildDelegation(text));
+    let text = part(m.text);
+    if (cost(text) > budget) {
       // Room for a useful part of it, or it waits for the next hook.
       if (budget < 400) break;
       const pointer = `\n\n[cut here: the whole message is \`codex-collab messages ${m.id}\`]`;
       const cut = (keep: number) => {
         // Never half a character: a high surrogate goes with its pair.
         const end = keep > 0 && /[\ud800-\udbff]/.test(m.text[keep - 1]) ? keep - 1 : keep;
-        return build(m.text.slice(0, end).trimEnd() + pointer);
+        return part(m.text.slice(0, end).trimEnd() + pointer);
       };
       // The most of it that fits.
       let lo = 0;
       let hi = m.text.length;
       while (lo < hi) {
         const mid = Math.ceil((lo + hi) / 2);
-        if (estimateTokens(cut(mid)) <= budget) lo = mid;
+        if (cost(cut(mid)) <= budget) lo = mid;
         else hi = mid - 1;
       }
-      envelope = cut(lo);
-      cost = estimateTokens(envelope);
+      text = cut(lo);
     }
     if (!claimDelivery(dir, threadId, m.id)) continue;
-    budget -= cost;
-    envelopes.push(envelope);
+    budget -= cost(text);
+    taken.push({ dir, message: m, part: text });
   }
-  if (envelopes.length === 0) return null;
-  const count = envelopes.length === 1 ? "A message" : `${envelopes.length} messages`;
-  return `codex-collab: ${count} from Claude Code reached this thread.\n${envelopes.join("\n")}`;
+  return taken;
+}
+
+/** What a hook hands Codex: a line saying what came, then each message in
+ *  its own envelope. */
+export function hookText(taken: Taken[]): string {
+  const count = taken.length === 1 ? "A message" : `${taken.length} messages`;
+  return `codex-collab: ${count} from Claude Code reached this thread.\n${taken.map((t) => buildDelegation(t.part)).join("\n")}`;
+}
+
+/** The text a hook hands Codex for these messages, or null when there are
+ *  none to hand over (see `take`). */
+export function compose(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now()): string | null {
+  const taken = take(items, threadId, now);
+  return taken.length > 0 ? hookText(taken) : null;
 }
 
 /** The hook's answer to Codex for one event, or null for none. */

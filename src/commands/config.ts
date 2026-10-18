@@ -131,6 +131,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
     "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` and `codex-collab peers stop` without asking, outside its sandbox, when each is a plain command; default off)" },
     "codex-hook": { validate: v => v === "on" || v === "off", hint: "on, off (on: Codex hooks hand a Codex thread what Claude Code sessions send it — after each tool call, when a turn would end, and with the user's next message; Codex asks you to trust them first; default off)" },
+    "codex-wake": { validate: v => v === "on" || v === "off", hint: "on, off (on: when a Claude Code session sends a Codex thread a message and the thread is idle on Codex's shared app-server — the Codex app over SSH, a terminal `codex` attached to it — codex-collab starts a turn on it with the message; default off)" },
     linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
     "spawn-model":  { validate: isModelName, hint: `the model a started Claude Code session runs on when \`send\` names none: ${CLAUDE_MODEL_TIERS.map((t) => t.alias).join(", ")}, or a full model name (default: your Claude Code default; see \`codex-collab models --claude\`)` },
     "spawn-models": { validate: v => v.split(",").every((name) => isModelName(name.trim())), hint: "comma-separated full model names to offer a Codex session besides the aliases, e.g. claude-opus-4-6,claude-sonnet-4-6 (shown by `codex-collab models --claude`; any model name works with `send --model` whether listed or not)" },
@@ -419,6 +420,12 @@ export function describeCodexHooks(enabled: boolean, inSync: boolean | null, pat
   return `on (${path}) — Codex hands a thread what Claude Code sessions send it, once you have trusted the hooks in Codex`;
 }
 
+/** One line on waking an idle thread on the shared app-server. */
+export function describeCodexWake(enabled: boolean): string {
+  if (!enabled) return "off — a message to an idle Codex thread waits for its next turn ('codex-collab config codex-wake on' starts one when the thread is idle on Codex's shared app-server)";
+  return "on — a message to a Codex thread idle on Codex's shared app-server starts a turn on it; a thread open in a server of its own (the Codex app on local files) gets it at its next turn";
+}
+
 /** One line on whether `send` can start a Claude Code session in this
  *  workspace: whether Claude Code trusts the folder, and when it does not,
  *  whether Codex does and what `spawn-trust` makes of that. Claude Code has
@@ -475,6 +482,7 @@ export async function handleHealth(args: string[]): Promise<void> {
     console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
     console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
     console.log(`  codex hooks: ${describeCodexHooks(codexHookEnabled(), codexHooksInSync(), codexHooksPath())}`);
+    console.log(`  codex wake: ${describeCodexWake(loadUserConfig()["codex-wake"] === "on")}`);
     const ws = resolveWorkspaceDir(options.dir);
     console.log(`  claude trust: ${describeClaudeTrust(ws, claudeTrusts(ws), codexTrust(ws), loadUserConfig()["spawn-trust"], trustReachesHome(ws))}`);
   }

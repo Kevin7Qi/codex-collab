@@ -35,6 +35,7 @@ import {
   sameContact,
   saveContacts,
   sweepChannels,
+  threadStateDirs,
   writeMessage,
   type Contact,
   type HostState,
@@ -43,7 +44,9 @@ import { TASK_KEEP_MS } from "../claude-tasks";
 import { transientSessionId } from "../claude-sessions";
 import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../peer";
 import { verifyMailboxDir } from "../questions";
-import { parseOptions } from "./shared";
+import { wakeThread } from "../codex-wake";
+import { undelivered } from "./hook";
+import { loadUserConfig, parseOptions } from "./shared";
 
 /** How often the host looks whether the sessions its threads talk to still
  *  run. (The variable is a test seam.) */
@@ -59,6 +62,11 @@ const INBOUND_LIMIT = 1024 * 1024;
 
 /** How often old messages are swept from the mailboxes. */
 const SWEEP_MS = 3600_000;
+
+/** How long after a message arrives the host waits before waking its thread
+ *  (`config codex-wake on`): messages sent together go in one turn. (The
+ *  variable is a test seam.) */
+const WAKE_DELAY_MS = Number(process.env.CODEX_COLLAB_WAKE_DELAY_MS) || 2000;
 
 interface Address {
   threadId: string;
@@ -121,7 +129,38 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     if (a.entryPath) { try { unlinkSync(a.entryPath); } catch { /* gone */ } }
     a.entryPath = null;
   };
+  // ── Waking a thread that is idle on the shared app-server ──
+  // Read at each message, so `config codex-wake` applies at once.
+  const wakeOn = (): boolean => {
+    try { return loadUserConfig()["codex-wake"] === "on"; } catch { return false; }
+  };
+  const wakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const waking = new Set<string>();
+  // The last reason a thread was not woken, so a wait is logged once.
+  const notWoken = new Map<string, string>();
+  const scheduleWake = (threadId: string) => {
+    if (exiting || wakeTimers.has(threadId) || waking.has(threadId) || !wakeOn()) return;
+    wakeTimers.set(threadId, setTimeout(() => {
+      wakeTimers.delete(threadId);
+      if (exiting) return;
+      waking.add(threadId);
+      void wakeThread(threadId).then((outcome) => {
+        if (outcome.woke) {
+          notWoken.delete(threadId);
+          log(`woke Codex thread ${threadId} with ${outcome.messages === 1 ? "a message" : `${outcome.messages} messages`}`);
+        } else if (outcome.why !== "nothing to hand over" && notWoken.get(threadId) !== outcome.why) {
+          notWoken.set(threadId, outcome.why);
+          log(`did not wake Codex thread ${threadId}: ${outcome.why}`);
+        }
+      }, (e) => log(`could not wake Codex thread ${threadId}: ${e instanceof Error ? e.message : String(e)}`))
+        .finally(() => waking.delete(threadId));
+    }, WAKE_DELAY_MS));
+  };
+
   const closeAddress = (a: Address, why: string) => {
+    const timer = wakeTimers.get(a.threadId);
+    if (timer) { clearTimeout(timer); wakeTimers.delete(a.threadId); }
+    notWoken.delete(a.threadId);
     if (addresses.get(a.threadId) === a) addresses.delete(a.threadId);
     try { a.server.close(); } catch { /* closed */ }
     try { unlinkSync(a.socketPath); } catch { /* gone */ }
@@ -270,6 +309,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         // A session that writes to the thread is one it talks to.
         const sender = contactAt(msg.replyPath, claudeEntries());
         if (sender) addContact(a, sender);
+        scheduleWake(a.threadId);
       }
     });
     sock.on("error", () => { /* a dropped connection loses nothing stored */ });
@@ -421,8 +461,14 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         return false;
       });
       if (changed) persist(a);
-      if (a.contacts.length === 0) closeAddress(a, "no Claude Code session it has talked to is running");
-      else keepEntry(a);
+      if (a.contacts.length === 0) {
+        closeAddress(a, "no Claude Code session it has talked to is running");
+        continue;
+      }
+      keepEntry(a);
+      // A thread that was in a turn when its messages came may be idle now;
+      // if no hook has handed them over, a turn is started for them.
+      if (wakeOn() && undelivered(threadStateDirs(a.threadId), a.threadId).length > 0) scheduleWake(a.threadId);
     }
     // Nothing held, nothing being opened, nobody asking: done. A task that
     // asks after this starts a host again.

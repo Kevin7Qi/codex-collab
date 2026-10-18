@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, te
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
 import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
@@ -2538,6 +2538,55 @@ describeUnix("a Codex thread's address", () => {
     const none = await runCli(["messages"], { CODEX_THREAD_ID: "" });
     expect(none.code).toBe(1);
     expect(none.stderr).toContain("no Codex thread ran it");
+  });
+
+  test("with codex-wake on, a reply to a thread idle on the shared app-server starts a turn on it there", async () => {
+    // A stand-in for Codex's shared app-server, at the control socket Codex
+    // would bind under this test's CODEX_HOME: the thread is idle there.
+    const control = join(TEST_HOME, ".codex", "app-server-control", "app-server-control.sock");
+    mkdirSync(dirname(control), { recursive: true });
+    const started: Array<Record<string, unknown>> = [];
+    const asked: string[] = [];
+    const server = Bun.serve({
+      unix: control,
+      fetch(req, srv) {
+        if (srv.upgrade(req)) return undefined as unknown as Response;
+        return new Response("not a websocket", { status: 400 });
+      },
+      websocket: {
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { id?: number; method?: string; params?: Record<string, unknown> };
+          if (msg.id === undefined) return;
+          const reply = (result: unknown): void => { ws.send(JSON.stringify({ id: msg.id, result })); };
+          asked.push(String(msg.method));
+          if (msg.method === "initialize") reply({ userAgent: "fake-shared/1.0" });
+          else if (msg.method === "thread/read") reply({ thread: { id: THREAD, status: { type: "idle" } } });
+          else {
+            if (msg.method === "turn/start") started.push(msg.params!);
+            reply({});
+          }
+        },
+      },
+    });
+    writeConfig({ "codex-wake": "on" });
+    try {
+      const fake = startFake("waking-claude", { reply: null });
+      registerFake(fake);
+      const id = taskIdOf((await runCli(["send", "long job", "--no-wait"])).stdout);
+      speak(fake, fake.received[0].replyPath, "job finished: all green");
+      await waitFor(() => started.length === 1, 10_000);
+      expect(started[0].threadId).toBe(THREAD);
+      const text = (started[0].input as Array<{ text: string }>)[0].text;
+      expect(text).toStartWith("<codex_delegation>");
+      expect(text).toContain(`[message from waking-claude, its reply to task ${id} ("long job")]\n\njob finished: all green`);
+      expect(asked).toContain("thread/resume");
+      // Handed over: no hook gives it to Codex again.
+      const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
+      expect(hooked.stdout).toBe("");
+    } finally {
+      removeConfig();
+      server.stop(true);
+    }
   });
 
   test("the address goes once no session the thread talks to runs, and the host with it, leaving nothing", async () => {

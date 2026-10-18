@@ -178,6 +178,12 @@ export function claimDelivery(stateDir: string, threadId: string, id: string): b
   }
 }
 
+/** Give a claim back: what was claimed never reached Codex after all. */
+export function releaseDelivery(stateDir: string, threadId: string, id: string): void {
+  if (!/^\d{13}-[0-9a-f]{8}$/.test(id)) return;
+  try { unlinkSync(join(deliveredDir(stateDir, threadId), id)); } catch { /* not claimed */ }
+}
+
 export function isDelivered(stateDir: string, threadId: string, id: string): boolean {
   try {
     statSync(join(deliveredDir(stateDir, threadId), id));
