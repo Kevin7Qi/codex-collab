@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "os";
 import { join } from "path";
 import pkg from "../package.json";
+import { shellOperators } from "./test-helpers";
 
 setDefaultTimeout(10_000);
 
@@ -95,6 +96,12 @@ describe("CLI valid commands", () => {
       expect(stdout).not.toContain("Usage: codex-collab <command>");
       // Fits a narrow terminal.
       for (const line of stdout.split("\n")) expect(line.length).toBeLessThanOrEqual(80);
+      // Every example is one plain command, which the codex-rule covers; a
+      // message in a file goes by --file.
+      const examples = stdout.split("\n").filter((l) => /^ {2}codex-collab send\b/.test(l));
+      expect(examples.length).toBeGreaterThan(3);
+      for (const line of examples) expect(shellOperators(line), line).toEqual([]);
+      expect(stdout).toContain("--file <path>         Read the message from a file. Run by Codex, it reads\n                        only inside the folder the Codex session works in.");
     }
     const general = run("run", "--help");
     expect(general.stdout).toContain("Usage: codex-collab <command>");
@@ -578,7 +585,7 @@ describe("health: the Codex-side lines", () => {
     expect(describeCodexRule(false, true, path)).toContain("codex-collab config codex-rule on");
     // Everything the rule lets Codex do without asking is named: the user
     // consents to what is said here.
-    expect(describeCodexRule(true, true, path)).toBe("on (/h/.codex/rules/codex-collab.rules) — Codex runs `codex-collab send` and `peers stop` without asking");
+    expect(describeCodexRule(true, true, path)).toBe("on (/h/.codex/rules/codex-collab.rules) — Codex runs `codex-collab send` and `peers stop` without asking when each is a plain command (`send --file <path>` for a message in a file)");
     expect(describeCodexRule(true, false, path)).toContain("out of date — run 'codex-collab skill sync'");
     expect(describeCodexRule(true, null, path)).toContain("is missing — run 'codex-collab skill sync'");
   });

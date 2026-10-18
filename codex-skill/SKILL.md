@@ -22,15 +22,15 @@ codex-collab is the whole path to them: it records every message as a task and k
     codex-collab peers stop [<name>]      # stop a session codex-collab started
     codex-collab send --help              # which session each form of send reaches; every option
 
-Every `send` is a task with an id, printed when the message is delivered. `--timeout <sec>` (default 600) bounds how long the command waits. The task continues past it for four hours from sending (or the `--timeout`, if longer), not counting time a session codex-collab started spends at a prompt the user can answer through Remote Control, and with at least 60 minutes (`config linger`) after the user answers one; a reply in that time is kept under the id; after that the task is `expired`. `--no-wait` returns once the message is delivered; `task wait <id>` collects the reply afterwards. `codex-collab send <name> -` reads the message from stdin.
+Every `send` is a task with an id, printed when the message is delivered. `--timeout <sec>` (default 600) bounds how long the command waits. The task continues past it for four hours from sending (or the `--timeout`, if longer), not counting time a session codex-collab started spends at a prompt the user can answer through Remote Control, and with at least 60 minutes (`config linger`) after the user answers one; a reply in that time is kept under the id; after that the task is `expired`. `--no-wait` returns once the message is delivered; `task wait <id>` collects the reply afterwards. `--file <path>` reads the message from a file inside the folder this Codex session works in; `-` reads it from stdin.
 
 ## Handing work off without waiting
 
     # a new session, on the model and effort the task calls for
-    codex-collab send --new --no-wait --model <model> --effort <level> - < task.md
+    codex-collab send --new --no-wait --model <model> --effort <level> --file task.md
 
     # a session that is already live, by its name
-    codex-collab send "<name>" --no-wait - < task.md
+    codex-collab send "<name>" --no-wait --file task.md
 
     # later: where it stands, and the reply once it has come
     codex-collab task status <id>
@@ -58,7 +58,7 @@ Simple questions usually return quickly; reviews, implementations and experiment
 
 ## Mechanics
 
-- `send` and `peers stop` reach Claude Code over a local socket, which the sandbox blocks: they run outside the sandbox. `peers`, `task` and `tasks` work inside it. `codex-collab config codex-rule on` removes the per-command approval for `send` and `peers stop`.
+- `send` and `peers stop` reach Claude Code over a local socket, which the sandbox blocks: they run outside the sandbox. `peers`, `task` and `tasks` work inside it. `codex-collab config codex-rule on` removes the per-command approval for `send` and `peers stop` when each is a plain command; a redirect, heredoc or pipe (`send - < task.md`) makes it a shell script, which Codex asks about first, and `--file` keeps it plain.
 - The outcome line is `task: <id>  status: <status>`; a message that could not be delivered gets the reason in its place. Exit codes: **0** replied. **3** no reply yet; the task continues. **5** a session codex-collab started stopped at a prompt nobody could answer, or one the user could answer through Remote Control and had not for 60 minutes (`config linger`); codex-collab stopped it, and its conversation is kept (when it would not stop, the error says so). **1** no reply will come: undeliverable, session gone, the turn of a session codex-collab started ended on an error, or the task expired. The error is reported as the session recorded it, e.g. `429 rate_limit at <time>`, `500 server_error at <time> (3 since delivery)`.
 - A task's own status is `pending`, `running`, `replied`, `blocked`, `lost`, `failed` or `expired`; it is what the `status:` line carries. `task status <id>` reads it once, along with the session's status while the task is open: `busy` (turn in progress), `shell` (turn ended with a command of its own still running), `idle` (nothing in hand), `waiting` (stopped at a prompt).
 - If a turn ends with an error, the task is marked as failed when codex-collab started the session, since nothing there will set it going again. In a session the user is working in, the task stays open and the error is recorded on it. Nothing is sent to the session on the caller's behalf.
