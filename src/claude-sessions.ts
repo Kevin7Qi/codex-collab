@@ -444,24 +444,30 @@ export function spawnedSessionName(cwd: string): string {
  *  it, and how to answer. It goes idle afterwards and receives messages
  *  as its later turns. Mechanics only — what to answer, and how much to
  *  look into before answering, is the session's own judgment. */
-/** How a started session answers, in both briefs. The Codex session
- *  receives the reply and nothing else, so the reply carries the whole
- *  answer; what the session writes in its own transcript after sending it
- *  reaches nobody working with it, and is output the user pays for. Said
- *  again on resuming, since a long or compacted conversation may have lost
- *  the first brief. */
-const REPLY_RULE = "The reply is all the Codex session receives, so put everything the answer needs in it; after sending it, end your turn with one short line at most, such as \"Replied.\"";
+/** How a started session answers, in both briefs. The first thing it sends a
+ *  Codex thread after a message is taken as that message's reply, and the
+ *  Codex session receives the reply and nothing else, so the reply carries
+ *  the whole answer; what the session writes in its own transcript after
+ *  sending it reaches nobody working with it, and is output the user pays
+ *  for. Said again on resuming, since a long or compacted conversation may
+ *  have lost the first brief. */
+const REPLY_RULE = "The first thing you send a Codex thread after its message is taken as the reply, and the reply is all the Codex session receives, so put everything the answer needs in it; after sending it, end your turn with one short line at most, such as \"Replied.\"";
+
+/** How a brief's first turn ends. Nothing has been asked yet: told to reply,
+ *  a session looks for someone to reply to, and told to read the workspace,
+ *  it reads it, before any message has come (#48). */
+const FIRST_TURN = "No message has come yet, so there is no one to send anything to and nothing to read or run: end this turn now with the single word \"Ready.\" in your own output.";
 
 export function spawnedSessionBrief(wsRoot: string): string {
   return [
     `You are a Claude Code session started by codex-collab for the Codex sessions working in ${wsRoot}.`,
-    "Codex sessions message you through codex-collab; each message says which Codex thread it comes from.",
-    `Answer by replying to the sender with SendMessage. ${REPLY_RULE}`,
-    "Read the workspace as needed. Do not change files unless a message asks you to.",
+    "Codex sessions message you through codex-collab, each from its Codex thread's own address, which stays open while you run.",
+    `Answer a message by replying to its sender with SendMessage, and write to that address later with anything the thread should know. ${REPLY_RULE}`,
+    "When a message needs the workspace, read it. Do not change files unless a message asks you to.",
     // Whatever Claude Code's settings decide about where a background
     // session's edits land, the Codex session only knows what the reply says.
     "When you do change files, say in your reply where the changes are: the path, and the branch and commit where there is one.",
-    "You will be stopped after a while with no messages. Reply now with one line saying you are ready, then wait.",
+    `You will be stopped after a while with no messages. ${FIRST_TURN}`,
   ].join(" ");
 }
 
@@ -470,9 +476,9 @@ export function spawnedSessionBrief(wsRoot: string): string {
 export function resumedSessionBrief(): string {
   return [
     "You were stopped by codex-collab after a while with no messages, and have now been resumed; your conversation so far is intact.",
-    `Codex sessions will message you as before, and you answer with SendMessage as before. ${REPLY_RULE}`,
-    "The workspace may have changed while you were stopped — look again before relying on what you saw earlier.",
-    "Reply now with one line saying you are ready, then wait.",
+    `Codex sessions will message you as before, each from its Codex thread's own address, and you answer with SendMessage as before. ${REPLY_RULE}`,
+    "The workspace may have changed while you were stopped: when a message needs it, look again before relying on what you saw earlier.",
+    FIRST_TURN,
   ].join(" ");
 }
 
