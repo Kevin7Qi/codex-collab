@@ -13,7 +13,7 @@ import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow 
 import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
-import { isThreadId, messagesSince, type ChannelMessage } from "../claude-channel";
+import { isThreadId, messagesSince, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
 /** Default wait (seconds) of `send` and of `task wait`. It bounds how long the
@@ -267,6 +267,43 @@ export async function handleTask(args: string[]): Promise<void> {
   if (options.json) console.log(JSON.stringify(record, null, 2));
   else reportOutcome(record, { waitedMs, hint, stateDir });
   process.exit(exitCodeFor(record.status));
+}
+
+/** `messages [<id>]`: what Claude Code sessions sent the Codex thread this
+ *  command runs in, oldest first — the latest `--limit` of them (`--all`
+ *  for every one kept), or one in full. Read from the thread's mailboxes, so
+ *  it works inside Codex's sandbox. */
+export async function handleMessages(args: string[]): Promise<void> {
+  const { positional, options } = parseOptions(args);
+  const threadId = process.env.CODEX_THREAD_ID;
+  if (!isThreadId(threadId)) {
+    die("`codex-collab messages` prints what Claude Code sessions sent the Codex thread it runs in, and no Codex thread ran it (CODEX_THREAD_ID is not set).");
+  }
+  const all = threadStateDirs(threadId)
+    .flatMap((dir) => messagesSince(dir, threadId).map((message) => ({ dir, message })))
+    .sort((a, b) => (a.message.id < b.message.id ? -1 : 1));
+  const replyOf = (dir: string, id: string) => listTasks(dir).find((t) => t.threadId === threadId && t.reply?.id === id);
+  const print = ({ dir, message: m }: { dir: string; message: ChannelMessage }) => {
+    const task = replyOf(dir, m.id);
+    console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${task ? `, its reply to task ${task.id}` : ""}:`);
+    for (const l of sanitizeForTerminal(m.text).trimEnd().split("\n")) console.log(`  ${l}`);
+  };
+  const wanted = positional[0];
+  if (wanted) {
+    const found = all.filter((x) => x.message.id.startsWith(wanted));
+    if (found.length !== 1) {
+      die(found.length > 1 ? `"${wanted}" matches several messages: ${found.map((x) => x.message.id).join(", ")}` : `No message "${wanted}" to this thread. \`codex-collab messages\` lists them.`);
+    }
+    print(found[0]);
+    return;
+  }
+  if (all.length === 0) {
+    console.log("No Claude Code session has sent this thread anything.");
+    return;
+  }
+  const shown = all.slice(-options.limit);
+  if (shown.length < all.length) console.log(`(${all.length - shown.length} older not shown — --all prints every one kept.)`);
+  for (const x of shown) print(x);
 }
 
 /** `tasks`: this workspace's tasks, newest first. */

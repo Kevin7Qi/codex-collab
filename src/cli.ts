@@ -150,12 +150,14 @@ function showClaudeHelp() {
   codex-collab task result <id>      Print a task's reply if it has come
   codex-collab task status <id>      Where a task stands (--json: the record)
   codex-collab tasks                 The tasks sent from this workspace
+  codex-collab messages [<id>]       What Claude Code sessions sent this
+                                     thread, or one message in full
   codex-collab peers stop [<session>]
                                      Stop a session codex-collab started; its
                                      conversation is kept
 
-send and peers stop run outside the Codex sandbox; peers, task and tasks work
-inside it.
+send and peers stop run outside the Codex sandbox; peers, task, tasks and
+messages work inside it.
 
 Which session send reaches
   send "<session>" "…"  That live session (or --to <session>; a unique prefix
@@ -526,7 +528,7 @@ async function main() {
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
     "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
-    "peer", "peers", "send", "task", "tasks", "reap-claude", "recv-task", "channel-host",
+    "peer", "peers", "send", "task", "tasks", "messages", "hook", "reap-claude", "recv-task", "channel-host",
   ]);
   if (!knownCommands.has(command)) {
     console.error(`Error: Unknown command: ${command}`);
@@ -538,7 +540,7 @@ async function main() {
   // not past a `--` terminator, where it is positional prompt text.
   const optionTokens = rest.includes("--") ? rest.slice(0, rest.indexOf("--")) : rest;
   if (optionTokens.includes("-h") || optionTokens.includes("--help")) {
-    if (["send", "peers", "task", "tasks"].includes(command)) showClaudeHelp();
+    if (["send", "peers", "task", "tasks", "messages"].includes(command)) showClaudeHelp();
     else showHelp();
     process.exit(0);
   }
@@ -611,6 +613,12 @@ async function main() {
       return (await import("./commands/task")).handleTask(rest);
     case "tasks":
       return (await import("./commands/task")).handleTasks(rest);
+    case "messages":
+      return (await import("./commands/task")).handleMessages(rest);
+    case "hook":
+      // Run by Codex as a hook (`config codex-hook on`): hands the thread
+      // what Claude Code sessions sent it (see commands/hook.ts).
+      return (await import("./commands/hook")).handleHook(rest);
     case "reap-claude":
       // Private: the detached reaper `send` starts for a Claude session it
       // spawned (see claude-sessions.ts). Not in --help.

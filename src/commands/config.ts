@@ -10,6 +10,7 @@ import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 import { claudeConfigFile, claudeTrusts, codexConfigFile, codexTrust, isSpawnTrustSetting, trustReachesHome } from "../claude-trust";
 import { underCodex } from "./send";
+import { codexHookEnabled, codexHooksInSync, codexHooksPath, installCodexHooks, removeCodexHooks } from "../codex-hooks";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
  *  consent to write (or remove) the Codex exec-policy rule. */
@@ -57,6 +58,47 @@ function setCodexRuleAndSave(cfg: UserConfig, on: boolean): void {
     die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)} — ${undone}.`);
   }
 }
+
+/** `config codex-hook on|off` is applied as it is set, as `codex-rule` is:
+ *  the setting IS the consent to add (or take out) the hooks. */
+function applyCodexHook(on: boolean): void {
+  if (on) {
+    const path = installCodexHooks();
+    console.log(`Added codex-collab's hooks to ${path}. Codex asks you to trust them the next time it starts (in the app or the terminal UI); from then on it hands a Codex thread what Claude Code sessions send it: after each tool call, when a turn would end, and with your next message.`);
+  } else if (removeCodexHooks()) {
+    console.log(`Took codex-collab's hooks out of ${codexHooksPath()}: what Claude Code sessions send a Codex thread reaches it through \`send\`, \`task wait\`, \`task result\` and \`messages\` only.`);
+  }
+}
+
+/** Apply the hook change and record the setting as one step, undoing the
+ *  change if the setting cannot be saved (as for the rule, above). */
+function setCodexHookAndSave(cfg: UserConfig, on: boolean): void {
+  const hadHooks = codexHooksInSync() !== null;
+  try {
+    applyCodexHook(on);
+  } catch (e) {
+    die(`Could not ${on ? "add hooks to" : "take hooks out of"} ${codexHooksPath()}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  try {
+    saveUserConfigOrThrow(cfg);
+  } catch (e) {
+    let undone: string;
+    try {
+      if (on && !hadHooks) {
+        removeCodexHooks();
+        undone = "the hooks were taken out again";
+      } else if (!on && hadHooks) {
+        installCodexHooks();
+        undone = "the hooks were put back";
+      } else {
+        undone = "the hooks are as they were";
+      }
+    } catch (u) {
+      undone = `and the hooks could not be put as they were: ${u instanceof Error ? u.message : String(u)}`;
+    }
+    die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)} — ${undone}.`);
+  }
+}
 import type { Model, AccountRead } from "../types";
 import {
   die,
@@ -88,6 +130,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     server:    { validate: v => (SERVER_PREFERENCES as readonly string[]).includes(v), hint: `${SERVER_PREFERENCES.join(", ")} (auto: attach to Codex's own app-server when its socket answers, else run a private one)` },
     spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
     "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` and `codex-collab peers stop` without asking, outside its sandbox, when each is a plain command; default off)" },
+    "codex-hook": { validate: v => v === "on" || v === "off", hint: "on, off (on: Codex hooks hand a Codex thread what Claude Code sessions send it — after each tool call, when a turn would end, and with the user's next message; Codex asks you to trust them first; default off)" },
     linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
     "spawn-model":  { validate: isModelName, hint: `the model a started Claude Code session runs on when \`send\` names none: ${CLAUDE_MODEL_TIERS.map((t) => t.alias).join(", ")}, or a full model name (default: your Claude Code default; see \`codex-collab models --claude\`)` },
     "spawn-models": { validate: v => v.split(",").every((name) => isModelName(name.trim())), hint: "comma-separated full model names to offer a Codex session besides the aliases, e.g. claude-opus-4-6,claude-sonnet-4-6 (shown by `codex-collab models --claude`; any model name works with `send --model` whether listed or not)" },
@@ -102,7 +145,9 @@ export async function handleConfig(args: string[]): Promise<void> {
   // No args -> show current config, or --unset to clear all
   if (positional.length === 0) {
     if (options.explicit.has("unset")) {
-      if ((cfg as Record<string, unknown>)["codex-rule"] === "on") setCodexRuleAndSave({}, false);
+      const had = cfg as Record<string, unknown>;
+      if (had["codex-hook"] === "on") setCodexHookAndSave({ ...(had["codex-rule"] === "on" ? { "codex-rule": "on" } : {}) } as UserConfig, false);
+      if (had["codex-rule"] === "on") setCodexRuleAndSave({}, false);
       else saveUserConfig({});
       console.log("All config values cleared. Using auto-detected defaults.");
       return;
@@ -131,6 +176,7 @@ export async function handleConfig(args: string[]): Promise<void> {
   if (options.explicit.has("unset")) {
     delete (cfg as Record<string, unknown>)[key];
     if (key === "codex-rule") setCodexRuleAndSave(cfg, false);
+    else if (key === "codex-hook") setCodexHookAndSave(cfg, false);
     else saveUserConfig(cfg);
     console.log(`Unset ${key} (will use auto-detected default)`);
     return;
@@ -155,8 +201,8 @@ export async function handleConfig(args: string[]): Promise<void> {
     die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
   }
 
-  if (key === "codex-rule" && value === "on" && process.platform === "win32") {
-    die("codex-rule is unavailable on Windows: Claude Code's cross-session messaging, which `codex-collab send` rides on, does not exist there.");
+  if ((key === "codex-rule" || key === "codex-hook") && value === "on" && process.platform === "win32") {
+    die(`${key} is unavailable on Windows: Claude Code's cross-session messaging, which \`codex-collab send\` rides on, does not exist there.`);
   }
   // Turning it on is the user's consent to having folders trusted in Claude
   // Code on their behalf, so it cannot come from the agent it serves.
@@ -167,6 +213,7 @@ export async function handleConfig(args: string[]): Promise<void> {
   (cfg as Record<string, unknown>)[key] =
     key === "timeout" || key === "linger" || (key === "spawn-resume" && value !== "off") ? Number(value) : key === "memory" ? value === "true" : value;
   if (key === "codex-rule") setCodexRuleAndSave(cfg, value === "on");
+  else if (key === "codex-hook") setCodexHookAndSave(cfg, value === "on");
   else saveUserConfig(cfg);
   console.log(`Set ${key}: ${value}`);
   if (key === "spawn-trust" && value === "codex") {
@@ -363,6 +410,15 @@ export function describeCodexRule(enabled: boolean, inSync: boolean | null, path
   return `on (${path}) — Codex runs \`codex-collab send\` and \`peers stop\` without asking when each is a plain command (\`send --file <path>\` for a message in a file)`;
 }
 
+/** One line on the opt-in hooks: on and as this binary writes them, on but
+ *  missing or different, or off. */
+export function describeCodexHooks(enabled: boolean, inSync: boolean | null, path: string): string {
+  if (!enabled) return "off — what Claude Code sessions send a Codex thread reaches it through `send`, `task wait`, `task result` and `messages` ('codex-collab config codex-hook on' hands it over in the thread's turns)";
+  if (inSync === null) return `on, but codex-collab's hooks are missing from ${path} — run 'codex-collab config codex-hook on'`;
+  if (!inSync) return `on, but codex-collab's hooks in ${path} are out of date — run 'codex-collab config codex-hook on'`;
+  return `on (${path}) — Codex hands a thread what Claude Code sessions send it, once you have trusted the hooks in Codex`;
+}
+
 /** One line on whether `send` can start a Claude Code session in this
  *  workspace: whether Claude Code trusts the folder, and when it does not,
  *  whether Codex does and what `spawn-trust` makes of that. Claude Code has
@@ -418,6 +474,7 @@ export async function handleHealth(args: string[]): Promise<void> {
   if (process.platform !== "win32") {
     console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
     console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
+    console.log(`  codex hooks: ${describeCodexHooks(codexHookEnabled(), codexHooksInSync(), codexHooksPath())}`);
     const ws = resolveWorkspaceDir(options.dir);
     console.log(`  claude trust: ${describeClaudeTrust(ws, claudeTrusts(ws), codexTrust(ws), loadUserConfig()["spawn-trust"], trustReachesHome(ws))}`);
   }

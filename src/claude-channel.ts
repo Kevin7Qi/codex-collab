@@ -28,7 +28,7 @@ import { closeSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, re
 import { connect } from "node:net";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { mailboxRoot, workspaceHash } from "./config";
+import { config, mailboxRoot, workspaceHash } from "./config";
 import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix } from "./peer";
 import { acquireLockAsync } from "./lock";
 import { spawnEnv } from "./claude-sessions";
@@ -151,6 +151,55 @@ export function messagesSince(stateDir: string, threadId: string, sinceMs = 0): 
   return messageIdsSince(stateDir, threadId, sinceMs)
     .map((id) => readMessage(stateDir, threadId, id))
     .filter((m): m is ChannelMessage => m !== null);
+}
+
+// ─── Handing messages to Codex ───────────────────────────────────────────────
+//
+// A message reaches Codex once, whichever route shows it first: a hook in one
+// of the thread's turns (commands/hook.ts), or a command whose output had it.
+// Each is claimed with a marker made only if absent, so two hooks that run
+// at once — parallel tool calls — never both hand the same message over.
+
+function deliveredDir(stateDir: string, threadId: string): string {
+  return join(threadDir(stateDir, threadId), "delivered");
+}
+
+/** Claim a message for handing to Codex: true when this call claimed it,
+ *  false when it was already claimed (or cannot be — a sandbox that keeps the
+ *  state dir read-only — in which case it is somebody else's to hand over). */
+export function claimDelivery(stateDir: string, threadId: string, id: string): boolean {
+  if (!/^\d{13}-[0-9a-f]{8}$/.test(id)) return false;
+  try {
+    mkdirSync(deliveredDir(stateDir, threadId), { recursive: true, mode: 0o700 });
+    closeSync(openSync(join(deliveredDir(stateDir, threadId), id), "wx", 0o600));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isDelivered(stateDir: string, threadId: string, id: string): boolean {
+  try {
+    statSync(join(deliveredDir(stateDir, threadId), id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The state dirs holding a mailbox of this thread: one per workspace it
+ *  sent from (`send -d` can name another), found by looking. */
+export function threadStateDirs(threadId: string, root: string = join(config.dataDir, "workspaces")): string[] {
+  if (!isThreadId(threadId)) return [];
+  let workspaces: string[];
+  try {
+    workspaces = readdirSync(root);
+  } catch {
+    return [];
+  }
+  return workspaces
+    .map((w) => join(root, w))
+    .filter((dir) => { try { return statSync(join(channelsDir(dir), threadId)).isDirectory(); } catch { return false; } });
 }
 
 /** Watch the thread's mailbox for the first message since `sinceMs` that
@@ -467,6 +516,14 @@ export function sweepChannels(stateDir: string, maxAgeMs: number, now: number = 
       if (!old) continue;
       try { unlinkSync(join(dir, f)); if (m) removed++; } catch { /* gone */ }
     }
+    // A delivery marker is named after its message, and goes with it.
+    const claims = deliveredDir(stateDir, threadId);
+    let marks: string[] = [];
+    try { marks = readdirSync(claims); } catch { /* none */ }
+    for (const f of marks) {
+      if (/^\d{13}-/.test(f) && f.slice(0, 13) < cutoff) { try { unlinkSync(join(claims, f)); } catch { /* gone */ } }
+    }
+    try { rmdirSync(claims); } catch { /* not empty, or none */ }
     if (open.has(threadId) || loadContacts(stateDir, threadId).length > 0) continue;
     try { rmdirSync(dir); } catch { /* not empty, or none */ }
     try { unlinkSync(contactsFile(stateDir, threadId)); } catch { /* none */ }

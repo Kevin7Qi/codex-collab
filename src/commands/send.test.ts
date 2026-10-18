@@ -2521,6 +2521,25 @@ describeUnix("a Codex thread's address", () => {
     expect(r.stdout).not.toContain("fyi from elsewhere");
   });
 
+  test("messages prints what sessions sent the thread, says which was a reply, and prints one whole by its id", async () => {
+    const fake = startFake("chatty-claude");
+    registerFake(fake);
+    const sent = await runCli(["send", "--to", "chatty-claude", "summarise it"]);
+    const id = taskIdOf(sent.stdout);
+    speak(fake, fake.received[0].replyPath, "and here is the long part");
+    await waitFor(() => inboxTexts().includes("and here is the long part"));
+    const listed = await runCli(["messages"]);
+    expect(listed.code).toBe(0);
+    expect(listed.stdout).toMatch(new RegExp(`MESSAGE (\\d{13}-[0-9a-f]{8}) FROM chatty-claude \\([^)]+ ago\\), its reply to task ${id}:\\n  pong: summarise it\\nMESSAGE (\\d{13}-[0-9a-f]{8}) FROM chatty-claude \\([^)]+ ago\\):\\n  and here is the long part\\n$`));
+    const later = /MESSAGE (\d{13}-[0-9a-f]{8}) FROM chatty-claude \([^)]+ ago\):\n  and here is the long part/.exec(listed.stdout)![1];
+    const one = await runCli(["messages", later]);
+    expect(one.stdout).toMatch(new RegExp(`^MESSAGE ${later} FROM chatty-claude \\([^)]+ ago\\):\\n  and here is the long part\\n$`));
+    // Only a Codex thread has messages.
+    const none = await runCli(["messages"], { CODEX_THREAD_ID: "" });
+    expect(none.code).toBe(1);
+    expect(none.stderr).toContain("no Codex thread ran it");
+  });
+
   test("the address goes once no session the thread talks to runs, and the host with it, leaving nothing", async () => {
     const fake = startFake("brief-claude");
     registerFake(fake);
