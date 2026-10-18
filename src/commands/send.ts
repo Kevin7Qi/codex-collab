@@ -120,11 +120,14 @@ export function readMessageFile(path: string, root: string | null): { ok: true; 
   if (root && !within(real, root)) return outside;
   let fd: number;
   try {
-    fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    // Without blocking: a pipe named here would otherwise wait for a writer
+    // for ever. Only a regular file is read.
+    fd = openSync(real, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0));
   } catch (e) {
     return failed(e);
   }
   try {
+    if (!fstatSync(fd).isFile()) return { ok: false, outside: false, why: "not a regular file" };
     if (root) {
       let opened: string | null = null;
       try {

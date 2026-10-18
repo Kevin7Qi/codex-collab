@@ -2004,6 +2004,16 @@ describeUnix("send", () => {
     const blank = await runCli(["send", "--file", empty]);
     expect(blank.code).toBe(1);
     expect(blank.stderr).toContain(`${empty} holds no message`);
+    // A pipe would wait for a writer for ever: refused at once, as anything
+    // but a regular file is.
+    const fifo = join(WS, "task-pipe");
+    rmSync(fifo, { force: true });
+    spawnSync("mkfifo", [fifo]);
+    const piped = await runCli(["send", "--file", fifo]);
+    expect(piped.code).toBe(1);
+    expect(piped.stderr).toContain(`Could not read the message from ${fifo}: not a regular file`);
+    expect((await runCli(["send", "--file", WS])).stderr).toContain("not a regular file");
+    rmSync(fifo, { force: true });
     const both = await runCli(["send", "--file", file, "-"]);
     expect(both.code).toBe(1);
     expect(both.stderr).toContain("--file and - each say where the message comes from: give one of them.");
