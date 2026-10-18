@@ -43,7 +43,7 @@ Simple questions usually return quickly; reviews, implementations and experiment
 
 ## What Claude sends this thread
 
-Every message this thread sends goes from its own address, `codex(<thread>-<workspace>)`, which stays open while a Claude Code session the thread has talked to runs. Claude replies there, and can write there later with anything the thread should know, such as what changed after the user talked to it directly; whatever arrives is kept for the thread. A task's reply is the first message its session sends back after delivery, so one reply can answer several messages, and it ends every task it answers.
+Every message this thread sends goes from its own address, `codex(<thread>-<workspace>)`, which stays open while a Claude Code session the thread has talked to runs and something passes through it at least once a day (`config address-idle`); the thread's next `send` opens it again. Claude replies there, and can write there later with anything the thread should know, such as what changed after the user talked to it directly; whatever arrives is kept for the thread. A task's reply is the first message its session sends back after delivery, so one reply can answer several messages, and it ends every task it answers.
 
 It reaches you in the output of `send`, `task wait` and `task result` (which also prints what the session wrote after its reply), and, where the user has turned them on:
 

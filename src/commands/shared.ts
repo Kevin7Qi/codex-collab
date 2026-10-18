@@ -675,6 +675,10 @@ export interface UserConfig {
    *  when a message reaches it (on|off; see codex-wake.ts). Read by the
    *  channel host at each message. */
   "codex-wake"?: string;
+  /** Seconds a Codex thread's address stays open with nothing passing
+   *  through it, or "off" (see claude-channel.ts). Read by the channel host
+   *  at each look. */
+  "address-idle"?: number | string;
 }
 
 export function loadUserConfig(): UserConfig {

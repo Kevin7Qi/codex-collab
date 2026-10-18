@@ -2679,6 +2679,25 @@ describeUnix("a Codex thread's address", () => {
     }
   });
 
+  test("an address with nothing through it for config address-idle closes while its session runs, and the next send opens it again where it was", async () => {
+    const fake = startFake("lasting-claude");
+    registerFake(fake);
+    writeConfig({ "address-idle": 2 });
+    try {
+      expect((await runCli(["send", "--to", "lasting-claude", "once"])).code).toBe(0);
+      const socket = fake.received[0].replyPath;
+      expect(addressEntries()).toHaveLength(1);
+      // Two quiet seconds: gone, though the session is still there.
+      await waitFor(() => addressEntries().length === 0 && !existsSync(socket), 8000);
+      expect(contacts()).toEqual([]);
+      const again = await runCli(["send", "--to", "lasting-claude", "twice"]);
+      expect(again.stdout).toContain("  pong: twice");
+      expect(fake.received[1].replyPath).toBe(socket);
+    } finally {
+      removeConfig();
+    }
+  });
+
   test("the address goes once no session the thread talks to runs, and the host with it, leaving nothing", async () => {
     const fake = startFake("brief-claude");
     registerFake(fake);

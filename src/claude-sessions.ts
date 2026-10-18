@@ -461,7 +461,7 @@ const FIRST_TURN = "No message has come yet, so there is no one to send anything
 export function spawnedSessionBrief(wsRoot: string): string {
   return [
     `You are a Claude Code session started by codex-collab for the Codex sessions working in ${wsRoot}.`,
-    "Codex sessions message you through codex-collab, each from its Codex thread's own address, which stays open while you run.",
+    "Codex sessions message you through codex-collab, each from its Codex thread's own address, which stays open while you run and it is in use.",
     `Answer a message by replying to its sender with SendMessage, and write to that address later with anything the thread should know. ${REPLY_RULE}`,
     "When a message needs the workspace, read it. Do not change files unless a message asks you to.",
     // Whatever Claude Code's settings decide about where a background

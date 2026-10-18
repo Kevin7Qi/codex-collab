@@ -67,23 +67,64 @@ function addressFile(stateDir: string, threadId: string): string {
   return join(threadDir(stateDir, threadId), "address.json");
 }
 
-/** The socket a thread's address has used, as its host recorded it. */
-export function recordedSocketPath(stateDir: string, threadId: string): string | null {
+/** What the host keeps about a thread's address between its runs: the
+ *  socket it has used, and when it was last in use. */
+interface AddressRecord {
+  socketPath?: string;
+  lastActiveAt?: number;
+}
+
+function readAddress(stateDir: string, threadId: string): AddressRecord {
   try {
     const a = JSON.parse(readFileSync(addressFile(stateDir, threadId), "utf-8"));
-    return typeof a?.socketPath === "string" && isAbsolute(a.socketPath) && a.socketPath.endsWith(".sock") ? a.socketPath : null;
+    return a && typeof a === "object" ? a as AddressRecord : {};
   } catch {
-    return null;
+    return {};
   }
+}
+
+function writeAddress(stateDir: string, threadId: string, record: AddressRecord): void {
+  const file = addressFile(stateDir, threadId);
+  mkdirSync(threadDir(stateDir, threadId), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(record) + "\n", { mode: 0o600 });
+  renameSync(tmp, file);
+}
+
+/** The socket a thread's address has used, as its host recorded it. */
+export function recordedSocketPath(stateDir: string, threadId: string): string | null {
+  const { socketPath } = readAddress(stateDir, threadId);
+  return typeof socketPath === "string" && isAbsolute(socketPath) && socketPath.endsWith(".sock") ? socketPath : null;
 }
 
 /** Record the socket a thread's address uses. For the host alone. */
 export function recordSocketPath(stateDir: string, threadId: string, socketPath: string): void {
-  const file = addressFile(stateDir, threadId);
-  mkdirSync(threadDir(stateDir, threadId), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ socketPath }) + "\n", { mode: 0o600 });
-  renameSync(tmp, file);
+  writeAddress(stateDir, threadId, { ...readAddress(stateDir, threadId), socketPath });
+}
+
+/** Record when the thread's address was last in use. For the host alone. */
+export function recordActivity(stateDir: string, threadId: string, at: number = Date.now()): void {
+  writeAddress(stateDir, threadId, { ...readAddress(stateDir, threadId), lastActiveAt: at });
+}
+
+/** When the thread's address was last in use, as far as what is on disk
+ *  tells: its host's record, or the latest message to it. 0 for never. */
+export function lastActivityOf(stateDir: string, threadId: string): number {
+  const recorded = readAddress(stateDir, threadId).lastActiveAt;
+  const ids = messageIdsSince(stateDir, threadId);
+  const latest = ids.length > 0 ? Number(ids[ids.length - 1].slice(0, 13)) : 0;
+  return Math.max(typeof recorded === "number" && Number.isFinite(recorded) ? recorded : 0, latest);
+}
+
+/** How long an address stays open with nothing passing through it, by
+ *  default: a day. `config address-idle` sets it, in seconds, or `off`. */
+export const DEFAULT_ADDRESS_IDLE_SEC = 24 * 3600;
+
+/** The idle limit in milliseconds as the user set it, or null for none. */
+export function addressIdleMs(setting: unknown): number | null {
+  if (setting === "off") return null;
+  const n = Number(setting);
+  return setting !== undefined && Number.isInteger(n) && n > 0 ? n * 1000 : DEFAULT_ADDRESS_IDLE_SEC * 1000;
 }
 
 /** The socket for a thread's address: the one it has used before, for as

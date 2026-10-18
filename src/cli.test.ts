@@ -597,6 +597,14 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     expect(cli("config", "codex-hook").stdout).toContain("not set");
   });
 
+  it("config address-idle takes seconds or off", () => {
+    expect(cli("config", "address-idle", "3600").exitCode).toBe(0);
+    expect(cli("config", "address-idle").stdout).toContain("address-idle: 3600");
+    expect(cli("config", "address-idle", "off").exitCode).toBe(0);
+    for (const bad of ["0", "-1", "1.5", "soon"]) expect(cli("config", "address-idle", bad).exitCode).toBe(1);
+    expect(cli("config", "address-idle", "--unset").exitCode).toBe(0);
+  });
+
   it("--codex and --rules are refused on sync", () => {
     const r = cli("skill", "sync", "--rules");
     expect(r.exitCode).toBe(1);

@@ -11,7 +11,7 @@ import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillIn
 import { claudeConfigFile, claudeTrusts, codexConfigFile, codexTrust, isSpawnTrustSetting, trustReachesHome } from "../claude-trust";
 import { underCodex } from "./send";
 import { codexHookEnabled, codexHooksInSync, codexHooksPath, installCodexHooks, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "../codex-hooks";
-import { claimEveryMessage } from "../claude-channel";
+import { DEFAULT_ADDRESS_IDLE_SEC, claimEveryMessage } from "../claude-channel";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
  *  consent to write (or remove) the Codex exec-policy rule. */
@@ -130,6 +130,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     spawn:     { validate: v => v === "on" || v === "off", hint: "on, off (start a background Claude Code session when a Codex `send` finds none live; default on)" },
     "codex-rule": { validate: v => v === "on" || v === "off", hint: "on, off (on: a Codex exec-policy rule lets Codex run `codex-collab send` and `codex-collab peers stop` without asking, outside its sandbox, when each is a plain command; default off)" },
     "codex-hook": { validate: v => v === "on" || v === "off", hint: "on, off (on: Codex hooks hand a Codex thread what Claude Code sessions send it — after each tool call, when a turn would end, and with the user's next message; Codex asks you to trust them first; default off)" },
+    "address-idle": { validate: v => v === "off" || (Number.isInteger(Number(v)) && Number(v) > 0 && Number(v) <= MAX_TIMEOUT_SECONDS), hint: `seconds a Codex thread's address stays open with nothing sent through it — no message to it, no send from the thread, no task waiting — 1-${MAX_TIMEOUT_SECONDS}, or off to keep it while a Claude Code session it talked to runs (default ${DEFAULT_ADDRESS_IDLE_SEC}, a day); the thread's next send opens it again` },
     "codex-wake": { validate: v => v === "on" || v === "off", hint: "on, off (on: when a Claude Code session sends a Codex thread a message while the thread is idle on Codex's shared app-server — the Codex app over SSH, a terminal `codex` attached to it — codex-collab starts a turn on it with the message; one that comes during a turn is codex-hook's to hand over; default off)" },
     linger:    { validate: v => { const n = Number(v); return Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS; }, hint: `seconds a started Claude Code session may idle before it is stopped, 1-${MAX_TIMEOUT_SECONDS} (default ${DEFAULT_SPAWN_LINGER_SEC})` },
     "spawn-model":  { validate: isModelName, hint: `the model a started Claude Code session runs on when \`send\` names none: ${CLAUDE_MODEL_TIERS.map((t) => t.alias).join(", ")}, or a full model name (default: your Claude Code default; see \`codex-collab models --claude\`)` },
@@ -211,7 +212,7 @@ export async function handleConfig(args: string[]): Promise<void> {
     die("spawn-trust codex is the user's to turn on, from their own terminal: with it, codex-collab marks folders trusted in Claude Code, and their settings, hooks and MCP servers then run under the user's account. It is not turned on from a command Codex runs.");
   }
   (cfg as Record<string, unknown>)[key] =
-    key === "timeout" || key === "linger" || (key === "spawn-resume" && value !== "off") ? Number(value) : key === "memory" ? value === "true" : value;
+    key === "timeout" || key === "linger" || ((key === "spawn-resume" || key === "address-idle") && value !== "off") ? Number(value) : key === "memory" ? value === "true" : value;
   if (key === "codex-rule") setCodexRuleAndSave(cfg, value === "on");
   else if (key === "codex-hook") setCodexHookAndSave(cfg, value === "on");
   else saveUserConfig(cfg);

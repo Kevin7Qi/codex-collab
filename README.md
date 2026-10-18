@@ -286,7 +286,7 @@ After `peer up`, `ListAgents` shows `codex(myproject-a1b2c3)` — message it and
 
 From Codex's own sessions, `codex-collab send <name> "message"` hands a Claude Code session in the workspace a message as a task and waits for its reply (default 600 s). The wait bounds the command only: a reply that comes within four hours of sending is kept for `task wait` / `task result` (exit 0 replied, 3 still running, 5 stopped at a prompt, 1 no reply will come: failed, lost or expired). For a session `send` started, time it waits at a prompt you can answer through Remote Control does not count toward those hours, and once you answer one it has at least `linger` seconds to reply. With none live, `send` starts a background session that stops after 60 idle minutes. Codex asks before each `send` and `peers stop` unless `config codex-rule on` (experimental). The `claude-collab` skill installed by `install.sh` teaches Codex these commands. Not on Windows.
 
-Each Codex thread sends from one address of its own, `codex(<thread>-<workspace>)`, which stays open while a Claude Code session it has talked to runs: Claude replies there, and can write there later with anything the thread should know. Whatever arrives is kept for the thread and reaches it in the output of `send` and `task`; with `config codex-hook on`, also inside the thread's own turns (after a tool call, when a turn would end, or with your next message); and with `config codex-wake on`, as a new turn when the thread is idle on Codex's shared app-server.
+Each Codex thread sends from one address of its own, `codex(<thread>-<workspace>)`, which stays open while a Claude Code session it has talked to runs and something passes through it at least once a day (`config address-idle`; the thread's next `send` opens it again): Claude replies there, and can write there later with anything the thread should know. Whatever arrives is kept for the thread and reaches it in the output of `send` and `task`; with `config codex-hook on`, also inside the thread's own turns (after a tool call, when a turn would end, or with your next message); and with `config codex-wake on`, as a new turn when the thread is idle on Codex's shared app-server.
 
 | Command | Description |
 |---------|-------------|
@@ -324,7 +324,7 @@ codex-collab config model --unset
 codex-collab config --unset
 ```
 
-Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `spawn-model`, `spawn-effort`, `spawn-models`, `spawn-autocompact`, `spawn-resume`, `spawn-trust`, `codex-rule`, `codex-hook`, `codex-wake`
+Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `timeout`, `memory`, `spawn`, `linger`, `spawn-model`, `spawn-effort`, `spawn-models`, `spawn-autocompact`, `spawn-resume`, `spawn-trust`, `codex-rule`, `codex-hook`, `codex-wake`, `address-idle`
 
 **Experimental:** `codex-rule`, `codex-hook` and `codex-wake` are off by default. Turned on, `codex-rule` lets any Codex session run `codex-collab send` and `peers stop` without asking, `codex-hook` hands a Codex thread what Claude sends it inside its own turns, and `codex-wake` starts a turn for it (details below).
 
@@ -353,6 +353,8 @@ From Claude Code 2.1.281, a background session starts only in a folder you have 
 `codex-hook` (`on` / `off`, default `off`) adds three hooks to Codex's `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`), after any of your own, and `off` or `--unset` takes only those out; your hooks keep their places, which Codex's trust in them depends on. After each tool call, when a turn would end, and when you write to a thread, they hand the thread what Claude Code sessions sent it and it has not seen yet, each message once, in the `<codex_delegation>` form Claude's messages take on the peer side; what `send`, `task` or `messages` already printed counts as seen, as does everything in the mailboxes when the hooks are turned on. At a turn's end, the turn goes on so that Codex can act on what came. Codex asks you to trust the hooks before they run. A message too long for one hook arrives cut, with `codex-collab messages <id>` to print it whole. Not available on Windows.
 
 `codex-wake` (`on` / `off`, default `off`): when a Claude Code session sends a Codex thread a message while the thread is idle on Codex's shared app-server (the Codex app over SSH, or a terminal `codex` attached to `codex app-server daemon`), codex-collab starts a turn on it with the message, on the thread's own settings. A message that arrives while the thread is in a turn is the hooks' to hand over, so the two work together. A thread open in an app-server of its own (the Codex app on local files runs one) cannot be reached from outside, and gets the message at its next turn.
+
+`address-idle` (seconds, or `off`; default 86400, a day): how long a Codex thread's address stays open with nothing passing through it — no message to it, no `send` from the thread, no task waiting on a reply. It then closes as it would once no Claude Code session it talked to is left, and the thread's next `send` opens it again, at the same socket. `off` keeps it while such a session runs.
 
 </details>
 

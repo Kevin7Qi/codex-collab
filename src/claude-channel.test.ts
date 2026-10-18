@@ -11,6 +11,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   ChannelRefused,
+  DEFAULT_ADDRESS_IDLE_SEC,
+  addressIdleMs,
+  lastActivityOf,
+  recordActivity,
   askHost,
   channelName,
   channelSocketPath,
@@ -69,6 +73,29 @@ describe("names", () => {
     expect(name).toMatch(/^codex\(b36a6ba4-[0-9a-f]{6}\)$/);
     // Short enough to show whole wherever Claude Code lists its peers.
     expect(name.length).toBeLessThanOrEqual(40);
+  });
+});
+
+describe("how long an address stays open", () => {
+  test("a day unless the user says otherwise: seconds, or off", () => {
+    expect(addressIdleMs(undefined)).toBe(DEFAULT_ADDRESS_IDLE_SEC * 1000);
+    expect(DEFAULT_ADDRESS_IDLE_SEC).toBe(86_400);
+    expect(addressIdleMs(600)).toBe(600_000);
+    expect(addressIdleMs("off")).toBeNull();
+    expect(addressIdleMs("soon")).toBe(DEFAULT_ADDRESS_IDLE_SEC * 1000);
+  });
+
+  test("its last use is the later of what its host wrote down and its latest message, and survives a recorded socket", () => {
+    const state = freshState();
+    expect(lastActivityOf(state, THREAD)).toBe(0);
+    recordSocketPath(state, THREAD, "/tmp/x/thread-a.sock");
+    recordActivity(state, THREAD, 5_000);
+    expect(lastActivityOf(state, THREAD)).toBe(5_000);
+    writeMessage(state, THREAD, { fromName: "x", replyPath: "/a", text: "hi" }, 9_000);
+    expect(lastActivityOf(state, THREAD)).toBe(9_000);
+    recordSocketPath(state, THREAD, "/tmp/x/thread-b.sock");
+    expect(lastActivityOf(state, THREAD)).toBe(9_000);
+    expect(recordedSocketPath(state, THREAD)).toBe("/tmp/x/thread-b.sock");
   });
 });
 

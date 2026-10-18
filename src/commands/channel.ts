@@ -33,6 +33,9 @@ import {
   isThreadId,
   loadContacts,
   readHostState,
+  addressIdleMs,
+  lastActivityOf,
+  recordActivity,
   recordSocketPath,
   recordedSocketPath,
   releaseDelivery,
@@ -50,7 +53,7 @@ import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStar
 import { verifyMailboxDir } from "../questions";
 import { wakeThread } from "../codex-wake";
 import type { Taken } from "./hook";
-import { loadUserConfig, parseOptions } from "./shared";
+import { formatDuration, loadUserConfig, parseOptions } from "./shared";
 
 /** How often the host looks whether the sessions its threads talk to still
  *  run. (The variable is a test seam.) */
@@ -87,7 +90,16 @@ interface Address {
   respawns: number[];
   /** The socket file this host made, by inode: only that one is removed. */
   socketIno: number | null;
+  /** When something last passed through the address — a message to it, a
+   *  send from its thread, a task's receiver asking for it — and when that
+   *  was last written down. */
+  lastActive: number;
+  activityWritten: number;
 }
+
+/** How stale the written-down time of an address's last use may get: it
+ *  only has to survive a host's restart, give or take. */
+const ACTIVITY_WRITE_MS = 5 * 60_000;
 
 function contactKey(c: Contact): string {
   return c.sessionId ?? `pid:${c.pid}:${c.procStart ?? ""}`;
@@ -134,6 +146,16 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     try { if (ino !== null && statSync(path).ino === ino) unlinkSync(path); } catch { /* gone */ }
   };
   let controlIno: number | null = null;
+  /** Something passed through the address. */
+  const touch = (a: Address) => {
+    a.lastActive = Date.now();
+    if (a.lastActive - a.activityWritten < ACTIVITY_WRITE_MS) return;
+    a.activityWritten = a.lastActive;
+    try { recordActivity(stateDir, a.threadId, a.lastActive); } catch { /* the next one */ }
+  };
+  const idleLimitMs = (): number | null => {
+    try { return addressIdleMs(loadUserConfig()["address-idle"]); } catch { return addressIdleMs(undefined); }
+  };
   const persist = (a: Address) => {
     try { saveContacts(stateDir, a.threadId, a.contacts); } catch (e) { log(`${a.name}: could not record its contacts: ${e instanceof Error ? e.message : String(e)}`); }
   };
@@ -184,6 +206,9 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     if (timer) { clearTimeout(timer); wakeTimers.delete(a.threadId); }
     notWoken.delete(a.threadId);
     if (addresses.get(a.threadId) === a) addresses.delete(a.threadId);
+    // When it was last in use, for the host that opens it next: its idle
+    // time goes on from there.
+    try { recordActivity(stateDir, a.threadId, a.lastActive); } catch { /* the next host starts afresh */ }
     try { a.server.close(); } catch { /* closed */ }
     unlinkOwn(a.socketPath, a.socketIno);
     removeEntry(a);
@@ -347,6 +372,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         try {
           const stored = writeMessage(stateDir, a.threadId, { fromName: msg.fromName, replyPath: msg.replyPath, text: msg.text });
           log(`${a.name}: message ${stored.id} from ${msg.fromName}`);
+          touch(a);
         } catch (e) {
           log(`${a.name}: could not store a message from ${msg.fromName}: ${e instanceof Error ? e.message : String(e)}`);
           continue;
@@ -360,7 +386,10 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     sock.on("error", () => { /* a dropped connection loses nothing stored */ });
   };
 
-  const openAddress = (threadId: string): Promise<Address> => {
+  /** Open the thread's address. `lastActive` is when it was last in use:
+   *  now for an address somebody asks for, what is on disk for one a host
+   *  before this one held. */
+  const openAddress = (threadId: string, lastActive: number = Date.now()): Promise<Address> => {
     const open = addresses.get(threadId);
     if (open) return Promise.resolve(open);
     const pending = opening.get(threadId);
@@ -371,7 +400,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       // whatever this host's environment would choose.
       const usual = threadSocketPath(stateDir, wsRoot, threadId);
       const server = createServer();
-      const a: Address = { threadId, name, socketPath: usual, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [], socketIno: null };
+      const a: Address = { threadId, name, socketPath: usual, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [], socketIno: null, lastActive, activityWritten: 0 };
       server.on("connection", inbound(a));
       const listenAt = async (socketPath: string): Promise<void> => {
         sweepEntriesFor(socketPath);
@@ -429,6 +458,8 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     if (!isContact(req.contact)) return { ok: false, error: "no Claude Code session named for the thread to talk to" };
     try {
       const a = await openAddress(req.threadId);
+      // A send from the thread, or a task's receiver waiting on a reply.
+      touch(a);
       addContact(a, req.contact);
       keepEntry(a);
       if (addresses.get(a.threadId) !== a) return { ok: false, error: `could not register ${a.name} in Claude Code's session registry (${sessionsDir()})` };
@@ -501,9 +532,13 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   let threads: string[] = [];
   try { threads = readdirSync(channelsDir(stateDir)).filter(isThreadId); } catch { /* none */ }
   const entries = claudeEntries();
+  const idleAtStart = idleLimitMs();
   for (const threadId of threads) {
     if (!loadContacts(stateDir, threadId).some((c) => contactRunning(c, entries))) continue;
-    try { await openAddress(threadId); } catch (e) { log(`could not reopen the address of ${threadId}: ${e instanceof Error ? e.message : String(e)}`); }
+    // One that went quiet for longer than an address stays open stays shut.
+    const last = lastActivityOf(stateDir, threadId) || Date.now();
+    if (idleAtStart !== null && Date.now() - last > idleAtStart) continue;
+    try { await openAddress(threadId, last); } catch (e) { log(`could not reopen the address of ${threadId}: ${e instanceof Error ? e.message : String(e)}`); }
   }
 
   const sweep = () => {
@@ -523,7 +558,20 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   // ── Who is still there ──
   setInterval(() => {
     const now = claudeEntries();
+    const idleMs = idleLimitMs();
     for (const a of [...addresses.values()]) {
+      // Nothing through it for the idle limit: it goes, as it would with
+      // nobody left to talk to. The thread's next send opens it again, on
+      // the socket it had.
+      if (idleMs !== null && Date.now() - a.lastActive > idleMs) {
+        closeAddress(a, `nothing has passed through it for ${formatDuration(idleMs)} (config address-idle)`);
+        // Whom it talked to goes too, so that a host started later leaves it
+        // shut and its folder is swept once its messages are: the next send
+        // names its session again.
+        a.contacts = [];
+        persist(a);
+        continue;
+      }
       let changed = false;
       a.contacts = a.contacts.filter((c) => {
         const key = contactKey(c);
