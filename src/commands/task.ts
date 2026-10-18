@@ -13,7 +13,7 @@ import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow 
 import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
-import { isThreadId, messagesSince, threadStateDirs, type ChannelMessage } from "../claude-channel";
+import { claimDelivery, isThreadId, messagesSince, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
 /** Default wait (seconds) of `send` and of `task wait`. It bounds how long the
@@ -98,9 +98,17 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
       for (const l of sanitizeForTerminal(record.reply?.text ?? "").trimEnd().split("\n")) console.log(`  ${l}`);
       // What the session wrote to the thread after it, kept in the mailbox
       // the reply came from.
-      for (const m of opts.stateDir ? laterFromSession(opts.stateDir, record) : []) {
+      const later = opts.stateDir ? laterFromSession(opts.stateDir, record) : [];
+      for (const m of later) {
         console.log(`LATER FROM ${m.fromName} (${since(m.at)} ago):`);
         for (const l of sanitizeForTerminal(m.text).trimEnd().split("\n")) console.log(`  ${l}`);
+      }
+      // Printed, it has reached whoever ran this — Codex, as a rule — and
+      // no hook or woken turn is to hand it over again. Inside Codex's
+      // sandbox the mark cannot be written; the hook after the command
+      // makes it there (claimShown).
+      if (opts.stateDir && isThreadId(record.threadId) && record.reply?.id) {
+        for (const id of [record.reply.id, ...later.map((m) => m.id)]) claimDelivery(opts.stateDir, record.threadId, id);
       }
       return;
     }
@@ -287,6 +295,8 @@ export async function handleMessages(args: string[]): Promise<void> {
     const task = replyOf(dir, m.id);
     console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${task ? `, its reply to task ${task.id}` : ""}:`);
     for (const l of sanitizeForTerminal(m.text).trimEnd().split("\n")) console.log(`  ${l}`);
+    // Printed whole, it has reached whoever ran this (see reportOutcome).
+    claimDelivery(dir, threadId, m.id);
   };
   const wanted = positional[0];
   if (wanted) {

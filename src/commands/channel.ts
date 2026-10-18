@@ -14,7 +14,7 @@
 // outright left in the registry, the next one removes before it registers.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
@@ -27,6 +27,7 @@ import {
   contactAt,
   contactRunning,
   hostControlPath,
+  hostLogFile,
   hostStateFile,
   isContact,
   isThreadId,
@@ -34,11 +35,11 @@ import {
   readHostState,
   recordSocketPath,
   recordedSocketPath,
+  releaseDelivery,
   sameContact,
   saveContacts,
   threadSocketPath,
   sweepChannels,
-  threadStateDirs,
   writeMessage,
   type Contact,
   type HostState,
@@ -48,7 +49,7 @@ import { transientSessionId } from "../claude-sessions";
 import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../peer";
 import { verifyMailboxDir } from "../questions";
 import { wakeThread } from "../codex-wake";
-import { undelivered } from "./hook";
+import type { Taken } from "./hook";
 import { loadUserConfig, parseOptions } from "./shared";
 
 /** How often the host looks whether the sessions its threads talk to still
@@ -84,6 +85,8 @@ interface Address {
   misses: Map<string, number>;
   /** When the holder last had to be put back: a few times, then the address goes. */
   respawns: number[];
+  /** The socket file this host made, by inode: only that one is removed. */
+  socketIno: number | null;
 }
 
 function contactKey(c: Contact): string {
@@ -125,6 +128,12 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   let lastRequestAt = Date.now();
   let exiting = false;
 
+  /** Remove a socket of this host's, and only that: a host that took over
+   *  the path since has its own socket there. */
+  const unlinkOwn = (path: string, ino: number | null) => {
+    try { if (ino !== null && statSync(path).ino === ino) unlinkSync(path); } catch { /* gone */ }
+  };
+  let controlIno: number | null = null;
   const persist = (a: Address) => {
     try { saveContacts(stateDir, a.threadId, a.contacts); } catch (e) { log(`${a.name}: could not record its contacts: ${e instanceof Error ? e.message : String(e)}`); }
   };
@@ -139,15 +148,25 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   };
   const wakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const waking = new Set<string>();
+  // What a wake in progress has claimed: given back if the host stops before
+  // the turn is asked for, or the claims would mark messages Codex never saw.
+  const claimedByWake = new Map<string, Taken[]>();
   // The last reason a thread was not woken, so a wait is logged once.
   const notWoken = new Map<string, string>();
+  // Only a message that arrives is a reason to wake: one that came while the
+  // thread was in a turn is the hooks' to hand over, or what Codex collected
+  // itself, and waking for it later would hand Codex what it may have seen.
   const scheduleWake = (threadId: string) => {
     if (exiting || wakeTimers.has(threadId) || waking.has(threadId) || !wakeOn()) return;
     wakeTimers.set(threadId, setTimeout(() => {
       wakeTimers.delete(threadId);
       if (exiting) return;
       waking.add(threadId);
-      void wakeThread(threadId).then((outcome) => {
+      const onTaken = (taken: Taken[]) => {
+        if (taken.length > 0) claimedByWake.set(threadId, taken);
+        else claimedByWake.delete(threadId);
+      };
+      void wakeThread(threadId, { onTaken }).then((outcome) => {
         if (outcome.woke) {
           notWoken.delete(threadId);
           log(`woke Codex thread ${threadId} with ${outcome.messages === 1 ? "a message" : `${outcome.messages} messages`}`);
@@ -166,7 +185,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     notWoken.delete(a.threadId);
     if (addresses.get(a.threadId) === a) addresses.delete(a.threadId);
     try { a.server.close(); } catch { /* closed */ }
-    try { unlinkSync(a.socketPath); } catch { /* gone */ }
+    unlinkOwn(a.socketPath, a.socketIno);
     removeEntry(a);
     const holder = a.holder;
     a.holder = null;
@@ -177,9 +196,12 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   // handlers, which exit; SIGHUP and a crash are sent there below.
   process.on("exit", () => {
     exiting = true;
+    for (const [threadId, taken] of claimedByWake) {
+      for (const t of taken) releaseDelivery(t.dir, threadId, t.message.id);
+    }
     for (const a of [...addresses.values()]) closeAddress(a, "the host is stopping");
     try { control?.close(); } catch { /* closed */ }
-    try { unlinkSync(controlPath); } catch { /* gone */ }
+    unlinkOwn(controlPath, controlIno);
     if (readHostState(stateDir)?.pid === process.pid) { try { unlinkSync(hostStateFile(stateDir)); } catch { /* gone */ } }
   });
   process.on("SIGHUP", () => process.exit(129));
@@ -283,6 +305,17 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     persist(a);
   };
 
+  // Claude Code sends a message again when it cannot tell the first went:
+  // the same id, stored once. The latest few hundred are remembered.
+  const seenMsgIds = new Set<string>();
+  const seenOnce = (id: string): boolean => {
+    if (!id) return false;
+    if (seenMsgIds.has(id)) return true;
+    seenMsgIds.add(id);
+    if (seenMsgIds.size > 500) seenMsgIds.delete(seenMsgIds.values().next().value as string);
+    return false;
+  };
+
   /** Store what a sender writes to the address, one envelope per line. */
   const inbound = (a: Address) => (sock: Socket) => {
     sock.setEncoding("utf8");
@@ -301,7 +334,16 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         buffer = buffer.slice(idx + 1);
         if (!line) continue;
         const msg = parseEnvelope(line);
-        if (!msg) continue;
+        if (!msg) {
+          // Control frames come this way too; a message in a form this
+          // version does not know would vanish without a trace.
+          log(`${a.name}: a line that is no message: ${line.slice(0, 160)}`);
+          continue;
+        }
+        if (seenOnce(msg.msgId)) {
+          log(`${a.name}: message ${msg.msgId} from ${msg.fromName} again; kept once`);
+          continue;
+        }
         try {
           const stored = writeMessage(stateDir, a.threadId, { fromName: msg.fromName, replyPath: msg.replyPath, text: msg.text });
           log(`${a.name}: message ${stored.id} from ${msg.fromName}`);
@@ -329,7 +371,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       // whatever this host's environment would choose.
       const usual = threadSocketPath(stateDir, wsRoot, threadId);
       const server = createServer();
-      const a: Address = { threadId, name, socketPath: usual, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [] };
+      const a: Address = { threadId, name, socketPath: usual, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [], socketIno: null };
       server.on("connection", inbound(a));
       const listenAt = async (socketPath: string): Promise<void> => {
         sweepEntriesFor(socketPath);
@@ -359,6 +401,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         a.socketPath = fresh;
         await listenAt(fresh);
       }
+      try { a.socketIno = statSync(a.socketPath).ino; } catch { /* removed already: nothing of ours to remove later */ }
       if (recordedSocketPath(stateDir, threadId) !== a.socketPath) {
         try { recordSocketPath(stateDir, threadId, a.socketPath); } catch (e) { log(`${name}: could not record its socket: ${e instanceof Error ? e.message : String(e)}`); }
       }
@@ -442,6 +485,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     log(`control socket error: ${e.message}`);
     process.exit(1);
   });
+  try { controlIno = statSync(controlPath).ino; } catch { /* removed already */ }
 
   // Ready: from here on a client finds this host by its state file.
   let procStart: string | null = procStartTicksOf(process.pid);
@@ -464,6 +508,14 @@ export async function handleChannelHost(args: string[]): Promise<void> {
 
   const sweep = () => {
     try { sweepChannels(stateDir, TASK_KEEP_MS, Date.now(), new Set(addresses.keys())); } catch { /* the next sweep */ }
+    // A host can run for days: its log starts afresh past 1 MB. It is open
+    // for appending, so what comes next goes at the start.
+    try {
+      if (statSync(hostLogFile(stateDir)).size > 1024 * 1024) {
+        truncateSync(hostLogFile(stateDir), 0);
+        log("log started afresh");
+      }
+    } catch { /* no log: output goes elsewhere */ }
   };
   sweep();
   setInterval(sweep, SWEEP_MS);
@@ -488,13 +540,10 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         continue;
       }
       keepEntry(a);
-      // A thread that was in a turn when its messages came may be idle now;
-      // if no hook has handed them over, a turn is started for them.
-      if (wakeOn() && undelivered(threadStateDirs(a.threadId), a.threadId).length > 0) scheduleWake(a.threadId);
     }
-    // Nothing held, nothing being opened, nobody asking: done. A task that
-    // asks after this starts a host again.
-    if (addresses.size === 0 && opening.size === 0 && Date.now() - lastRequestAt >= CHECK_MS) {
+    // Nothing held, nothing being opened or woken, nobody asking: done. A
+    // task that asks after this starts a host again.
+    if (addresses.size === 0 && opening.size === 0 && waking.size === 0 && wakeTimers.size === 0 && Date.now() - lastRequestAt >= CHECK_MS) {
       log("no addresses left: stopping");
       process.exit(0);
     }

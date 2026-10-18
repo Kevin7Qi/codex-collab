@@ -54,7 +54,8 @@ describe("waking a thread", () => {
     expect(s.asked.map((x) => x.method)).toEqual(["thread/read", "thread/resume", "turn/start"]);
     // Its turns are not read, and its settings are left as its user set them.
     expect(s.asked[0].params).toEqual({ threadId: THREAD, includeTurns: false });
-    expect(s.asked[1].params).toEqual({ threadId: THREAD });
+    // Without its turns: on a long thread they are more than one answer holds.
+    expect(s.asked[1].params).toEqual({ threadId: THREAD, excludeTurns: true });
     const start = s.asked[2].params as { threadId: string; input: Array<{ type: string; text: string }> };
     expect(Object.keys(start).sort()).toEqual(["input", "threadId"]);
     expect(start.input).toHaveLength(1);
@@ -70,12 +71,24 @@ describe("waking a thread", () => {
   test("in a turn, or not held by the shared server, it is left alone and nothing is claimed", async () => {
     const { root, ws } = fresh();
     const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
-    for (const [status, why] of [["active", "in a turn"], ["notLoaded", "not held by the shared app-server"], ["systemError", "its state is systemError"]]) {
+    for (const [status, why] of [["active", "in a turn"], ["notLoaded", "not held by the shared app-server"], ["unknownState", "its state is unknownState"]]) {
       const s = server(status);
       expect(await wakeThread(THREAD, { connect: async () => s.client, root })).toEqual({ woke: false, why });
       expect(s.asked.map((x) => x.method)).toEqual(["thread/read"]);
     }
     expect(isDelivered(ws, THREAD, m.id)).toBe(false);
+  });
+
+  test("a thread whose last turn failed takes a turn as an idle one does, and the claims are told before the turn is asked for", async () => {
+    const { root, ws } = fresh();
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "try again" });
+    const s = server("systemError");
+    const told: string[][] = [];
+    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root, onTaken: (taken) => told.push(taken.map((t) => t.message.id)) });
+    expect(outcome).toEqual({ woke: true, messages: 1 });
+    // Told what it claimed, then told it is settled: a host that stops in
+    // between gives the claims back.
+    expect(told).toEqual([[m.id], []]);
   });
 
   test("a turn that cannot be started gives its messages back for the next hook or wake", async () => {

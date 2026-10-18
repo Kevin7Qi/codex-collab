@@ -8,7 +8,7 @@
 // by its place in the file, and only ours are ever taken out. Codex asks the
 // user to trust them before they run.
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { shellQuote } from "./approvals";
@@ -46,10 +46,14 @@ export function hookCommand(bun: string = process.execPath, cli: string = proces
   return `${shellQuote(bun)} ${shellQuote(cli)} hook`;
 }
 
-/** Whether a hook handler is one of ours: it runs this CLI's `hook`. */
+/** Whether a hook handler is one of ours: exactly the command `hookCommand`
+ *  writes — two quoted paths, the second codex-collab's CLI, then `hook` —
+ *  so that no hook of the user's is ever taken for one. */
 export function isOurHandler(h: unknown): boolean {
   const command = (h as { command?: unknown } | null)?.command;
-  return typeof command === "string" && / hook$/.test(command) && /codex-collab|cli\.ts/.test(command);
+  if (typeof command !== "string") return false;
+  const m = /^'(?:[^']|'\\'')+' '((?:[^']|'\\'')+)' hook$/.exec(command);
+  return !!m && (/codex-collab/.test(m[1]) || /\/cli\.ts$/.test(m[1]));
 }
 
 function ourHandler(event: string, command: string): Record<string, unknown> {
@@ -95,27 +99,68 @@ function withoutOurs(groups: unknown): unknown[] {
   return out;
 }
 
-function writeDoc(path: string, doc: HooksDoc): void {
+/** Replace the file's content, atomically. A link (a dotfiles manager's,
+ *  say) stays a link: the file it points to is the one replaced. */
+function writeText(path: string, text: string): void {
   mkdirSync(dirname(path), { recursive: true });
+  let target = path;
+  try { target = realpathSync(path); } catch { /* a new file */ }
   let mode = 0o600;
-  try { mode = statSync(path).mode & 0o777; } catch { /* a new file */ }
-  const tmp = `${path}.codex-collab-${process.pid}.tmp`;
+  try { mode = statSync(target).mode & 0o777; } catch { /* a new file */ }
+  const tmp = `${target}.codex-collab-${process.pid}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode });
-    renameSync(tmp, path);
+    writeFileSync(tmp, text, { mode });
+    renameSync(tmp, target);
   } catch (e) {
     rmSync(tmp, { force: true });
     throw e;
   }
 }
 
+function writeDoc(path: string, doc: HooksDoc): void {
+  writeText(path, JSON.stringify(doc, null, 2) + "\n");
+}
+
+/** The hooks file as it is now, to put back as it was: null for none. */
+export function snapshotCodexHooks(path: string = codexHooksPath()): string | null {
+  try {
+    return readFileSync(path, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/** Put the hooks file back as a snapshot had it. */
+export function restoreCodexHooks(snapshot: string | null, path: string = codexHooksPath()): void {
+  if (snapshot === null) rmSync(path, { force: true });
+  else writeText(path, snapshot);
+}
+
+/** Our hooks in an event's groups, written where ours already are, so that
+ *  every hook keeps its place — Codex keys each hook's trust by it — or
+ *  after the user's when there were none. */
+function withOurs(groups: unknown, handler: Record<string, unknown>): unknown[] {
+  const list = Array.isArray(groups) ? groups : [];
+  let placed = false;
+  const out: unknown[] = [];
+  for (const g of list) {
+    const handlers = (g as { hooks?: unknown } | null)?.hooks;
+    if (!Array.isArray(handlers) || !handlers.some(isOurHandler)) { out.push(g); continue; }
+    const kept: unknown[] = [];
+    for (const h of handlers) {
+      if (!isOurHandler(h)) kept.push(h);
+      else if (!placed) { kept.push(handler); placed = true; }
+    }
+    if (kept.length > 0) out.push({ ...(g as object), hooks: kept });
+  }
+  return placed ? out : [...out, { hooks: [handler] }];
+}
+
 /** Add our hooks (replacing any of ours already there). Returns the path. */
 export function installCodexHooks(command: string = hookCommand(), path: string = codexHooksPath()): string {
   const doc = readDoc(path);
   const hooks: Record<string, unknown> = { ...(doc.hooks ?? {}) };
-  for (const event of HOOK_EVENTS) {
-    hooks[event] = [...withoutOurs(hooks[event]), { hooks: [ourHandler(event, command)] }];
-  }
+  for (const event of HOOK_EVENTS) hooks[event] = withOurs(hooks[event], ourHandler(event, command));
   writeDoc(path, { ...doc, hooks });
   return path;
 }
@@ -137,7 +182,11 @@ export function removeCodexHooks(path: string = codexHooksPath()): boolean {
   if (!found) return false;
   const rest: HooksDoc = { ...doc, hooks };
   if (Object.keys(hooks).length === 0) delete rest.hooks;
-  if (Object.keys(rest).length === 0) rmSync(path, { force: true });
+  // The file goes once it holds nothing — unless it is a link, which is the
+  // user's setup: it keeps an empty object.
+  let link = false;
+  try { link = lstatSync(path).isSymbolicLink(); } catch { /* gone */ }
+  if (Object.keys(rest).length === 0 && !link) rmSync(path, { force: true });
   else writeDoc(path, rest);
   return true;
 }

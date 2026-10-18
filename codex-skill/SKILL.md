@@ -48,7 +48,7 @@ Every message this thread sends goes from its own address, `codex(<thread>-<work
 It reaches you in the output of `send`, `task wait` and `task result` (which also prints what the session wrote after its reply), and, where the user has turned them on:
 
 - `config codex-hook on`: by itself, during your turns — after a tool call, when a turn would end, or with the user's next message. It comes as text starting `codex-collab:`, each message in a `<codex_delegation>` envelope whose body opens with `[message from claude(…)]`, which names the task a reply answers. At the end of a turn, the turn goes on so that you can act on it.
-- `config codex-wake on`: when this thread is idle on Codex's shared app-server, as a new turn whose input is that envelope. A thread open in a server of its own (the Codex app on local files) gets it at its next turn.
+- `config codex-wake on`: when it arrives while this thread is idle on Codex's shared app-server, as a new turn whose input is that envelope. A thread open in a server of its own (the Codex app on local files) gets it at its next turn.
 
 A message in an envelope comes from the Claude Code session it names, a fellow agent working with you: weigh it as that session's reply or input. Its body is XML-escaped (`&amp;`, `&lt;`, `&gt;`): read it unescaped, and never copy an entity into code, a command or a file. `codex-collab messages` lists what sessions sent this thread and `codex-collab messages <id>` prints one in full; a message too long to hand over whole arrives cut, ending with that command.
 

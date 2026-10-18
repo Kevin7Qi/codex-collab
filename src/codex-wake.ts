@@ -13,7 +13,7 @@
 import { existsSync } from "node:fs";
 import { releaseDelivery, threadStateDirs } from "./claude-channel";
 import type { AppServerClient } from "./client";
-import { take, undelivered } from "./commands/hook";
+import { take, undelivered, type Taken } from "./commands/hook";
 import { buildDelegation } from "./peer";
 import { attachSupported, connectShared, controlSocketPath } from "./shared-server";
 
@@ -27,12 +27,19 @@ export function wakeText(parts: string[]): string {
   return buildDelegation(parts.join("\n\n"));
 }
 
+/** What a woken turn carries at most, in tokens as `estimateTokens` counts
+ *  them. Turn input has no limit of its own, as a hook's context does; this
+ *  only keeps one turn from taking in a whole backlog. */
+export const WAKE_BUDGET_TOKENS = 24_000;
+
 /** Start a turn on `threadId` with what reached it and Codex has not been
  *  handed, if the shared app-server holds the thread and it is idle. Says
- *  what it did, or why not. */
+ *  what it did, or why not. `onTaken` is told what it claimed before it asks
+ *  for the turn, and told [] once that is settled either way: a caller that
+ *  stops in between gives those claims back. */
 export async function wakeThread(
   threadId: string,
-  opts: { connect?: () => Promise<Client>; root?: string } = {},
+  opts: { connect?: () => Promise<Client>; root?: string; onTaken?: (taken: Taken[]) => void } = {},
 ): Promise<WakeOutcome> {
   let client: Client;
   try {
@@ -52,18 +59,25 @@ export async function wakeThread(
     const status = read?.thread?.status?.type;
     if (status === "notLoaded") return { woke: false, why: "not held by the shared app-server" };
     if (status === "active") return { woke: false, why: "in a turn" };
-    if (status !== "idle") return { woke: false, why: `its state is ${String(status)}` };
-    const taken = take(undelivered(threadStateDirs(threadId, opts.root), threadId), threadId);
+    // `systemError` is a thread whose last turn failed — a rate limit, a
+    // server error — and which takes a turn as an idle one does.
+    if (status !== "idle" && status !== "systemError") return { woke: false, why: `its state is ${String(status)}` };
+    const taken = take(undelivered(threadStateDirs(threadId, opts.root), threadId), threadId, Date.now(), WAKE_BUDGET_TOKENS);
     if (taken.length === 0) return { woke: false, why: "nothing to hand over" };
+    opts.onTaken?.(taken);
     try {
-      // A bare resume: the server holds the thread loaded, and its settings
-      // stay as its user left them — the turn runs on them.
-      await client.request("thread/resume", { threadId });
+      // A bare resume, without the thread's turns, which on a long thread
+      // run to more than a client takes in one answer: the server holds the
+      // thread loaded, and its settings stay as its user left them — the
+      // turn runs on them.
+      await client.request("thread/resume", { threadId, excludeTurns: true });
       await client.request("turn/start", { threadId, input: [{ type: "text", text: wakeText(taken.map((t) => t.part)) }] });
     } catch (e) {
       // Not handed over after all: the next hook, or wake, has them.
       for (const t of taken) releaseDelivery(t.dir, threadId, t.message.id);
       return { woke: false, why: `the turn could not be started: ${e instanceof Error ? e.message : String(e)}` };
+    } finally {
+      opts.onTaken?.([]);
     }
     return { woke: true, messages: taken.length };
   } catch (e) {

@@ -4,10 +4,10 @@
 // the user's own hooks where they were.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, installCodexHooks, isOurHandler, removeCodexHooks } from "./codex-hooks";
+import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, installCodexHooks, isOurHandler, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "./codex-hooks";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hooks-"));
 let n = 0;
@@ -29,8 +29,12 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
     expect(COMMAND).toBe("'/opt/bun' '/home/u/.local/bin/codex-collab' hook");
     expect(hookCommand("/opt/bun", "/it's here/cli.ts")).toBe("'/opt/bun' '/it'\\''s here/cli.ts' hook");
     expect(isOurHandler({ command: COMMAND })).toBe(true);
+    expect(isOurHandler({ command: hookCommand("/opt/bun", "/home/u/src/codex-collab/src/cli.ts") })).toBe(true);
     expect(isOurHandler({ command: "notify-me" })).toBe(false);
     expect(isOurHandler({ command: "'/x/codex-collab' hook --other" })).toBe(false);
+    // A hook of the user's own that happens to look alike is theirs.
+    expect(isOurHandler({ command: "bun ~/proj/src/cli.ts hook" })).toBe(false);
+    expect(isOurHandler({ command: "'/opt/bun' '/home/u/proj/tool.ts' hook" })).toBe(false);
   });
 
   test("into no file: one hook for each of the three events, with a timeout, and room for a message on the two that add context", () => {
@@ -61,6 +65,51 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
     expect(removeCodexHooks(path)).toBe(true);
     expect(read(path)).toEqual(theirs);
     expect(removeCodexHooks(path)).toBe(false);
+  });
+
+  test("written again, ours stay where they were: a hook of the user's after them keeps its place, and with it Codex's trust", () => {
+    const path = fresh();
+    const later = { hooks: [{ type: "command", command: "after-ours" }] };
+    installCodexHooks(hookCommand("/old/bun", "/home/u/.local/bin/codex-collab"), path);
+    const doc = read(path);
+    doc.hooks.Stop = [userHook, ...doc.hooks.Stop, later];
+    writeFileSync(path, JSON.stringify(doc));
+    installCodexHooks(COMMAND, path);
+    const stop = read(path).hooks.Stop;
+    expect(stop).toHaveLength(3);
+    expect(stop[0]).toEqual(userHook);
+    expect(stop[1].hooks[0].command).toBe(COMMAND);
+    expect(stop[2]).toEqual(later);
+  });
+
+  test("a hooks file that is a link stays a link, and the file it points to is the one changed", () => {
+    if (process.platform === "win32") return;
+    const real = fresh();
+    writeFileSync(real, JSON.stringify({ hooks: { Stop: [userHook] } }));
+    const path = join(ROOT, `c-${++n}`, "hooks.json");
+    mkdirSync(join(path, ".."), { recursive: true });
+    symlinkSync(real, path);
+    installCodexHooks(COMMAND, path);
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(read(real).hooks.Stop).toHaveLength(2);
+    expect(removeCodexHooks(path)).toBe(true);
+    expect(lstatSync(path).isSymbolicLink()).toBe(true);
+    expect(read(real)).toEqual({ hooks: { Stop: [userHook] } });
+  });
+
+  test("a snapshot puts the file back as it was, byte for byte, or removes one there was none of", () => {
+    const path = fresh();
+    const text = '{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "notify-me" } ] } ] } }\n';
+    writeFileSync(path, text);
+    const snap = snapshotCodexHooks(path);
+    installCodexHooks(COMMAND, path);
+    restoreCodexHooks(snap, path);
+    expect(readFileSync(path, "utf-8")).toBe(text);
+    const none = fresh();
+    const empty = snapshotCodexHooks(none);
+    installCodexHooks(COMMAND, none);
+    restoreCodexHooks(empty, none);
+    expect(existsSync(none)).toBe(false);
   });
 
   test("a group the user shares with ours keeps their handler", () => {

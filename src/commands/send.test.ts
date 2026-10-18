@@ -2505,6 +2505,30 @@ describeUnix("a Codex thread's address", () => {
     }
   });
 
+  test("a message Claude Code sends again with the same id is kept once", async () => {
+    const fake = startFake("retrying-claude", { reply: null });
+    registerFake(fake);
+    const id = taskIdOf((await runCli(["send", "--to", "retrying-claude", "ping", "--no-wait"])).stdout);
+    const line = JSON.stringify({ ...JSON.parse(buildEnvelope({ text: "pong once", ourSocketPath: fake.socketPath, ourName: fake.name, mode: "prompting" })), msg_id: `retry-${id}` }) + "\n";
+    for (let i = 0; i < 2; i++) {
+      Bun.connect({ unix: fake.received[0].replyPath, socket: { open(s) { s.write(line); s.end(); }, data() {}, error() {} } });
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    await waitFor(() => inboxTexts().includes("pong once"));
+    await new Promise((r) => setTimeout(r, 300));
+    expect(inboxTexts().filter((t) => t === "pong once")).toHaveLength(1);
+    expect((await runCli(["task", "wait", id, "--timeout", "10"])).stdout).toContain("  pong once");
+  });
+
+  test("a reply `send` printed has reached Codex: no hook or woken turn hands it over again", async () => {
+    const fake = startFake("plain-claude");
+    registerFake(fake);
+    const r = await runCli(["send", "--to", "plain-claude", "printed once"]);
+    expect(r.stdout).toContain("  pong: printed once");
+    const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
+    expect(hooked.stdout).not.toContain("printed once");
+  });
+
   test("another session's message to the thread is kept for it, is no reply, and makes that session one the thread talks to", async () => {
     const asked = startFake("asked-claude", { reply: null });
     registerFake(asked);
@@ -2583,6 +2607,46 @@ describeUnix("a Codex thread's address", () => {
       // Handed over: no hook gives it to Codex again.
       const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
       expect(hooked.stdout).toBe("");
+    } finally {
+      removeConfig();
+      server.stop(true);
+    }
+  });
+
+  test("with codex-wake on, a message that came while the thread was in a turn is the hooks': no turn is started for it later", async () => {
+    const control = join(TEST_HOME, ".codex", "app-server-control", "app-server-control.sock");
+    mkdirSync(dirname(control), { recursive: true });
+    let status = "active";
+    const started: unknown[] = [];
+    const server = Bun.serve({
+      unix: control,
+      fetch(req, srv) {
+        if (srv.upgrade(req)) return undefined as unknown as Response;
+        return new Response("not a websocket", { status: 400 });
+      },
+      websocket: {
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { id?: number; method?: string; params?: unknown };
+          if (msg.id === undefined) return;
+          if (msg.method === "turn/start") started.push(msg.params);
+          const result = msg.method === "initialize" ? { userAgent: "fake-shared/1.0" }
+            : msg.method === "thread/read" ? { thread: { id: THREAD, status: { type: status } } } : {};
+          ws.send(JSON.stringify({ id: msg.id, result }));
+        },
+      },
+    });
+    writeConfig({ "codex-wake": "on" });
+    try {
+      const fake = startFake("busy-claude", { reply: null });
+      registerFake(fake);
+      await runCli(["send", "while you work", "--no-wait"]);
+      speak(fake, fake.received[0].replyPath, "a reply mid-turn");
+      await waitFor(() => inboxTexts().includes("a reply mid-turn"));
+      // Looked at once it came, in a turn; then the turn ends.
+      await new Promise((r) => setTimeout(r, 2600));
+      status = "idle";
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(started).toEqual([]);
     } finally {
       removeConfig();
       server.stop(true);

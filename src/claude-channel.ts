@@ -236,6 +236,28 @@ export function isDelivered(stateDir: string, threadId: string, id: string): boo
   }
 }
 
+/** Claim every message every mailbox holds now, in every workspace: what
+ *  the hooks, turned on, are not to hand over — it went out through `send`
+ *  and `task`, or was there to be read. Returns how many were claimed. */
+export function claimEveryMessage(root: string = join(config.dataDir, "workspaces")): number {
+  let workspaces: string[];
+  try {
+    workspaces = readdirSync(root);
+  } catch {
+    return 0;
+  }
+  let claimed = 0;
+  for (const w of workspaces) {
+    const dir = join(root, w);
+    let threads: string[] = [];
+    try { threads = readdirSync(channelsDir(dir)).filter(isThreadId); } catch { /* no mailboxes */ }
+    for (const threadId of threads) {
+      for (const id of messageIdsSince(dir, threadId)) if (claimDelivery(dir, threadId, id)) claimed++;
+    }
+  }
+  return claimed;
+}
+
 /** The state dirs holding a mailbox of this thread: one per workspace it
  *  sent from (`send -d` can name another), found by looking. */
 export function threadStateDirs(threadId: string, root: string = join(config.dataDir, "workspaces")): string[] {
@@ -491,18 +513,28 @@ export async function openChannel(
   // would have two processes claim the same names.
   mkdirSync(channelsDir(stateDir), { recursive: true, mode: 0o700 });
   const release = await acquireLockAsync(join(channelsDir(stateDir), "host.lock"), { staleThresholdMs: 30_000 });
+  // Let go of on the way out too — a receiver that ends while it waits here
+  // would leave the next one waiting out the lock's staleness — and once:
+  // a second release could remove a lock another process holds by then.
+  let held = true;
+  const letGo = () => { if (held) { held = false; release(); } };
+  process.once("exit", letGo);
   try {
     const again = await ask();
     if (again) return again;
     // A host that wrote its state and does not answer is stopped or stuck,
     // and its addresses reach nobody: it goes, so that a new one can take
-    // the names. A pid that is no longer that host is left alone.
+    // the names. A pid that is no longer that host is left alone, and one
+    // this process cannot check is not replaced: two hosts would take each
+    // other's sockets.
     const stale = readHostState(stateDir);
-    if (stale && procIdentity({ pid: stale.pid, ...(stale.procStart ? { procStart: stale.procStart } : {}), ...(stale.pidDomain ? { pidDomain: stale.pidDomain } : {}) }) === "live") {
-      try { process.kill(stale.pid, "SIGTERM"); } catch { /* gone */ }
+    const identity = () => stale ? procIdentity({ pid: stale.pid, ...(stale.procStart ? { procStart: stale.procStart } : {}), ...(stale.pidDomain ? { pidDomain: stale.pidDomain } : {}) }) : "dead";
+    if (identity() === "unverifiable") throw new Error(`the channel host (pid ${stale!.pid}) does not answer, and cannot be checked from here`);
+    if (identity() === "live") {
+      try { process.kill(stale!.pid, "SIGTERM"); } catch { /* gone */ }
       const until = Date.now() + 3000;
-      while (Date.now() < until && procIdentity({ pid: stale.pid, ...(stale.procStart ? { procStart: stale.procStart } : {}) }) === "live") await Bun.sleep(50);
-      try { process.kill(stale.pid, "SIGKILL"); } catch { /* gone */ }
+      while (Date.now() < until && identity() === "live") await Bun.sleep(50);
+      if (identity() === "live") { try { process.kill(stale!.pid, "SIGKILL"); } catch { /* gone */ } }
     }
     try { unlinkSync(hostStateFile(stateDir)); } catch { /* none */ }
     (opts.start ?? startHost)(cwd, stateDir);
@@ -514,7 +546,8 @@ export async function openChannel(
     }
     throw new Error(`the channel host did not start within ${HOST_START_TIMEOUT_MS / 1000}s (its log: ${hostLogFile(stateDir)})`);
   } finally {
-    release();
+    process.off("exit", letGo);
+    letGo();
   }
 }
 
@@ -574,8 +607,12 @@ export function sweepChannels(stateDir: string, maxAgeMs: number, now: number = 
     }
     try { rmdirSync(claims); } catch { /* not empty, or none */ }
     if (open.has(threadId) || loadContacts(stateDir, threadId).length > 0) continue;
-    try { rmdirSync(dir); } catch { /* not empty, or none */ }
+    // Nothing left in its mailbox, and nobody it talks to: the thread's
+    // folder goes, its contacts and recorded socket with it — no session is
+    // left that knows the address.
+    try { rmdirSync(dir); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") continue; /* messages left */ }
     try { unlinkSync(contactsFile(stateDir, threadId)); } catch { /* none */ }
+    try { unlinkSync(addressFile(stateDir, threadId)); } catch { /* none */ }
     try { rmdirSync(threadDir(stateDir, threadId)); } catch { /* not empty */ }
   }
   return removed;

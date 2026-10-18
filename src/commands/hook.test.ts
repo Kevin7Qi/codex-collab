@@ -38,10 +38,15 @@ function answer(root: string, input: Record<string, unknown>): Record<string, un
 }
 
 describe("counting and reading", () => {
-  test("a token estimate counts Chinese as about one a character, other text about four characters to one", () => {
+  test("a token estimate errs high: ASCII at about four characters to one, every other character one of its own", () => {
     expect(estimateTokens("abcdefgh")).toBe(2);
     expect(estimateTokens("论文第三章")).toBe(5);
     expect(estimateTokens("第三章 ok")).toBe(4);
+    // Scripts of more than one byte a character are no longer undercounted:
+    // the answer stays under four bytes a token whatever it is written in.
+    for (const text of ["क".repeat(1000), "─".repeat(1000), "щ".repeat(1000), "😀".repeat(500)]) {
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4 * estimateTokens(text));
+    }
   });
 
   test("the tasks a command's output reported replied, by their status line", () => {
@@ -58,7 +63,9 @@ describe("what the hook hands over", () => {
     const first = answer(root, { hook_event_name: "PostToolUse", tool_response: "ok" });
     const context = (first?.hookSpecificOutput as Record<string, string>).additionalContext;
     expect(first?.hookSpecificOutput).toEqual(expect.objectContaining({ hookEventName: "PostToolUse" }));
-    expect(context).toStartWith("codex-collab: A message from Claude Code reached this thread.\n<codex_delegation>\n  <source_thread_id></source_thread_id>\n  <input>[message from claude(ws-a1b2c3)]");
+    // Said with a developer's weight, and the skill may not be loaded: the
+    // line before it says whose it is.
+    expect(context).toStartWith("codex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>\n  <source_thread_id></source_thread_id>\n  <input>[message from claude(ws-a1b2c3)]");
     // The envelope's body is escaped, as on the peer side.
     expect(context).toContain("Chapter 3 reads well; &lt;one&gt; fix &amp; a note.</input>\n</codex_delegation>");
     expect(isDelivered(ws, THREAD, m.id)).toBe(true);
@@ -117,6 +124,29 @@ describe("what the hook hands over", () => {
     expect(after).toContain("small one");
   });
 
+  test("a message that does not fit after another waits for the next hook whole: only the first is ever cut", () => {
+    const { root, ws } = fresh();
+    const now = Date.now();
+    const half = "word ".repeat(Math.floor(HOOK_BUDGET_TOKENS * 0.6) * 4 / 5);
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: `one ${half}` }, now - 2);
+    const second = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: `two ${half}` }, now - 1);
+    const first = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(first).toContain("one word");
+    expect(first).not.toContain("two word");
+    expect(first).not.toContain("[cut here");
+    expect(isDelivered(ws, THREAD, second.id)).toBe(false);
+    const next = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(next).toContain(`two ${half}</input>`);
+  });
+
+  test("messages a `messages` command printed are not handed over again", () => {
+    const { root, ws } = fresh();
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "read it yourself" });
+    const printed = `MESSAGE ${m.id} FROM claude(a) (5s ago):\n  read it yourself\n`;
+    expect(answer(root, { hook_event_name: "PostToolUse", tool_response: printed })).toBeNull();
+    expect(isDelivered(ws, THREAD, m.id)).toBe(true);
+  });
+
   test("messages from every workspace the thread sent from come in the order they arrived", () => {
     const { root, ws } = fresh();
     const other = join(root, "ws-other");
@@ -124,7 +154,7 @@ describe("what the hook hands over", () => {
     writeMessage(other, THREAD, { fromName: "b", replyPath: "/b", text: "second" }, 2_000);
     writeMessage(ws, THREAD, { fromName: "a", replyPath: "/a", text: "first" }, 1_000);
     const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
-    expect(context).toStartWith("codex-collab: 2 messages from Claude Code reached this thread.");
+    expect(context).toStartWith("codex-collab: 2 messages from Claude Code reached this thread, each from the Claude Code session it names, a peer agent working with you.");
     expect(context.indexOf("first")).toBeLessThan(context.indexOf("second"));
   });
 
@@ -135,6 +165,21 @@ describe("what the hook hands over", () => {
     expect(hookAnswer({ session_id: THREAD, hook_event_name: "PreToolUse" }, root)).toBeNull();
     expect(hookAnswer({ hook_event_name: "PostToolUse" }, root)).toBeNull();
     expect(hookAnswer({ session_id: THREAD, hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"))).toBeNull();
+  });
+
+  test("run by Codex through a pipe, its answer arrives whole however the message is written", () => {
+    // Bun drops what a pipe has not taken when the process exits straight
+    // after the write: the messages in it would be claimed, and lost.
+    const home = join(ROOT, `home-${++n}`);
+    const ws = join(home, ".codex-collab", "workspaces", "ws");
+    mkdirSync(ws, { recursive: true, mode: 0o700 });
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "क".repeat(40_000) });
+    const r = spawnSync("bun", ["run", CLI, "hook"], { input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: THREAD, tool_response: "" }), encoding: "utf-8", env: { ...process.env, HOME: home, CODEX_COLLAB_NO_UPDATE_CHECK: "1" } });
+    expect(r.status).toBe(0);
+    const context = JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context).toContain(`[cut here: the whole message is \`codex-collab messages ${m.id}\`]`);
+    expect(estimateTokens(context)).toBeLessThanOrEqual(HOOK_BUDGET_TOKENS);
+    expect(Buffer.byteLength(r.stdout)).toBeLessThan(4 * HOOK_BUDGET_TOKENS + 1024);
   });
 
   test("run by Codex with input it cannot read, it says nothing and succeeds: never in a turn's way", () => {

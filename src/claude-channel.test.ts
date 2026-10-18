@@ -14,6 +14,9 @@ import {
   askHost,
   channelName,
   channelSocketPath,
+  claimDelivery,
+  claimEveryMessage,
+  isDelivered,
   recordSocketPath,
   recordedSocketPath,
   threadSocketPath,
@@ -220,11 +223,28 @@ describe("the sweep", () => {
     saveContacts(state, open, []);
     const contacted = "01a0985a-445b-7ee2-85b5-00000000000c";
     saveContacts(state, contacted, [contact()]);
+    // A thread with nothing left but the socket it used goes too: no session
+    // is left that knows its address.
+    const done = "01a0985a-445b-7ee2-85b5-00000000000d";
+    recordSocketPath(state, done, "/tmp/x/thread-d.sock");
+    claimDelivery(state, other, "0000000000001-00000000");
     expect(sweepChannels(state, 7 * day, now, new Set([open]))).toBe(3);
     expect(messageIdsSince(state, THREAD)).toEqual([recent.id]);
     expect(existsSync(join(state, "channels", other))).toBe(false);
+    expect(existsSync(join(state, "channels", done))).toBe(false);
     expect(existsSync(join(state, "channels", open))).toBe(true);
     expect(existsSync(join(state, "channels", contacted))).toBe(true);
+  });
+
+  test("everything the mailboxes hold can be marked handed over at once, in every workspace", () => {
+    const root = join(ROOT, `root-${++n}`);
+    const [a, b] = [join(root, "ws-a"), join(root, "ws-b")];
+    for (const d of [a, b]) mkdirSync(d, { recursive: true, mode: 0o700 });
+    const m1 = writeMessage(a, THREAD, { fromName: "x", replyPath: "/a", text: "one" });
+    const m2 = writeMessage(b, "01a0985a-445b-7ee2-85b5-00000000000e", { fromName: "x", replyPath: "/a", text: "two" });
+    expect(claimEveryMessage(root)).toBe(2);
+    expect(isDelivered(a, THREAD, m1.id) && isDelivered(b, "01a0985a-445b-7ee2-85b5-00000000000e", m2.id)).toBe(true);
+    expect(claimEveryMessage(root)).toBe(0);
   });
 });
 

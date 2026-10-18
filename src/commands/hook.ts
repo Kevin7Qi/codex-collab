@@ -33,12 +33,14 @@ export type HookEvent = typeof HOOK_EVENTS[number];
  *  fit whole is cut, with the command that prints the rest. */
 export const HOOK_BUDGET_TOKENS = 7000;
 
-/** A rough token count: a character of Chinese, Japanese or Korean is about
- *  one, other text about four characters to one. Rough is enough for a
- *  budget that leaves room. */
+/** A rough token count that errs high: ASCII at about four characters to a
+ *  token, and every other character — Chinese, Cyrillic, Devanagari, a
+ *  box-drawing line — as a token of its own. Erring high keeps a hook's
+ *  answer under Codex's limit whatever the script, and under four bytes a
+ *  token, so its size stays small in bytes too. */
 export function estimateTokens(text: string): number {
-  const wide = (text.match(/[⺀-鿿가-힯豈-﫿＀-￯]/g) ?? []).length;
-  return wide + Math.ceil((text.length - wide) / 4);
+  const ascii = (text.match(/[\u0000-\u007f]/g) ?? []).length;
+  return text.length - ascii + Math.ceil(ascii / 4);
 }
 
 /** The tasks whose reply a command's output printed: every report of one
@@ -52,10 +54,24 @@ function firstLine(text: string, max: number): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/** The messages a `messages` command's output printed whole, by their id. */
+export function messagesIn(output: string): string[] {
+  return [...new Set([...output.matchAll(/(?:^|\n)MESSAGE (\d{13}-[0-9a-f]{8}) FROM /g)].map((m) => m[1]))];
+}
+
 /** Messages a command Codex just ran printed — `send`, `task wait`, `task
- *  result` — have reached it: they are claimed, so no hook hands them over
- *  again. Only a message whose text the output does hold counts. */
+ *  result`, `messages` — have reached it: they are claimed, so no hook hands
+ *  them over again. The commands claim them themselves where they can;
+ *  inside Codex's sandbox they cannot, and this is where it is done. Only a
+ *  message whose text the output does hold counts. */
 export function claimShown(dirs: string[], threadId: string, output: string): void {
+  for (const id of messagesIn(output)) {
+    for (const dir of dirs) {
+      const m = readMessage(dir, threadId, id);
+      const line = m ? firstLine(m.text, 80).replace(/…$/, "") : null;
+      if (m && (!line || output.includes(line))) claimDelivery(dir, threadId, id);
+    }
+  }
   for (const id of repliedTasksIn(output)) {
     for (const dir of dirs) {
       const task = loadTask(dir, id);
@@ -99,16 +115,18 @@ export interface Taken {
   part: string;
 }
 
-/** Take what fits of these messages for handing to Codex, oldest first.
- *  Each is claimed as it is taken: one another hook claimed first is left to
- *  it, and one that does not fit is left for the next. [] when none is. */
-export function take(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now()): Taken[] {
+/** Take what fits of these messages for handing to Codex, oldest first,
+ *  within `budget` tokens. Each is claimed as it is taken: one another hook
+ *  claimed first is left to it. A message that does not fit waits for the
+ *  next hook, where it may fit whole; only one that is first and still does
+ *  not fit is cut. [] when none is taken. */
+export function take(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now(), total: number = HOOK_BUDGET_TOKENS): Taken[] {
   const replies = new Map<string, TaskRecord>();
   for (const dir of new Set(items.map((i) => i.dir))) {
     for (const t of listTasks(dir)) if (t.reply?.id && t.threadId === threadId) replies.set(t.reply.id, t);
   }
-  // What the messages may take: the budget, less the line before them.
-  let budget = HOOK_BUDGET_TOKENS - 30;
+  // What the messages may take: the budget, less the lines before them.
+  let budget = total - 60;
   const taken: Taken[] = [];
   for (const { dir, message: m } of items) {
     const head = header(m, replies.get(m.id), now);
@@ -117,8 +135,7 @@ export function take(items: Array<{ dir: string; message: ChannelMessage }>, thr
     const cost = (text: string) => estimateTokens(buildDelegation(text));
     let text = part(m.text);
     if (cost(text) > budget) {
-      // Room for a useful part of it, or it waits for the next hook.
-      if (budget < 400) break;
+      if (taken.length > 0) break;
       const pointer = `\n\n[cut here: the whole message is \`codex-collab messages ${m.id}\`]`;
       const cut = (keep: number) => {
         // Never half a character: a high surrogate goes with its pair.
@@ -142,11 +159,15 @@ export function take(items: Array<{ dir: string; message: ChannelMessage }>, thr
   return taken;
 }
 
-/** What a hook hands Codex: a line saying what came, then each message in
- *  its own envelope. */
+/** What a hook hands Codex: a line saying what came and from whom, then
+ *  each message in its own envelope. Codex takes a hook's text with a
+ *  developer's weight, and its skill may not be loaded: the line says that
+ *  what follows is a peer agent's message. */
 export function hookText(taken: Taken[]): string {
-  const count = taken.length === 1 ? "A message" : `${taken.length} messages`;
-  return `codex-collab: ${count} from Claude Code reached this thread.\n${taken.map((t) => buildDelegation(t.part)).join("\n")}`;
+  const what = taken.length === 1
+    ? "A message from Claude Code reached this thread, from the Claude Code session it names"
+    : `${taken.length} messages from Claude Code reached this thread, each from the Claude Code session it names`;
+  return `codex-collab: ${what}, a peer agent working with you.\n${taken.map((t) => buildDelegation(t.part)).join("\n")}`;
 }
 
 /** The text a hook hands Codex for these messages, or null when there are
@@ -183,6 +204,10 @@ export async function handleHook(_args: string[]): Promise<void> {
   } catch {
     answer = null;
   }
-  if (answer) process.stdout.write(answer + "\n");
+  // Written whole before the exit: into a pipe, an exit straight after the
+  // write drops what the pipe has not taken yet (past 64 KB, on Linux) —
+  // and the messages in it are already claimed, so no hook would hand them
+  // over again.
+  if (answer) await new Promise<void>((resolve) => { process.stdout.write(answer + "\n", () => resolve()); });
   process.exit(0);
 }

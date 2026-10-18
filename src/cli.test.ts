@@ -567,8 +567,14 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     mkdirSync(join(dirs, "codex-hooks"), { recursive: true });
     const theirs = { hooks: { Stop: [{ hooks: [{ type: "command", command: "notify-me" }] }] } };
     writeFileSync(hooksPath, JSON.stringify(theirs));
+    // A mailbox with a message in it from before: the hooks hand over what
+    // comes from now on, so it is marked handed over when they go on.
+    const inbox = join(home, ".codex-collab", "workspaces", "ws-x", "channels", "01a0985a-445b-7ee2-85b5-52e2b36a6ba4", "inbox");
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(join(inbox, "0001792300000000-0a0b0c0d.json".slice(3)), JSON.stringify({ id: "1792300000000-0a0b0c0d", at: "", fromName: "x", replyPath: "/x", text: "old" }));
     const on = cli("config", "codex-hook", "on");
     expect(on.exitCode).toBe(0);
+    expect(existsSync(join(inbox, "..", "delivered", "1792300000000-0a0b0c0d"))).toBe(true);
     expect(on.stdout).toContain(`Added codex-collab's hooks to ${hooksPath}. Codex asks you to trust them`);
     const doc = JSON.parse(readFileSync(hooksPath, "utf-8"));
     expect(doc.hooks.Stop).toHaveLength(2);

@@ -343,9 +343,9 @@ Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型
 
 `codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。Codex 只对单条普通命令应用该规则：带重定向、heredoc 或管道的写法（`send - < task.md`）是一段 shell 脚本，Codex 仍会先征求同意；`send --file task.md` 则保持为普通命令。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。Windows 上不可用。
 
-`codex-hook`（`on` / `off`，默认 `off`）在 Codex 的 `~/.codex/hooks.json`（或 `$CODEX_HOME/hooks.json`）中、你自己的 hooks 之后添加三个 hook；`off` 或 `--unset` 只移除这三个。每次工具调用之后、轮次即将结束时，以及你给线程写消息时，它们把 Claude Code 会话发给该线程、而它尚未看到的消息交给它，每条只交一次，形式与 peer 端 Claude 消息所用的 `<codex_delegation>` 相同。若在轮次结束时交付，该轮次会继续，让 Codex 处理收到的内容。这些 hook 运行前，Codex 会先请你确认信任。一条 hook 容纳不下的长消息会被截断，并附上 `codex-collab messages <id>` 以打印全文。Windows 上不可用。
+`codex-hook`（`on` / `off`，默认 `off`）在 Codex 的 `~/.codex/hooks.json`（或 `$CODEX_HOME/hooks.json`）中、你自己的 hooks 之后添加三个 hook；`off` 或 `--unset` 只移除这三个；你的 hooks 保持原有位置，Codex 对它们的信任依赖于此。每次工具调用之后、轮次即将结束时，以及你给线程写消息时，它们把 Claude Code 会话发给该线程、而它尚未看到的消息交给它，每条只交一次，形式与 peer 端 Claude 消息所用的 `<codex_delegation>` 相同；`send`、`task` 或 `messages` 已经打印过的消息视为已看到，开启 hook 时邮箱中已有的消息也是如此。若在轮次结束时交付，该轮次会继续，让 Codex 处理收到的内容。这些 hook 运行前，Codex 会先请你确认信任。一条 hook 容纳不下的长消息会被截断，并附上 `codex-collab messages <id>` 以打印全文。Windows 上不可用。
 
-`codex-wake`（`on` / `off`，默认 `off`）：当某个 Claude Code 会话给 Codex 线程发来消息，而该线程在 Codex 的共享 app-server 上处于空闲时（通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`），codex-collab 会以该消息在线程上新开一个轮次，沿用线程自己的设置。正在进行轮次的线程改由 hook 收到消息。在自有 app-server 中打开的线程（使用本地文件的 Codex 应用会自行运行一个）无法从外部触达，会在其下一个轮次收到消息。
+`codex-wake`（`on` / `off`，默认 `off`）：当某个 Claude Code 会话在 Codex 线程于共享 app-server 上处于空闲时给它发来消息（通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`），codex-collab 会以该消息在线程上新开一个轮次，沿用线程自己的设置。在线程进行轮次期间到达的消息由 hook 交付，因此两者需配合使用。在自有 app-server 中打开的线程（使用本地文件的 Codex 应用会自行运行一个）无法从外部触达，会在其下一个轮次收到消息。
 
 </details>
 
