@@ -74,6 +74,7 @@ import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
 import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from "../claude-trust";
 import { codexThreadCwd } from "../codex-session";
+import { isThreadId, openChannel, watchInbox, type ChannelMessage, type Contact } from "../claude-channel";
 import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
@@ -170,15 +171,11 @@ export function codexThreadId(env: NodeJS.ProcessEnv = process.env): string | nu
   return id && /^[0-9a-f-]{8,}$/i.test(id) ? id : null;
 }
 
-/** The name a task's receiver registers under, which IS the address its
- *  reply is sent to: codex(<thread>-<workspace>-<task>). The same family as
- *  the broker's front door and thread peers, so Claude can tell which Codex
- *  session is talking and from which workspace — and one address per task,
- *  so that whatever is sent to it can only be that task's. With a name a
- *  Codex thread's tasks shared, a session's second thought about a finished
- *  task would reach whichever task held the name by then, and be recorded as
- *  its reply; sent to a finished task's own address it finds nobody, and
- *  Claude is told so. */
+/** The name a task's receiver registers under when the task has an address
+ *  of its own — a message from no Codex thread, or one whose thread's address
+ *  could not be opened: codex(<thread>-<workspace>-<task>), which IS the
+ *  address its reply is sent to, for as long as the task. A Codex thread's
+ *  messages otherwise share the thread's address (`channelName`). */
 export function senderName(cwd: string, threadId: string | null, taskId: string): string {
   const tag = threadId ? threadId.replace(/-/g, "").slice(0, 8) : "shell";
   return `codex(${tag}-${workspaceSuffix(cwd)}-${taskId})`;
@@ -187,8 +184,13 @@ export function senderName(cwd: string, threadId: string | null, taskId: string)
 /** The text Claude receives: the message, then one line saying who sent it
  *  and where the reply goes. It names no deadline. The reply is kept whenever
  *  it comes, so there is none on Claude's side — and a number here, however
- *  generous, is a budget a careful model cuts its work to fit. */
-export function composeMessage(text: string, opts: { threadId: string | null }): string {
+ *  generous, is a budget a careful model cuts its work to fit. From the
+ *  thread's own address, it says that the address is the thread's for good:
+ *  Claude can write there later too. */
+export function composeMessage(text: string, opts: { threadId: string | null; channel?: boolean }): string {
+  if (opts.threadId && opts.channel) {
+    return `${text}\n\n(From Codex thread ${opts.threadId}. This peer is that thread's address: reply to it when you are done, and write to it later with anything the thread should know. What you send is kept for it.)`;
+  }
   const who = opts.threadId ? `Codex thread ${opts.threadId}` : "a Codex session";
   return `${text}\n\n(From ${who}. Reply to this peer when you are done; your reply is kept for it.)`;
 }
@@ -658,6 +660,19 @@ export async function handleSend(args: string[]): Promise<void> {
 // The receiver — the half of `send` that outlives the command
 // ---------------------------------------------------------------------------
 
+/** How often a receiver asks the channel host to keep its thread's address
+ *  — the host's own look at its sessions, so neither outlasts the other by
+ *  much. (The variable is a test seam.) */
+const CHANNEL_KEEP_MS = Number(process.env.CODEX_COLLAB_CHANNEL_CHECK_MS) || 30_000;
+
+/** A reply as a task records it: from the thread's mailbox, it keeps the
+ *  message's id and arrival, so what the session said after it can be found. */
+type TaskReply = NonNullable<TaskRecord["reply"]>;
+
+function replyOf(m: ChannelMessage): TaskReply {
+  return { text: m.text, fromName: m.fromName, id: m.id, at: m.at };
+}
+
 /** How long `send` waits for a receiver to deliver. It covers a runtime
  *  start, a `ps`, two locks and one local connect. (The variable is a test
  *  seam, as the poll intervals are.) */
@@ -757,10 +772,10 @@ function howFarItGot(record: TaskRecord): string {
     : "The message was not delivered.";
 }
 
-/** Remove what a receiver that was killed outright left behind: its entry in
- *  Claude Code's registry and its socket. Every other way out of a receiver
- *  removes both; SIGKILL, an out-of-memory kill or a power cut runs no code,
- *  and a receiver now lives for hours. Two witnesses are asked before
+/** Remove what a receiver, or a channel host, that was killed outright left
+ *  behind: an entry in Claude Code's registry and its socket. Every other way
+ *  out removes both; SIGKILL, an out-of-memory kill or a power cut runs no
+ *  code, and both live for hours. Two witnesses are asked before
  *  anything is removed — the process is gone, AND nothing answers at the
  *  socket — because from inside a pid namespace of its own every host process
  *  looks gone, while a connection that a sandbox refuses is not "nobody
@@ -772,7 +787,8 @@ export async function sweepDeadReceivers(): Promise<number> {
   } catch {
     return 0;
   }
-  const ours = join(mailboxRoot(), "task-");
+  // A task's own address, and a thread's (claude-channel.ts).
+  const ours = [join(mailboxRoot(), "task-"), join(mailboxRoot(), "thread-")];
   let removed = 0;
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
@@ -784,7 +800,7 @@ export async function sweepDeadReceivers(): Promise<number> {
       continue;
     }
     const socket = entry?.messagingSocketPath;
-    if (typeof socket !== "string" || !socket.startsWith(ours) || entry.pid === process.pid) continue;
+    if (typeof socket !== "string" || !ours.some((p) => socket.startsWith(p)) || entry.pid === process.pid) continue;
     if (procIdentity(entry) !== "dead") continue;
     const nobodyThere = await new Promise<boolean>((resolve) => {
       const sock = connect({ path: socket }, () => { sock.destroy(); resolve(false); });
@@ -953,8 +969,17 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   const socketPath = taskSocketPath(task.id);
   const entryPath = join(sessionsDir(), `${process.pid}.json`);
   let server: Server | null = null;
+  // Whether the task has an address of its own, here — the socket and the
+  // registry entry this receiver removes when it goes. The thread's address
+  // is the channel host's to remove.
+  let ownAddress = false;
+  let inbox: ReturnType<typeof watchInbox> | null = null;
+  let keep: ReturnType<typeof setInterval> | null = null;
   let finished = false;
   const release = (): void => {
+    inbox?.stop();
+    if (keep) clearInterval(keep);
+    if (!ownAddress) return;
     try { server?.close(); } catch { /* closed */ }
     try { unlinkSync(socketPath); } catch { /* gone */ }
     try { unlinkSync(entryPath); } catch { /* gone */ }
@@ -1000,82 +1025,102 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   } catch (e) {
     finish({ status: "failed", error: e instanceof Error ? e.message : String(e) }, 1);
   }
-  try { unlinkSync(socketPath); } catch { /* none */ }
   // Tidy up after receivers that never got the chance to: never a reason
   // for this task to fail.
   try { await sweepDeadReceivers(); } catch { /* leave them */ }
 
+  // The reply the task waits for is the named session's: another sender's
+  // message is no answer to it. A background session Claude Code has just
+  // brought back replies from the new process's own socket, and may do so
+  // before the watch below has seen the restart: the same job and session at
+  // that address is the session asked.
+  const fromTarget = (replyPath: string): boolean => replyPath === target.socketPath
+    || (target.kind === "bg" && !!findRestartedSession({ pid: target.pid, sessionId: target.sessionId, jobId: target.jobId, socketPath: replyPath }));
   // The reply, also kept where code that is busy elsewhere (stopping a
   // blocked session) can see it came.
-  let arrived = null as { text: string; fromName: string } | null;
-  let resolveReply!: (reply: { text: string; fromName: string }) => void;
-  const reply = new Promise<{ text: string; fromName: string }>((resolve) => { resolveReply = (r) => { arrived ??= r; resolve(r); }; });
-  server = createServer((sock) => {
-    sock.setEncoding("utf8");
-    let buffer = "";
-    sock.on("data", (chunk: string) => {
-      buffer += chunk;
-      if (buffer.length > 1024 * 1024) { sock.destroy(); return; }
-      let idx: number;
-      while ((idx = buffer.indexOf("\n")) !== -1) {
-        const line = buffer.slice(0, idx).trim();
-        buffer = buffer.slice(idx + 1);
-        if (!line) continue;
-        const msg = parseEnvelope(line);
-        if (!msg) continue;
-        // The reply the task waits for is the named session's. Another
-        // sender's message is not an answer — it is noted, not consumed. A
-        // background session Claude Code has just brought back replies from
-        // the new process's own socket, and may do so before the watch below
-        // has seen the restart: the same job and session at that address is
-        // the session asked.
-        const fromTarget = msg.replyPath === target.socketPath
-          || (target.kind === "bg" && !!findRestartedSession({ pid: target.pid, sessionId: target.sessionId, jobId: target.jobId, socketPath: msg.replyPath }));
-        if (!fromTarget) {
-          console.log(`A message from ${msg.fromName} arrived; still waiting for ${target.name}.`);
-          continue;
-        }
-        resolveReply({ text: msg.text, fromName: msg.fromName });
-      }
-    });
-    sock.on("error", () => { /* a dropped connection is not a reply */ });
-  });
-  try {
-    const listening = server;
-    // Bind with group/other bits masked: the socket is connectable the
-    // moment it exists, before any chmod could run (as the broker does).
-    const prevUmask = process.umask(0o077);
+  let arrived = null as TaskReply | null;
+  let resolveReply!: (reply: TaskReply) => void;
+  const reply = new Promise<TaskReply>((resolve) => { resolveReply = (r) => { arrived ??= r; resolve(r); }; });
+
+  // A Codex thread's messages come from one address, the thread's, which the
+  // workspace's channel host holds while a session the thread talks to runs:
+  // Claude replies there and may write there later, and the reply is read
+  // from the thread's mailbox. A message from no thread — a `send` run by
+  // hand — gets an address of its own, here, for as long as its task; so
+  // does one whose thread's address cannot be opened.
+  const threadId = task.threadId && isThreadId(task.threadId) ? task.threadId : null;
+  const contactOf = (): Contact => ({ name: target.name, pid: target.pid, sessionId: target.sessionId, procStart: target.procStart, socketPath: target.socketPath });
+  let channel: { name: string; socketPath: string } | null = null;
+  if (threadId) {
     try {
-      await new Promise<void>((resolve, reject) => {
-        listening.once("listening", resolve);
-        listening.once("error", reject);
-        listening.listen(socketPath);
-      });
-    } finally {
-      process.umask(prevUmask);
+      channel = await openChannel(stateDir, task.cwd, threadId, contactOf());
+    } catch (e) {
+      console.log(`Could not open the address of Codex thread ${threadId} (${e instanceof Error ? e.message : String(e)}); this task gets one of its own.`);
     }
-  } catch (e) {
-    finish({ status: "failed", error: `Could not open a socket for the reply at ${socketPath}: ${e instanceof Error ? e.message : String(e)}` }, 1);
   }
-  const name = senderName(task.cwd, task.threadId, task.id);
-  let registerError: unknown = null;
-  try {
-    mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
-    writeFileSync(entryPath, JSON.stringify(buildRegistryEntry({
-      pid: process.pid,
-      cwd: task.cwd,
-      name,
-      socketPath,
-      version: sniffRegistryVersion(),
-      procStart: procStartOf(process.pid),
-      sessionId: transientSessionId(),
-    })));
-  } catch (e) {
-    registerError = e;
-  }
-  if (registerError) {
-    const e = registerError;
-    finish({ status: "failed", error: `Could not register with Claude Code's session registry (${sessionsDir()}): ${e instanceof Error ? e.message : String(e)}` }, 1);
+  const name = channel?.name ?? senderName(task.cwd, task.threadId, task.id);
+  const replyTo = channel?.socketPath ?? socketPath;
+  if (!channel) {
+    ownAddress = true;
+    try { unlinkSync(socketPath); } catch { /* none */ }
+    server = createServer((sock) => {
+      sock.setEncoding("utf8");
+      let buffer = "";
+      sock.on("data", (chunk: string) => {
+        buffer += chunk;
+        if (buffer.length > 1024 * 1024) { sock.destroy(); return; }
+        let idx: number;
+        while ((idx = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, idx).trim();
+          buffer = buffer.slice(idx + 1);
+          if (!line) continue;
+          const msg = parseEnvelope(line);
+          if (!msg) continue;
+          if (!fromTarget(msg.replyPath)) {
+            console.log(`A message from ${msg.fromName} arrived; still waiting for ${target.name}.`);
+            continue;
+          }
+          resolveReply({ text: msg.text, fromName: msg.fromName });
+        }
+      });
+      sock.on("error", () => { /* a dropped connection is not a reply */ });
+    });
+    try {
+      const listening = server;
+      // Bind with group/other bits masked: the socket is connectable the
+      // moment it exists, before any chmod could run (as the broker does).
+      const prevUmask = process.umask(0o077);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          listening.once("listening", resolve);
+          listening.once("error", reject);
+          listening.listen(socketPath);
+        });
+      } finally {
+        process.umask(prevUmask);
+      }
+    } catch (e) {
+      finish({ status: "failed", error: `Could not open a socket for the reply at ${socketPath}: ${e instanceof Error ? e.message : String(e)}` }, 1);
+    }
+    let registerError: unknown = null;
+    try {
+      mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
+      writeFileSync(entryPath, JSON.stringify(buildRegistryEntry({
+        pid: process.pid,
+        cwd: task.cwd,
+        name,
+        socketPath,
+        version: sniffRegistryVersion(),
+        procStart: procStartOf(process.pid),
+        sessionId: transientSessionId(),
+      })));
+    } catch (e) {
+      registerError = e;
+    }
+    if (registerError) {
+      const e = registerError;
+      finish({ status: "failed", error: `Could not register with Claude Code's session registry (${sessionsDir()}): ${e instanceof Error ? e.message : String(e)}` }, 1);
+    }
   }
 
   // ── Deliver ──
@@ -1086,11 +1131,20 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   // from this one's (see nextTurnAfter).
   phase = "delivering";
   const joinedTurn = sessionStatusNow(target.pid) === "busy";
-  updateTask(stateDir, task.id, { deliveryStartedAt: new Date().toISOString(), joinedTurn });
+  const deliveryStartedAt = new Date().toISOString();
+  updateTask(stateDir, task.id, { deliveryStartedAt, joinedTurn });
+  // The mailbox is read from this moment: a session can answer before its
+  // delivery is noted done.
+  inbox = channel && threadId
+    ? watchInbox(stateDir, threadId, Date.parse(deliveryStartedAt), (m) => fromTarget(m.replyPath), {
+      onOther: (m) => console.log(`A message from ${m.fromName} arrived for the thread; still waiting for ${target.name}.`),
+    })
+    : null;
+  void inbox?.message.then((m) => resolveReply(replyOf(m)));
   try {
     await deliver(target.socketPath, buildEnvelope({
-      text: composeMessage(task.message, { threadId: task.threadId }),
-      ourSocketPath: socketPath,
+      text: composeMessage(task.message, { threadId: task.threadId, channel: !!channel }),
+      ourSocketPath: replyTo,
       ourName: name,
       mode: "prompting",
     }));
@@ -1101,6 +1155,20 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   const deliveredAt = new Date().toISOString();
   updateTask(stateDir, task.id, { status: "running", deliveredAt, senderName: name, ...(joinedTurn ? { busySeenAt: deliveredAt } : {}) });
   phase = "delivered";
+  // The address must outlast a host that went — killed, or its temp space
+  // cleared: asked now and then, the host, or a new one, keeps it, with the
+  // session as it is now (Claude Code may have brought it back as a new
+  // process). One ask at a time.
+  if (channel && threadId) {
+    let asking = false;
+    keep = setInterval(() => {
+      if (asking) return;
+      asking = true;
+      openChannel(stateDir, task.cwd, threadId, contactOf())
+        .catch((e) => console.log(`Could not keep the address of Codex thread ${threadId}: ${e instanceof Error ? e.message : String(e)}`))
+        .finally(() => { asking = false; });
+    }, CHANNEL_KEEP_MS);
+  }
   // Errors are this task's until another task's message starts a turn of its
   // own in that session — which it can only do once this message's turn has
   // been seen running: until then, a message delivered after it may land in
@@ -1189,6 +1257,11 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       ...(blockedWatch ? [blockedWatch.blocked] : []),
     ]);
     stall?.stop();
+    // The mailbox is looked at every so often: a reply may have landed since
+    // the last look, and whatever else ended the wait, a reply that came is
+    // the task's answer.
+    const landed = typeof answer === "string" ? inbox?.lookNow() : null;
+    if (landed) done({ status: "replied", reply: replyOf(landed), error: undefined });
 
     if (answer === "stalled") {
       // Its turn ended on an error without replying. Saying so is the whole
@@ -1226,6 +1299,8 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       }
       // It may have got past the prompt and answered while it was being
       // stopped: an answer that came is the task's answer.
+      const late = inbox?.lookNow();
+      if (late) done({ status: "replied", reply: replyOf(late), error: undefined });
       if (arrived) done({ status: "replied", reply: arrived, error: undefined });
       const unansweredSec = blockedWatch?.unansweredSec() ?? null;
       done({

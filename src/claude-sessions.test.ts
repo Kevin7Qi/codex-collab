@@ -576,13 +576,25 @@ describeUnix("spawn helpers", () => {
   test("the brief names the workspace and asks for a reply by SendMessage that carries everything, and little after it", () => {
     const brief = spawnedSessionBrief("/work/repo");
     expect(brief).toContain("/work/repo");
-    expect(brief).toContain("Answer by replying to the sender with SendMessage.");
-    // Resumed or new, the session is told the reply is all the Codex
-    // session gets, and to end its turn with a line at most after it.
+    expect(brief).toContain("Answer a message by replying to its sender with SendMessage, and write to that address later with anything the thread should know.");
+    // Resumed or new, the session is told its first word back is the reply,
+    // that the reply is all the Codex session gets, and to end its turn with
+    // a line at most after it.
     for (const said of [brief, resumedSessionBrief()]) {
-      expect(said).toContain("The reply is all the Codex session receives, so put everything the answer needs in it; after sending it, end your turn with one short line at most, such as \"Replied.\"");
+      expect(said).toContain("The first thing you send a Codex thread after its message is taken as the reply, and the reply is all the Codex session receives, so put everything the answer needs in it; after sending it, end your turn with one short line at most, such as \"Replied.\"");
     }
     expect(resumedSessionBrief()).toContain("you answer with SendMessage as before");
+  });
+
+  test("the brief's own turn ends at once: no one to reply to yet, and nothing to read or run", () => {
+    // Told to reply now, a session went looking for a sender; told to read
+    // the workspace as needed, it read it before any message came (#48).
+    for (const said of [spawnedSessionBrief("/work/repo"), resumedSessionBrief()]) {
+      expect(said.endsWith("No message has come yet, so there is no one to send anything to and nothing to read or run: end this turn now with the single word \"Ready.\" in your own output.")).toBe(true);
+      expect(said).not.toMatch(/Reply now|as needed/);
+    }
+    expect(spawnedSessionBrief("/w")).toContain("When a message needs the workspace, read it.");
+    expect(resumedSessionBrief()).toContain("when a message needs it, look again");
   });
 });
 

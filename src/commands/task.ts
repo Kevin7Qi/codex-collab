@@ -13,6 +13,7 @@ import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow 
 import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
+import { claimDelivery, isThreadId, messagesSince, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
 /** Default wait (seconds) of `send` and of `task wait`. It bounds how long the
@@ -56,6 +57,23 @@ function since(iso: string | undefined, now = Date.now()): string {
   return Number.isFinite(t) ? formatDuration(Math.max(1000, now - t)) : "an unknown time";
 }
 
+/** A message's text as every report prints it: made safe for a terminal,
+ *  and indented so no line of it sits at column 0, the way `ask` prints
+ *  answers. The hook finds what a command printed by this same text. */
+export function printedText(text: string): string {
+  return sanitizeForTerminal(text).trimEnd().split("\n").map((l) => `  ${l}`).join("\n");
+}
+
+/** What the session a task went to wrote to the thread after its reply, oldest
+ *  first: none for a reply that did not come through the thread's mailbox. */
+export function laterFromSession(stateDir: string, record: TaskRecord): ChannelMessage[] {
+  const reply = record.reply;
+  if (!reply?.id || !reply.at || !isThreadId(record.threadId)) return [];
+  const replyId = reply.id;
+  return messagesSince(stateDir, record.threadId, Date.parse(reply.at))
+    .filter((m) => m.id > replyId && (m.replyPath === record.target.socketPath || m.fromName === reply.fromName));
+}
+
 /** Poll a task until it is final or `timeoutMs` has passed; returns it as it
  *  then stands. null when the record has disappeared. */
 export async function waitForTask(stateDir: string, id: string, timeoutMs: number): Promise<TaskRecord | null> {
@@ -84,7 +102,21 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
         : "";
       console.log(`REPLY FROM ${target.name}${took}:`);
       // Indented so no reply line sits at column 0, the way `ask` prints answers.
-      for (const l of sanitizeForTerminal(record.reply?.text ?? "").trimEnd().split("\n")) console.log(`  ${l}`);
+      console.log(printedText(record.reply?.text ?? ""));
+      // What the session wrote to the thread after it, kept in the mailbox
+      // the reply came from.
+      const later = opts.stateDir ? laterFromSession(opts.stateDir, record) : [];
+      for (const m of later) {
+        console.log(`LATER FROM ${m.fromName} (${since(m.at)} ago):`);
+        console.log(printedText(m.text));
+      }
+      // Printed, it has reached whoever ran this — Codex, as a rule — and
+      // no hook or woken turn is to hand it over again. Inside Codex's
+      // sandbox the mark cannot be written; the hook after the command
+      // makes it there (claimShown).
+      if (opts.stateDir && isThreadId(record.threadId) && record.reply?.id) {
+        for (const id of [record.reply.id, ...later.map((m) => m.id)]) claimDelivery(opts.stateDir, record.threadId, id);
+      }
       return;
     }
     case "pending":
@@ -250,6 +282,45 @@ export async function handleTask(args: string[]): Promise<void> {
   if (options.json) console.log(JSON.stringify(record, null, 2));
   else reportOutcome(record, { waitedMs, hint, stateDir });
   process.exit(exitCodeFor(record.status));
+}
+
+/** `messages [<id>]`: what Claude Code sessions sent the Codex thread this
+ *  command runs in, oldest first — the latest `--limit` of them (`--all`
+ *  for every one kept), or one in full. Read from the thread's mailboxes, so
+ *  it works inside Codex's sandbox. */
+export async function handleMessages(args: string[]): Promise<void> {
+  const { positional, options } = parseOptions(args);
+  const threadId = process.env.CODEX_THREAD_ID;
+  if (!isThreadId(threadId)) {
+    die("`codex-collab messages` prints what Claude Code sessions sent the Codex thread it runs in, and no Codex thread ran it (CODEX_THREAD_ID is not set).");
+  }
+  const all = threadStateDirs(threadId)
+    .flatMap((dir) => messagesSince(dir, threadId).map((message) => ({ dir, message })))
+    .sort((a, b) => (a.message.id < b.message.id ? -1 : 1));
+  const replyOf = (dir: string, id: string) => listTasks(dir).find((t) => t.threadId === threadId && t.reply?.id === id);
+  const print = ({ dir, message: m }: { dir: string; message: ChannelMessage }) => {
+    const task = replyOf(dir, m.id);
+    console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${task ? `, its reply to task ${task.id}` : ""}:`);
+    console.log(printedText(m.text));
+    // Printed whole, it has reached whoever ran this (see reportOutcome).
+    claimDelivery(dir, threadId, m.id);
+  };
+  const wanted = positional[0];
+  if (wanted) {
+    const found = all.filter((x) => x.message.id.startsWith(wanted));
+    if (found.length !== 1) {
+      die(found.length > 1 ? `"${wanted}" matches several messages: ${found.map((x) => x.message.id).join(", ")}` : `No message "${wanted}" to this thread. \`codex-collab messages\` lists them.`);
+    }
+    print(found[0]);
+    return;
+  }
+  if (all.length === 0) {
+    console.log("No Claude Code session has sent this thread anything.");
+    return;
+  }
+  const shown = all.slice(-options.limit);
+  if (shown.length < all.length) console.log(`(${all.length - shown.length} older not shown — --all prints every one kept.)`);
+  for (const x of shown) print(x);
 }
 
 /** `tasks`: this workspace's tasks, newest first. */
