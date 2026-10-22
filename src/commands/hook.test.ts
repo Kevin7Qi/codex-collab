@@ -167,7 +167,9 @@ describe("what the hook hands over", () => {
     expect(hookAnswer({ session_id: THREAD, hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"))).toBeNull();
   });
 
-  test("run by Codex through a pipe, its answer arrives whole however the message is written", () => {
+  // Not on Windows, where there are no hooks (`config codex-hook` refuses
+  // them) and the home directory follows USERPROFILE, not this HOME.
+  test.skipIf(process.platform === "win32")("run by Codex through a pipe, its answer arrives whole however the message is written", () => {
     // Bun drops what a pipe has not taken when the process exits straight
     // after the write: the messages in it would be claimed, and lost.
     const home = join(ROOT, `home-${++n}`);

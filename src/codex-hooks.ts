@@ -11,7 +11,6 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { shellQuote } from "./approvals";
 import { config } from "./config";
 import { HOOK_EVENTS } from "./commands/hook";
 
@@ -40,10 +39,17 @@ export function codexHooksPath(): string {
   return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "hooks.json");
 }
 
+/** Quoted for `sh`, which Codex runs a hook's command with. Hooks exist only
+ *  where `send` does (not on Windows), so the command is the same wherever
+ *  it is written — unlike `shellQuote`, which quotes for the platform. */
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 /** The command each hook runs: Bun and this CLI by absolute path, since a
  *  hook the Codex app starts on macOS has a PATH with neither. */
 export function hookCommand(bun: string = process.execPath, cli: string = process.argv[1]): string {
-  return `${shellQuote(bun)} ${shellQuote(cli)} hook`;
+  return `${shQuote(bun)} ${shQuote(cli)} hook`;
 }
 
 /** Whether a hook handler is one of ours: exactly the command `hookCommand`
