@@ -35,6 +35,11 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
     // A hook of the user's own that happens to look alike is theirs.
     expect(isOurHandler({ command: "bun ~/proj/src/cli.ts hook" })).toBe(false);
     expect(isOurHandler({ command: "'/opt/bun' '/home/u/proj/tool.ts' hook" })).toBe(false);
+    // Another project's `cli.ts hook`, quoted just as ours, is not ours —
+    // unless it is the very command this install writes.
+    const other = "'/opt/bun' '/home/u/other-project/src/cli.ts' hook";
+    expect(isOurHandler({ command: other })).toBe(false);
+    expect(isOurHandler({ command: other }, other)).toBe(true);
   });
 
   test("into no file: one hook for each of the three events, with a timeout, and room for a message on the two that add context", () => {
@@ -110,6 +115,17 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
     installCodexHooks(COMMAND, none);
     restoreCodexHooks(empty, none);
     expect(existsSync(none)).toBe(false);
+  });
+
+  test("a hook of another project that looks like ours is neither replaced nor removed", () => {
+    const path = fresh();
+    const theirs = { hooks: { PostToolUse: [{ hooks: [{ type: "command", command: "'/opt/bun' '/home/u/other-project/src/cli.ts' hook" }] }] } };
+    writeFileSync(path, JSON.stringify(theirs));
+    installCodexHooks(COMMAND, path);
+    expect(read(path).hooks.PostToolUse).toHaveLength(2);
+    expect(read(path).hooks.PostToolUse[0]).toEqual(theirs.hooks.PostToolUse[0]);
+    expect(removeCodexHooks(path, COMMAND)).toBe(true);
+    expect(read(path)).toEqual(theirs);
   });
 
   test("a group the user shares with ours keeps their handler", () => {

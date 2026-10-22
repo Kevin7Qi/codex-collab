@@ -52,14 +52,17 @@ export function hookCommand(bun: string = process.execPath, cli: string = proces
   return `${shQuote(bun)} ${shQuote(cli)} hook`;
 }
 
-/** Whether a hook handler is one of ours: exactly the command `hookCommand`
- *  writes — two quoted paths, the second codex-collab's CLI, then `hook` —
- *  so that no hook of the user's is ever taken for one. */
-export function isOurHandler(h: unknown): boolean {
+/** Whether a hook handler is one of ours: the very command this install
+ *  writes (`current`), or one `hookCommand` wrote for another install of
+ *  codex-collab — two quoted paths, the second with codex-collab in it, then
+ *  `hook`. Nothing else is, so that no hook of the user's — another project's
+ *  `cli.ts hook`, say — is ever taken for one, replaced or removed. */
+export function isOurHandler(h: unknown, current: string = hookCommand()): boolean {
   const command = (h as { command?: unknown } | null)?.command;
   if (typeof command !== "string") return false;
+  if (command === current) return true;
   const m = /^'(?:[^']|'\\'')+' '((?:[^']|'\\'')+)' hook$/.exec(command);
-  return !!m && (/codex-collab/.test(m[1]) || /\/cli\.ts$/.test(m[1]));
+  return !!m && /codex-collab/.test(m[1]);
 }
 
 function ourHandler(event: string, command: string): Record<string, unknown> {
@@ -92,13 +95,13 @@ function readDoc(path: string): HooksDoc {
 }
 
 /** Every group of an event with our handlers taken out; groups left empty go. */
-function withoutOurs(groups: unknown): unknown[] {
+function withoutOurs(groups: unknown, command: string): unknown[] {
   if (!Array.isArray(groups)) return [];
   const out: unknown[] = [];
   for (const g of groups) {
     const handlers = (g as { hooks?: unknown } | null)?.hooks;
     if (!Array.isArray(handlers)) { out.push(g); continue; }
-    const kept = handlers.filter((h) => !isOurHandler(h));
+    const kept = handlers.filter((h) => !isOurHandler(h, command));
     if (kept.length === 0) continue;
     out.push(kept.length === handlers.length ? g : { ...(g as object), hooks: kept });
   }
@@ -145,16 +148,17 @@ export function restoreCodexHooks(snapshot: string | null, path: string = codexH
 /** Our hooks in an event's groups, written where ours already are, so that
  *  every hook keeps its place — Codex keys each hook's trust by it — or
  *  after the user's when there were none. */
-function withOurs(groups: unknown, handler: Record<string, unknown>): unknown[] {
+function withOurs(groups: unknown, handler: Record<string, unknown>, command: string): unknown[] {
   const list = Array.isArray(groups) ? groups : [];
+  const ours = (h: unknown) => isOurHandler(h, command);
   let placed = false;
   const out: unknown[] = [];
   for (const g of list) {
     const handlers = (g as { hooks?: unknown } | null)?.hooks;
-    if (!Array.isArray(handlers) || !handlers.some(isOurHandler)) { out.push(g); continue; }
+    if (!Array.isArray(handlers) || !handlers.some(ours)) { out.push(g); continue; }
     const kept: unknown[] = [];
     for (const h of handlers) {
-      if (!isOurHandler(h)) kept.push(h);
+      if (!ours(h)) kept.push(h);
       else if (!placed) { kept.push(handler); placed = true; }
     }
     if (kept.length > 0) out.push({ ...(g as object), hooks: kept });
@@ -166,14 +170,14 @@ function withOurs(groups: unknown, handler: Record<string, unknown>): unknown[] 
 export function installCodexHooks(command: string = hookCommand(), path: string = codexHooksPath()): string {
   const doc = readDoc(path);
   const hooks: Record<string, unknown> = { ...(doc.hooks ?? {}) };
-  for (const event of HOOK_EVENTS) hooks[event] = withOurs(hooks[event], ourHandler(event, command));
+  for (const event of HOOK_EVENTS) hooks[event] = withOurs(hooks[event], ourHandler(event, command), command);
   writeDoc(path, { ...doc, hooks });
   return path;
 }
 
 /** Take our hooks out, leaving the user's; the file goes when nothing else
  *  is in it. False when none of ours were there. */
-export function removeCodexHooks(path: string = codexHooksPath()): boolean {
+export function removeCodexHooks(path: string = codexHooksPath(), command: string = hookCommand()): boolean {
   if (!existsSync(path)) return false;
   const doc = readDoc(path);
   if (!doc.hooks) return false;
@@ -181,8 +185,8 @@ export function removeCodexHooks(path: string = codexHooksPath()): boolean {
   const hooks: Record<string, unknown> = {};
   for (const [event, groups] of Object.entries(doc.hooks)) {
     if (!Array.isArray(groups)) { hooks[event] = groups; continue; }
-    if (groups.some((g) => { const hs = (g as { hooks?: unknown } | null)?.hooks; return Array.isArray(hs) && hs.some(isOurHandler); })) found = true;
-    const kept = withoutOurs(groups);
+    if (groups.some((g) => { const hs = (g as { hooks?: unknown } | null)?.hooks; return Array.isArray(hs) && hs.some((h) => isOurHandler(h, command)); })) found = true;
+    const kept = withoutOurs(groups, command);
     if (kept.length > 0) hooks[event] = kept;
   }
   if (!found) return false;
@@ -216,7 +220,7 @@ export function codexHooksInSync(command: string = hookCommand(), path: string =
       const handlers = (g as { hooks?: unknown } | null)?.hooks;
       if (!Array.isArray(handlers)) continue;
       for (const h of handlers) {
-        if (!isOurHandler(h)) continue;
+        if (!isOurHandler(h, command)) continue;
         ours++;
         if (JSON.stringify(h) === JSON.stringify(ourHandler(event, command))) right++;
       }

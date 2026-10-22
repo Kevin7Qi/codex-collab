@@ -57,6 +57,13 @@ function since(iso: string | undefined, now = Date.now()): string {
   return Number.isFinite(t) ? formatDuration(Math.max(1000, now - t)) : "an unknown time";
 }
 
+/** A message's text as every report prints it: made safe for a terminal,
+ *  and indented so no line of it sits at column 0, the way `ask` prints
+ *  answers. The hook finds what a command printed by this same text. */
+export function printedText(text: string): string {
+  return sanitizeForTerminal(text).trimEnd().split("\n").map((l) => `  ${l}`).join("\n");
+}
+
 /** What the session a task went to wrote to the thread after its reply, oldest
  *  first: none for a reply that did not come through the thread's mailbox. */
 export function laterFromSession(stateDir: string, record: TaskRecord): ChannelMessage[] {
@@ -95,13 +102,13 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
         : "";
       console.log(`REPLY FROM ${target.name}${took}:`);
       // Indented so no reply line sits at column 0, the way `ask` prints answers.
-      for (const l of sanitizeForTerminal(record.reply?.text ?? "").trimEnd().split("\n")) console.log(`  ${l}`);
+      console.log(printedText(record.reply?.text ?? ""));
       // What the session wrote to the thread after it, kept in the mailbox
       // the reply came from.
       const later = opts.stateDir ? laterFromSession(opts.stateDir, record) : [];
       for (const m of later) {
         console.log(`LATER FROM ${m.fromName} (${since(m.at)} ago):`);
-        for (const l of sanitizeForTerminal(m.text).trimEnd().split("\n")) console.log(`  ${l}`);
+        console.log(printedText(m.text));
       }
       // Printed, it has reached whoever ran this — Codex, as a rule — and
       // no hook or woken turn is to hand it over again. Inside Codex's
@@ -294,7 +301,7 @@ export async function handleMessages(args: string[]): Promise<void> {
   const print = ({ dir, message: m }: { dir: string; message: ChannelMessage }) => {
     const task = replyOf(dir, m.id);
     console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${task ? `, its reply to task ${task.id}` : ""}:`);
-    for (const l of sanitizeForTerminal(m.text).trimEnd().split("\n")) console.log(`  ${l}`);
+    console.log(printedText(m.text));
     // Printed whole, it has reached whoever ran this (see reportOutcome).
     claimDelivery(dir, threadId, m.id);
   };

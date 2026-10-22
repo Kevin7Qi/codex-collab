@@ -139,6 +139,30 @@ describe("what the hook hands over", () => {
     expect(next).toContain(`two ${half}</input>`);
   });
 
+  test("a message that came in after the command printed, and opens the same way, is still handed over", () => {
+    const { root, ws } = fresh();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "q", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "Done.\nThe first part." });
+    updateTask(ws, task.id, { status: "replied", reply: { text: reply.text, fromName: "claude(a)", id: reply.id, at: reply.at } });
+    // What `task wait` printed — before the follow-up below arrived.
+    const printed = `task: ${task.id}  status: replied\nREPLY FROM claude(a) (after 2s):\n  Done.\n  The first part.\n`;
+    const later = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "Done.\nAnd the second." });
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: printed })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain("Done.\nAnd the second.");
+    expect(context).not.toContain("The first part");
+    expect(isDelivered(ws, THREAD, later.id)).toBe(true);
+  });
+
+  test("a command's output in a structured response is read for what it printed", () => {
+    const { root, ws } = fresh();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "q", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "seen already" });
+    updateTask(ws, task.id, { status: "replied", reply: { text: reply.text, fromName: "claude(a)", id: reply.id, at: reply.at } });
+    const response = { exit_code: 0, stdout: `task: ${task.id}  status: replied\nREPLY FROM claude(a):\n  seen already\n`, stderr: "" };
+    expect(answer(root, { hook_event_name: "PostToolUse", tool_response: response })).toBeNull();
+    expect(isDelivered(ws, THREAD, reply.id)).toBe(true);
+  });
+
   test("messages a `messages` command printed are not handed over again", () => {
     const { root, ws } = fresh();
     const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "read it yourself" });

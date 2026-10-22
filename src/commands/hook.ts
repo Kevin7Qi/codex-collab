@@ -20,7 +20,7 @@ import { listTasks, loadTask, type TaskRecord } from "../claude-tasks";
 import { claimDelivery, isDelivered, isThreadId, messageIdsSince, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { buildDelegation } from "../peer";
 import { sanitizeForTerminal } from "../questions";
-import { laterFromSession } from "./task";
+import { laterFromSession, printedText } from "./task";
 import { formatAge } from "./shared";
 
 /** The events the hook answers, and how each hands a message over. */
@@ -63,13 +63,16 @@ export function messagesIn(output: string): string[] {
  *  result`, `messages` — have reached it: they are claimed, so no hook hands
  *  them over again. The commands claim them themselves where they can;
  *  inside Codex's sandbox they cannot, and this is where it is done. Only a
- *  message whose text the output does hold counts. */
+ *  message whose whole text the output holds, as it is printed, counts: one
+ *  that came in after the command printed, and opens the same way, is still
+ *  Codex's to be handed. A message the output holds only in part (cut by
+ *  Codex) is handed over again, which costs a repeat and loses nothing. */
 export function claimShown(dirs: string[], threadId: string, output: string): void {
+  const printed = (text: string) => output.includes(printedText(text));
   for (const id of messagesIn(output)) {
     for (const dir of dirs) {
       const m = readMessage(dir, threadId, id);
-      const line = m ? firstLine(m.text, 80).replace(/…$/, "") : null;
-      if (m && (!line || output.includes(line))) claimDelivery(dir, threadId, id);
+      if (m && printed(m.text)) claimDelivery(dir, threadId, id);
     }
   }
   for (const id of repliedTasksIn(output)) {
@@ -77,12 +80,20 @@ export function claimShown(dirs: string[], threadId: string, output: string): vo
       const task = loadTask(dir, id);
       if (!task || task.threadId !== threadId || !task.reply?.id) continue;
       const shown: Array<{ id: string; text: string }> = [{ id: task.reply.id, text: task.reply.text }, ...laterFromSession(dir, task)];
-      for (const m of shown) {
-        const line = firstLine(m.text, 80).replace(/…$/, "");
-        if (!line || output.includes(line)) claimDelivery(dir, threadId, m.id);
-      }
+      for (const m of shown) if (printed(m.text)) claimDelivery(dir, threadId, m.id);
     }
   }
+}
+
+/** The text in a tool's response: the response itself for a shell command,
+ *  and for a structured one, every piece of text in it, each on lines of its
+ *  own — as a JSON string its line breaks would be escapes, and nothing in
+ *  it would start a line. */
+export function responseText(response: unknown): string {
+  if (typeof response === "string") return response;
+  if (Array.isArray(response)) return response.map(responseText).join("\n");
+  if (response && typeof response === "object") return Object.values(response).map(responseText).join("\n");
+  return "";
 }
 
 /** What reached the thread and Codex has not been handed, oldest first. */
@@ -186,8 +197,7 @@ export function hookAnswer(input: Record<string, unknown>, root?: string): strin
   const dirs = threadStateDirs(threadId, root);
   if (dirs.length === 0) return null;
   if (event === "PostToolUse") {
-    const response = input.tool_response;
-    claimShown(dirs, threadId, typeof response === "string" ? response : JSON.stringify(response ?? ""));
+    claimShown(dirs, threadId, responseText(input.tool_response));
   }
   const text = compose(undelivered(dirs, threadId), threadId);
   if (!text) return null;
