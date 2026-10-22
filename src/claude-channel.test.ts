@@ -148,6 +148,16 @@ describe("the mailbox", () => {
     }
   });
 
+  test("messages written in one millisecond keep the order they came in: an answer is never taken for its postscript", () => {
+    const state = freshState();
+    const texts = Array.from({ length: 50 }, (_, i) => `message ${i}`);
+    for (const text of texts) writeMessage(state, THREAD, { fromName: "x", replyPath: "/s", text }, 42_000);
+    expect(messagesSince(state, THREAD).map((m) => m.text)).toEqual(texts);
+    const watch = watchInbox(state, THREAD, 0, (m) => m.replyPath === "/s", { pollMs: 60_000 });
+    expect(watch.lookNow()?.text).toBe("message 0");
+    watch.stop();
+  });
+
   test("a mailbox of another thread, or none, is empty", () => {
     const state = freshState();
     writeMessage(state, THREAD, { fromName: "x", replyPath: "/a", text: "hi" });

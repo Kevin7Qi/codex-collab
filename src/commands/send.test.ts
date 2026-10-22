@@ -2698,6 +2698,20 @@ describeUnix("a Codex thread's address", () => {
     }
   });
 
+  test("a socket removed under a running host is made again where it was, and the reply still comes", async () => {
+    const fake = startFake("swept-claude");
+    registerFake(fake);
+    expect((await runCli(["send", "--to", "swept-claude", "before"])).code).toBe(0);
+    const socket = fake.received[0].replyPath;
+    // Temp space cleared while the host runs: its socket is gone.
+    unlinkSync(socket);
+    const after = await runCli(["send", "--to", "swept-claude", "after"]);
+    expect(after.stdout).toContain("  pong: after");
+    expect(fake.received[1].replyPath).toBe(socket);
+    expect(existsSync(socket)).toBe(true);
+    expect(addressEntries()).toHaveLength(1);
+  });
+
   test("the address goes once no session the thread talks to runs, and the host with it, leaving nothing", async () => {
     const fake = startFake("brief-claude");
     registerFake(fake);

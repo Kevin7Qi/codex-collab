@@ -451,13 +451,30 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     return p;
   };
 
+  /** Whether the address's socket is no longer the one this host made:
+   *  removed — temp space cleared under a running host — or replaced. */
+  const socketGone = (a: Address): boolean => {
+    try {
+      return a.socketIno === null ? !existsSync(a.socketPath) : statSync(a.socketPath).ino !== a.socketIno;
+    } catch {
+      return true;
+    }
+  };
+  /** Open the address again where it was, since that path is where Claude
+   *  sends a reply; whom it talks to is on disk, and comes back with it. */
+  const reopen = (a: Address): Promise<Address> => {
+    closeAddress(a, `its socket ${a.socketPath} was removed; listening there again`);
+    return openAddress(a.threadId, a.lastActive);
+  };
+
   const handle = async (req: Record<string, unknown>): Promise<Record<string, unknown>> => {
     if (req.op === "ping") return { ok: true, pid: process.pid, addresses: addresses.size };
     if (req.op !== "open") return { ok: false, error: `unknown request: ${String(req.op)}` };
     if (!isThreadId(req.threadId)) return { ok: false, error: "not a Codex thread id" };
     if (!isContact(req.contact)) return { ok: false, error: "no Claude Code session named for the thread to talk to" };
     try {
-      const a = await openAddress(req.threadId);
+      let a = await openAddress(req.threadId);
+      if (socketGone(a)) a = await reopen(a);
       // A send from the thread, or a task's receiver waiting on a reply.
       touch(a);
       addContact(a, req.contact);
@@ -585,6 +602,10 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       if (changed) persist(a);
       if (a.contacts.length === 0) {
         closeAddress(a, "no Claude Code session it has talked to is running");
+        continue;
+      }
+      if (socketGone(a)) {
+        void reopen(a).catch((e) => log(`could not reopen the address of ${a.threadId}: ${e instanceof Error ? e.message : String(e)}`));
         continue;
       }
       keepEntry(a);

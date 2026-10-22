@@ -181,12 +181,28 @@ export interface ChannelMessage {
 
 const MESSAGE_FILE = /^(\d{13})-[0-9a-f]{8}\.json$/;
 
+/** The last id this process gave a message: the millisecond, and a count
+ *  within it. */
+let lastIdMs = 0;
+let idSeq = 0;
+
+/** A message id: the millisecond, then a count within it and two random
+ *  bytes. Two messages one process writes in one millisecond — an answer and
+ *  its postscript — keep the order they came in, which is the order a reply
+ *  is found by; the random bytes keep two writers apart. */
+function nextMessageId(now: number): string {
+  const ms = Math.floor(now);
+  if (ms === lastIdMs) idSeq = (idSeq + 1) & 0xffff;
+  else { lastIdMs = ms; idSeq = 0; }
+  return `${String(ms).padStart(13, "0")}-${idSeq.toString(16).padStart(4, "0")}${randomBytes(2).toString("hex")}`;
+}
+
 /** Store a message in the thread's mailbox and return it as stored. */
 export function writeMessage(stateDir: string, threadId: string, fields: Omit<ChannelMessage, "id" | "at">, now: number = Date.now()): ChannelMessage {
   const dir = inboxDir(stateDir, threadId);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   for (;;) {
-    const id = `${String(now).padStart(13, "0")}-${randomBytes(4).toString("hex")}`;
+    const id = nextMessageId(now);
     const msg: ChannelMessage = { id, at: new Date(now).toISOString(), ...fields };
     const tmp = join(dir, `.${id}.${process.pid}.tmp`);
     // The messages are the user's work: theirs alone to read.
