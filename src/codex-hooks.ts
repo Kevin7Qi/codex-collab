@@ -46,9 +46,32 @@ function shQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+/** The path hooks reach this CLI by: the link the installer manages, where
+ *  one leads to this very CLI. Bun resolves the link a script starts through,
+ *  so `process.argv[1]` is the file behind it — in a dev install, a checkout,
+ *  which can move or go. The link stays, and follows whichever install is
+ *  current, so hooks need no rewriting, and Codex no new trust, when that
+ *  changes. With no such link, or one leading elsewhere (a CLI run from
+ *  another checkout), the path it runs from. */
+export function stableCliPath(cli: string = process.argv[1], links: Array<string | null> = [Bun.which("codex-collab"), join(homedir(), ".local", "bin", "codex-collab")]): string {
+  let real: string;
+  try {
+    real = realpathSync(cli);
+  } catch {
+    return cli;
+  }
+  for (const link of links) {
+    if (!link) continue;
+    try {
+      if (realpathSync(link) === real) return link;
+    } catch { /* a link to nothing */ }
+  }
+  return cli;
+}
+
 /** The command each hook runs: Bun and this CLI by absolute path, since a
  *  hook the Codex app starts on macOS has a PATH with neither. */
-export function hookCommand(bun: string = process.execPath, cli: string = process.argv[1]): string {
+export function hookCommand(bun: string = process.execPath, cli: string = stableCliPath()): string {
   return `${shQuote(bun)} ${shQuote(cli)} hook`;
 }
 

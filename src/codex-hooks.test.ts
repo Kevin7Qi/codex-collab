@@ -7,7 +7,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, installCodexHooks, isOurHandler, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "./codex-hooks";
+import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, installCodexHooks, isOurHandler, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hooks-"));
 let n = 0;
@@ -40,6 +40,31 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
     const other = "'/opt/bun' '/home/u/other-project/src/cli.ts' hook";
     expect(isOurHandler({ command: other })).toBe(false);
     expect(isOurHandler({ command: other }, other)).toBe(true);
+  });
+
+  test("hooks reach the CLI by the installer's link when it leads to this CLI, so that a checkout moving changes nothing", () => {
+    if (process.platform === "win32") return;
+    const dir = join(ROOT, `links-${++n}`);
+    mkdirSync(dir, { recursive: true });
+    const cli = join(dir, "cli.ts");
+    const other = join(dir, "other.ts");
+    writeFileSync(cli, "");
+    writeFileSync(other, "");
+    const link = join(dir, "codex-collab");
+    symlinkSync(cli, link);
+    const elsewhere = join(dir, "elsewhere");
+    symlinkSync(other, elsewhere);
+    const dangling = join(dir, "dangling");
+    symlinkSync(join(dir, "gone.ts"), dangling);
+    expect(stableCliPath(cli, [link])).toBe(link);
+    // The second place is looked at when the first is no use.
+    expect(stableCliPath(cli, [null, dangling, elsewhere, link])).toBe(link);
+    // A link leading to another install is not this one, and none is none.
+    expect(stableCliPath(cli, [elsewhere])).toBe(cli);
+    expect(stableCliPath(cli, [])).toBe(cli);
+    expect(stableCliPath(join(dir, "missing.ts"), [link])).toBe(join(dir, "missing.ts"));
+    // A hook written through the link is ours, wherever the link leads.
+    expect(isOurHandler({ command: hookCommand("/opt/bun", link) }, "other")).toBe(true);
   });
 
   test("into no file: one hook for each of the three events, with a timeout, and room for a message on the two that add context", () => {
