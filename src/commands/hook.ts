@@ -143,7 +143,7 @@ export function take(items: Array<{ dir: string; message: ChannelMessage }>, thr
     const head = header(m, replies.get(m.id), now);
     const part = (body: string) => `${head}\n\n${body}`;
     // Counted as Codex gets it, escaped and enveloped.
-    const cost = (text: string) => estimateTokens(buildDelegation(text));
+    const cost = (text: string) => estimateTokens(buildDelegation(text, threadId));
     let text = part(m.text);
     if (cost(text) > budget) {
       if (taken.length > 0) break;
@@ -174,18 +174,18 @@ export function take(items: Array<{ dir: string; message: ChannelMessage }>, thr
  *  each message in its own envelope. Codex takes a hook's text with a
  *  developer's weight, and its skill may not be loaded: the line says that
  *  what follows is a peer agent's message. */
-export function hookText(taken: Taken[]): string {
+export function hookText(taken: Taken[], threadId: string): string {
   const what = taken.length === 1
     ? "A message from Claude Code reached this thread, from the Claude Code session it names"
     : `${taken.length} messages from Claude Code reached this thread, each from the Claude Code session it names`;
-  return `codex-collab: ${what}, a peer agent working with you.\n${taken.map((t) => buildDelegation(t.part)).join("\n")}`;
+  return `codex-collab: ${what}, a peer agent working with you.\n${taken.map((t) => buildDelegation(t.part, threadId)).join("\n")}`;
 }
 
 /** The text a hook hands Codex for these messages, or null when there are
  *  none to hand over (see `take`). */
 export function compose(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now()): string | null {
   const taken = take(items, threadId, now);
-  return taken.length > 0 ? hookText(taken) : null;
+  return taken.length > 0 ? hookText(taken, threadId) : null;
 }
 
 /** The hook's answer to Codex for one event, or null for none. */

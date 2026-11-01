@@ -59,7 +59,7 @@ describe("waking a thread", () => {
     const start = s.asked[2].params as { threadId: string; input: Array<{ type: string; text: string }> };
     expect(Object.keys(start).sort()).toEqual(["input", "threadId"]);
     expect(start.input).toHaveLength(1);
-    expect(start.input[0].text).toBe("<codex_delegation>\n  <source_thread_id></source_thread_id>\n  <input>[message from claude(a)]\n\nfirst\n\n[message from claude(a)]\n\nsecond</input>\n</codex_delegation>");
+    expect(start.input[0].text).toBe(`<codex_delegation>\n  <source_thread_id>${THREAD}</source_thread_id>\n  <input>[message from claude(a)]\n\nfirst\n\n[message from claude(a)]\n\nsecond</input>\n</codex_delegation>`);
     expect(isDelivered(ws, THREAD, a.id) && isDelivered(ws, THREAD, b.id)).toBe(true);
     expect(s.closed()).toBe(true);
     // Handed over once.

@@ -65,7 +65,7 @@ describe("what the hook hands over", () => {
     expect(first?.hookSpecificOutput).toEqual(expect.objectContaining({ hookEventName: "PostToolUse" }));
     // Said with a developer's weight, and the skill may not be loaded: the
     // line before it says whose it is.
-    expect(context).toStartWith("codex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>\n  <source_thread_id></source_thread_id>\n  <input>[message from claude(ws-a1b2c3)]");
+    expect(context).toStartWith("codex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>\n  <source_thread_id>" + THREAD + "</source_thread_id>\n  <input>[message from claude(ws-a1b2c3)]");
     // The envelope's body is escaped, as on the peer side.
     expect(context).toContain("Chapter 3 reads well; &lt;one&gt; fix &amp; a note.</input>\n</codex_delegation>");
     expect(isDelivered(ws, THREAD, m.id)).toBe(true);

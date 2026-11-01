@@ -23,8 +23,8 @@ type Client = Pick<AppServerClient, "request" | "close">;
 
 /** The turn input for messages taken: one envelope, each message under its
  *  own opening line, since the Codex app shows one envelope as one message. */
-export function wakeText(parts: string[]): string {
-  return buildDelegation(parts.join("\n\n"));
+export function wakeText(parts: string[], threadId: string): string {
+  return buildDelegation(parts.join("\n\n"), threadId);
 }
 
 /** What a woken turn carries at most, in tokens as `estimateTokens` counts
@@ -71,7 +71,7 @@ export async function wakeThread(
       // thread loaded, and its settings stay as its user left them — the
       // turn runs on them.
       await client.request("thread/resume", { threadId, excludeTurns: true });
-      await client.request("turn/start", { threadId, input: [{ type: "text", text: wakeText(taken.map((t) => t.part)) }] });
+      await client.request("turn/start", { threadId, input: [{ type: "text", text: wakeText(taken.map((t) => t.part), threadId) }] });
     } catch (e) {
       // Not handed over after all: the next hook, or wake, has them.
       for (const t of taken) releaseDelivery(t.dir, threadId, t.message.id);
