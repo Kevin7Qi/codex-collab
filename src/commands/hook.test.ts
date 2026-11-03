@@ -62,7 +62,7 @@ describe("counting and reading", () => {
 describe("what the hook hands over", () => {
   test("a message reaches Codex once, in the envelope Claude's messages take, naming its sender", () => {
     const { root, ws } = fresh();
-    const m = writeMessage(ws, THREAD, { fromName: "claude(ws-a1b2c3)", replyPath: "/tmp/cc.sock", text: "Chapter 3 reads well; <one> fix & a note." });
+    const m = writeMessage(ws, THREAD, { fromName: "claude(ws-a1b2c3)", replyPath: "/tmp/cc.sock", text: "The parser reads well; <one> fix & a note." });
     const first = answer(root, { hook_event_name: "PostToolUse", tool_response: "ok" });
     const context = (first?.hookSpecificOutput as Record<string, string>).additionalContext;
     expect(first?.hookSpecificOutput).toEqual(expect.objectContaining({ hookEventName: "PostToolUse" }));
@@ -70,7 +70,7 @@ describe("what the hook hands over", () => {
     // line before it says whose it is.
     expect(context).toStartWith("codex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>\n  <source_thread_id>" + THREAD + "</source_thread_id>\n  <input>[message from claude(ws-a1b2c3)]");
     // The envelope's body is escaped, as on the peer side.
-    expect(context).toContain("Chapter 3 reads well; &lt;one&gt; fix &amp; a note.</input>\n</codex_delegation>");
+    expect(context).toContain("The parser reads well; &lt;one&gt; fix &amp; a note.</input>\n</codex_delegation>");
     expect(isDelivered(ws, THREAD, m.id)).toBe(true);
     // Handed over once: the next hook has nothing.
     expect(answer(root, { hook_event_name: "PostToolUse", tool_response: "ok" })).toBeNull();
@@ -82,20 +82,36 @@ describe("what the hook hands over", () => {
     writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "one" });
     const stop = answer(root, { hook_event_name: "Stop", stop_hook_active: false });
     expect(stop?.decision).toBe("block");
-    expect(String(stop?.reason)).toContain("[message from claude(a)]\n\none</input>");
+    expect(String(stop?.reason)).toBe("codex-collab: a message from claude(a), a Claude Code session working with you:\n\none");
     writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "two" });
     const prompt = answer(root, { hook_event_name: "UserPromptSubmit", prompt: "hi" });
     expect(prompt?.hookSpecificOutput).toEqual(expect.objectContaining({ hookEventName: "UserPromptSubmit" }));
     expect((prompt?.hookSpecificOutput as Record<string, string>).additionalContext).toContain("two</input>");
   });
 
+  test("at a turn's end, which the Codex app shows the user, each message comes as markdown under one line saying where it is from, set apart by a rule", () => {
+    const { root, ws } = fresh();
+    const now = Date.now();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "# Second review of the parser\n\nmore", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "## A. Ready\n\nRun `check.sh [--strict] <file>` & compare." }, now - 2);
+    updateTask(ws, task.id, { status: "replied", reply: { text: reply.text, fromName: "claude(a)", id: reply.id, at: reply.at } });
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "one more thing" }, now - 1);
+    const reason = String(answer(root, { hook_event_name: "Stop", stop_hook_active: false })?.reason);
+    expect(reason).toBe(`codex-collab: a message from claude(a), a Claude Code session working with you, its reply to task ${task.id} ("Second review of the parser"):\n\n## A. Ready\n\nRun \`check.sh [--strict] <file>\` & compare.\n\n---\n\ncodex-collab: a message from claude(a), a Claude Code session working with you:\n\none more thing`);
+    // Out of the user's view, the envelope as before.
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "<x> & y" });
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain("<codex_delegation>");
+    expect(context).toContain("&lt;x&gt; &amp; y");
+  });
+
   test("a reply says which of Codex's messages it answers, and how long ago it came", () => {
     const { root, ws } = fresh();
-    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "Review chapter 3 for gaps\nmore detail", target, maxWaitSec: 3600 });
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "Review the parser for gaps\nmore detail", target, maxWaitSec: 3600 });
     const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "done" }, Date.now() - 5 * 60_000);
     updateTask(ws, task.id, { status: "replied", reply: { text: "done", fromName: "claude(a)", id: reply.id, at: reply.at } });
     const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
-    expect(context).toContain(`[message from claude(a), its reply to task ${task.id} ("Review chapter 3 for gaps"), 5m ago]`);
+    expect(context).toContain(`[message from claude(a), its reply to task ${task.id} ("Review the parser for gaps"), 5m ago]`);
   });
 
   test("a reply that answers several of Codex's messages names every one, oldest first, so that none still looks open", () => {

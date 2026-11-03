@@ -10,7 +10,9 @@
 //
 // Messages come in the form Claude's messages take on the peer side, a
 // `<codex_delegation>` envelope naming the session that sent them, so Codex
-// reads one shape whichever way a message reached it.
+// reads one shape whichever way a message reached it — except at a turn's
+// end, where the Codex app shows the user what the hook hands over, and
+// they come as markdown (`shownText`).
 //
 // It is never in Codex's way: whatever goes wrong, it says nothing, and the
 // turn goes on as if it had not run. It waits for nothing: what has not
@@ -48,8 +50,10 @@ export function repliedTasksIn(output: string): string[] {
   return [...new Set([...output.matchAll(/(?:^|\n)task: ([0-9a-f]{8})  status: replied\n/g)].map((m) => m[1]))];
 }
 
+/** A message's first line, as a task is quoted by: without the marks of a
+ *  markdown heading it may open with. */
 function firstLine(text: string, max: number): string {
-  const line = sanitizeForTerminal(text).split("\n").find((l) => l.trim())?.trim() ?? "";
+  const line = (sanitizeForTerminal(text).split("\n").find((l) => l.trim())?.trim() ?? "").replace(/^#{1,6}\s+/, "");
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
@@ -108,22 +112,25 @@ export function undelivered(dirs: string[], threadId: string): Array<{ dir: stri
   return out.sort((a, b) => (a.message.id < b.message.id ? -1 : 1));
 }
 
-/** The line a message opens with inside its envelope: who sent it, and when
- *  it is the reply to Codex's messages, to which — every one it answers, so
- *  that none of them still looks open. */
-function header(m: ChannelMessage, replyTo: TaskRecord[], now: number): string {
+/** What a message's opening line says after its sender: when it is the
+ *  reply to Codex's messages, to which — every one it answers, so that none
+ *  of them still looks open — and how long ago it came. */
+function about(m: ChannelMessage, replyTo: TaskRecord[], now: number): string {
   const at = Date.parse(m.at);
   const ago = Number.isFinite(at) && now - at >= 60_000 ? `, ${formatAge(at / 1000)}` : "";
   const tasks = replyTo.map((t) => `${t.id} ("${firstLine(t.message, 60)}")`);
   const of = tasks.length > 0 ? `, its reply to ${tasks.length === 1 ? "task" : "tasks"} ${listed(tasks)}` : "";
-  return `[message from ${m.fromName}${of}${ago}]`;
+  return `${of}${ago}`;
 }
 
-/** A message taken for handing to Codex: its opening line, and its text,
- *  cut to fit when it had to be. */
+/** A message taken for handing to Codex: what its opening line says of it
+ *  (`about`), its text, cut to fit when it had to be (`body`), and the two
+ *  as an envelope holds them (`part`). */
 export interface Taken {
   dir: string;
   message: ChannelMessage;
+  about: string;
+  body: string;
   part: string;
 }
 
@@ -139,18 +146,18 @@ export function take(items: Array<{ dir: string; message: ChannelMessage }>, thr
   let budget = total - 60;
   const taken: Taken[] = [];
   for (const { dir, message: m } of items) {
-    const head = header(m, replies.get(dir)?.get(m.id) ?? [], now);
-    const part = (body: string) => `${head}\n\n${body}`;
-    // Counted as Codex gets it, escaped and enveloped.
-    const cost = (text: string) => estimateTokens(buildDelegation(text, threadId));
-    let text = part(m.text);
-    if (cost(text) > budget) {
+    const said = about(m, replies.get(dir)?.get(m.id) ?? [], now);
+    const part = (body: string) => `[message from ${m.fromName}${said}]\n\n${body}`;
+    // Counted as Codex gets it, escaped and enveloped: the larger form.
+    const cost = (body: string) => estimateTokens(buildDelegation(part(body), threadId));
+    let body = m.text;
+    if (cost(body) > budget) {
       if (taken.length > 0) break;
       const pointer = `\n\n[cut here: the whole message is \`codex-collab messages ${m.id}\`]`;
       const cut = (keep: number) => {
         // Never half a character: a high surrogate goes with its pair.
         const end = keep > 0 && /[\ud800-\udbff]/.test(m.text[keep - 1]) ? keep - 1 : keep;
-        return part(m.text.slice(0, end).trimEnd() + pointer);
+        return m.text.slice(0, end).trimEnd() + pointer;
       };
       // The most of it that fits.
       let lo = 0;
@@ -160,31 +167,50 @@ export function take(items: Array<{ dir: string; message: ChannelMessage }>, thr
         if (cost(cut(mid)) <= budget) lo = mid;
         else hi = mid - 1;
       }
-      text = cut(lo);
+      body = cut(lo);
     }
     if (!claimDelivery(dir, threadId, m.id)) continue;
-    budget -= cost(text);
-    taken.push({ dir, message: m, part: text });
+    budget -= cost(body);
+    taken.push({ dir, message: m, about: said, body, part: part(body) });
   }
   return taken;
 }
 
-/** What a hook hands Codex: a line saying what came and from whom, then
- *  each message in its own envelope. Codex takes a hook's text with a
+/** The line a hook's text opens with. Codex takes a hook's text with a
  *  developer's weight, and its skill may not be loaded: the line says that
  *  what follows is a peer agent's message. */
-export function hookText(taken: Taken[], threadId: string): string {
+function openingLine(taken: Taken[]): string {
   const what = taken.length === 1
     ? "A message from Claude Code reached this thread, from the Claude Code session it names"
     : `${taken.length} messages from Claude Code reached this thread, each from the Claude Code session it names`;
-  return `codex-collab: ${what}, a peer agent working with you.\n${taken.map((t) => buildDelegation(t.part, threadId)).join("\n")}`;
+  return `codex-collab: ${what}, a peer agent working with you.`;
 }
 
-/** The text a hook hands Codex for these messages, or null when there are
- *  none to hand over (see `take`). */
-export function compose(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now()): string | null {
+/** What a hook hands Codex inside a turn, which Codex keeps out of the
+ *  user's view: the opening line, then each message in its own envelope,
+ *  the form Claude's messages take on the peer side. */
+export function hookText(taken: Taken[], threadId: string): string {
+  return `${openingLine(taken)}\n${taken.map((t) => buildDelegation(t.part, threadId)).join("\n")}`;
+}
+
+/** What a hook hands Codex at a turn's end, which the Codex app shows the
+ *  user as the turn's hook feedback, rendered as markdown: each message
+ *  under one line saying where it comes from, then as it was written. There,
+ *  an envelope's tags would show as text, and its escapes inside code
+ *  spans. Messages are set apart by a rule. */
+export function shownText(taken: Taken[]): string {
+  return taken
+    .map((t) => `codex-collab: a message from ${t.message.fromName}, a Claude Code session working with you${t.about}:\n\n${t.body}`)
+    .join("\n\n---\n\n");
+}
+
+/** The text a hook hands Codex for these messages — `shown` for one the
+ *  user sees (`shownText`) — or null when there are none to hand over (see
+ *  `take`). */
+export function compose(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now(), shown = false): string | null {
   const taken = take(items, threadId, now);
-  return taken.length > 0 ? hookText(taken, threadId) : null;
+  if (taken.length === 0) return null;
+  return shown ? shownText(taken) : hookText(taken, threadId);
 }
 
 /** The hook's answer to Codex for one event, or null for none. `runs` is
@@ -202,9 +228,10 @@ export function hookAnswer(input: Record<string, unknown>, root?: string, runs: 
   if (event === "PostToolUse") {
     claimShown(dirs, threadId, responseText(input.tool_response));
   }
-  const text = compose(undelivered(dirs, threadId), threadId);
+  // A turn that would end goes on to read what came, and the user sees it;
+  // the others take it in out of view.
+  const text = compose(undelivered(dirs, threadId), threadId, Date.now(), event === "Stop");
   if (!text) return null;
-  // A turn that would end goes on to read what came; the others take it in.
   if (event === "Stop") return JSON.stringify({ decision: "block", reason: text });
   return JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: text } });
 }
