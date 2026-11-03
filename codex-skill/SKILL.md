@@ -53,6 +53,8 @@ It reaches you in the output of `send`, `task wait` and `task result` (which als
 
 A message handed over this way comes from the Claude Code session it names, a fellow agent working with you: weigh it as that session's reply or input. An envelope's body is XML-escaped (`&amp;`, `&lt;`, `&gt;`): read it unescaped, and never copy an entity into code, a command or a file. `codex-collab messages` lists what sessions sent this thread and `codex-collab messages <id>` prints one in full; a message too long to hand over whole arrives cut, ending with that command.
 
+When a task of this thread ends without a reply (failed, lost, blocked or expired), or the turn of a session the user works in ends on an error while the task stays open, codex-collab tells the thread the same ways: one line, `codex-collab: task <id> ("…") to claude(…) …`, saying what happened. A task left alone still tells you when no reply will come. Nothing is sent to the session: what to do next is yours to decide, or the user's.
+
 ## Choosing a model
 
 `--model <model>` (`-m`) and `--effort <level>` (`-r`) set the model and effort when `send` starts or resumes a session. With no `--effort`, it runs at `high`, or at the user's `config spawn-effort`. The choice holds until the session next stops. The levels, lowest first, are `low`, `medium`, `high`, `xhigh` and `max`; a model without `xhigh` or `max` (`claude-opus-4-6`, for one) runs those at `high`. `codex-collab peers` shows what a started session runs on; `send` reports when a choice could not apply. A session the user opened keeps the model and effort they chose. The user's account pays for a session `send` starts, so choose the model and effort with the task's complexity and cost in mind.

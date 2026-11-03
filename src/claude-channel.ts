@@ -177,6 +177,30 @@ export interface ChannelMessage {
   /** The socket the sender said replies go to: who sent it. */
   replyPath: string;
   text: string;
+  /** For a notice of codex-collab's own (`writeNotice`), the task it is
+   *  about. A message Claude sends never has one. */
+  about?: string;
+}
+
+/** The name a notice of codex-collab's own goes under. */
+export const NOTICE_FROM = "codex-collab";
+
+/** Whether a message is a notice of codex-collab's own about a task. */
+export function isNotice(m: ChannelMessage): boolean {
+  return typeof m.about === "string";
+}
+
+/** Tell the thread what became of one of its tasks that no reply will tell
+ *  it of: kept with the messages, it reaches Codex the ways they do. Written
+ *  only by a task's receiver: the channel host writes a message only as
+ *  Claude sent it, and never one with `about`. */
+export function writeNotice(stateDir: string, threadId: string, taskId: string, text: string, now: number = Date.now()): ChannelMessage {
+  return writeMessage(stateDir, threadId, { fromName: NOTICE_FROM, replyPath: "", text, about: taskId }, now);
+}
+
+/** The thread's notices about a task, oldest first. */
+export function noticesAbout(stateDir: string, threadId: string, taskId: string): ChannelMessage[] {
+  return messagesSince(stateDir, threadId).filter((m) => m.about === taskId);
 }
 
 const MESSAGE_FILE = /^(\d{13})-[0-9a-f]{8}\.json$/;
@@ -240,7 +264,7 @@ export function readMessage(stateDir: string, threadId: string, id: string): Cha
   if (!/^\d{13}-[0-9a-f]{8}$/.test(id)) return null;
   try {
     const m = JSON.parse(readFileSync(join(inboxDir(stateDir, threadId), `${id}.json`), "utf-8"));
-    return m && typeof m.id === "string" && typeof m.text === "string" && typeof m.fromName === "string" && typeof m.replyPath === "string" ? m as ChannelMessage : null;
+    return m && typeof m.id === "string" && typeof m.text === "string" && typeof m.fromName === "string" && typeof m.replyPath === "string" && (m.about === undefined || typeof m.about === "string") ? m as ChannelMessage : null;
   } catch {
     return null;
   }
@@ -528,6 +552,19 @@ export function askHost(control: string, request: Record<string, unknown>, timeo
     sock.on("error", (e) => done(e));
     sock.on("close", () => done(new Error("the channel host closed the connection without answering")));
   });
+}
+
+/** Ask the workspace's channel host to wake the thread for what was just
+ *  written to its mailbox (a notice: `writeNotice`). False when no host
+ *  answered: the hooks still hand it over, at the thread's next turn. */
+export async function wakeThroughHost(stateDir: string, threadId: string, timeoutMs = 3000): Promise<boolean> {
+  const state = readHostState(stateDir);
+  if (!state) return false;
+  try {
+    return (await askHost(state.control, { op: "wake", threadId }, timeoutMs)).ok === true;
+  } catch {
+    return false;
+  }
 }
 
 /** The host refused a request it understood: asking again will not help. */

@@ -19,11 +19,11 @@
 // arrived yet is a later hook's.
 
 import { listTasks, loadTask, type TaskRecord } from "../claude-tasks";
-import { claimDelivery, isDelivered, isThreadId, messageIdsSince, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
+import { claimDelivery, isDelivered, isNotice, isThreadId, messageIdsSince, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { HOOK_EVENTS, hookRunsDir, noteHookRan, type HookEvent } from "../codex-hooks";
 import { buildDelegation } from "../peer";
 import { sanitizeForTerminal } from "../questions";
-import { laterFromSession, listed, printedText, repliesByMessage } from "./task";
+import { claimReported, laterFromSession, listed, printedText, repliesByMessage } from "./task";
 import { formatAge } from "./shared";
 
 export { HOOK_EVENTS, type HookEvent };
@@ -48,6 +48,11 @@ export function estimateTokens(text: string): number {
  *  leads with this line (`statusLine`). */
 export function repliedTasksIn(output: string): string[] {
   return [...new Set([...output.matchAll(/(?:^|\n)task: ([0-9a-f]{8})  status: replied\n/g)].map((m) => m[1]))];
+}
+
+/** Every task a command's output reported on, with the status it gave. */
+export function reportedTasksIn(output: string): Array<{ id: string; status: string }> {
+  return [...output.matchAll(/(?:^|\n)task: ([0-9a-f]{8})  status: ([a-z]+)\n/g)].map((m) => ({ id: m[1], status: m[2] }));
 }
 
 /** A message's first line, as a task is quoted by: without the marks of a
@@ -84,6 +89,13 @@ export function claimShown(dirs: string[], threadId: string, output: string): vo
       if (!task || task.threadId !== threadId || !task.reply?.id) continue;
       const shown: Array<{ id: string; text: string }> = [{ id: task.reply.id, text: task.reply.text }, ...laterFromSession(dir, task)];
       for (const m of shown) if (printed(m.text)) claimDelivery(dir, threadId, m.id);
+    }
+  }
+  // A report of a task says what its notices say (`claimReported`).
+  for (const { id, status } of reportedTasksIn(output)) {
+    for (const dir of dirs) {
+      const task = loadTask(dir, id);
+      if (task && task.threadId === threadId) claimReported(dir, task, status, output);
     }
   }
 }
@@ -125,7 +137,8 @@ function about(m: ChannelMessage, replyTo: TaskRecord[], now: number): string {
 
 /** A message taken for handing to Codex: what its opening line says of it
  *  (`about`), its text, cut to fit when it had to be (`body`), and the two
- *  as an envelope holds them (`part`). */
+ *  as an envelope holds them (`part`). A notice of codex-collab's own is
+ *  one line, `codex-collab: ` and what it says, wherever it goes. */
 export interface Taken {
   dir: string;
   message: ChannelMessage;
@@ -146,8 +159,8 @@ export function take(items: Array<{ dir: string; message: ChannelMessage }>, thr
   let budget = total - 60;
   const taken: Taken[] = [];
   for (const { dir, message: m } of items) {
-    const said = about(m, replies.get(dir)?.get(m.id) ?? [], now);
-    const part = (body: string) => `[message from ${m.fromName}${said}]\n\n${body}`;
+    const said = isNotice(m) ? "" : about(m, replies.get(dir)?.get(m.id) ?? [], now);
+    const part = (body: string) => isNotice(m) ? `codex-collab: ${body}` : `[message from ${m.fromName}${said}]\n\n${body}`;
     // Counted as Codex gets it, escaped and enveloped: the larger form.
     const cost = (body: string) => estimateTokens(buildDelegation(part(body), threadId));
     let body = m.text;
@@ -187,20 +200,24 @@ function openingLine(taken: Taken[]): string {
 }
 
 /** What a hook hands Codex inside a turn, which Codex keeps out of the
- *  user's view: the opening line, then each message in its own envelope,
- *  the form Claude's messages take on the peer side. */
+ *  user's view: codex-collab's notices, a line each, then the opening line
+ *  and each message from Claude in its own envelope, the form Claude's
+ *  messages take on the peer side. */
 export function hookText(taken: Taken[], threadId: string): string {
-  return `${openingLine(taken)}\n${taken.map((t) => buildDelegation(t.part, threadId)).join("\n")}`;
+  const notices = taken.filter((t) => isNotice(t.message)).map((t) => t.part);
+  const messages = taken.filter((t) => !isNotice(t.message));
+  const fromClaude = messages.length > 0 ? [`${openingLine(messages)}\n${messages.map((t) => buildDelegation(t.part, threadId)).join("\n")}`] : [];
+  return [...notices, ...fromClaude].join("\n");
 }
 
 /** What a hook hands Codex at a turn's end, which the Codex app shows the
  *  user as the turn's hook feedback, rendered as markdown: each message
- *  under one line saying where it comes from, then as it was written. There,
- *  an envelope's tags would show as text, and its escapes inside code
- *  spans. Messages are set apart by a rule. */
+ *  under one line saying where it comes from, then as it was written, and a
+ *  notice as its one line. There, an envelope's tags would show as text,
+ *  and its escapes inside code spans. They are set apart by a rule. */
 export function shownText(taken: Taken[]): string {
   return taken
-    .map((t) => `codex-collab: a message from ${t.message.fromName}, a Claude Code session working with you${t.about}:\n\n${t.body}`)
+    .map((t) => isNotice(t.message) ? t.part : `codex-collab: a message from ${t.message.fromName}, a Claude Code session working with you${t.about}:\n\n${t.body}`)
     .join("\n\n---\n\n");
 }
 

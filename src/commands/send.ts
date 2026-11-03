@@ -74,8 +74,9 @@ import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
 import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from "../claude-trust";
 import { codexThreadCwd } from "../codex-session";
-import { isThreadId, openChannel, watchInbox, type ChannelMessage, type Contact } from "../claude-channel";
-import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
+import { wakeThread } from "../codex-wake";
+import { isThreadId, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
+import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
 /** Where `send --file` may read when Codex runs it: inside the folder the
@@ -973,6 +974,11 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   // registry entry this receiver removes when it goes. The thread's address
   // is the channel host's to remove.
   let ownAddress = false;
+  // Set once the address is known (below); before that nothing is announced.
+  let announce: (patch: Partial<TaskRecord>) => Promise<void> = async () => {};
+  // The thread a notice goes to, once the task has the thread's address:
+  // none for a task with an address of its own, whose mailbox nothing reads.
+  let noticeTo: string | null = null;
   let inbox: ReturnType<typeof watchInbox> | null = null;
   let keep: ReturnType<typeof setInterval> | null = null;
   let finished = false;
@@ -1006,6 +1012,12 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       : phase === "delivering"
         ? `the process delivering the message was stopped while delivering it, so the message may have reached ${target.name}`
         : "the process delivering the message was stopped before it delivered it";
+    // Delivered, the caller may have gone on without waiting: tell the
+    // thread. No host is asked to wake it from here (an exit cannot wait);
+    // the hooks hand the notice over.
+    if (phase === "delivered" && noticeTo) {
+      try { writeNotice(stateDir, noticeTo, task.id, outcomeNotice({ ...(loadTask(stateDir, task.id) ?? task), status: "failed", error })); } catch { /* the record says it */ }
+    }
     try { updateTask(stateDir, task.id, { status: "failed", error, finishedAt: new Date().toISOString() }); } catch { /* state dir gone */ }
   });
   process.on("SIGHUP", () => process.exit(129));
@@ -1060,6 +1072,33 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   }
   const name = channel?.name ?? senderName(task.cwd, task.threadId, task.id);
   const replyTo = channel?.socketPath ?? socketPath;
+  /** Tell the thread what `patch` makes of the task, in a notice
+   *  (`outcomeNotice`), and have the host wake it. Only for a task that
+   *  went through the thread's address: nothing hands a notice to any
+   *  other. Whatever fails here, the record still says it. */
+  noticeTo = channel ? threadId : null;
+  announce = async (patch) => {
+    if (!channel || !threadId) return;
+    try {
+      writeNotice(stateDir, threadId, task.id, outcomeNotice({ ...(loadTask(stateDir, task.id) ?? task), ...patch }));
+    } catch (e) {
+      console.log(`Could not leave Codex thread ${threadId} a notice: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    // The host wakes it, as for a message. A task whose session went is often
+    // the one the host was kept for, and the host may have stopped with it:
+    // then the wake is this receiver's to do.
+    if (await wakeThroughHost(stateDir, threadId)) return;
+    let wakeOn = false;
+    try { wakeOn = loadUserConfig()["codex-wake"] === "on"; } catch { /* unreadable: off */ }
+    if (!wakeOn) return;
+    try {
+      const outcome = await wakeThread(threadId);
+      console.log(outcome.woke ? `Woke Codex thread ${threadId} with the notice.` : `Did not wake Codex thread ${threadId}: ${outcome.why}`);
+    } catch (e) {
+      console.log(`Could not wake Codex thread ${threadId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
   if (!channel) {
     ownAddress = true;
     try { unlinkSync(socketPath); } catch { /* none */ }
@@ -1245,6 +1284,14 @@ export async function handleRecvTask(args: string[]): Promise<void> {
     if (busyWatch) clearInterval(busyWatch);
     finish(patch);
   };
+  // No reply will say what became of the task: a notice does, before the
+  // record does (`claimReported` counts on that order), through the thread's
+  // mailbox, which the hooks hand over, and a wake for a thread idle on the
+  // shared app-server. Codex may have been told the reply comes by itself.
+  const ended = async (patch: Partial<TaskRecord>): Promise<never> => {
+    await announce(patch);
+    return done(patch);
+  };
 
   let noted = false;
   for (;;) {
@@ -1274,8 +1321,9 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       // that is the end of the task. A session the user is working in has
       // them: the task keeps its address, and its reply, and what happened is
       // recorded for whoever reads the task next.
-      if (target.spawned) done({ status: "failed", error: reason });
+      if (target.spawned) return ended({ status: "failed", error: reason });
       updateTask(stateDir, task.id, { error: reason });
+      await announce({ error: reason });
       noted = true;
       continue;
     }
@@ -1303,7 +1351,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       if (late) done({ status: "replied", reply: replyOf(late), error: undefined });
       if (arrived) done({ status: "replied", reply: arrived, error: undefined });
       const unansweredSec = blockedWatch?.unansweredSec() ?? null;
-      done({
+      return ended({
         status: "blocked",
         ...(unansweredSec !== null ? { unansweredSec } : {}),
         ...(stillThere ? { error: `${target.name} did not stop when told to, and is still at the prompt` } : {}),
@@ -1328,7 +1376,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       // session, and "no reply" says nothing a Codex session can act on.
       const failure = turnTrouble(target.sessionId, deliveredAt, until());
       const error = [answer === "lost" ? lostWatch.reason() : null, failure ? describeTrouble(failure) : null].filter(Boolean).join("; ");
-      done({ status: answer, ...(error ? { error } : {}) });
+      return ended({ status: answer, ...(error ? { error } : {}) });
     }
     // A stall noted earlier belongs to a turn that then finished: leaving it
     // on the record would tell the next reader this task's turn had died.

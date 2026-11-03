@@ -1951,7 +1951,13 @@ describeUnix("send", () => {
     expect(fake.received).toHaveLength(1);
     await waitFor(() => !!(taskRecord(id) as { error?: string })?.error, 10_000);
     expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "running", error: expect.stringContaining("529 server_error") }));
+    // The thread is told, since nothing else would tell it: the task is open.
+    await waitFor(() => inboxTexts().some((t) => t.startsWith(`task ${id} `)), 10_000);
+    expect(inboxTexts().find((t) => t.startsWith(`task ${id} `))).toMatch(/is still open \(dying-claude ended its turn without replying: 529 server_error at [^)]+\)\. dying-claude is a session the user works in/);
     expect((await runCli(["task", "status", id], env)).stdout).toContain("529 server_error");
+    // That report printed the error: no hook hands the notice over again.
+    const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv(env), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
+    expect(hooked.stdout).not.toContain(`task ${id} `);
     // And the reply, whenever the turn is picked up again, still arrives.
     speak(fake, fake.received[0].replyPath, "recovered later");
     const waited = await runCli(["task", "wait", id], env);
@@ -2565,6 +2571,43 @@ describeUnix("a Codex thread's address", () => {
     expect(replyComesByItself({ ...base, threadId: null }, {}, hooks)).toBe(false);
   });
 
+  test("a task that ends without a reply leaves the thread a notice the hooks hand over, unless a report already said how it ended", async () => {
+    const hook = () => spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" }).stdout;
+    hook(); // whatever earlier cases left for the thread
+    const first = startFake("leaving-claude", { reply: null });
+    registerFake(first);
+    const id = taskIdOf((await runCli(["send", "--to", "leaving-claude", "run the tests", "--no-wait"])).stdout);
+    first.stop();
+    await waitFor(() => inboxTexts().some((t) => t.startsWith(`task ${id} `)), 20_000);
+    await waitFor(() => taskRecord(id)?.status === "lost", 10_000);
+    expect(hook()).toContain(`codex-collab: task ${id} (\\"run the tests\\") to leaving-claude is lost: leaving-claude ended before it replied`);
+    // Asked about, the task said how it ended: its notice is not handed over.
+    const second = startFake("leaving-claude-2", { reply: null });
+    registerFake(second);
+    const id2 = taskIdOf((await runCli(["send", "--to", "leaving-claude-2", "lint", "--no-wait"])).stdout);
+    second.stop();
+    const waited = await runCli(["task", "wait", id2, "--timeout", "20"]);
+    expect(waited.stdout).toContain(`task: ${id2}  status: lost`);
+    expect(inboxTexts().some((t) => t.startsWith(`task ${id2} `))).toBe(true);
+    expect(hook()).toBe("");
+    // A receiver that is stopped says so on its way out.
+    const fourth = startFake("waiting-claude", { reply: null });
+    registerFake(fourth);
+    const id4 = taskIdOf((await runCli(["send", "--to", "waiting-claude", "format", "--no-wait"])).stdout);
+    const receiver = (taskRecord(id4)!.receiver as { pid: number }).pid;
+    process.kill(receiver, "SIGTERM");
+    await waitFor(() => inboxTexts().some((t) => t.startsWith(`task ${id4} `)), 10_000);
+    expect(inboxTexts().find((t) => t.startsWith(`task ${id4} `))).toBe(`task ${id4} ("format") to waiting-claude failed (the process collecting the reply was stopped before a reply came). No reply will come.`);
+    hook();
+    // A message from no Codex thread has no thread to tell.
+    const third = startFake("leaving-claude-3", { reply: null });
+    registerFake(third);
+    const id3 = taskIdOf((await runCli(["send", "--to", "leaving-claude-3", "plain", "--no-wait"], { CODEX_THREAD_ID: "" })).stdout);
+    third.stop();
+    await waitFor(() => taskRecord(id3)?.status === "lost", 20_000);
+    expect(inboxTexts().some((t) => t.startsWith(`task ${id3} `))).toBe(false);
+  });
+
   test("a message Claude Code sends again with the same id is kept once", async () => {
     const fake = startFake("retrying-claude", { reply: null });
     registerFake(fake);
@@ -2667,6 +2710,49 @@ describeUnix("a Codex thread's address", () => {
       // Handed over: no hook gives it to Codex again.
       const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
       expect(hooked.stdout).toBe("");
+    } finally {
+      removeConfig();
+      server.stop(true);
+    }
+  });
+
+  test("with codex-wake on, a task that ends without a reply wakes a thread idle on the shared app-server with its notice", async () => {
+    const control = join(TEST_HOME, ".codex", "app-server-control", "app-server-control.sock");
+    mkdirSync(dirname(control), { recursive: true });
+    const started: Array<Record<string, unknown>> = [];
+    const server = Bun.serve({
+      unix: control,
+      fetch(req, srv) {
+        if (srv.upgrade(req)) return undefined as unknown as Response;
+        return new Response("not a websocket", { status: 400 });
+      },
+      websocket: {
+        message(ws, raw) {
+          const msg = JSON.parse(String(raw)) as { id?: number; method?: string; params?: Record<string, unknown> };
+          if (msg.id === undefined) return;
+          const reply = (result: unknown): void => { ws.send(JSON.stringify({ id: msg.id, result })); };
+          if (msg.method === "initialize") reply({ userAgent: "fake-shared/1.0" });
+          else if (msg.method === "thread/read") reply({ thread: { id: THREAD, status: { type: "idle" } } });
+          else {
+            if (msg.method === "turn/start") started.push(msg.params!);
+            reply({});
+          }
+        },
+      },
+    });
+    writeConfig({ "codex-wake": "on" });
+    try {
+      // Whatever earlier cases left for the thread is not this case's.
+      spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
+      const fake = startFake("vanishing-claude", { reply: null });
+      registerFake(fake);
+      const id = taskIdOf((await runCli(["send", "long job", "--no-wait"])).stdout);
+      // Its session went, and the host kept for it goes too: the wake asked
+      // for still happens.
+      fake.stop();
+      await waitFor(() => started.length === 1, 20_000);
+      const text = (started[0].input as Array<{ text: string }>)[0].text;
+      expect(text).toContain(`codex-collab: task ${id} ("long job") to vanishing-claude is lost: vanishing-claude ended before it replied`);
     } finally {
       removeConfig();
       server.stop(true);

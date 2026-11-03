@@ -9,9 +9,10 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isDelivered, writeMessage } from "../claude-channel";
-import { createTask, updateTask } from "../claude-tasks";
+import { isDelivered, writeMessage, writeNotice } from "../claude-channel";
+import { createTask, updateTask, type TaskRecord } from "../claude-tasks";
 import { HOOK_BUDGET_TOKENS, estimateTokens, hookAnswer, repliedTasksIn } from "./hook";
+import { outcomeNotice } from "./task";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hook-"));
 const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
@@ -103,6 +104,50 @@ describe("what the hook hands over", () => {
     const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
     expect(context).toContain("<codex_delegation>");
     expect(context).toContain("&lt;x&gt; &amp; y");
+  });
+
+  test("a notice of codex-collab's own is one line wherever it goes: before Claude's messages inside a turn, set apart by a rule at its end", () => {
+    const { root, ws } = fresh();
+    const now = Date.now();
+    writeNotice(ws, THREAD, "0a0b0c0d", "task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied. No reply will come.", now - 2);
+    writeMessage(ws, THREAD, { fromName: "claude(b)", replyPath: "/b", text: "<b> & done" }, now - 1);
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toStartWith("codex-collab: task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied. No reply will come.\ncodex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>");
+    expect(context).toContain("[message from claude(b)]\n\n&lt;b&gt; &amp; done</input>");
+    writeNotice(ws, THREAD, "0a0b0c0e", "task 0a0b0c0e (\"lint\") to claude(a) expired with no reply.", now);
+    writeMessage(ws, THREAD, { fromName: "claude(b)", replyPath: "/b", text: "more" }, now + 1);
+    expect(String(answer(root, { hook_event_name: "Stop" })?.reason)).toBe("codex-collab: task 0a0b0c0e (\"lint\") to claude(a) expired with no reply.\n\n---\n\ncodex-collab: a message from claude(b), a Claude Code session working with you:\n\nmore");
+  });
+
+  test("a report that printed a task's end has told Codex what its notice says; one that printed the task still open has not", () => {
+    const { root, ws } = fresh();
+    const ended = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "run the tests", target, maxWaitSec: 3600 });
+    const open = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "lint", target, maxWaitSec: 3600 });
+    // The receiver writes the notice first, then the record.
+    const n1 = writeNotice(ws, THREAD, ended.id, "the end of it");
+    updateTask(ws, ended.id, { status: "lost", error: "its registration went" });
+    const n2 = writeNotice(ws, THREAD, open.id, "it ended later");
+    const printed = `task: ${ended.id}  status: lost\nclaude(ws-a1b2c3) ended before it replied\n\ntask: ${open.id}  status: running\nno reply from claude(ws-a1b2c3) yet (sent 2m ago)\n`;
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: printed })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(isDelivered(ws, THREAD, n1.id)).toBe(true);
+    expect(context).not.toContain("the end of it");
+    expect(context).toContain("codex-collab: it ended later");
+    expect(isDelivered(ws, THREAD, n2.id)).toBe(true);
+    // While a task stays open, a report that printed its error has told it.
+    const erred = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "build", target, maxWaitSec: 3600 });
+    updateTask(ws, erred.id, { error: "claude(ws-a1b2c3) ended its turn without replying: 529 server_error" });
+    const n3 = writeNotice(ws, THREAD, erred.id, "task is still open (claude(ws-a1b2c3) ended its turn without replying: 529 server_error).");
+    expect(answer(root, { hook_event_name: "PostToolUse", tool_response: `task: ${erred.id}  status: running\n  error     claude(ws-a1b2c3) ended its turn without replying: 529 server_error\n` })).toBeNull();
+    expect(isDelivered(ws, THREAD, n3.id)).toBe(true);
+  });
+
+  test("a notice says how a task ended without a reply, or that it is still open after its session's turn failed", () => {
+    const base = { id: "0a0b0c0d", message: "# Run the tests\n\nall of them", target: { ...target, name: "claude(ws)" } } as TaskRecord;
+    expect(outcomeNotice({ ...base, status: "failed", error: "claude(ws) ended its turn without replying: 529 server_error" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) failed (claude(ws) ended its turn without replying: 529 server_error). No reply will come.");
+    expect(outcomeNotice({ ...base, status: "lost" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is lost: claude(ws) ended before it replied. No reply will come.");
+    expect(outcomeNotice({ ...base, status: "blocked" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is blocked: claude(ws) stopped at a prompt nobody answered. No reply will come.");
+    expect(outcomeNotice({ ...base, status: "expired" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) expired with no reply.");
+    expect(outcomeNotice({ ...base, status: "running", error: "claude(ws) ended its turn without replying: 529 server_error" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is still open (claude(ws) ended its turn without replying: 529 server_error). claude(ws) is a session the user works in, who can set it going again; its reply would still come to this thread.");
   });
 
   test("a reply says which of Codex's messages it answers, and how long ago it came", () => {

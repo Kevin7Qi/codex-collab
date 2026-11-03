@@ -13,7 +13,7 @@ import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow 
 import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
-import { channelName, claimDelivery, isThreadId, messagesSince, threadStateDirs, type ChannelMessage } from "../claude-channel";
+import { channelName, claimDelivery, isNotice, isThreadId, messagesSince, noticesAbout, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { hooksRunIn } from "../codex-hooks";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
@@ -99,6 +99,43 @@ export function replyComesByItself(record: TaskRecord, env: NodeJS.ProcessEnv = 
   return hooksRunIn(threadId, hooks);
 }
 
+/** What a thread is told of its task when no reply will tell it: how the
+ *  task ended without one, or, while it stays open, the error its session's
+ *  turn ended on. Codex may have been told the reply comes by itself, and
+ *  then nothing else would ever say so. */
+export function outcomeNotice(record: TaskRecord): string {
+  const name = record.target.name;
+  const quoted = firstLine(record.message, 60).replace(/^#{1,6}\s+/, "");
+  const task = `task ${record.id} ("${quoted}") to ${name}`;
+  const why = record.error ? ` (${record.error})` : "";
+  switch (record.status) {
+    case "failed":
+      return `${task} failed${why}. No reply will come.`;
+    case "lost":
+      return `${task} is lost: ${name} ended before it replied${why}. No reply will come.`;
+    case "blocked":
+      return `${task} is blocked: ${name} stopped at a prompt nobody answered${why}. No reply will come.`;
+    case "expired":
+      return `${task} expired with no reply${why}.`;
+    default:
+      return `${task} is still open${why}. ${name} is a session the user works in, who can set it going again; its reply would still come to this thread.`;
+  }
+}
+
+/** Mark the thread's notices about a task as handed to Codex, once a
+ *  report of the task has told it what they say: every one when the report
+ *  gave the task's end (a receiver writes its notice before the end), and
+ *  while the task is open, one whose error the report printed. `printed` is
+ *  the report's text, or the part of it that matters. */
+export function claimReported(stateDir: string, record: TaskRecord, printedStatus: string, printed: string): void {
+  if (!isThreadId(record.threadId)) return;
+  const ended = FINAL_STATUSES.has(printedStatus as TaskStatus);
+  for (const n of noticesAbout(stateDir, record.threadId, record.id)) {
+    const told = ended || (!!record.error && printed.includes(record.error) && n.text.includes(record.error));
+    if (told) claimDelivery(stateDir, record.threadId, n.id);
+  }
+}
+
 /** What the session a task went to wrote to the thread after its reply, oldest
  *  first: none for a reply that did not come through the thread's mailbox. */
 export function laterFromSession(stateDir: string, record: TaskRecord): ChannelMessage[] {
@@ -126,6 +163,13 @@ export async function waitForTask(stateDir: string, id: string, timeoutMs: numbe
 /** Print what became of a task, status line first. `waitedMs` is how long
  *  the caller just waited, when it did. */
 export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hint?: string; stateDir?: string } = {}): void {
+  printOutcome(record, opts);
+  // What the report said, the thread's notices about the task have said too
+  // (`claimReported`); the error, where there is one, is printed with it.
+  if (opts.stateDir) claimReported(opts.stateDir, record, record.status, record.error ?? "");
+}
+
+function printOutcome(record: TaskRecord, opts: { waitedMs?: number; hint?: string; stateDir?: string }): void {
   const { target } = record;
   const hint = opts.hint ?? "";
   const facts = { stateDir: opts.stateDir };
@@ -306,7 +350,10 @@ export async function handleTask(args: string[]): Promise<void> {
 
   if (sub === "status") {
     if (options.json) console.log(JSON.stringify(record, null, 2));
-    else printStatus(record, hint, stateDir);
+    else {
+      printStatus(record, hint, stateDir);
+      claimReported(stateDir, record, record.status, record.error ?? "");
+    }
     return;
   }
   let waitedMs: number | undefined;
@@ -341,7 +388,9 @@ export async function handleMessages(args: string[]): Promise<void> {
   };
   const print = ({ dir, message: m }: { dir: string; message: ChannelMessage }) => {
     const tasks = (repliesIn(dir).get(m.id) ?? []).map((t) => t.id);
-    const of = tasks.length > 0 ? `, its reply to ${tasks.length === 1 ? "task" : "tasks"} ${listed(tasks)}` : "";
+    const of = isNotice(m)
+      ? `, about task ${m.about}`
+      : tasks.length > 0 ? `, its reply to ${tasks.length === 1 ? "task" : "tasks"} ${listed(tasks)}` : "";
     console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${of}:`);
     console.log(printedText(m.text));
     // Printed whole, it has reached whoever ran this (see reportOutcome).

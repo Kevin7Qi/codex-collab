@@ -202,8 +202,9 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   };
 
   const closeAddress = (a: Address, why: string) => {
-    const timer = wakeTimers.get(a.threadId);
-    if (timer) { clearTimeout(timer); wakeTimers.delete(a.threadId); }
+    // A wake on its way stays: it is for what reached the thread's mailbox,
+    // which is there whether or not the address is — the notice of a task
+    // whose session went, say. The host stays until it has run.
     notWoken.delete(a.threadId);
     if (addresses.get(a.threadId) === a) addresses.delete(a.threadId);
     // When it was last in use, for the host that opens it next: its idle
@@ -469,6 +470,15 @@ export async function handleChannelHost(args: string[]): Promise<void> {
 
   const handle = async (req: Record<string, unknown>): Promise<Record<string, unknown>> => {
     if (req.op === "ping") return { ok: true, pid: process.pid, addresses: addresses.size };
+    // A task's receiver wrote the thread a notice (`writeNotice`), straight
+    // into its mailbox: a thread idle on the shared app-server is woken for
+    // it as for a message that came to the address.
+    if (req.op === "wake") {
+      if (!isThreadId(req.threadId)) return { ok: false, error: "not a Codex thread id" };
+      log(`asked to wake Codex thread ${req.threadId} for a notice${wakeOn() ? "" : " (codex-wake is off)"}`);
+      scheduleWake(req.threadId);
+      return { ok: true };
+    }
     if (req.op !== "open") return { ok: false, error: `unknown request: ${String(req.op)}` };
     if (!isThreadId(req.threadId)) return { ok: false, error: "not a Codex thread id" };
     if (!isContact(req.contact)) return { ok: false, error: "no Claude Code session named for the thread to talk to" };
