@@ -20,7 +20,7 @@ import { listTasks, loadTask, type TaskRecord } from "../claude-tasks";
 import { claimDelivery, isDelivered, isThreadId, messageIdsSince, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { buildDelegation } from "../peer";
 import { sanitizeForTerminal } from "../questions";
-import { laterFromSession, printedText } from "./task";
+import { laterFromSession, listed, printedText, repliesByMessage } from "./task";
 import { formatAge } from "./shared";
 
 /** The events the hook answers, and how each hands a message over. */
@@ -110,11 +110,13 @@ export function undelivered(dirs: string[], threadId: string): Array<{ dir: stri
 }
 
 /** The line a message opens with inside its envelope: who sent it, and when
- *  it is the reply to one of Codex's messages, which. */
-function header(m: ChannelMessage, replyTo: TaskRecord | undefined, now: number): string {
+ *  it is the reply to Codex's messages, to which — every one it answers, so
+ *  that none of them still looks open. */
+function header(m: ChannelMessage, replyTo: TaskRecord[], now: number): string {
   const at = Date.parse(m.at);
   const ago = Number.isFinite(at) && now - at >= 60_000 ? `, ${formatAge(at / 1000)}` : "";
-  const of = replyTo ? `, its reply to task ${replyTo.id} ("${firstLine(replyTo.message, 60)}")` : "";
+  const tasks = replyTo.map((t) => `${t.id} ("${firstLine(t.message, 60)}")`);
+  const of = tasks.length > 0 ? `, its reply to ${tasks.length === 1 ? "task" : "tasks"} ${listed(tasks)}` : "";
   return `[message from ${m.fromName}${of}${ago}]`;
 }
 
@@ -132,15 +134,13 @@ export interface Taken {
  *  next hook, where it may fit whole; only one that is first and still does
  *  not fit is cut. [] when none is taken. */
 export function take(items: Array<{ dir: string; message: ChannelMessage }>, threadId: string, now: number = Date.now(), total: number = HOOK_BUDGET_TOKENS): Taken[] {
-  const replies = new Map<string, TaskRecord>();
-  for (const dir of new Set(items.map((i) => i.dir))) {
-    for (const t of listTasks(dir)) if (t.reply?.id && t.threadId === threadId) replies.set(t.reply.id, t);
-  }
+  const replies = new Map<string, Map<string, TaskRecord[]>>();
+  for (const dir of new Set(items.map((i) => i.dir))) replies.set(dir, repliesByMessage(listTasks(dir), threadId));
   // What the messages may take: the budget, less the lines before them.
   let budget = total - 60;
   const taken: Taken[] = [];
   for (const { dir, message: m } of items) {
-    const head = header(m, replies.get(m.id), now);
+    const head = header(m, replies.get(dir)?.get(m.id) ?? [], now);
     const part = (body: string) => `${head}\n\n${body}`;
     // Counted as Codex gets it, escaped and enveloped.
     const cost = (text: string) => estimateTokens(buildDelegation(text, threadId));

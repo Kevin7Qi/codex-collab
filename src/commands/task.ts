@@ -64,6 +64,24 @@ export function printedText(text: string): string {
   return sanitizeForTerminal(text).trimEnd().split("\n").map((l) => `  ${l}`).join("\n");
 }
 
+/** "a", "a and b", "a, b and c". */
+export function listed(items: string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** The tasks of a thread each message is the reply to, by message id,
+ *  oldest task first: one reply can answer several of the thread's
+ *  messages, and it ends every task it answers. */
+export function repliesByMessage(tasks: TaskRecord[], threadId: string): Map<string, TaskRecord[]> {
+  const out = new Map<string, TaskRecord[]>();
+  for (const t of tasks) {
+    if (!t.reply?.id || t.threadId !== threadId) continue;
+    out.set(t.reply.id, [...(out.get(t.reply.id) ?? []), t]);
+  }
+  for (const list of out.values()) list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+  return out;
+}
+
 /** What the session a task went to wrote to the thread after its reply, oldest
  *  first: none for a reply that did not come through the thread's mailbox. */
 export function laterFromSession(stateDir: string, record: TaskRecord): ChannelMessage[] {
@@ -297,10 +315,15 @@ export async function handleMessages(args: string[]): Promise<void> {
   const all = threadStateDirs(threadId)
     .flatMap((dir) => messagesSince(dir, threadId).map((message) => ({ dir, message })))
     .sort((a, b) => (a.message.id < b.message.id ? -1 : 1));
-  const replyOf = (dir: string, id: string) => listTasks(dir).find((t) => t.threadId === threadId && t.reply?.id === id);
+  const replies = new Map<string, Map<string, TaskRecord[]>>();
+  const repliesIn = (dir: string) => {
+    if (!replies.has(dir)) replies.set(dir, repliesByMessage(listTasks(dir), threadId));
+    return replies.get(dir)!;
+  };
   const print = ({ dir, message: m }: { dir: string; message: ChannelMessage }) => {
-    const task = replyOf(dir, m.id);
-    console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${task ? `, its reply to task ${task.id}` : ""}:`);
+    const tasks = (repliesIn(dir).get(m.id) ?? []).map((t) => t.id);
+    const of = tasks.length > 0 ? `, its reply to ${tasks.length === 1 ? "task" : "tasks"} ${listed(tasks)}` : "";
+    console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${of}:`);
     console.log(printedText(m.text));
     // Printed whole, it has reached whoever ran this (see reportOutcome).
     claimDelivery(dir, threadId, m.id);

@@ -2503,6 +2503,8 @@ describeUnix("a Codex thread's address", () => {
       expect(r.code).toBe(0);
       expect(r.stdout).toContain("  both read: fine");
     }
+    // Every task it answers is named, so that none still looks open.
+    expect((await runCli(["messages"])).stdout).toMatch(new RegExp(`FROM busy-claude \\([^)]+ ago\\), its reply to tasks ${a} and ${b}:\\n  both read: fine\\n`));
   });
 
   test("a message Claude Code sends again with the same id is kept once", async () => {

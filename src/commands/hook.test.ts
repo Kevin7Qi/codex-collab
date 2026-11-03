@@ -95,6 +95,18 @@ describe("what the hook hands over", () => {
     expect(context).toContain(`[message from claude(a), its reply to task ${task.id} ("Review chapter 3 for gaps"), 5m ago]`);
   });
 
+  test("a reply that answers several of Codex's messages names every one, oldest first, so that none still looks open", () => {
+    const { root, ws } = fresh();
+    const first = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "Fix the two failing tests", target, maxWaitSec: 3600 });
+    const second = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "Also: leave the README to me", target, maxWaitSec: 3600 });
+    updateTask(ws, first.id, { createdAt: new Date(Date.now() - 60_000).toISOString() });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "both done" });
+    // Recorded newest first, as a receiver that finishes later would.
+    for (const t of [second, first]) updateTask(ws, t.id, { status: "replied", reply: { text: "both done", fromName: "claude(a)", id: reply.id, at: reply.at } });
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain(`[message from claude(a), its reply to tasks ${first.id} ("Fix the two failing tests") and ${second.id} ("Also: leave the README to me")]`);
+  });
+
   test("a reply a command already printed is not handed over again; one it did not print is", () => {
     const { root, ws } = fresh();
     const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "q", target, maxWaitSec: 3600 });
