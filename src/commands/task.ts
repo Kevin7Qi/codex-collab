@@ -13,7 +13,8 @@ import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow 
 import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
-import { claimDelivery, isThreadId, messagesSince, threadStateDirs, type ChannelMessage } from "../claude-channel";
+import { channelName, claimDelivery, isThreadId, messagesSince, threadStateDirs, type ChannelMessage } from "../claude-channel";
+import { hooksRunIn } from "../codex-hooks";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
 /** Default wait (seconds) of `send` and of `task wait`. It bounds how long the
@@ -82,6 +83,22 @@ export function repliesByMessage(tasks: TaskRecord[], threadId: string): Map<str
   return out;
 }
 
+/** What a report says of a task still waiting for its reply, when that
+ *  reply will come into the thread by itself. */
+export const COMES_BY_ITSELF = "its reply comes to this thread by itself when it arrives, so there is no need to check on it";
+
+/** Whether a task's reply comes by itself into the Codex thread asking
+ *  about it: the task went from this very thread, through the thread's
+ *  address (whose mailbox the hooks hand over from), and Codex runs the
+ *  hooks there as things stand (`hooksRunIn`). Codex cannot see whether the
+ *  user turned the hooks on, or trusted them, so without this it checks. */
+export function replyComesByItself(record: TaskRecord, env: NodeJS.ProcessEnv = process.env, hooks: Parameters<typeof hooksRunIn>[1] = {}): boolean {
+  const threadId = record.threadId;
+  if (!isThreadId(threadId) || env.CODEX_THREAD_ID !== threadId) return false;
+  if (record.senderName !== channelName(record.cwd, threadId)) return false;
+  return hooksRunIn(threadId, hooks);
+}
+
 /** What the session a task went to wrote to the thread after its reply, oldest
  *  first: none for a reply that did not come through the thread's mailbox. */
 export function laterFromSession(stateDir: string, record: TaskRecord): ChannelMessage[] {
@@ -139,9 +156,10 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
     }
     case "pending":
     case "running": {
+      const comes = replyComesByItself(record) ? `; ${COMES_BY_ITSELF}` : "";
       console.log(opts.waitedMs !== undefined
-        ? `no reply from ${target.name} within ${formatDuration(opts.waitedMs)}`
-        : `no reply from ${target.name} yet (sent ${since(record.deliveredAt ?? record.createdAt)} ago)`);
+        ? `no reply from ${target.name} within ${formatDuration(opts.waitedMs)}${comes}`
+        : `no reply from ${target.name} yet (sent ${since(record.deliveredAt ?? record.createdAt)} ago)${comes}`);
       if (showsHints()) {
         console.log(`  codex-collab task wait ${record.id}${hint}     waits for it`);
         console.log(`  codex-collab task result ${record.id}${hint}   prints it once it is there`);
@@ -269,6 +287,7 @@ function printStatus(record: TaskRecord, hint: string, stateDir: string): void {
   const recorded = record.error ?? describeFailure(record, stateDir);
   if (recorded) console.log(`  error     ${recorded}`);
   console.log(`  message   ${firstLine(record.message)}`);
+  if (!final && replyComesByItself(record)) console.log(`  reply     ${COMES_BY_ITSELF.replace(/^its reply /, "")}`);
   if (showsHints() && record.status === "replied") console.log(`Print the reply: codex-collab task result ${record.id}${hint}`);
   else if (showsHints() && !final) console.log(`Wait for the reply: codex-collab task wait ${record.id}${hint}`);
   if (final && record.target.spawned) console.log("  session   conversation kept");

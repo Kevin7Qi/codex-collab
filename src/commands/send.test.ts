@@ -9,14 +9,17 @@
 
 import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
 import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
+import { replyComesByItself } from "./task";
 import { channelName } from "../claude-channel";
+import { noteHookRan } from "../codex-hooks";
+import type { TaskRecord } from "../claude-tasks";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
 const TEST_HOME = mkdtempSync(join(tmpdir(), "codex-collab-send-home-"));
@@ -24,6 +27,8 @@ const REGISTRY = join(TEST_HOME, "sessions");
 const JOBS = join(TEST_HOME, "jobs");
 const WS = join(TEST_HOME, "ws");
 const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
+/** Where the hook notes that Codex ran it in a thread, under this HOME. */
+const HOOK_RUNS = join(TEST_HOME, ".codex-collab", "hook-runs");
 
 // Unix sockets, sleep, ps and sh fakes: none of it exists on Windows, where
 // Claude Code has no cross-session messaging for `send` to ride on anyway.
@@ -404,6 +409,9 @@ afterEach(() => {
   for (const s of sleepers) { try { s.kill(); } catch { /* gone */ } }
   sleepers.length = 0;
   for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+  // A test that ran the hook leaves its note that Codex runs it in THREAD,
+  // which would change what `send` tells the next test's Codex.
+  rmSync(HOOK_RUNS, { recursive: true, force: true });
 });
 
 afterAll(async () => {
@@ -500,9 +508,9 @@ describeUnix("peers", () => {
     expect(whereItLives({ entrypoint: "cli", tmux: null })).toBeNull();
     expect(whereItLives({ entrypoint: null, tmux: null })).toBeNull();
     expect(whereItLives({ entrypoint: "sdk-ts", tmux: null })).toBe("via sdk-ts");
-    const lines = formatSessions([row("thesis-83", "claude-vscode", null), row("narrative", "cli", "work:@2.%2"), row("plain", "cli", null)]).split("\n");
-    expect(lines[1]).toMatch(/^ {2}thesis-83 +idle +interactive +in VS Code$/);
-    expect(lines[2]).toMatch(/^ {2}narrative +idle +interactive +tmux work:@2\.%2$/);
+    const lines = formatSessions([row("notes-83", "claude-vscode", null), row("refactor", "cli", "work:@2.%2"), row("plain", "cli", null)]).split("\n");
+    expect(lines[1]).toMatch(/^ {2}notes-83 +idle +interactive +in VS Code$/);
+    expect(lines[2]).toMatch(/^ {2}refactor +idle +interactive +tmux work:@2\.%2$/);
     expect(lines[3]).toMatch(/^ {2}plain +idle +interactive$/);
   });
 
@@ -2505,6 +2513,56 @@ describeUnix("a Codex thread's address", () => {
     }
     // Every task it answers is named, so that none still looks open.
     expect((await runCli(["messages"])).stdout).toMatch(new RegExp(`FROM busy-claude \\([^)]+ ago\\), its reply to tasks ${a} and ${b}:\\n  both read: fine\\n`));
+  });
+
+  test("where Codex runs the hooks in the thread, `send` and the task commands tell it the reply comes by itself; nowhere else", async () => {
+    const fake = startFake("slow-claude", { reply: null });
+    registerFake(fake);
+    const COMES = "its reply comes to this thread by itself when it arrives, so there is no need to check on it";
+    // No sign yet that Codex runs the hook in this thread: the reply is
+    // kept, for Codex to collect.
+    const first = await runCli(["send", "--to", "slow-claude", "first", "--no-wait"]);
+    expect(first.stdout).toContain("Not waiting; its reply is kept.");
+    // Codex runs it: at the user's message, after a tool call.
+    const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
+    expect(hooked.status).toBe(0);
+    const r = await runCli(["send", "--to", "slow-claude", "second", "--no-wait"]);
+    const id = taskIdOf(r.stdout);
+    expect(r.stdout).toContain(`Sent to slow-claude as task ${id}. Not waiting; ${COMES}.`);
+    expect((await runCli(["task", "status", id])).stdout).toContain(`  reply     comes to this thread by itself when it arrives, so there is no need to check on it\n`);
+    const result = await runCli(["task", "result", id]);
+    expect(result.code).toBe(3);
+    expect(result.stdout).toMatch(new RegExp(`no reply from slow-claude yet \\(sent [^)]+ ago\\); ${COMES}\\n`));
+    const waited = await runCli(["task", "wait", id, "--timeout", "1"]);
+    expect(waited.stdout).toContain(`no reply from slow-claude within 1s; ${COMES}\n`);
+    // Asked from another thread: the reply does not come there.
+    const elsewhere = await runCli(["task", "result", id], { CODEX_THREAD_ID: "01a0985a-445b-7ee2-85b5-00000000abcd" });
+    expect(elsewhere.stdout).not.toContain("by itself");
+    // The hooks file changed since the hook ran: Codex may want the user's
+    // trust again before it runs them, so nothing is promised.
+    const hooksFile = join(TEST_HOME, ".codex", "hooks.json");
+    mkdirSync(dirname(hooksFile), { recursive: true });
+    const had = existsSync(hooksFile);
+    if (!had) writeFileSync(hooksFile, "{}\n");
+    const later = new Date(Date.now() + 5000);
+    utimesSync(hooksFile, later, later);
+    try {
+      expect((await runCli(["task", "result", id])).stdout).not.toContain("by itself");
+    } finally {
+      if (!had) rmSync(hooksFile, { force: true });
+    }
+  });
+
+  test("a task whose reply comes to an address of its own, or from no thread, is never said to come by itself", () => {
+    const dir = mkdtempSync(join(TEST_HOME, "comes-"));
+    const hooks = { runsDir: join(dir, "runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml") };
+    noteHookRan(THREAD, hooks.runsDir);
+    const env = { CODEX_THREAD_ID: THREAD };
+    const base = { id: "0a0b0c0d", cwd: WS, threadId: THREAD, senderName: channelName(WS, THREAD) } as TaskRecord;
+    expect(replyComesByItself(base, env, hooks)).toBe(true);
+    expect(replyComesByItself({ ...base, senderName: `codex(52e2b36a-ws-${base.id})` }, env, hooks)).toBe(false);
+    expect(replyComesByItself({ ...base, senderName: undefined }, env, hooks)).toBe(false);
+    expect(replyComesByItself({ ...base, threadId: null }, {}, hooks)).toBe(false);
   });
 
   test("a message Claude Code sends again with the same id is kept once", async () => {

@@ -4,10 +4,10 @@
 // the user's own hooks where they were.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, installCodexHooks, isOurHandler, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
+import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hooks-"));
 let n = 0;
@@ -189,5 +189,72 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
       expect(readFileSync(path, "utf-8")).toBe(text);
       expect(codexHooksInSync(COMMAND, path)).toBe(false);
     }
+  });
+});
+
+describe("whether Codex runs the hooks in a thread", () => {
+  const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
+  const OTHER = "01a0985a-445b-7ee2-85b5-00000000abcd";
+  /** A runs dir, and Codex's hooks file and config, written `ago` ms back. */
+  const setup = (ago = 60_000) => {
+    const dir = join(ROOT, `r-${++n}`);
+    const opts = { runsDir: join(dir, "hook-runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml") };
+    const then = new Date(Date.now() - ago);
+    for (const f of [opts.hooksPath, opts.codexConfig]) {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(f, "");
+      utimesSync(f, then, then);
+    }
+    return opts;
+  };
+  const touch = (path: string) => { const now = new Date(Date.now() + 1000); utimesSync(path, now, now); };
+
+  test("only where the hook ran since its settings last changed: a change may have dropped the user's trust, until it runs again", () => {
+    const opts = setup();
+    expect(hooksRunIn(THREAD, opts)).toBe(false);
+    noteHookRan(THREAD, opts.runsDir);
+    expect(hooksRunIn(THREAD, opts)).toBe(true);
+    // Another thread's run says nothing of this one.
+    expect(hooksRunIn(OTHER, opts)).toBe(false);
+    // The hooks file rewritten (Codex asks to trust a changed hook again),
+    // or Codex's config changed (where it keeps that trust): not known.
+    touch(opts.hooksPath);
+    expect(hooksRunIn(THREAD, opts)).toBe(false);
+    noteHookRan(THREAD, opts.runsDir, new Date(Date.now() + 2000));
+    expect(hooksRunIn(THREAD, opts)).toBe(true);
+    utimesSync(opts.codexConfig, new Date(Date.now() + 3000), new Date(Date.now() + 3000));
+    expect(hooksRunIn(THREAD, opts)).toBe(false);
+  });
+
+  test("a setting that is not there stops nothing; an id that is not a thread's is never one", () => {
+    const opts = setup();
+    rmSync(opts.hooksPath);
+    rmSync(opts.codexConfig);
+    noteHookRan(THREAD, opts.runsDir);
+    expect(hooksRunIn(THREAD, opts)).toBe(true);
+    noteHookRan("../escape", opts.runsDir);
+    expect(readdirSync(opts.runsDir)).toEqual([THREAD]);
+    expect(hooksRunIn("../escape", opts)).toBe(false);
+  });
+
+  test("a thread's first note clears notes of threads the hook has not run in for a week; later ones only touch their own", () => {
+    const opts = setup();
+    const stale = "01a0985a-445b-7ee2-85b5-0000000000aa";
+    const recent = "01a0985a-445b-7ee2-85b5-0000000000bb";
+    noteHookRan(stale, opts.runsDir, new Date(Date.now() - 8 * 24 * 3600 * 1000));
+    noteHookRan(recent, opts.runsDir, new Date(Date.now() - 6 * 24 * 3600 * 1000));
+    noteHookRan(THREAD, opts.runsDir);
+    expect(readdirSync(opts.runsDir).sort()).toEqual([THREAD, recent].sort());
+  });
+
+  test("the last run anywhere, and whether it still says the hooks run", () => {
+    const opts = setup();
+    expect(lastHookRun(opts)).toBeNull();
+    const at = new Date(Date.now() - 5000);
+    noteHookRan(OTHER, opts.runsDir, new Date(Date.now() - 20_000));
+    noteHookRan(THREAD, opts.runsDir, at);
+    expect(lastHookRun(opts)).toEqual({ at: at.getTime(), current: true });
+    touch(opts.codexConfig);
+    expect(lastHookRun(opts)).toEqual({ at: at.getTime(), current: false });
   });
 });

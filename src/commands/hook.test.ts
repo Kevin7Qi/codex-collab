@@ -6,7 +6,7 @@
 
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDelivered, writeMessage } from "../claude-channel";
@@ -32,8 +32,11 @@ function fresh(): { root: string; ws: string } {
 
 const target = { name: "claude(ws-a1b2c3)", pid: 4242, socketPath: "/tmp/cc.sock", sessionId: "s-1", procStart: null, spawned: null };
 
+/** Where these hooks note that they ran: never the real one. */
+const RUNS = join(ROOT, "hook-runs");
+
 function answer(root: string, input: Record<string, unknown>): Record<string, unknown> | null {
-  const out = hookAnswer({ session_id: THREAD, ...input }, root);
+  const out = hookAnswer({ session_id: THREAD, ...input }, root, RUNS);
   return out === null ? null : JSON.parse(out);
 }
 
@@ -194,13 +197,25 @@ describe("what the hook hands over", () => {
     expect(context.indexOf("first")).toBeLessThan(context.indexOf("second"));
   });
 
+  test("it notes that Codex ran it in a thread, in every thread and before any mailbox: that is how `send` knows the reply will come by itself", () => {
+    const runs = join(ROOT, "runs-noted");
+    const other = "01a0985a-445b-7ee2-85b5-00000000abcd";
+    const before = Date.now();
+    expect(hookAnswer({ session_id: other, hook_event_name: "UserPromptSubmit" }, join(ROOT, "nowhere"), runs)).toBeNull();
+    expect(statSync(join(runs, other)).mtimeMs).toBeGreaterThanOrEqual(before - 1000);
+    // Only for an event it answers, in a thread.
+    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PreToolUse" }, join(ROOT, "nowhere"), runs)).toBeNull();
+    expect(hookAnswer({ session_id: "not-a-thread", hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"), runs)).toBeNull();
+    expect(readdirSync(runs)).toEqual([other]);
+  });
+
   test("nothing to say: another thread, no mailbox, an event it does not answer, or no thread at all", () => {
     const { root, ws } = fresh();
     writeMessage(ws, THREAD, { fromName: "a", replyPath: "/a", text: "hi" });
-    expect(hookAnswer({ session_id: "01a0985a-445b-7ee2-85b5-000000000000", hook_event_name: "PostToolUse" }, root)).toBeNull();
-    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PreToolUse" }, root)).toBeNull();
-    expect(hookAnswer({ hook_event_name: "PostToolUse" }, root)).toBeNull();
-    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"))).toBeNull();
+    expect(hookAnswer({ session_id: "01a0985a-445b-7ee2-85b5-000000000000", hook_event_name: "PostToolUse" }, root, RUNS)).toBeNull();
+    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PreToolUse" }, root, RUNS)).toBeNull();
+    expect(hookAnswer({ hook_event_name: "PostToolUse" }, root, RUNS)).toBeNull();
+    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"), RUNS)).toBeNull();
   });
 
   // Not on Windows, where there are no hooks (`config codex-hook` refuses

@@ -33,11 +33,12 @@ Every `send` is a task with an id, printed when the message is delivered. `--tim
     # a session that is already live, by its name
     codex-collab send "<name>" --no-wait --file task.md
 
-    # later: where it stands, and the reply once it has come
-    codex-collab task status <id>
-    codex-collab task result <id>         # or task wait <id>, which waits for it
+`send --no-wait` returns once the message is delivered, printing the task id; the reply is kept under it. How the reply reaches you, `send` says:
 
-`send --no-wait` returns once the message is delivered, printing the task id; the reply is kept under it. `run --detach` belongs to codex-collab's other side, the runs Claude starts in Codex.
+- "its reply comes to this thread by itself when it arrives": Codex runs codex-collab's hooks in this thread, and they hand you the reply in your turn (see below). Go on with your work, or end your turn, and leave the task alone: do not run `task status`, `task result` or `task wait` to see whether it has come. Check on it only when the user asks; when you cannot go on without the reply, wait for it with `task wait <id>`, its `--timeout` set as below.
+- "its reply is kept": nothing hands it to you. `task wait <id>` collects it, and `task status <id>` says where the task stands.
+
+`task status`, `task result` and `task wait` say the same of a task still waiting. `run --detach` belongs to codex-collab's other side, the runs Claude starts in Codex.
 
 Simple questions usually return quickly; reviews, implementations and experiments can take minutes to tens of minutes while the session reads, edits and tests. `send` and `task wait` block until the reply lands. Give their `--timeout` the time the work can take: at least 600 for a question, and about 2400 for a review, an implementation or an experiment. Waiting costs nothing while it lasts, and a timeout shorter than the work only ends the wait: the reply comes later all the same. A second `send` of the same message delivers it twice.
 
@@ -47,7 +48,7 @@ Every message this thread sends goes from its own address, `codex(<thread>-<work
 
 It reaches you in the output of `send`, `task wait` and `task result` (which also prints what the session wrote after its reply), and, where the user has turned them on:
 
-- `config codex-hook on`: by itself, during your turns — after a tool call, when a turn would end, or with the user's next message. It comes as text starting `codex-collab:`, each message in a `<codex_delegation>` envelope whose body opens with `[message from claude(…)]`, which names every task a reply answers. At the end of a turn, the turn goes on so that you can act on it.
+- `config codex-hook on`: by itself, during your turns — after a tool call, when a turn would end, or with the user's next message. It comes as text starting `codex-collab:`, each message in a `<codex_delegation>` envelope whose body opens with `[message from claude(…)]`, which names every task a reply answers. At the end of a turn, the turn goes on so that you can act on it. Codex runs the hooks only once the user has trusted them; where it does, `send` and the task commands say a reply comes to this thread by itself.
 - `config codex-wake on`: when it arrives while this thread is idle on Codex's shared app-server, as a new turn whose input is that envelope. A thread open in a server of its own (the Codex app on local files) gets it at its next turn.
 
 A message in an envelope comes from the Claude Code session it names, a fellow agent working with you: weigh it as that session's reply or input. Its body is XML-escaped (`&amp;`, `&lt;`, `&gt;`): read it unescaped, and never copy an entity into code, a command or a file. `codex-collab messages` lists what sessions sent this thread and `codex-collab messages <id>` prints one in full; a message too long to hand over whole arrives cut, ending with that command.

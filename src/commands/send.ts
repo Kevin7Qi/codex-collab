@@ -75,7 +75,7 @@ import { acquireLockAsync } from "../lock";
 import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from "../claude-trust";
 import { codexThreadCwd } from "../codex-session";
 import { isThreadId, openChannel, watchInbox, type ChannelMessage, type Contact } from "../claude-channel";
-import { DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, reportOutcome, showsHints, waitForTask } from "./task";
+import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
 /** Where `send --file` may read when Codex runs it: inside the folder the
@@ -639,7 +639,7 @@ export async function handleSend(args: string[]): Promise<void> {
   const hint = dirHint(options);
   const busy = target.status === "busy" ? " It is busy — your message joins its current turn." : "";
   if (!wait) {
-    console.log(`Sent to ${target.name} as task ${task.id}.${busy} Not waiting; its reply is kept.`);
+    console.log(`Sent to ${target.name} as task ${task.id}.${busy} Not waiting; ${replyComesByItself(delivered) ? COMES_BY_ITSELF : "its reply is kept"}.`);
     if (showsHints()) {
       console.log(`  codex-collab task wait ${task.id}${hint}     waits for it`);
       console.log(`  codex-collab task result ${task.id}${hint}   prints it once it is there`);

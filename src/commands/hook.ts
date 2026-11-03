@@ -18,14 +18,13 @@
 
 import { listTasks, loadTask, type TaskRecord } from "../claude-tasks";
 import { claimDelivery, isDelivered, isThreadId, messageIdsSince, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
+import { HOOK_EVENTS, hookRunsDir, noteHookRan, type HookEvent } from "../codex-hooks";
 import { buildDelegation } from "../peer";
 import { sanitizeForTerminal } from "../questions";
 import { laterFromSession, listed, printedText, repliesByMessage } from "./task";
 import { formatAge } from "./shared";
 
-/** The events the hook answers, and how each hands a message over. */
-export const HOOK_EVENTS = ["PostToolUse", "Stop", "UserPromptSubmit"] as const;
-export type HookEvent = typeof HOOK_EVENTS[number];
+export { HOOK_EVENTS, type HookEvent };
 
 /** What one hook hands over at most, in tokens as `estimateTokens` counts
  *  them: under the limit `config codex-hook` sets on the hooks (8,000), past
@@ -188,12 +187,16 @@ export function compose(items: Array<{ dir: string; message: ChannelMessage }>, 
   return taken.length > 0 ? hookText(taken, threadId) : null;
 }
 
-/** The hook's answer to Codex for one event, or null for none. */
-export function hookAnswer(input: Record<string, unknown>, root?: string): string | null {
+/** The hook's answer to Codex for one event, or null for none. `runs` is
+ *  where it notes that Codex ran it in the thread (`noteHookRan`). */
+export function hookAnswer(input: Record<string, unknown>, root?: string, runs: string = hookRunsDir()): string | null {
   const event = input.hook_event_name;
   if (!HOOK_EVENTS.includes(event as HookEvent)) return null;
   const threadId = input.session_id;
   if (!isThreadId(threadId)) return null;
+  // In every thread, before it has a mailbox: a thread's first `send` tells
+  // Codex whether the reply will come by itself from this.
+  noteHookRan(threadId, runs);
   const dirs = threadStateDirs(threadId, root);
   if (dirs.length === 0) return null;
   if (event === "PostToolUse") {

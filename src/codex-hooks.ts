@@ -7,12 +7,23 @@
 // user's own hooks: ours go after theirs, since Codex keys each hook's trust
 // by its place in the file, and only ours are ever taken out. Codex asks the
 // user to trust them before they run.
+//
+// Whether they do run is known only from the hook itself: each time Codex
+// runs it in a thread, it notes so (`noteHookRan`), and `send` and `task`
+// tell Codex its reply comes by itself only where that note is newer than
+// anything that could have stopped the hooks since (`hooksRunIn`).
 
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { config } from "./config";
-import { HOOK_EVENTS } from "./commands/hook";
+import { isThreadId } from "./claude-channel";
+import { codexConfigFile } from "./claude-trust";
+
+/** The events our hooks answer (commands/hook.ts says how each hands a
+ *  message over). */
+export const HOOK_EVENTS = ["PostToolUse", "Stop", "UserPromptSubmit"] as const;
+export type HookEvent = typeof HOOK_EVENTS[number];
 
 /** What Codex may put in context from one of our hooks before it moves the
  *  text to a file instead (its default is 2,500 tokens). The hook keeps
@@ -251,4 +262,103 @@ export function codexHooksInSync(command: string = hookCommand(), path: string =
   }
   if (ours === 0) return null;
   return ours === HOOK_EVENTS.length && right === HOOK_EVENTS.length;
+}
+
+/** Where the hook notes when Codex last ran it in each thread: an empty
+ *  file per thread, named by its id, whose time is that run's. */
+export function hookRunsDir(): string {
+  return join(config.dataDir, "hook-runs");
+}
+
+/** How long a thread's note is kept after the hook last ran in it. */
+const HOOK_RUN_KEEP_MS = 7 * 24 * 3600 * 1000;
+
+/** Note that Codex ran the hook in this thread just now. Codex runs it after
+ *  every tool call in every thread, so this is one write, to a file that is
+ *  there already; a thread's first note also clears the notes of threads
+ *  the hook has not run in for a week. Never throws: the hook's work goes on
+ *  whether or not this was written. */
+export function noteHookRan(threadId: string, dir: string = hookRunsDir(), now: Date = new Date()): void {
+  if (!isThreadId(threadId)) return;
+  const path = join(dir, threadId);
+  try {
+    utimesSync(path, now, now);
+    return;
+  } catch { /* the thread's first */ }
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    writeFileSync(path, "", { mode: 0o600 });
+    utimesSync(path, now, now);
+  } catch {
+    return;
+  }
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const old = join(dir, name);
+    try {
+      if (now.getTime() - statSync(old).mtimeMs > HOOK_RUN_KEEP_MS) rmSync(old, { force: true });
+    } catch { /* gone already */ }
+  }
+}
+
+function mtimeOf(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/** Files whose change can stop Codex running the hooks: the hooks file, and
+ *  Codex's config, where it keeps the user's trust in each hook and whether
+ *  hooks run at all. */
+function hookSettings(opts: { hooksPath?: string; codexConfig?: string }): string[] {
+  return [opts.hooksPath ?? codexHooksPath(), opts.codexConfig ?? codexConfigFile()];
+}
+
+/** Whether a run of the hook at `ran` (ms) still says Codex runs it: no
+ *  setting has changed since. A setting that changed in the same instant
+ *  counts as changed after. */
+function stillRuns(ran: number | null, settings: string[]): boolean {
+  if (ran === null) return false;
+  return settings.every((f) => {
+    const changed = mtimeOf(f);
+    return changed === null || changed < ran;
+  });
+}
+
+/** Whether Codex runs our hooks in this thread as things stand: the hook
+ *  ran there since the hooks file and Codex's config last changed. Then
+ *  whatever reaches the thread's mailbox is handed to it by itself, during a
+ *  turn or with the user's next message. A change to either file makes this
+ *  false until the hook runs again — at the thread's next tool call, if
+ *  Codex still runs it — since it may have dropped the user's trust (Codex
+ *  asks again after our hook's command changes) or turned hooks off. */
+export function hooksRunIn(threadId: string, opts: { runsDir?: string; hooksPath?: string; codexConfig?: string } = {}): boolean {
+  if (!isThreadId(threadId)) return false;
+  return stillRuns(mtimeOf(join(opts.runsDir ?? hookRunsDir(), threadId)), hookSettings(opts));
+}
+
+/** When Codex last ran the hook in any thread (ms), and whether no setting
+ *  has changed since; null when there is no note of any run. */
+export function lastHookRun(opts: { runsDir?: string; hooksPath?: string; codexConfig?: string } = {}): { at: number; current: boolean } | null {
+  const dir = opts.runsDir ?? hookRunsDir();
+  let latest: number | null = null;
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    if (!isThreadId(name)) continue;
+    const at = mtimeOf(join(dir, name));
+    if (at !== null && (latest === null || at > latest)) latest = at;
+  }
+  return latest === null ? null : { at: latest, current: stillRuns(latest, hookSettings(opts)) };
 }

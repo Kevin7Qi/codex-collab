@@ -10,7 +10,7 @@ import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 import { claudeConfigFile, claudeTrusts, codexConfigFile, codexTrust, isSpawnTrustSetting, trustReachesHome } from "../claude-trust";
 import { underCodex } from "./send";
-import { codexHookEnabled, codexHooksInSync, codexHooksPath, installCodexHooks, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "../codex-hooks";
+import { codexHookEnabled, codexHooksInSync, codexHooksPath, installCodexHooks, lastHookRun, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "../codex-hooks";
 import { DEFAULT_ADDRESS_IDLE_SEC, claimEveryMessage } from "../claude-channel";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
@@ -101,6 +101,7 @@ function setCodexHookAndSave(cfg: UserConfig, on: boolean): void {
 import type { Model, AccountRead } from "../types";
 import {
   die,
+  formatAge,
   parseOptions,
   withClient,
   fetchAllPages,
@@ -413,11 +414,14 @@ export function describeCodexRule(enabled: boolean, inSync: boolean | null, path
 
 /** One line on the opt-in hooks: on and as this binary writes them, on but
  *  missing or different, or off. */
-export function describeCodexHooks(enabled: boolean, inSync: boolean | null, path: string): string {
+export function describeCodexHooks(enabled: boolean, inSync: boolean | null, path: string, lastRun: { at: number; current: boolean } | null = null): string {
   if (!enabled) return "off — what Claude Code sessions send a Codex thread reaches it through `send`, `task wait`, `task result` and `messages` ('codex-collab config codex-hook on' hands it over in the thread's turns)";
   if (inSync === null) return `on, but codex-collab's hooks are missing from ${path} — run 'codex-collab config codex-hook on'`;
   if (!inSync) return `on, but codex-collab's hooks in ${path} are out of date — run 'codex-collab config codex-hook on'`;
-  return `on (${path}) — Codex hands a thread what Claude Code sessions send it, once you have trusted the hooks in Codex`;
+  if (lastRun?.current) return `on (${path}) — Codex hands a thread what Claude Code sessions send it; it last ran the hooks ${formatAge(lastRun.at / 1000)}`;
+  // Codex runs them only once the user has trusted them, and asks again
+  // after their command changes.
+  return `on (${path}), but Codex has not run the hooks since they or its config last changed — it runs them once you have trusted them in Codex; until then, Codex is not told that replies come to its thread by themselves`;
 }
 
 /** One line on waking an idle thread on the shared app-server. */
@@ -481,7 +485,7 @@ export async function handleHealth(args: string[]): Promise<void> {
   if (process.platform !== "win32") {
     console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
     console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
-    console.log(`  codex hooks: ${describeCodexHooks(codexHookEnabled(), codexHooksInSync(), codexHooksPath())}`);
+    console.log(`  codex hooks: ${describeCodexHooks(codexHookEnabled(), codexHooksInSync(), codexHooksPath(), lastHookRun())}`);
     console.log(`  codex wake: ${describeCodexWake(loadUserConfig()["codex-wake"] === "on")}`);
     const ws = resolveWorkspaceDir(options.dir);
     console.log(`  claude trust: ${describeClaudeTrust(ws, claudeTrusts(ws), codexTrust(ws), loadUserConfig()["spawn-trust"], trustReachesHome(ws))}`);
