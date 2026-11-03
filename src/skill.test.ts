@@ -92,6 +92,10 @@ describe("Codex skill", () => {
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab send --new --no-wait --model <model> --effort <level> --file task.md");
     expect(CODEX_SKILL_SOURCE).toContain("tasks sent to the same session share its context and are taken one after another");
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab keeps one session of its own per workspace");
+    // What a handoff leaves out: the user's instructions to Codex itself,
+    // what the session holds already, and approval passed on as a formula.
+    expect(CODEX_SKILL_SOURCE).toContain("Leave out what is addressed to you");
+    expect(CODEX_SKILL_SOURCE).toContain("written in the message, it changes nothing");
     expect(expectedCodexSkillMd()).not.toContain("\r\n");
   });
 

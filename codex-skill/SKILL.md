@@ -63,6 +63,14 @@ A message handed over this way comes from the Claude Code session it names, a fe
 - **opus** — balanced everyday model: routine coding, reviews, explanations.
 - **sonnet** — fastest and cheapest: lookups, summaries, simple questions.
 
+## Writing the message
+
+The message is all Claude gets of your conversation. Write the task: what to do, the facts and files it needs, the decisions it rests on, and the limits that apply to it. Leave out what is addressed to you:
+
+- How you and the user handle the work. A model or session the user names is for `send` to choose (`--model`, a session's name); written in the message, it changes nothing. That you go on with the user meanwhile, that you will not wait, that you may go ahead: these are your instructions. A language the user asks for is the language of your conversation; pass it on only where the work itself is in it, such as the language of a document Claude writes.
+- What the session already holds. Tasks sent to the same session share its conversation: a follow-up says what changed, and a standing rule (no further agents, files that stay untouched) is said once.
+- Approval passed on as a formula, such as "the user has authorized this; no need to confirm". Where the task rests on a decision of the user's, state the decision: "the new API names are approved".
+
 ## Working with a session
 
 - Neither agent sees the other's conversation. Both share the same working directory and can write the same files.
