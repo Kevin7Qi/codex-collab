@@ -2597,7 +2597,7 @@ describeUnix("a Codex thread's address", () => {
     const receiver = (taskRecord(id4)!.receiver as { pid: number }).pid;
     process.kill(receiver, "SIGTERM");
     await waitFor(() => inboxTexts().some((t) => t.startsWith(`task ${id4} `)), 10_000);
-    expect(inboxTexts().find((t) => t.startsWith(`task ${id4} `))).toBe(`task ${id4} ("format") to waiting-claude failed (the process collecting the reply was stopped before a reply came). No reply will come.`);
+    expect(inboxTexts().find((t) => t.startsWith(`task ${id4} `))).toBe(`task ${id4} ("format") to waiting-claude failed (the process collecting the reply was stopped before a reply came).`);
     hook();
     // A message from no Codex thread has no thread to tell.
     const third = startFake("leaving-claude-3", { reply: null });
@@ -2714,6 +2714,21 @@ describeUnix("a Codex thread's address", () => {
       removeConfig();
       server.stop(true);
     }
+  });
+
+  test("a task whose receiver is killed outright is told to the thread by the host, once, and ends", async () => {
+    const fake = startFake("steady-claude", { reply: null });
+    registerFake(fake);
+    const id = taskIdOf((await runCli(["send", "--to", "steady-claude", "a long one", "--no-wait"])).stdout);
+    const receiver = (taskRecord(id)!.receiver as { pid: number }).pid;
+    // No exit of its own to say anything on.
+    process.kill(receiver, "SIGKILL");
+    await waitFor(() => taskRecord(id)?.status === "failed", 10_000);
+    const told = () => inboxTexts().filter((t) => t.startsWith(`task ${id} `));
+    expect(told()).toEqual([`task ${id} ("a long one") to steady-claude failed (the process collecting the reply is gone (it was killed, or the machine restarted), so a reply can no longer reach this task).`]);
+    // The host looks again and again; the task has ended, so once is all.
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(told()).toHaveLength(1);
   });
 
   test("with codex-wake on, a task that ends without a reply wakes a thread idle on the shared app-server with its notice", async () => {

@@ -44,10 +44,12 @@ import {
   threadSocketPath,
   sweepChannels,
   writeMessage,
+  writeNotice,
   type Contact,
   type HostState,
 } from "../claude-channel";
-import { TASK_KEEP_MS } from "../claude-tasks";
+import { TASK_KEEP_MS, listTasks, settled, updateTask } from "../claude-tasks";
+import { outcomeNotice } from "./task";
 import { transientSessionId } from "../claude-sessions";
 import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../peer";
 import { verifyMailboxDir } from "../questions";
@@ -582,8 +584,37 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   sweep();
   setInterval(sweep, SWEEP_MS);
 
+  // ── Tasks whose receiver went without a word ──
+  // A task's receiver tells the thread when the task ends without a reply;
+  // one killed outright (the machine restarted, out of memory, kill -9)
+  // cannot, and its task would read as failed only to someone who asked —
+  // while Codex may have been told the reply comes by itself. The host tells
+  // the thread instead: the notice first, then the record, which ends the
+  // task so that this happens once. The receiver is verifiably gone, so the
+  // record has no other writer left.
+  const noticeLostReceivers = () => {
+    for (const t of listTasks(stateDir)) {
+      if (t.status !== "running" || !isThreadId(t.threadId) || t.senderName !== channelName(t.cwd, t.threadId)) continue;
+      const now = settled(t);
+      if (now.status === "running") continue;
+      try {
+        writeNotice(stateDir, t.threadId, t.id, outcomeNotice(now));
+        updateTask(stateDir, t.id, { status: now.status, error: now.error, finishedAt: new Date().toISOString() });
+      } catch (e) {
+        log(`could not tell Codex thread ${t.threadId} about task ${t.id}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      log(`told Codex thread ${t.threadId} that task ${t.id} lost its receiver`);
+      scheduleWake(t.threadId);
+    }
+  };
+  // At once, for what went while no host ran (a restarted machine), then
+  // with every look.
+  noticeLostReceivers();
+
   // ── Who is still there ──
   setInterval(() => {
+    noticeLostReceivers();
     const now = claudeEntries();
     const idleMs = idleLimitMs();
     for (const a of [...addresses.values()]) {

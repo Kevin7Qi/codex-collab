@@ -110,11 +110,11 @@ export function outcomeNotice(record: TaskRecord): string {
   const why = record.error ? ` (${record.error})` : "";
   switch (record.status) {
     case "failed":
-      return `${task} failed${why}. No reply will come.`;
+      return `${task} failed${why}.`;
     case "lost":
-      return `${task} is lost: ${name} ended before it replied${why}. No reply will come.`;
+      return `${task} is lost: ${name} ended before it replied${why}.`;
     case "blocked":
-      return `${task} is blocked: ${name} stopped at a prompt nobody answered${why}. No reply will come.`;
+      return `${task} is blocked: ${name} stopped at a prompt nobody answered${why}.`;
     case "expired":
       return `${task} expired with no reply${why}.`;
     default:

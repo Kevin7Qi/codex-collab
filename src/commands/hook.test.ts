@@ -109,10 +109,10 @@ describe("what the hook hands over", () => {
   test("a notice of codex-collab's own is one line wherever it goes: before Claude's messages inside a turn, set apart by a rule at its end", () => {
     const { root, ws } = fresh();
     const now = Date.now();
-    writeNotice(ws, THREAD, "0a0b0c0d", "task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied. No reply will come.", now - 2);
+    writeNotice(ws, THREAD, "0a0b0c0d", "task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied.", now - 2);
     writeMessage(ws, THREAD, { fromName: "claude(b)", replyPath: "/b", text: "<b> & done" }, now - 1);
     const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
-    expect(context).toStartWith("codex-collab: task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied. No reply will come.\ncodex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>");
+    expect(context).toStartWith("codex-collab: task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied.\ncodex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>");
     expect(context).toContain("[message from claude(b)]\n\n&lt;b&gt; &amp; done</input>");
     writeNotice(ws, THREAD, "0a0b0c0e", "task 0a0b0c0e (\"lint\") to claude(a) expired with no reply.", now);
     writeMessage(ws, THREAD, { fromName: "claude(b)", replyPath: "/b", text: "more" }, now + 1);
@@ -143,9 +143,9 @@ describe("what the hook hands over", () => {
 
   test("a notice says how a task ended without a reply, or that it is still open after its session's turn failed", () => {
     const base = { id: "0a0b0c0d", message: "# Run the tests\n\nall of them", target: { ...target, name: "claude(ws)" } } as TaskRecord;
-    expect(outcomeNotice({ ...base, status: "failed", error: "claude(ws) ended its turn without replying: 529 server_error" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) failed (claude(ws) ended its turn without replying: 529 server_error). No reply will come.");
-    expect(outcomeNotice({ ...base, status: "lost" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is lost: claude(ws) ended before it replied. No reply will come.");
-    expect(outcomeNotice({ ...base, status: "blocked" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is blocked: claude(ws) stopped at a prompt nobody answered. No reply will come.");
+    expect(outcomeNotice({ ...base, status: "failed", error: "claude(ws) ended its turn without replying: 529 server_error" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) failed (claude(ws) ended its turn without replying: 529 server_error).");
+    expect(outcomeNotice({ ...base, status: "lost" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is lost: claude(ws) ended before it replied.");
+    expect(outcomeNotice({ ...base, status: "blocked" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is blocked: claude(ws) stopped at a prompt nobody answered.");
     expect(outcomeNotice({ ...base, status: "expired" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) expired with no reply.");
     expect(outcomeNotice({ ...base, status: "running", error: "claude(ws) ended its turn without replying: 529 server_error" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is still open (claude(ws) ended its turn without replying: 529 server_error). claude(ws) is a session the user works in, who can set it going again; its reply would still come to this thread.");
   });
