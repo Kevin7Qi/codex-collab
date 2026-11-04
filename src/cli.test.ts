@@ -443,7 +443,7 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
   const rulesPath = join(dirs, "codex-rules", "codex-collab.rules");
   afterAll(() => rmSync(dirs, { recursive: true, force: true }));
 
-  function cliIn(env: { home: string; rules: string }, ...args: string[]): { stdout: string; stderr: string; exitCode: number } {
+  function cliIn(env: { home: string; rules: string; hooks?: string }, ...args: string[]): { stdout: string; stderr: string; exitCode: number } {
     const result = spawnSync("bun", ["run", CLI, ...args], {
       encoding: "utf-8",
       cwd: import.meta.dir + "/..",
@@ -456,10 +456,12 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
         CODEX_COLLAB_SKILL_DIR: claudeDir,
         CODEX_COLLAB_CODEX_SKILL_DIR: codexDir,
         CODEX_COLLAB_CODEX_RULES_PATH: env.rules,
+        CODEX_COLLAB_CODEX_HOOKS_PATH: env.hooks ?? hooksPath,
       },
     });
     return { stdout: (result.stdout ?? "") as string, stderr: (result.stderr ?? "") as string, exitCode: result.status ?? 1 };
   }
+  const hooksPath = join(dirs, "codex-hooks", "hooks.json");
   const cli = (...args: string[]) => cliIn({ home, rules: rulesPath }, ...args);
 
   it("sync creates a missing Codex skill only with consent, and never writes the rule unasked", () => {
@@ -559,6 +561,48 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     expect(off.exitCode).toBe(1);
     expect(off.stderr).toContain("the rule was put back");
     expect(existsSync(rules)).toBe(true);
+  });
+
+  it("config codex-hook on adds codex-collab's hooks beside the user's own, off takes only ours out", () => {
+    mkdirSync(join(dirs, "codex-hooks"), { recursive: true });
+    const theirs = { hooks: { Stop: [{ hooks: [{ type: "command", command: "notify-me" }] }] } };
+    writeFileSync(hooksPath, JSON.stringify(theirs));
+    // A mailbox with a message in it from before: the hooks hand over what
+    // comes from now on, so it is marked handed over when they go on.
+    const inbox = join(home, ".codex-collab", "workspaces", "ws-x", "channels", "01a0985a-445b-7ee2-85b5-52e2b36a6ba4", "inbox");
+    mkdirSync(inbox, { recursive: true });
+    writeFileSync(join(inbox, "0001792300000000-0a0b0c0d.json".slice(3)), JSON.stringify({ id: "1792300000000-0a0b0c0d", at: "", fromName: "x", replyPath: "/x", text: "old" }));
+    const on = cli("config", "codex-hook", "on");
+    expect(on.exitCode).toBe(0);
+    expect(existsSync(join(inbox, "..", "delivered", "1792300000000-0a0b0c0d"))).toBe(true);
+    expect(on.stdout).toContain(`Added codex-collab's hooks to ${hooksPath}. Codex asks you to trust them`);
+    const doc = JSON.parse(readFileSync(hooksPath, "utf-8"));
+    expect(doc.hooks.Stop).toHaveLength(2);
+    expect(doc.hooks.PostToolUse[0].hooks[0].command).toMatch(/ hook$/);
+    expect(cli("config", "codex-hook").stdout).toContain("codex-hook: on");
+    const off = cli("config", "codex-hook", "off");
+    expect(off.exitCode).toBe(0);
+    expect(off.stdout).toContain(`Took codex-collab's hooks out of ${hooksPath}`);
+    expect(JSON.parse(readFileSync(hooksPath, "utf-8"))).toEqual(theirs);
+    // --unset takes them out too.
+    cli("config", "codex-hook", "on");
+    expect(cli("config", "codex-hook", "--unset").exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(hooksPath, "utf-8"))).toEqual(theirs);
+    // A hooks file codex-collab cannot read is left alone, and the setting not saved.
+    writeFileSync(hooksPath, "{ broken");
+    const broken = cli("config", "codex-hook", "on");
+    expect(broken.exitCode).toBe(1);
+    expect(broken.stderr).toContain("codex-collab leaves it as it is");
+    expect(readFileSync(hooksPath, "utf-8")).toBe("{ broken");
+    expect(cli("config", "codex-hook").stdout).toContain("not set");
+  });
+
+  it("config address-idle takes seconds or off", () => {
+    expect(cli("config", "address-idle", "3600").exitCode).toBe(0);
+    expect(cli("config", "address-idle").stdout).toContain("address-idle: 3600");
+    expect(cli("config", "address-idle", "off").exitCode).toBe(0);
+    for (const bad of ["0", "-1", "1.5", "soon"]) expect(cli("config", "address-idle", bad).exitCode).toBe(1);
+    expect(cli("config", "address-idle", "--unset").exitCode).toBe(0);
   });
 
   it("--codex and --rules are refused on sync", () => {

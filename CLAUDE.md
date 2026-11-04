@@ -19,7 +19,7 @@ bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) —
 |------|---------|
 | `src/cli.ts` | CLI router, argument parsing, signal handlers |
 | `src/client.ts` | JSON-RPC client for Codex app server (spawn, handshake, request routing) |
-| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve; `send` with its detached receiver, `task`/`tasks`, `peers` with `peers stop` and the reaper entry point) |
+| `src/commands/` | CLI command handlers (run, review, threads, kill, config, approve; `send` with its detached receiver, `channel-host` (the workspace's Codex thread addresses), `task`/`tasks`, `peers` with `peers stop` and the reaper entry point) |
 | `src/threads.ts` | Thread index, run ledger, short ID mapping |
 | `src/turns.ts` | Turn lifecycle (runTurn, runReview), event wiring |
 | `src/events.ts` | Event dispatcher (progress lines, log writer, output accumulator) |
@@ -32,6 +32,7 @@ bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) —
 | `src/claude-sessions.ts` | Codex's side of peer messaging: the Claude Code sessions `peers` lists and `send` reaches, sessions `send` starts (`claude --bg`), their records and reaper |
 | `src/claude-transcript.ts` | Reads a Claude Code session's own transcript for why a turn failed (API errors); fails open, undocumented format |
 | `src/claude-tasks.ts` | Task records for `send`: one per message, written by a detached receiver, read by `task status\|wait\|result` and `tasks` |
+| `src/claude-channel.ts` | One address per Codex thread, `codex(<thread>-<workspace>)`, and its mailbox: what Claude sends the thread, kept on disk; contacts; how a receiver finds or starts the workspace's channel host (`commands/channel.ts`, private `channel-host`) |
 | `src/broker-client.ts` | Socket-based client for connecting to the broker server |
 | `src/shared-server.ts` | Attach to Codex's shared app-server over its control socket (WebSocket client, attach/spawn decision) |
 | `src/models.ts` | Model and effort defaults shared by the CLI and the peer |

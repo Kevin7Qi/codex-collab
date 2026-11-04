@@ -830,13 +830,14 @@ export function escapeDelegation(text: string): string {
  *  legible text. Injected items land in a pseudo-turn the app never
  *  displays, whatever shape they take.
  *
- *  `source_thread_id` is empty: the sender is a Claude session, not a Codex
- *  thread, and the app parses an empty value fine (it checks for the tag,
- *  not for content). Attribution rides inside `<input>` instead. */
-export function buildDelegation(input: string, sourceThreadId = ""): string {
+ *  The app makes `source_thread_id` a link to the chat a message came from.
+ *  The sender here is a Claude session, which has no chat there, and an empty
+ *  value is a link to nothing, so it names the thread the message is going
+ *  to: the one chat that exists. Attribution rides inside `<input>`. */
+export function buildDelegation(input: string, threadId: string): string {
   return [
     "<codex_delegation>",
-    `  <source_thread_id>${escapeDelegation(sourceThreadId)}</source_thread_id>`,
+    `  <source_thread_id>${escapeDelegation(threadId)}</source_thread_id>`,
     `  <input>${escapeDelegation(input)}</input>`,
     "</codex_delegation>",
   ].join("\n");
@@ -2437,6 +2438,7 @@ export function createPeer(host: PeerHost): Peer {
         text: buildDelegation(
           `[message from ${conv.fromName || "a Claude peer"}]\n\n`
           + (nudge ? `${nudge}\n\n${runPrompt}` : runPrompt),
+          conv.threadId,
         ),
       }];
       // On a shared app-server the thread may be mid-turn under the Codex

@@ -1,0 +1,306 @@
+// src/commands/hook.test.ts — what the hook hands Codex, and when it stays quiet
+//
+// Mailboxes and task records live under a temp workspaces root; the hook is
+// called as Codex calls it — an event's input, its answer back — through
+// `hookAnswer`, and once through the CLI to show it never fails a turn.
+
+import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isDelivered, writeMessage, writeNotice } from "../claude-channel";
+import { createTask, updateTask, type TaskRecord } from "../claude-tasks";
+import { HOOK_BUDGET_TOKENS, estimateTokens, hookAnswer, repliedTasksIn } from "./hook";
+import { outcomeNotice } from "./task";
+
+const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hook-"));
+const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
+const CLI = join(import.meta.dir, "..", "cli.ts");
+let n = 0;
+
+afterAll(() => {
+  rmSync(ROOT, { recursive: true, force: true });
+});
+
+/** A fresh workspaces root with one workspace's state dir in it. */
+function fresh(): { root: string; ws: string } {
+  const root = join(ROOT, `root-${++n}`);
+  const ws = join(root, `ws-${n}`);
+  mkdirSync(ws, { recursive: true, mode: 0o700 });
+  return { root, ws };
+}
+
+const target = { name: "claude(ws-a1b2c3)", pid: 4242, socketPath: "/tmp/cc.sock", sessionId: "s-1", procStart: null, spawned: null };
+
+/** Where these hooks note that they ran: never the real one. */
+const RUNS = join(ROOT, "hook-runs");
+
+function answer(root: string, input: Record<string, unknown>): Record<string, unknown> | null {
+  const out = hookAnswer({ session_id: THREAD, ...input }, root, RUNS);
+  return out === null ? null : JSON.parse(out);
+}
+
+describe("counting and reading", () => {
+  test("a token estimate errs high: ASCII at about four characters to one, every other character one of its own", () => {
+    expect(estimateTokens("abcdefgh")).toBe(2);
+    expect(estimateTokens("论文第三章")).toBe(5);
+    expect(estimateTokens("第三章 ok")).toBe(4);
+    // Scripts of more than one byte a character are no longer undercounted:
+    // the answer stays under four bytes a token whatever it is written in.
+    for (const text of ["क".repeat(1000), "─".repeat(1000), "щ".repeat(1000), "😀".repeat(500)]) {
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4 * estimateTokens(text));
+    }
+  });
+
+  test("the tasks a command's output reported replied, by their status line", () => {
+    const output = "Sent to x as task 1234abcd.\n\ntask: 1234abcd  status: replied\nREPLY FROM x:\n  hi\ntask: 9999aaaa  status: running\n";
+    expect(repliedTasksIn(output)).toEqual(["1234abcd"]);
+    expect(repliedTasksIn("nothing here")).toEqual([]);
+  });
+});
+
+describe("what the hook hands over", () => {
+  test("a message reaches Codex once, in the envelope Claude's messages take, naming its sender", () => {
+    const { root, ws } = fresh();
+    const m = writeMessage(ws, THREAD, { fromName: "claude(ws-a1b2c3)", replyPath: "/tmp/cc.sock", text: "The parser reads well; <one> fix & a note." });
+    const first = answer(root, { hook_event_name: "PostToolUse", tool_response: "ok" });
+    const context = (first?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(first?.hookSpecificOutput).toEqual(expect.objectContaining({ hookEventName: "PostToolUse" }));
+    // Said with a developer's weight, and the skill may not be loaded: the
+    // line before it says whose it is.
+    expect(context).toStartWith("codex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>\n  <source_thread_id>" + THREAD + "</source_thread_id>\n  <input>[message from claude(ws-a1b2c3)]");
+    // The envelope's body is escaped, as on the peer side.
+    expect(context).toContain("The parser reads well; &lt;one&gt; fix &amp; a note.</input>\n</codex_delegation>");
+    expect(isDelivered(ws, THREAD, m.id)).toBe(true);
+    // Handed over once: the next hook has nothing.
+    expect(answer(root, { hook_event_name: "PostToolUse", tool_response: "ok" })).toBeNull();
+    expect(answer(root, { hook_event_name: "Stop" })).toBeNull();
+  });
+
+  test("at a turn's end the message keeps the turn going; with the user's next message it goes in as context", () => {
+    const { root, ws } = fresh();
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "one" });
+    const stop = answer(root, { hook_event_name: "Stop", stop_hook_active: false });
+    expect(stop?.decision).toBe("block");
+    expect(String(stop?.reason)).toBe("codex-collab: a message from claude(a), a Claude Code session working with you:\n\none");
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "two" });
+    const prompt = answer(root, { hook_event_name: "UserPromptSubmit", prompt: "hi" });
+    expect(prompt?.hookSpecificOutput).toEqual(expect.objectContaining({ hookEventName: "UserPromptSubmit" }));
+    expect((prompt?.hookSpecificOutput as Record<string, string>).additionalContext).toContain("two</input>");
+  });
+
+  test("at a turn's end, which the Codex app shows the user, each message comes as markdown under one line saying where it is from, set apart by a rule", () => {
+    const { root, ws } = fresh();
+    const now = Date.now();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "# Second review of the parser\n\nmore", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "## A. Ready\n\nRun `check.sh [--strict] <file>` & compare." }, now - 2);
+    updateTask(ws, task.id, { status: "replied", reply: { text: reply.text, fromName: "claude(a)", id: reply.id, at: reply.at } });
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "one more thing" }, now - 1);
+    const reason = String(answer(root, { hook_event_name: "Stop", stop_hook_active: false })?.reason);
+    expect(reason).toBe(`codex-collab: a message from claude(a), a Claude Code session working with you, its reply to task ${task.id} ("Second review of the parser"):\n\n## A. Ready\n\nRun \`check.sh [--strict] <file>\` & compare.\n\n---\n\ncodex-collab: a message from claude(a), a Claude Code session working with you:\n\none more thing`);
+    // Out of the user's view, the envelope as before.
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "<x> & y" });
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain("<codex_delegation>");
+    expect(context).toContain("&lt;x&gt; &amp; y");
+  });
+
+  test("a notice of codex-collab's own is one line wherever it goes: before Claude's messages inside a turn, set apart by a rule at its end", () => {
+    const { root, ws } = fresh();
+    const now = Date.now();
+    writeNotice(ws, THREAD, "0a0b0c0d", "task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied.", now - 2);
+    writeMessage(ws, THREAD, { fromName: "claude(b)", replyPath: "/b", text: "<b> & done" }, now - 1);
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toStartWith("codex-collab: task 0a0b0c0d (\"run the tests\") to claude(a) is lost: claude(a) ended before it replied.\ncodex-collab: A message from Claude Code reached this thread, from the Claude Code session it names, a peer agent working with you.\n<codex_delegation>");
+    expect(context).toContain("[message from claude(b)]\n\n&lt;b&gt; &amp; done</input>");
+    writeNotice(ws, THREAD, "0a0b0c0e", "task 0a0b0c0e (\"lint\") to claude(a) expired with no reply.", now);
+    writeMessage(ws, THREAD, { fromName: "claude(b)", replyPath: "/b", text: "more" }, now + 1);
+    expect(String(answer(root, { hook_event_name: "Stop" })?.reason)).toBe("codex-collab: task 0a0b0c0e (\"lint\") to claude(a) expired with no reply.\n\n---\n\ncodex-collab: a message from claude(b), a Claude Code session working with you:\n\nmore");
+  });
+
+  test("a report that printed a task's end has told Codex what its notice says; one that printed the task still open has not", () => {
+    const { root, ws } = fresh();
+    const ended = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "run the tests", target, maxWaitSec: 3600 });
+    const open = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "lint", target, maxWaitSec: 3600 });
+    // The receiver writes the notice first, then the record.
+    const n1 = writeNotice(ws, THREAD, ended.id, "the end of it");
+    updateTask(ws, ended.id, { status: "lost", error: "its registration went" });
+    const n2 = writeNotice(ws, THREAD, open.id, "it ended later");
+    const printed = `task: ${ended.id}  status: lost\nclaude(ws-a1b2c3) ended before it replied\n\ntask: ${open.id}  status: running\nno reply from claude(ws-a1b2c3) yet (sent 2m ago)\n`;
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: printed })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(isDelivered(ws, THREAD, n1.id)).toBe(true);
+    expect(context).not.toContain("the end of it");
+    expect(context).toContain("codex-collab: it ended later");
+    expect(isDelivered(ws, THREAD, n2.id)).toBe(true);
+    // While a task stays open, a report that printed its error has told it.
+    const erred = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "build", target, maxWaitSec: 3600 });
+    updateTask(ws, erred.id, { error: "claude(ws-a1b2c3) ended its turn without replying: 529 server_error" });
+    const n3 = writeNotice(ws, THREAD, erred.id, "task is still open (claude(ws-a1b2c3) ended its turn without replying: 529 server_error).");
+    expect(answer(root, { hook_event_name: "PostToolUse", tool_response: `task: ${erred.id}  status: running\n  error     claude(ws-a1b2c3) ended its turn without replying: 529 server_error\n` })).toBeNull();
+    expect(isDelivered(ws, THREAD, n3.id)).toBe(true);
+  });
+
+  test("a notice says how a task ended without a reply, or that it is still open after its session's turn failed", () => {
+    const base = { id: "0a0b0c0d", message: "# Run the tests\n\nall of them", target: { ...target, name: "claude(ws)" } } as TaskRecord;
+    expect(outcomeNotice({ ...base, status: "failed", error: "claude(ws) ended its turn without replying: 529 server_error" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) failed (claude(ws) ended its turn without replying: 529 server_error).");
+    expect(outcomeNotice({ ...base, status: "lost" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is lost: claude(ws) ended before it replied.");
+    expect(outcomeNotice({ ...base, status: "blocked" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is blocked: claude(ws) stopped at a prompt nobody answered.");
+    expect(outcomeNotice({ ...base, status: "expired" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) expired with no reply.");
+    expect(outcomeNotice({ ...base, status: "running", error: "claude(ws) ended its turn without replying: 529 server_error" })).toBe("task 0a0b0c0d (\"Run the tests\") to claude(ws) is still open (claude(ws) ended its turn without replying: 529 server_error). claude(ws) is a session the user works in, who can set it going again; its reply would still come to this thread.");
+  });
+
+  test("a reply says which of Codex's messages it answers, and how long ago it came", () => {
+    const { root, ws } = fresh();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "Review the parser for gaps\nmore detail", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "done" }, Date.now() - 5 * 60_000);
+    updateTask(ws, task.id, { status: "replied", reply: { text: "done", fromName: "claude(a)", id: reply.id, at: reply.at } });
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain(`[message from claude(a), its reply to task ${task.id} ("Review the parser for gaps"), 5m ago]`);
+  });
+
+  test("a reply that answers several of Codex's messages names every one, oldest first, so that none still looks open", () => {
+    const { root, ws } = fresh();
+    const first = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "Fix the two failing tests", target, maxWaitSec: 3600 });
+    const second = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "Also: leave the README to me", target, maxWaitSec: 3600 });
+    updateTask(ws, first.id, { createdAt: new Date(Date.now() - 60_000).toISOString() });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "both done" });
+    // Recorded newest first, as a receiver that finishes later would.
+    for (const t of [second, first]) updateTask(ws, t.id, { status: "replied", reply: { text: "both done", fromName: "claude(a)", id: reply.id, at: reply.at } });
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain(`[message from claude(a), its reply to tasks ${first.id} ("Fix the two failing tests") and ${second.id} ("Also: leave the README to me")]`);
+  });
+
+  test("a reply a command already printed is not handed over again; one it did not print is", () => {
+    const { root, ws } = fresh();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "q", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "the answer is 42" });
+    updateTask(ws, task.id, { status: "replied", reply: { text: "the answer is 42", fromName: "claude(a)", id: reply.id, at: reply.at } });
+    const later = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "and a postscript" });
+    // What `send` printed when the reply came, before the postscript did.
+    const printed = `Sent to claude(a) as task ${task.id}.\n\ntask: ${task.id}  status: replied\nREPLY FROM claude(a) (after 1s):\n  the answer is 42\n`;
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: printed })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).not.toContain("the answer is 42");
+    expect(context).toContain("and a postscript");
+    expect(isDelivered(ws, THREAD, reply.id)).toBe(true);
+    expect(isDelivered(ws, THREAD, later.id)).toBe(true);
+  });
+
+  test("a message too long for one hook is cut, with the command that prints it whole; one that does not fit waits for the next hook", () => {
+    const { root, ws } = fresh();
+    const now = Date.now();
+    const big = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "word ".repeat(HOOK_BUDGET_TOKENS * 2) }, now - 2);
+    const next = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "small one" }, now - 1);
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain(`[cut here: the whole message is \`codex-collab messages ${big.id}\`]`);
+    expect(estimateTokens(context)).toBeLessThanOrEqual(HOOK_BUDGET_TOKENS);
+    expect(context).not.toContain("small one");
+    expect(isDelivered(ws, THREAD, next.id)).toBe(false);
+    const after = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(after).toContain("small one");
+  });
+
+  test("a message that does not fit after another waits for the next hook whole: only the first is ever cut", () => {
+    const { root, ws } = fresh();
+    const now = Date.now();
+    const half = "word ".repeat(Math.floor(HOOK_BUDGET_TOKENS * 0.6) * 4 / 5);
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: `one ${half}` }, now - 2);
+    const second = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: `two ${half}` }, now - 1);
+    const first = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(first).toContain("one word");
+    expect(first).not.toContain("two word");
+    expect(first).not.toContain("[cut here");
+    expect(isDelivered(ws, THREAD, second.id)).toBe(false);
+    const next = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(next).toContain(`two ${half}</input>`);
+  });
+
+  test("a message that came in after the command printed, and opens the same way, is still handed over", () => {
+    const { root, ws } = fresh();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "q", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "Done.\nThe first part." });
+    updateTask(ws, task.id, { status: "replied", reply: { text: reply.text, fromName: "claude(a)", id: reply.id, at: reply.at } });
+    // What `task wait` printed — before the follow-up below arrived.
+    const printed = `task: ${task.id}  status: replied\nREPLY FROM claude(a) (after 2s):\n  Done.\n  The first part.\n`;
+    const later = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "Done.\nAnd the second." });
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: printed })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toContain("Done.\nAnd the second.");
+    expect(context).not.toContain("The first part");
+    expect(isDelivered(ws, THREAD, later.id)).toBe(true);
+  });
+
+  test("a command's output in a structured response is read for what it printed", () => {
+    const { root, ws } = fresh();
+    const task = createTask(ws, { cwd: "/ws", threadId: THREAD, message: "q", target, maxWaitSec: 3600 });
+    const reply = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/tmp/cc.sock", text: "seen already" });
+    updateTask(ws, task.id, { status: "replied", reply: { text: reply.text, fromName: "claude(a)", id: reply.id, at: reply.at } });
+    const response = { exit_code: 0, stdout: `task: ${task.id}  status: replied\nREPLY FROM claude(a):\n  seen already\n`, stderr: "" };
+    expect(answer(root, { hook_event_name: "PostToolUse", tool_response: response })).toBeNull();
+    expect(isDelivered(ws, THREAD, reply.id)).toBe(true);
+  });
+
+  test("messages a `messages` command printed are not handed over again", () => {
+    const { root, ws } = fresh();
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "read it yourself" });
+    const printed = `MESSAGE ${m.id} FROM claude(a) (5s ago):\n  read it yourself\n`;
+    expect(answer(root, { hook_event_name: "PostToolUse", tool_response: printed })).toBeNull();
+    expect(isDelivered(ws, THREAD, m.id)).toBe(true);
+  });
+
+  test("messages from every workspace the thread sent from come in the order they arrived", () => {
+    const { root, ws } = fresh();
+    const other = join(root, "ws-other");
+    mkdirSync(other, { recursive: true, mode: 0o700 });
+    writeMessage(other, THREAD, { fromName: "b", replyPath: "/b", text: "second" }, 2_000);
+    writeMessage(ws, THREAD, { fromName: "a", replyPath: "/a", text: "first" }, 1_000);
+    const context = (answer(root, { hook_event_name: "PostToolUse", tool_response: "" })?.hookSpecificOutput as Record<string, string>).additionalContext;
+    expect(context).toStartWith("codex-collab: 2 messages from Claude Code reached this thread, each from the Claude Code session it names, a peer agent working with you.");
+    expect(context.indexOf("first")).toBeLessThan(context.indexOf("second"));
+  });
+
+  test("it notes that Codex ran it in a thread, in every thread and before any mailbox: that is how `send` knows the reply will come by itself", () => {
+    const runs = join(ROOT, "runs-noted");
+    const other = "01a0985a-445b-7ee2-85b5-00000000abcd";
+    const before = Date.now();
+    expect(hookAnswer({ session_id: other, hook_event_name: "UserPromptSubmit" }, join(ROOT, "nowhere"), runs)).toBeNull();
+    expect(statSync(join(runs, other)).mtimeMs).toBeGreaterThanOrEqual(before - 1000);
+    // Only for an event it answers, in a thread.
+    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PreToolUse" }, join(ROOT, "nowhere"), runs)).toBeNull();
+    expect(hookAnswer({ session_id: "not-a-thread", hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"), runs)).toBeNull();
+    expect(readdirSync(runs)).toEqual([other]);
+  });
+
+  test("nothing to say: another thread, no mailbox, an event it does not answer, or no thread at all", () => {
+    const { root, ws } = fresh();
+    writeMessage(ws, THREAD, { fromName: "a", replyPath: "/a", text: "hi" });
+    expect(hookAnswer({ session_id: "01a0985a-445b-7ee2-85b5-000000000000", hook_event_name: "PostToolUse" }, root, RUNS)).toBeNull();
+    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PreToolUse" }, root, RUNS)).toBeNull();
+    expect(hookAnswer({ hook_event_name: "PostToolUse" }, root, RUNS)).toBeNull();
+    expect(hookAnswer({ session_id: THREAD, hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"), RUNS)).toBeNull();
+  });
+
+  // Not on Windows, where there are no hooks (`config codex-hook` refuses
+  // them) and the home directory follows USERPROFILE, not this HOME.
+  test.skipIf(process.platform === "win32")("run by Codex through a pipe, its answer arrives whole however the message is written", () => {
+    // Bun drops what a pipe has not taken when the process exits straight
+    // after the write: the messages in it would be claimed, and lost.
+    const home = join(ROOT, `home-${++n}`);
+    const ws = join(home, ".codex-collab", "workspaces", "ws");
+    mkdirSync(ws, { recursive: true, mode: 0o700 });
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "क".repeat(40_000) });
+    const r = spawnSync("bun", ["run", CLI, "hook"], { input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: THREAD, tool_response: "" }), encoding: "utf-8", env: { ...process.env, HOME: home, CODEX_COLLAB_NO_UPDATE_CHECK: "1" } });
+    expect(r.status).toBe(0);
+    const context = JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string;
+    expect(context).toContain(`[cut here: the whole message is \`codex-collab messages ${m.id}\`]`);
+    expect(estimateTokens(context)).toBeLessThanOrEqual(HOOK_BUDGET_TOKENS);
+    expect(Buffer.byteLength(r.stdout)).toBeLessThan(4 * HOOK_BUDGET_TOKENS + 1024);
+  });
+
+  test("run by Codex with input it cannot read, it says nothing and succeeds: never in a turn's way", () => {
+    for (const input of ["not json", "", "[1,2]"]) {
+      const r = spawnSync("bun", ["run", CLI, "hook"], { input, encoding: "utf-8", env: { ...process.env, HOME: ROOT, CODEX_COLLAB_NO_UPDATE_CHECK: "1" } });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe("");
+    }
+  });
+});

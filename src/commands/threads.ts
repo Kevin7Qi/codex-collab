@@ -15,7 +15,8 @@ import {
 import { getCurrentSessionId } from "../broker";
 import { resolveWorkspaceDir, resolveMailboxDir } from "../config";
 import { sweepQuestions } from "../questions";
-import { sweepTasks } from "../claude-tasks";
+import { TASK_KEEP_MS, sweepTasks } from "../claude-tasks";
+import { sweepChannels } from "../claude-channel";
 import type { AppServerClient } from "../client";
 import type { Thread, RunRecord } from "../types";
 import {
@@ -634,6 +635,9 @@ export async function handleClean(args: string[]): Promise<void> {
   // Tasks handed to Claude Code sessions: finished ones, once old. One still
   // waited on is kept however old it is.
   const tasksDeleted = sweepTasks(ws.stateDir);
+  // What Claude Code sessions wrote to this workspace's Codex threads, kept
+  // as long as task records are.
+  const messagesDeleted = sweepChannels(ws.stateDir, TASK_KEEP_MS);
   const receiversSwept = await (await import("./send")).sweepDeadReceivers();
 
   // Clean stale thread mappings — use log file mtime as proxy for last
@@ -673,6 +677,8 @@ export async function handleClean(args: string[]): Promise<void> {
     parts.push(`${questionsDeleted} old question files deleted`);
   if (tasksDeleted > 0)
     parts.push(`${tasksDeleted} old task records deleted`);
+  if (messagesDeleted > 0)
+    parts.push(`${messagesDeleted} old messages to Codex threads deleted`);
   if (receiversSwept > 0)
     parts.push(`${receiversSwept} dead task receivers unregistered`);
   if (mappingsRemoved > 0)
