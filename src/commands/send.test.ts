@@ -2573,7 +2573,8 @@ describeUnix("a Codex thread's address", () => {
       // hook to mark it seen: Codex may never read that output (a command it
       // left running in the background), and then the hook hands it over.
       speak(fake, fake.received[1].replyPath, "both done");
-      await waitFor(() => inboxTexts().includes("both done"));
+      // In the mailbox first, then on the task once its receiver takes it.
+      await waitFor(() => taskRecord(id)?.status === "replied", 10_000);
       expect((await runCli(["task", "result", id])).stdout).toContain("  both done");
       expect(hook({ hook_event_name: "UserPromptSubmit" }).stdout).toContain("both done");
       // Hooks turned off: nothing is promised, whatever ran before.
