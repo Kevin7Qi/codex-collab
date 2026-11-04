@@ -49,7 +49,7 @@ describe("waking a thread", () => {
     const a = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "first" }, Date.now() - 2);
     const b = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "second" }, Date.now() - 1);
     const s = server("idle");
-    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root });
+    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root, hooksRun: true });
     expect(outcome).toEqual({ woke: true, messages: 2 });
     expect(s.asked.map((x) => x.method)).toEqual(["thread/read", "thread/resume", "turn/start"]);
     // Its turns are not read, and its settings are left as its user set them.
@@ -64,7 +64,7 @@ describe("waking a thread", () => {
     expect(s.closed()).toBe(true);
     // Handed over once.
     const again = server("idle");
-    expect(await wakeThread(THREAD, { connect: async () => again.client, root })).toEqual({ woke: false, why: "nothing to hand over" });
+    expect(await wakeThread(THREAD, { connect: async () => again.client, root, hooksRun: true })).toEqual({ woke: false, why: "nothing to hand over" });
     expect(again.asked.map((x) => x.method)).toEqual(["thread/read"]);
   });
 
@@ -73,7 +73,7 @@ describe("waking a thread", () => {
     const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
     for (const [status, why] of [["active", "in a turn"], ["notLoaded", "not held by the shared app-server"], ["unknownState", "its state is unknownState"]]) {
       const s = server(status);
-      expect(await wakeThread(THREAD, { connect: async () => s.client, root })).toEqual({ woke: false, why });
+      expect(await wakeThread(THREAD, { connect: async () => s.client, root, hooksRun: true })).toEqual({ woke: false, why });
       expect(s.asked.map((x) => x.method)).toEqual(["thread/read"]);
     }
     expect(isDelivered(ws, THREAD, m.id)).toBe(false);
@@ -84,7 +84,7 @@ describe("waking a thread", () => {
     const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "try again" });
     const s = server("systemError");
     const told: string[][] = [];
-    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root, onTaken: (taken) => told.push(taken.map((t) => t.message.id)) });
+    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root, hooksRun: true, onTaken: (taken) => told.push(taken.map((t) => t.message.id)) });
     expect(outcome).toEqual({ woke: true, messages: 1 });
     // Told what it claimed, then told it is settled: a host that stops in
     // between gives the claims back.
@@ -95,16 +95,26 @@ describe("waking a thread", () => {
     const { root, ws } = fresh();
     const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
     const s = server("idle", "turn/start");
-    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root });
+    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root, hooksRun: true });
     expect(outcome.woke).toBe(false);
     expect((outcome as { why: string }).why).toContain("the turn could not be started: turn/start refused");
     expect(isDelivered(ws, THREAD, m.id)).toBe(false);
     expect(s.closed()).toBe(true);
   });
 
+  test("a thread Codex does not run the hooks in is not woken: nothing would mark what it printed for itself, and old replies would come again", async () => {
+    const { root, ws } = fresh();
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    const s = server("idle");
+    const outcome = await wakeThread(THREAD, { connect: async () => s.client, root, hooksRun: false });
+    expect(outcome.woke).toBe(false);
+    expect(s.asked).toEqual([]);
+    expect(isDelivered(ws, THREAD, m.id)).toBe(false);
+  });
+
   test("with no shared server to reach, nothing happens", async () => {
     const { root, ws } = fresh();
     writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
-    expect(await wakeThread(THREAD, { connect: async () => { throw new Error("ENOENT"); }, root })).toEqual({ woke: false, why: "no shared app-server" });
+    expect(await wakeThread(THREAD, { connect: async () => { throw new Error("ENOENT"); }, root, hooksRun: true })).toEqual({ woke: false, why: "no shared app-server" });
   });
 });

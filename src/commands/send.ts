@@ -76,7 +76,7 @@ import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from ".
 import { codexThreadCwd } from "../codex-session";
 import { wakeThread } from "../codex-wake";
 import { isThreadId, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
-import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
+import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
 /** Where `send --file` may read when Codex runs it: inside the folder the
@@ -1007,8 +1007,10 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   process.on("exit", () => {
     if (finished) return;
     release();
+    // Through the thread's address, the session's answer still comes: the
+    // address is the host's, not this process's.
     const error = phase === "delivered"
-      ? "the process collecting the reply was stopped before a reply came"
+      ? `the process collecting the reply was stopped before a reply came${noticeTo ? `; ${LATE_ANSWER}` : ""}`
       : phase === "delivering"
         ? `the process delivering the message was stopped while delivering it, so the message may have reached ${target.name}`
         : "the process delivering the message was stopped before it delivered it";

@@ -235,6 +235,34 @@ export function removeCodexHooks(path: string = codexHooksPath(), command: strin
   return true;
 }
 
+/** The events in which a hook of the user's comes after one of ours. Codex
+ *  keys its trust in a hook by the hook's place in the file, so taking ours
+ *  out moves those up, and Codex asks for the user's trust in them again;
+ *  until then they do not run. */
+export function hooksAfterOurs(path: string = codexHooksPath(), command: string = hookCommand()): string[] {
+  let doc: HooksDoc;
+  try {
+    doc = readDoc(path);
+  } catch {
+    return [];
+  }
+  const events: string[] = [];
+  for (const [event, groups] of Object.entries(doc.hooks ?? {})) {
+    if (!Array.isArray(groups)) continue;
+    let seenOurs = false;
+    let theirsAfter = false;
+    for (const g of groups) {
+      const handlers = (g as { hooks?: unknown } | null)?.hooks;
+      for (const h of Array.isArray(handlers) ? handlers : [g]) {
+        if (isOurHandler(h, command)) seenOurs = true;
+        else if (seenOurs) theirsAfter = true;
+      }
+    }
+    if (theirsAfter) events.push(event);
+  }
+  return events;
+}
+
 /** Whether our hooks are installed as this binary would write them: true,
  *  false (some missing or different — `config codex-hook on` writes them
  *  again), or null when none are. */
@@ -314,22 +342,20 @@ function mtimeOf(path: string): number | null {
   }
 }
 
-/** Files whose change can stop Codex running the hooks: the hooks file, and
- *  Codex's config, where it keeps the user's trust in each hook and whether
- *  hooks run at all. */
-function hookSettings(opts: { hooksPath?: string; codexConfig?: string }): string[] {
-  return [opts.hooksPath ?? codexHooksPath(), opts.codexConfig ?? codexConfigFile()];
-}
+type HookSettings = { runsDir?: string; hooksPath?: string; codexConfig?: string; enabled?: boolean };
 
-/** Whether a run of the hook at `ran` (ms) still says Codex runs it: no
- *  setting has changed since. A setting that changed in the same instant
- *  counts as changed after. */
-function stillRuns(ran: number | null, settings: string[]): boolean {
-  if (ran === null) return false;
-  return settings.every((f) => {
-    const changed = mtimeOf(f);
-    return changed === null || changed < ran;
-  });
+/** Whether a run of the hook at `ran` (ms) still says Codex runs it: the
+ *  user has them on, our hooks file is there (`config codex-hook off`
+ *  removes it when ours were all it held), and neither it nor Codex's
+ *  config — where Codex keeps the user's trust in each hook, and whether
+ *  hooks run at all — has changed since. A change in the same instant
+ *  counts as after. */
+function stillRuns(ran: number | null, opts: HookSettings): boolean {
+  if (ran === null || !(opts.enabled ?? codexHookEnabled())) return false;
+  const hooksChanged = mtimeOf(opts.hooksPath ?? codexHooksPath());
+  if (hooksChanged === null || hooksChanged >= ran) return false;
+  const configChanged = mtimeOf(opts.codexConfig ?? codexConfigFile());
+  return configChanged === null || configChanged < ran;
 }
 
 /** Whether Codex runs our hooks in this thread as things stand: the hook
@@ -339,14 +365,14 @@ function stillRuns(ran: number | null, settings: string[]): boolean {
  *  false until the hook runs again — at the thread's next tool call, if
  *  Codex still runs it — since it may have dropped the user's trust (Codex
  *  asks again after our hook's command changes) or turned hooks off. */
-export function hooksRunIn(threadId: string, opts: { runsDir?: string; hooksPath?: string; codexConfig?: string } = {}): boolean {
+export function hooksRunIn(threadId: string, opts: HookSettings = {}): boolean {
   if (!isThreadId(threadId)) return false;
-  return stillRuns(mtimeOf(join(opts.runsDir ?? hookRunsDir(), threadId)), hookSettings(opts));
+  return stillRuns(mtimeOf(join(opts.runsDir ?? hookRunsDir(), threadId)), opts);
 }
 
 /** When Codex last ran the hook in any thread (ms), and whether no setting
  *  has changed since; null when there is no note of any run. */
-export function lastHookRun(opts: { runsDir?: string; hooksPath?: string; codexConfig?: string } = {}): { at: number; current: boolean } | null {
+export function lastHookRun(opts: HookSettings = {}): { at: number; current: boolean } | null {
   const dir = opts.runsDir ?? hookRunsDir();
   let latest: number | null = null;
   let names: string[];
@@ -360,5 +386,5 @@ export function lastHookRun(opts: { runsDir?: string; hooksPath?: string; codexC
     const at = mtimeOf(join(dir, name));
     if (at !== null && (latest === null || at > latest)) latest = at;
   }
-  return latest === null ? null : { at: latest, current: stillRuns(latest, hookSettings(opts)) };
+  return latest === null ? null : { at: latest, current: stillRuns(latest, opts) };
 }

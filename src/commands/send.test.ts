@@ -215,6 +215,23 @@ function removeConfig(): void {
   rmSync(join(TEST_HOME, ".codex-collab", "config.json"), { force: true });
 }
 
+/** Codex runs the hooks in THREAD: they are on (with `cfg`), their file was
+ *  written earlier, and the hook has run there since — which also hands
+ *  over whatever earlier cases left for the thread. Returns what undoes it. */
+function hooksRunning(cfg: Record<string, unknown> = {}): () => void {
+  const hooksFile = join(TEST_HOME, ".codex", "hooks.json");
+  mkdirSync(dirname(hooksFile), { recursive: true });
+  writeFileSync(hooksFile, "{}\n");
+  const before = new Date(Date.now() - 60_000);
+  utimesSync(hooksFile, before, before);
+  writeConfig({ "codex-hook": "on", ...cfg });
+  spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
+  return () => {
+    removeConfig();
+    rmSync(hooksFile, { force: true });
+  };
+}
+
 /** A fake `claude` on PATH. `--bg` logs itself, announces `cafe0001`, and
  *  registers a live entry (a sleeper it starts) whose socket is `socketPath`
  *  — a fake session this test serves. `stop <id>` only logs, so a reaper's
@@ -2525,43 +2542,60 @@ describeUnix("a Codex thread's address", () => {
     const fake = startFake("slow-claude", { reply: null });
     registerFake(fake);
     const COMES = "its reply comes to this thread by itself when it arrives, so there is no need to check on it";
-    // No sign yet that Codex runs the hook in this thread: the reply is
-    // kept, for Codex to collect.
-    const first = await runCli(["send", "--to", "slow-claude", "first", "--no-wait"]);
-    expect(first.stdout).toContain("Not waiting; its reply is kept.");
-    // Codex runs it: at the user's message, after a tool call.
-    const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
-    expect(hooked.status).toBe(0);
-    const r = await runCli(["send", "--to", "slow-claude", "second", "--no-wait"]);
-    const id = taskIdOf(r.stdout);
-    expect(r.stdout).toContain(`Sent to slow-claude as task ${id}. Not waiting; ${COMES}.`);
-    expect((await runCli(["task", "status", id])).stdout).toContain(`  reply     comes to this thread by itself when it arrives, so there is no need to check on it\n`);
-    const result = await runCli(["task", "result", id]);
-    expect(result.code).toBe(3);
-    expect(result.stdout).toMatch(new RegExp(`no reply from slow-claude yet \\(sent [^)]+ ago\\); ${COMES}\\n`));
-    const waited = await runCli(["task", "wait", id, "--timeout", "1"]);
-    expect(waited.stdout).toContain(`no reply from slow-claude within 1s; ${COMES}\n`);
-    // Asked from another thread: the reply does not come there.
-    const elsewhere = await runCli(["task", "result", id], { CODEX_THREAD_ID: "01a0985a-445b-7ee2-85b5-00000000abcd" });
-    expect(elsewhere.stdout).not.toContain("by itself");
-    // The hooks file changed since the hook ran: Codex may want the user's
-    // trust again before it runs them, so nothing is promised.
+    const hook = (input: Record<string, unknown>) => spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ session_id: THREAD, ...input }), encoding: "utf-8" });
+    // The user turned the hooks on; their file was written before.
     const hooksFile = join(TEST_HOME, ".codex", "hooks.json");
     mkdirSync(dirname(hooksFile), { recursive: true });
-    const had = existsSync(hooksFile);
-    if (!had) writeFileSync(hooksFile, "{}\n");
-    const later = new Date(Date.now() + 5000);
-    utimesSync(hooksFile, later, later);
+    writeFileSync(hooksFile, "{}\n");
+    const before = new Date(Date.now() - 60_000);
+    utimesSync(hooksFile, before, before);
+    writeConfig({ "codex-hook": "on" });
     try {
-      expect((await runCli(["task", "result", id])).stdout).not.toContain("by itself");
+      // No sign yet that Codex runs the hook in this thread: the reply is
+      // kept, for Codex to collect.
+      const first = await runCli(["send", "--to", "slow-claude", "first", "--no-wait"]);
+      expect(first.stdout).toContain("Not waiting; its reply is kept.");
+      // Codex runs it: at the user's message, after a tool call.
+      expect(hook({ hook_event_name: "UserPromptSubmit" }).status).toBe(0);
+      const r = await runCli(["send", "--to", "slow-claude", "second", "--no-wait"]);
+      const id = taskIdOf(r.stdout);
+      expect(r.stdout).toContain(`Sent to slow-claude as task ${id}. Not waiting; ${COMES}.`);
+      expect((await runCli(["task", "status", id])).stdout).toContain(`  reply     comes to this thread by itself when it arrives, so there is no need to check on it\n`);
+      const result = await runCli(["task", "result", id]);
+      expect(result.code).toBe(3);
+      expect(result.stdout).toMatch(new RegExp(`no reply from slow-claude yet \\(sent [^)]+ ago\\); ${COMES}\\n`));
+      const waited = await runCli(["task", "wait", id, "--timeout", "1"]);
+      expect(waited.stdout).toContain(`no reply from slow-claude within 1s; ${COMES}\n`);
+      // Asked from another thread: the reply does not come there.
+      const elsewhere = await runCli(["task", "result", id], { CODEX_THREAD_ID: "01a0985a-445b-7ee2-85b5-00000000abcd" });
+      expect(elsewhere.stdout).not.toContain("by itself");
+      // Where the hooks run, a command that prints the reply leaves it to the
+      // hook to mark it seen: Codex may never read that output (a command it
+      // left running in the background), and then the hook hands it over.
+      speak(fake, fake.received[1].replyPath, "both done");
+      await waitFor(() => inboxTexts().includes("both done"));
+      expect((await runCli(["task", "result", id])).stdout).toContain("  both done");
+      expect(hook({ hook_event_name: "UserPromptSubmit" }).stdout).toContain("both done");
+      // Hooks turned off: nothing is promised, whatever ran before.
+      writeConfig({ "codex-hook": "off" });
+      expect((await runCli(["send", "--to", "slow-claude", "third", "--no-wait"])).stdout).toContain("Not waiting; its reply is kept.");
+      writeConfig({ "codex-hook": "on" });
+      // The hooks file changed since the hook ran: Codex may want the user's
+      // trust again before it runs them, so nothing is promised.
+      const later = new Date(Date.now() + 5000);
+      utimesSync(hooksFile, later, later);
+      expect((await runCli(["send", "--to", "slow-claude", "fourth", "--no-wait"])).stdout).toContain("Not waiting; its reply is kept.");
     } finally {
-      if (!had) rmSync(hooksFile, { force: true });
+      removeConfig();
+      rmSync(hooksFile, { force: true });
     }
   });
 
   test("a task whose reply comes to an address of its own, or from no thread, is never said to come by itself", () => {
     const dir = mkdtempSync(join(TEST_HOME, "comes-"));
-    const hooks = { runsDir: join(dir, "runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml") };
+    const hooks = { runsDir: join(dir, "runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml"), enabled: true };
+    writeFileSync(hooks.hooksPath, "{}\n");
+    utimesSync(hooks.hooksPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
     noteHookRan(THREAD, hooks.runsDir);
     const env = { CODEX_THREAD_ID: THREAD };
     const base = { id: "0a0b0c0d", cwd: WS, threadId: THREAD, senderName: channelName(WS, THREAD) } as TaskRecord;
@@ -2597,7 +2631,7 @@ describeUnix("a Codex thread's address", () => {
     const receiver = (taskRecord(id4)!.receiver as { pid: number }).pid;
     process.kill(receiver, "SIGTERM");
     await waitFor(() => inboxTexts().some((t) => t.startsWith(`task ${id4} `)), 10_000);
-    expect(inboxTexts().find((t) => t.startsWith(`task ${id4} `))).toBe(`task ${id4} ("format") to waiting-claude failed (the process collecting the reply was stopped before a reply came).`);
+    expect(inboxTexts().find((t) => t.startsWith(`task ${id4} `))).toBe(`task ${id4} ("format") to waiting-claude failed (the process collecting the reply was stopped before a reply came; an answer that still comes reaches this thread as a message).`);
     hook();
     // A message from no Codex thread has no thread to tell.
     const third = startFake("leaving-claude-3", { reply: null });
@@ -2695,7 +2729,7 @@ describeUnix("a Codex thread's address", () => {
         },
       },
     });
-    writeConfig({ "codex-wake": "on" });
+    const restore = hooksRunning({ "codex-wake": "on" });
     try {
       const fake = startFake("waking-claude", { reply: null });
       registerFake(fake);
@@ -2711,7 +2745,7 @@ describeUnix("a Codex thread's address", () => {
       const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
       expect(hooked.stdout).toBe("");
     } finally {
-      removeConfig();
+      restore();
       server.stop(true);
     }
   });
@@ -2725,10 +2759,21 @@ describeUnix("a Codex thread's address", () => {
     process.kill(receiver, "SIGKILL");
     await waitFor(() => taskRecord(id)?.status === "failed", 10_000);
     const told = () => inboxTexts().filter((t) => t.startsWith(`task ${id} `));
-    expect(told()).toEqual([`task ${id} ("a long one") to steady-claude failed (the process collecting the reply is gone (it was killed, or the machine restarted), so a reply can no longer reach this task).`]);
+    expect(told()).toEqual([`task ${id} ("a long one") to steady-claude failed (the process collecting the reply is gone (it was killed, or the machine restarted); an answer that still comes reaches this thread as a message).`]);
     // The host looks again and again; the task has ended, so once is all.
     await new Promise((r) => setTimeout(r, 1200));
     expect(told()).toHaveLength(1);
+    // A receiver that went after its answer came, before it took it in: the
+    // answer is the task's reply, and there is nothing to tell.
+    const other = taskIdOf((await runCli(["send", "--to", "steady-claude", "a short one", "--no-wait"])).stdout);
+    const second = (taskRecord(other)!.receiver as { pid: number }).pid;
+    process.kill(second, "SIGSTOP");
+    speak(fake, fake.received[1].replyPath, "short answer");
+    await waitFor(() => inboxTexts().includes("short answer"));
+    process.kill(second, "SIGKILL");
+    await waitFor(() => taskRecord(other)?.status === "replied", 10_000);
+    expect((taskRecord(other)!.reply as { text: string }).text).toBe("short answer");
+    expect(inboxTexts().some((t) => t.startsWith(`task ${other} `))).toBe(false);
   });
 
   test("with codex-wake on, a task that ends without a reply wakes a thread idle on the shared app-server with its notice", async () => {
@@ -2755,10 +2800,8 @@ describeUnix("a Codex thread's address", () => {
         },
       },
     });
-    writeConfig({ "codex-wake": "on" });
+    const restore = hooksRunning({ "codex-wake": "on" });
     try {
-      // Whatever earlier cases left for the thread is not this case's.
-      spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
       const fake = startFake("vanishing-claude", { reply: null });
       registerFake(fake);
       const id = taskIdOf((await runCli(["send", "long job", "--no-wait"])).stdout);
@@ -2769,7 +2812,7 @@ describeUnix("a Codex thread's address", () => {
       const text = (started[0].input as Array<{ text: string }>)[0].text;
       expect(text).toContain(`codex-collab: task ${id} ("long job") to vanishing-claude is lost: vanishing-claude ended before it replied`);
     } finally {
-      removeConfig();
+      restore();
       server.stop(true);
     }
   });
@@ -2796,7 +2839,7 @@ describeUnix("a Codex thread's address", () => {
         },
       },
     });
-    writeConfig({ "codex-wake": "on" });
+    const restore = hooksRunning({ "codex-wake": "on" });
     try {
       const fake = startFake("busy-claude", { reply: null });
       registerFake(fake);
@@ -2809,7 +2852,7 @@ describeUnix("a Codex thread's address", () => {
       await new Promise((r) => setTimeout(r, 1500));
       expect(started).toEqual([]);
     } finally {
-      removeConfig();
+      restore();
       server.stop(true);
     }
   });

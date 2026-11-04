@@ -13,6 +13,7 @@
 import { existsSync } from "node:fs";
 import { releaseDelivery, threadStateDirs } from "./claude-channel";
 import type { AppServerClient } from "./client";
+import { hooksRunIn } from "./codex-hooks";
 import { take, undelivered, type Taken } from "./commands/hook";
 import { buildDelegation } from "./peer";
 import { attachSupported, connectShared, controlSocketPath } from "./shared-server";
@@ -33,14 +34,21 @@ export function wakeText(parts: string[], threadId: string): string {
 export const WAKE_BUDGET_TOKENS = 24_000;
 
 /** Start a turn on `threadId` with what reached it and Codex has not been
- *  handed, if the shared app-server holds the thread and it is idle. Says
- *  what it did, or why not. `onTaken` is told what it claimed before it asks
- *  for the turn, and told [] once that is settled either way: a caller that
- *  stops in between gives those claims back. */
+ *  handed, if Codex runs our hooks in the thread and the shared app-server
+ *  holds it idle. Says what it did, or why not. `onTaken` is told what it
+ *  claimed before it asks for the turn, and told [] once that is settled
+ *  either way: a caller that stops in between gives those claims back.
+ *
+ *  The hooks are what tell, in a thread, what Codex has already read: a
+ *  command it runs inside its sandbox cannot mark what it printed, and the
+ *  hook after the command does. Without them, a wake would hand over again
+ *  replies Codex had printed for itself. `hooksRun` says whether they run
+ *  (`hooksRunIn` unless given). */
 export async function wakeThread(
   threadId: string,
-  opts: { connect?: () => Promise<Client>; root?: string; onTaken?: (taken: Taken[]) => void } = {},
+  opts: { connect?: () => Promise<Client>; root?: string; onTaken?: (taken: Taken[]) => void; hooksRun?: boolean } = {},
 ): Promise<WakeOutcome> {
+  if (!(opts.hooksRun ?? hooksRunIn(threadId))) return { woke: false, why: "Codex does not run codex-collab's hooks in the thread (codex-hook)" };
   let client: Client;
   try {
     if (opts.connect) {

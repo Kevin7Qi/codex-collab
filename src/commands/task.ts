@@ -99,6 +99,11 @@ export function replyComesByItself(record: TaskRecord, env: NodeJS.ProcessEnv = 
   return hooksRunIn(threadId, hooks);
 }
 
+/** Said of a task sent through its thread's address whose collecting
+ *  process went: the address is the channel host's, so the session's
+ *  answer still reaches the thread. */
+export const LATE_ANSWER = "an answer that still comes reaches this thread as a message";
+
 /** What a thread is told of its task when no reply will tell it: how the
  *  task ended without one, or, while it stays open, the error its session's
  *  turn ended on. Codex may have been told the reply comes by itself, and
@@ -120,6 +125,17 @@ export function outcomeNotice(record: TaskRecord): string {
     default:
       return `${task} is still open${why}. ${name} is a session the user works in, who can set it going again; its reply would still come to this thread.`;
   }
+}
+
+/** Whether a command that prints what reached a thread is the one to mark
+ *  it handed to Codex: only one the thread itself runs, and only where Codex
+ *  does not run the hooks there. Where it does, the hook after each tool
+ *  call marks what that call's output showed Codex (claimShown) — which
+ *  holds too for a command Codex left running in the background and read
+ *  later, or never: marked as it printed, a reply Codex never read would be
+ *  lost to it. A person running the command is not Codex. */
+export function claimsWhatItPrints(threadId: string | null | undefined, env: NodeJS.ProcessEnv = process.env): boolean {
+  return isThreadId(threadId) && env.CODEX_THREAD_ID === threadId && !hooksRunIn(threadId);
 }
 
 /** Mark the thread's notices about a task as handed to Codex, once a
@@ -166,7 +182,7 @@ export function reportOutcome(record: TaskRecord, opts: { waitedMs?: number; hin
   printOutcome(record, opts);
   // What the report said, the thread's notices about the task have said too
   // (`claimReported`); the error, where there is one, is printed with it.
-  if (opts.stateDir) claimReported(opts.stateDir, record, record.status, record.error ?? "");
+  if (opts.stateDir && claimsWhatItPrints(record.threadId)) claimReported(opts.stateDir, record, record.status, record.error ?? "");
 }
 
 function printOutcome(record: TaskRecord, opts: { waitedMs?: number; hint?: string; stateDir?: string }): void {
@@ -189,11 +205,10 @@ function printOutcome(record: TaskRecord, opts: { waitedMs?: number; hint?: stri
         console.log(`LATER FROM ${m.fromName} (${since(m.at)} ago):`);
         console.log(printedText(m.text));
       }
-      // Printed, it has reached whoever ran this — Codex, as a rule — and
-      // no hook or woken turn is to hand it over again. Inside Codex's
-      // sandbox the mark cannot be written; the hook after the command
-      // makes it there (claimShown).
-      if (opts.stateDir && isThreadId(record.threadId) && record.reply?.id) {
+      // Printed, it has reached the thread that ran this, and no hook or
+      // woken turn is to hand it over again (`claimsWhatItPrints` says when
+      // this command is the one to say so).
+      if (opts.stateDir && isThreadId(record.threadId) && record.reply?.id && claimsWhatItPrints(record.threadId)) {
         for (const id of [record.reply.id, ...later.map((m) => m.id)]) claimDelivery(opts.stateDir, record.threadId, id);
       }
       return;
@@ -352,7 +367,7 @@ export async function handleTask(args: string[]): Promise<void> {
     if (options.json) console.log(JSON.stringify(record, null, 2));
     else {
       printStatus(record, hint, stateDir);
-      claimReported(stateDir, record, record.status, record.error ?? "");
+      if (claimsWhatItPrints(record.threadId)) claimReported(stateDir, record, record.status, record.error ?? "");
     }
     return;
   }
@@ -393,8 +408,8 @@ export async function handleMessages(args: string[]): Promise<void> {
       : tasks.length > 0 ? `, its reply to ${tasks.length === 1 ? "task" : "tasks"} ${listed(tasks)}` : "";
     console.log(`MESSAGE ${m.id} FROM ${m.fromName} (${since(m.at)} ago)${of}:`);
     console.log(printedText(m.text));
-    // Printed whole, it has reached whoever ran this (see reportOutcome).
-    claimDelivery(dir, threadId, m.id);
+    // Printed whole, it has reached the thread (see reportOutcome).
+    if (claimsWhatItPrints(threadId)) claimDelivery(dir, threadId, m.id);
   };
   const wanted = positional[0];
   if (wanted) {

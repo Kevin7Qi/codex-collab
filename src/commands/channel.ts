@@ -30,8 +30,10 @@ import {
   hostLogFile,
   hostStateFile,
   isContact,
+  isNotice,
   isThreadId,
   loadContacts,
+  messagesSince,
   readHostState,
   addressIdleMs,
   lastActivityOf,
@@ -48,8 +50,8 @@ import {
   type Contact,
   type HostState,
 } from "../claude-channel";
-import { TASK_KEEP_MS, listTasks, settled, updateTask } from "../claude-tasks";
-import { outcomeNotice } from "./task";
+import { TASK_KEEP_MS, listTasks, loadTask, settled, updateTask, type TaskRecord } from "../claude-tasks";
+import { LATE_ANSWER, outcomeNotice } from "./task";
 import { transientSessionId } from "../claude-sessions";
 import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../peer";
 import { verifyMailboxDir } from "../questions";
@@ -368,7 +370,8 @@ export async function handleChannelHost(args: string[]): Promise<void> {
           log(`${a.name}: a line that is no message: ${line.slice(0, 160)}`);
           continue;
         }
-        if (seenOnce(msg.msgId)) {
+        // Per thread: one message sent to two of them is each one's.
+        if (msg.msgId && seenOnce(`${a.threadId}:${msg.msgId}`)) {
           log(`${a.name}: message ${msg.msgId} from ${msg.fromName} again; kept once`);
           continue;
         }
@@ -593,10 +596,27 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   // task so that this happens once. The receiver is verifiably gone, so the
   // record has no other writer left.
   const noticeLostReceivers = () => {
-    for (const t of listTasks(stateDir)) {
-      if (t.status !== "running" || !isThreadId(t.threadId) || t.senderName !== channelName(t.cwd, t.threadId)) continue;
-      const now = settled(t);
-      if (now.status === "running") continue;
+    for (const listed of listTasks(stateDir)) {
+      if (listed.status !== "running" || !isThreadId(listed.threadId) || listed.senderName !== channelName(listed.cwd, listed.threadId)) continue;
+      if (settled(listed).status === "running") continue;
+      // Its receiver is gone; read the record again. A receiver writes how
+      // its task ended before it exits, so one that finished between the
+      // listing and now has said so, and only a task that still reads as
+      // running lost its receiver.
+      const t = loadTask(stateDir, listed.id);
+      if (!t || t.status !== "running" || !isThreadId(t.threadId)) continue;
+      if (settled(t).status === "running") continue;
+      // The session may have answered before its receiver went: the answer
+      // is in the mailbox, and it is the task's reply.
+      const since = Date.parse(t.deliveryStartedAt ?? t.deliveredAt ?? t.createdAt);
+      const answer = messagesSince(stateDir, t.threadId, since).find((m) => !isNotice(m) && m.replyPath === t.target.socketPath);
+      if (answer) {
+        try { updateTask(stateDir, t.id, { status: "replied", reply: { text: answer.text, fromName: answer.fromName, id: answer.id, at: answer.at }, error: undefined, finishedAt: new Date().toISOString() }); } catch { /* the next look */ }
+        log(`task ${t.id} lost its receiver after its answer came: recorded as replied`);
+        continue;
+      }
+      // Its address is this host's, so an answer may still come.
+      const now: TaskRecord = { ...t, status: "failed", error: `the process collecting the reply is gone (it was killed, or the machine restarted); ${LATE_ANSWER}` };
       try {
         writeNotice(stateDir, t.threadId, t.id, outcomeNotice(now));
         updateTask(stateDir, t.id, { status: now.status, error: now.error, finishedAt: new Date().toISOString() });

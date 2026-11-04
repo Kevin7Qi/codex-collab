@@ -7,7 +7,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
+import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, hooksAfterOurs, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hooks-"));
 let n = 0;
@@ -192,13 +192,25 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
   });
 });
 
+test("taking our hooks out names the events where the user's own hooks came after ours, which move up and lose Codex's trust", () => {
+  const path = fresh();
+  writeFileSync(path, JSON.stringify({ hooks: { Stop: [userHook] } }));
+  installCodexHooks(COMMAND, path);
+  expect(hooksAfterOurs(path, COMMAND)).toEqual([]);
+  // The user adds one of their own after ours.
+  const doc = read(path);
+  doc.hooks.PostToolUse.push({ hooks: [{ type: "command", command: "lint-after" }] });
+  writeFileSync(path, JSON.stringify(doc));
+  expect(hooksAfterOurs(path, COMMAND)).toEqual(["PostToolUse"]);
+});
+
 describe("whether Codex runs the hooks in a thread", () => {
   const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
   const OTHER = "01a0985a-445b-7ee2-85b5-00000000abcd";
   /** A runs dir, and Codex's hooks file and config, written `ago` ms back. */
   const setup = (ago = 60_000) => {
     const dir = join(ROOT, `r-${++n}`);
-    const opts = { runsDir: join(dir, "hook-runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml") };
+    const opts = { runsDir: join(dir, "hook-runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml"), enabled: true };
     const then = new Date(Date.now() - ago);
     for (const f of [opts.hooksPath, opts.codexConfig]) {
       mkdirSync(dir, { recursive: true });
@@ -226,12 +238,22 @@ describe("whether Codex runs the hooks in a thread", () => {
     expect(hooksRunIn(THREAD, opts)).toBe(false);
   });
 
-  test("a setting that is not there stops nothing; an id that is not a thread's is never one", () => {
+  test("hooks turned off, or a hooks file gone, run nowhere, whatever ran before; Codex's config not there stops nothing", () => {
     const opts = setup();
-    rmSync(opts.hooksPath);
-    rmSync(opts.codexConfig);
     noteHookRan(THREAD, opts.runsDir);
+    expect(hooksRunIn(THREAD, { ...opts, enabled: false })).toBe(false);
+    // `config codex-hook off` removes the file when ours were all it held.
+    rmSync(opts.hooksPath);
+    expect(hooksRunIn(THREAD, opts)).toBe(false);
+    writeFileSync(opts.hooksPath, "");
+    utimesSync(opts.hooksPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    rmSync(opts.codexConfig);
     expect(hooksRunIn(THREAD, opts)).toBe(true);
+  });
+
+  test("an id that is not a thread's is never one", () => {
+    const opts = setup();
+    noteHookRan(THREAD, opts.runsDir);
     noteHookRan("../escape", opts.runsDir);
     expect(readdirSync(opts.runsDir)).toEqual([THREAD]);
     expect(hooksRunIn("../escape", opts)).toBe(false);
