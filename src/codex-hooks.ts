@@ -10,15 +10,14 @@
 //
 // Whether they do run is known only from the hook itself: each time Codex
 // runs it in a thread, it notes so (`noteHookRan`), and `send` and `task`
-// tell Codex its reply comes by itself only where that note is newer than
-// anything that could have stopped the hooks since (`hooksRunIn`).
+// tell Codex its reply comes by itself, and a wake starts a turn, only where
+// that note is newer than our hooks file (`hooksRunIn`).
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { config } from "./config";
 import { isThreadId } from "./claude-channel";
-import { codexConfigFile } from "./claude-trust";
 
 /** The events our hooks answer (commands/hook.ts says how each hands a
  *  message over). */
@@ -342,29 +341,28 @@ function mtimeOf(path: string): number | null {
   }
 }
 
-type HookSettings = { runsDir?: string; hooksPath?: string; codexConfig?: string; enabled?: boolean };
+type HookSettings = { runsDir?: string; hooksPath?: string; enabled?: boolean };
 
 /** Whether a run of the hook at `ran` (ms) still says Codex runs it: the
  *  user has them on, our hooks file is there (`config codex-hook off`
- *  removes it when ours were all it held), and neither it nor Codex's
- *  config — where Codex keeps the user's trust in each hook, and whether
- *  hooks run at all — has changed since. A change in the same instant
- *  counts as after. */
+ *  removes it when ours were all it held), and it has not changed since —
+ *  Codex asks for the user's trust again in a hook whose command changed. A
+ *  change in the same instant counts as after. Codex's own config, where it
+ *  keeps that trust, is not looked at: Codex writes it for reasons of its
+ *  own, and an idle thread, where the hook cannot run, would read as one
+ *  without hooks after every such write. */
 function stillRuns(ran: number | null, opts: HookSettings): boolean {
   if (ran === null || !(opts.enabled ?? codexHookEnabled())) return false;
   const hooksChanged = mtimeOf(opts.hooksPath ?? codexHooksPath());
-  if (hooksChanged === null || hooksChanged >= ran) return false;
-  const configChanged = mtimeOf(opts.codexConfig ?? codexConfigFile());
-  return configChanged === null || configChanged < ran;
+  return hooksChanged !== null && hooksChanged < ran;
 }
 
-/** Whether Codex runs our hooks in this thread as things stand: the hook
- *  ran there since the hooks file and Codex's config last changed. Then
- *  whatever reaches the thread's mailbox is handed to it by itself, during a
- *  turn or with the user's next message. A change to either file makes this
- *  false until the hook runs again — at the thread's next tool call, if
- *  Codex still runs it — since it may have dropped the user's trust (Codex
- *  asks again after our hook's command changes) or turned hooks off. */
+/** Whether Codex runs our hooks in this thread as things stand: they are on,
+ *  and the hook ran there since our hooks file last changed (`stillRuns`).
+ *  Then whatever reaches the thread's mailbox is handed to it by itself,
+ *  during a turn or with the user's next message. A change to the file makes
+ *  this false until the hook runs again, at the thread's next turn, since
+ *  Codex asks for the user's trust again after our hook's command changes. */
 export function hooksRunIn(threadId: string, opts: HookSettings = {}): boolean {
   if (!isThreadId(threadId)) return false;
   return stillRuns(mtimeOf(join(opts.runsDir ?? hookRunsDir(), threadId)), opts);

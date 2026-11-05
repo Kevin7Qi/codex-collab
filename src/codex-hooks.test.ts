@@ -6,7 +6,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, hooksAfterOurs, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hooks-"));
@@ -207,48 +207,55 @@ test("taking our hooks out names the events where the user's own hooks came afte
 describe("whether Codex runs the hooks in a thread", () => {
   const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
   const OTHER = "01a0985a-445b-7ee2-85b5-00000000abcd";
-  /** A runs dir, and Codex's hooks file and config, written `ago` ms back. */
+  /** A runs dir, and Codex's hooks file, written `ago` ms back. */
   const setup = (ago = 60_000) => {
     const dir = join(ROOT, `r-${++n}`);
-    const opts = { runsDir: join(dir, "hook-runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml"), enabled: true };
+    const opts = { runsDir: join(dir, "hook-runs"), hooksPath: join(dir, "hooks.json"), enabled: true };
     const then = new Date(Date.now() - ago);
-    for (const f of [opts.hooksPath, opts.codexConfig]) {
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(f, "");
-      utimesSync(f, then, then);
-    }
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(opts.hooksPath, "");
+    utimesSync(opts.hooksPath, then, then);
     return opts;
   };
   const touch = (path: string) => { const now = new Date(Date.now() + 1000); utimesSync(path, now, now); };
 
-  test("only where the hook ran since its settings last changed: a change may have dropped the user's trust, until it runs again", () => {
+  test("only where the hook ran since the hooks file last changed: Codex asks to trust a changed hook again, until it runs again", () => {
     const opts = setup();
     expect(hooksRunIn(THREAD, opts)).toBe(false);
     noteHookRan(THREAD, opts.runsDir);
     expect(hooksRunIn(THREAD, opts)).toBe(true);
     // Another thread's run says nothing of this one.
     expect(hooksRunIn(OTHER, opts)).toBe(false);
-    // The hooks file rewritten (Codex asks to trust a changed hook again),
-    // or Codex's config changed (where it keeps that trust): not known.
     touch(opts.hooksPath);
     expect(hooksRunIn(THREAD, opts)).toBe(false);
     noteHookRan(THREAD, opts.runsDir, new Date(Date.now() + 2000));
     expect(hooksRunIn(THREAD, opts)).toBe(true);
-    utimesSync(opts.codexConfig, new Date(Date.now() + 3000), new Date(Date.now() + 3000));
-    expect(hooksRunIn(THREAD, opts)).toBe(false);
   });
 
-  test("hooks turned off, or a hooks file gone, run nowhere, whatever ran before; Codex's config not there stops nothing", () => {
+  test("Codex rewriting its own config leaves a thread as it was: an idle one, where the hook cannot run, stays one with hooks", () => {
+    const opts = setup();
+    noteHookRan(THREAD, opts.runsDir, new Date(Date.now() - 30_000));
+    const home = join(dirname(opts.hooksPath), "codex-home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "config.toml"), "model = \"m\"\n");
+    const was = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    try {
+      expect(hooksRunIn(THREAD, opts)).toBe(true);
+      expect(lastHookRun(opts)?.current).toBe(true);
+    } finally {
+      if (was === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = was;
+    }
+  });
+
+  test("hooks turned off, or a hooks file gone, run nowhere, whatever ran before", () => {
     const opts = setup();
     noteHookRan(THREAD, opts.runsDir);
     expect(hooksRunIn(THREAD, { ...opts, enabled: false })).toBe(false);
     // `config codex-hook off` removes the file when ours were all it held.
     rmSync(opts.hooksPath);
     expect(hooksRunIn(THREAD, opts)).toBe(false);
-    writeFileSync(opts.hooksPath, "");
-    utimesSync(opts.hooksPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
-    rmSync(opts.codexConfig);
-    expect(hooksRunIn(THREAD, opts)).toBe(true);
   });
 
   test("an id that is not a thread's is never one", () => {
@@ -276,7 +283,7 @@ describe("whether Codex runs the hooks in a thread", () => {
     noteHookRan(OTHER, opts.runsDir, new Date(Date.now() - 20_000));
     noteHookRan(THREAD, opts.runsDir, at);
     expect(lastHookRun(opts)).toEqual({ at: at.getTime(), current: true });
-    touch(opts.codexConfig);
+    touch(opts.hooksPath);
     expect(lastHookRun(opts)).toEqual({ at: at.getTime(), current: false });
   });
 });

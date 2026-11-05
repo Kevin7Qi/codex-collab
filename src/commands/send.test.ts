@@ -2594,7 +2594,7 @@ describeUnix("a Codex thread's address", () => {
 
   test("a task whose reply comes to an address of its own, or from no thread, is never said to come by itself", () => {
     const dir = mkdtempSync(join(TEST_HOME, "comes-"));
-    const hooks = { runsDir: join(dir, "runs"), hooksPath: join(dir, "hooks.json"), codexConfig: join(dir, "config.toml"), enabled: true };
+    const hooks = { runsDir: join(dir, "runs"), hooksPath: join(dir, "hooks.json"), enabled: true };
     writeFileSync(hooks.hooksPath, "{}\n");
     utimesSync(hooks.hooksPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
     noteHookRan(THREAD, hooks.runsDir);

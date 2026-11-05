@@ -425,7 +425,7 @@ export function describeCodexHooks(enabled: boolean, inSync: boolean | null, pat
   if (lastRun?.current) return `on (${path}) — Codex hands a thread what Claude Code sessions send it; it last ran the hooks ${formatAge(lastRun.at / 1000)}`;
   // Codex runs them only once the user has trusted them, and asks again
   // after their command changes.
-  return `on (${path}), but Codex has not run the hooks since they or its config last changed — it runs them once you have trusted them in Codex; until then, Codex is not told that replies come to its thread by themselves`;
+  return `on (${path}), but Codex has not run the hooks since they last changed — it runs them once you have trusted them in Codex; until then, Codex is not told that replies come to its thread by themselves`;
 }
 
 /** One line on waking an idle thread on the shared app-server. */
