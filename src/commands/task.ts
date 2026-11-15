@@ -14,7 +14,7 @@ import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, sett
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
 import { channelName, claimDelivery, isNotice, isThreadId, messagesSince, noticesAbout, threadStateDirs, type ChannelMessage } from "../claude-channel";
-import { hooksRunIn } from "../codex-hooks";
+import { RECENT_HOOK_RUN_MS, hooksRunIn } from "../codex-hooks";
 import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
 
 /** Default wait (seconds) of `send` and of `task wait`. It bounds how long the
@@ -90,13 +90,14 @@ export const COMES_BY_ITSELF = "its reply comes to this thread by itself when it
 /** Whether a task's reply comes by itself into the Codex thread asking
  *  about it: the task went from this very thread, through the thread's
  *  address (whose mailbox the hooks hand over from), and Codex runs the
- *  hooks there as things stand (`hooksRunIn`). Codex cannot see whether the
- *  user turned the hooks on, or trusted them, so without this it checks. */
+ *  hooks there as things stand (`hooksRunIn`), lately enough to say so of
+ *  this turn (`RECENT_HOOK_RUN_MS`). Codex cannot see whether the user
+ *  turned the hooks on, or trusted them, so without this it checks. */
 export function replyComesByItself(record: TaskRecord, env: NodeJS.ProcessEnv = process.env, hooks: Parameters<typeof hooksRunIn>[1] = {}): boolean {
   const threadId = record.threadId;
   if (!isThreadId(threadId) || env.CODEX_THREAD_ID !== threadId) return false;
   if (record.senderName !== channelName(record.cwd, threadId)) return false;
-  return hooksRunIn(threadId, hooks);
+  return hooksRunIn(threadId, { within: RECENT_HOOK_RUN_MS, ...hooks });
 }
 
 /** Said of a task sent through its thread's address whose collecting

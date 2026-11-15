@@ -7,7 +7,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, codexHooksInSync, hookCommand, hooksAfterOurs, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
+import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, RECENT_HOOK_RUN_MS, codexHooksInSync, hookCommand, hooksAfterOurs, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hooks-"));
 let n = 0;
@@ -247,6 +247,16 @@ describe("whether Codex runs the hooks in a thread", () => {
       if (was === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = was;
     }
+  });
+
+  test("asked with a window, only where the hook ran within it: hooks Codex stopped running show nowhere else", () => {
+    const opts = setup(3 * 3600_000);
+    noteHookRan(THREAD, opts.runsDir, new Date(Date.now() - 2 * 3600_000));
+    expect(hooksRunIn(THREAD, opts)).toBe(true);
+    expect(hooksRunIn(THREAD, { ...opts, within: RECENT_HOOK_RUN_MS })).toBe(false);
+    noteHookRan(THREAD, opts.runsDir);
+    expect(hooksRunIn(THREAD, { ...opts, within: RECENT_HOOK_RUN_MS })).toBe(true);
+    expect(hooksRunIn(THREAD, { ...opts, within: RECENT_HOOK_RUN_MS, now: Date.now() + RECENT_HOOK_RUN_MS + 1000 })).toBe(false);
   });
 
   test("hooks turned off, or a hooks file gone, run nowhere, whatever ran before", () => {

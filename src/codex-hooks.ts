@@ -11,7 +11,8 @@
 // Whether they do run is known only from the hook itself: each time Codex
 // runs it in a thread, it notes so (`noteHookRan`), and `send` and `task`
 // tell Codex its reply comes by itself, and a wake starts a turn, only where
-// that note is newer than our hooks file (`hooksRunIn`).
+// that note is newer than our hooks file (`hooksRunIn`); the promise also
+// needs a recent one (`RECENT_HOOK_RUN_MS`).
 
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -341,7 +342,17 @@ function mtimeOf(path: string): number | null {
   }
 }
 
-type HookSettings = { runsDir?: string; hooksPath?: string; enabled?: boolean };
+/** How lately the hook must have run in a thread for a command there to
+ *  promise that a reply comes by itself. Such a command runs in one of the
+ *  thread's turns, and in a turn where Codex runs the hooks one ran after
+ *  the last tool call, or with the user's message: a thread in whose turns
+ *  none has run for this long has lost them inside Codex — its trust
+ *  withdrawn, or reset by an update — which nothing on disk here shows. */
+export const RECENT_HOOK_RUN_MS = 3600 * 1000;
+
+/** `within`: the hook must also have run in the thread no longer than that
+ *  ago (ms; `now` is a test seam). */
+type HookSettings = { runsDir?: string; hooksPath?: string; enabled?: boolean; within?: number; now?: number };
 
 /** Whether a run of the hook at `ran` (ms) still says Codex runs it: the
  *  user has them on, our hooks file is there (`config codex-hook off`
@@ -371,7 +382,9 @@ export function hookRanIn(threadId: string, runsDir: string = hookRunsDir()): bo
  *  Codex asks for the user's trust again after our hook's command changes. */
 export function hooksRunIn(threadId: string, opts: HookSettings = {}): boolean {
   if (!isThreadId(threadId)) return false;
-  return stillRuns(mtimeOf(join(opts.runsDir ?? hookRunsDir(), threadId)), opts);
+  const ran = mtimeOf(join(opts.runsDir ?? hookRunsDir(), threadId));
+  if (ran !== null && opts.within !== undefined && (opts.now ?? Date.now()) - ran > opts.within) return false;
+  return stillRuns(ran, opts);
 }
 
 /** When Codex last ran the hook in any thread (ms), and whether no setting

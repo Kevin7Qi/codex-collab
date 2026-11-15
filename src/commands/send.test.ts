@@ -2650,7 +2650,8 @@ describeUnix("a Codex thread's address", () => {
     const dir = mkdtempSync(join(TEST_HOME, "comes-"));
     const hooks = { runsDir: join(dir, "runs"), hooksPath: join(dir, "hooks.json"), enabled: true };
     writeFileSync(hooks.hooksPath, "{}\n");
-    utimesSync(hooks.hooksPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    const longAgo = new Date(Date.now() - 3 * 3600_000);
+    utimesSync(hooks.hooksPath, longAgo, longAgo);
     noteHookRan(THREAD, hooks.runsDir);
     const env = { CODEX_THREAD_ID: THREAD };
     const base = { id: "0a0b0c0d", cwd: WS, threadId: THREAD, senderName: channelName(WS, THREAD) } as TaskRecord;
@@ -2658,6 +2659,11 @@ describeUnix("a Codex thread's address", () => {
     expect(replyComesByItself({ ...base, senderName: `codex(52e2b36a-ws-${base.id})` }, env, hooks)).toBe(false);
     expect(replyComesByItself({ ...base, senderName: undefined }, env, hooks)).toBe(false);
     expect(replyComesByItself({ ...base, threadId: null }, {}, hooks)).toBe(false);
+    // A thread in whose turns the hook has not run for two hours, though its
+    // file has not changed: Codex no longer runs it there (trust withdrawn).
+    const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+    utimesSync(join(hooks.runsDir, THREAD), twoHoursAgo, twoHoursAgo);
+    expect(replyComesByItself(base, env, hooks)).toBe(false);
   });
 
   test("a task that ends without a reply leaves the thread a notice the hooks hand over, unless a report already said how it ended", async () => {
