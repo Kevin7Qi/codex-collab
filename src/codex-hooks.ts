@@ -357,6 +357,12 @@ function stillRuns(ran: number | null, opts: HookSettings): boolean {
   return hooksChanged !== null && hooksChanged < ran;
 }
 
+/** Whether the hook has run in this thread at all within the week its runs
+ *  are kept (`noteHookRan`), whatever has changed since. */
+export function hookRanIn(threadId: string, runsDir: string = hookRunsDir()): boolean {
+  return isThreadId(threadId) && mtimeOf(join(runsDir, threadId)) !== null;
+}
+
 /** Whether Codex runs our hooks in this thread as things stand: they are on,
  *  and the hook ran there since our hooks file last changed (`stillRuns`).
  *  Then whatever reaches the thread's mailbox is handed to it by itself,

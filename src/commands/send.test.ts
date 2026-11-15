@@ -2702,6 +2702,31 @@ describeUnix("a Codex thread's address", () => {
     expect(none.stderr).toContain("no Codex thread ran it");
   });
 
+  test("with codex-wake on, a session no hook of ours has run in is not tried, and the host says once that its messages wait", async () => {
+    // Another assistant running commands here, with an id of its own.
+    const other = "0b0c0d0e-1111-4222-8333-444455556666";
+    const hostLog = () => {
+      const root = join(TEST_HOME, ".codex-collab", "workspaces");
+      return readdirSync(root).map((d) => join(root, d, "channels", "host.log")).filter(existsSync).map((f) => readFileSync(f, "utf-8")).join("");
+    };
+    writeConfig({ "codex-wake": "on" });
+    try {
+      const fake = startFake("helpful-claude", { reply: null });
+      registerFake(fake);
+      const id = taskIdOf((await runCli(["send", "--to", "helpful-claude", "look into it", "--no-wait"], { CODEX_THREAD_ID: other })).stdout);
+      speak(fake, fake.received[0].replyPath, "looked: fine");
+      speak(fake, fake.received[0].replyPath, "and one more thing");
+      await waitFor(() => (hostLog().match(new RegExp(`Codex thread ${other}: no codex-collab hook has run in it`, "g")) ?? []).length === 1, 10_000);
+      await new Promise((r) => setTimeout(r, 500));
+      expect(hostLog().match(new RegExp(`Codex thread ${other}: no codex-collab hook has run in it`, "g"))).toHaveLength(1);
+      expect(hostLog()).not.toContain(`wake Codex thread ${other}`);
+      // It collects the reply itself, as `send` told it.
+      expect((await runCli(["task", "wait", id, "--timeout", "10"], { CODEX_THREAD_ID: other })).stdout).toContain("  looked: fine");
+    } finally {
+      removeConfig();
+    }
+  });
+
   test("with codex-wake on, a reply to a thread idle on the shared app-server starts a turn on it there", async () => {
     // A stand-in for Codex's shared app-server, at the control socket Codex
     // would bind under this test's CODEX_HOME: the thread is idle there.

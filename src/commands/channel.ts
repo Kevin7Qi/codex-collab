@@ -56,6 +56,7 @@ import { transientSessionId } from "../claude-sessions";
 import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../peer";
 import { verifyMailboxDir } from "../questions";
 import { wakeThread } from "../codex-wake";
+import { hookRanIn } from "../codex-hooks";
 import type { Taken } from "./hook";
 import { formatDuration, loadUserConfig, parseOptions } from "./shared";
 
@@ -184,6 +185,19 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   // itself, and waking for it later would hand Codex what it may have seen.
   const scheduleWake = (threadId: string) => {
     if (exiting || wakeTimers.has(threadId) || waking.has(threadId) || !wakeOn()) return;
+    // A session no hook of ours has run in lately is not tried: one outside
+    // this machine's Codex that only runs commands here (another assistant
+    // using the skill), which no wake reaches, or a thread idle for longer
+    // than a hook's run is kept. Its messages wait for it to collect them,
+    // as `send` told it. Logged once.
+    if (!hookRanIn(threadId)) {
+      const why = "no codex-collab hook has run in it this past week, so it is not woken (a session outside this machine's Codex, or a thread idle that long); its messages wait for it to collect them";
+      if (notWoken.get(threadId) !== why) {
+        notWoken.set(threadId, why);
+        log(`Codex thread ${threadId}: ${why}`);
+      }
+      return;
+    }
     wakeTimers.set(threadId, setTimeout(() => {
       wakeTimers.delete(threadId);
       if (exiting) return;
