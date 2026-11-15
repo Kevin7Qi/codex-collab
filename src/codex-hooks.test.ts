@@ -7,7 +7,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, RECENT_HOOK_RUN_MS, codexHooksInSync, hookCommand, hooksAfterOurs, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
+import { HOOK_CONTEXT_LIMIT, HOOK_TIMEOUT_SEC, RECENT_HOOK_RUN_MS, codexHooksInSync, forgetHookRuns, hookCommand, hooksAfterOurs, hooksRunIn, installCodexHooks, isOurHandler, lastHookRun, noteHookRan, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks, stableCliPath } from "./codex-hooks";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hooks-"));
 let n = 0;
@@ -207,34 +207,69 @@ test("taking our hooks out names the events where the user's own hooks came afte
 describe("whether Codex runs the hooks in a thread", () => {
   const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
   const OTHER = "01a0985a-445b-7ee2-85b5-00000000abcd";
-  /** A runs dir, and Codex's hooks file, written `ago` ms back. */
-  const setup = (ago = 60_000) => {
+  /** A runs dir, and Codex's hooks file with ours in it. */
+  const setup = () => {
     const dir = join(ROOT, `r-${++n}`);
     const opts = { runsDir: join(dir, "hook-runs"), hooksPath: join(dir, "hooks.json"), enabled: true };
-    const then = new Date(Date.now() - ago);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(opts.hooksPath, "");
-    utimesSync(opts.hooksPath, then, then);
+    installCodexHooks(COMMAND, opts.hooksPath);
     return opts;
   };
-  const touch = (path: string) => { const now = new Date(Date.now() + 1000); utimesSync(path, now, now); };
+  type Opts = ReturnType<typeof setup>;
+  /** Codex ran the hook in the thread (at `at`). */
+  const ran = (thread: string, opts: Opts, at?: Date) => noteHookRan(thread, opts.runsDir, at, opts.hooksPath);
+  /** The hooks file edited, as the user might by hand. */
+  const edit = (opts: Opts, change: (doc: any) => void) => {
+    const doc = read(opts.hooksPath);
+    change(doc);
+    writeFileSync(opts.hooksPath, JSON.stringify(doc, null, 2));
+  };
 
-  test("only where the hook ran since the hooks file last changed: Codex asks to trust a changed hook again, until it runs again", () => {
+  test("only where the hook ran with ours where and what they are now: Codex asks to trust one of ours that moved or changed again, until it runs again", () => {
     const opts = setup();
     expect(hooksRunIn(THREAD, opts)).toBe(false);
-    noteHookRan(THREAD, opts.runsDir);
+    ran(THREAD, opts);
     expect(hooksRunIn(THREAD, opts)).toBe(true);
     // Another thread's run says nothing of this one.
     expect(hooksRunIn(OTHER, opts)).toBe(false);
-    touch(opts.hooksPath);
+    // Edits that leave ours alone change nothing: Codex's trust in each of
+    // ours rests on its place and its own definition only.
+    const later = new Date(Date.now() + 5000);
+    utimesSync(opts.hooksPath, later, later);
+    edit(opts, (doc) => {
+      doc.hooks.PostToolUse.push({ hooks: [{ type: "command", command: "lint-after" }] });
+      doc.hooks.PostToolUse[0].hooks.push({ type: "command", command: "also-after" });
+      doc.hooks.SessionStart = [{ hooks: [{ type: "command", command: "hello" }] }];
+      doc.hooks.Stop[0].hooks[0] = Object.fromEntries(Object.entries(doc.hooks.Stop[0].hooks[0]).reverse());
+    });
+    expect(hooksRunIn(THREAD, opts)).toBe(true);
+    // A hook of the user's put before one of ours moves it.
+    edit(opts, (doc) => { doc.hooks.Stop.unshift({ hooks: [{ type: "command", command: "first" }] }); });
     expect(hooksRunIn(THREAD, opts)).toBe(false);
-    noteHookRan(THREAD, opts.runsDir, new Date(Date.now() + 2000));
+    ran(THREAD, opts);
+    expect(hooksRunIn(THREAD, opts)).toBe(true);
+    // One of ours changed, or the matcher of its group.
+    edit(opts, (doc) => { doc.hooks.UserPromptSubmit[0].hooks[0].timeout = 30; });
+    expect(hooksRunIn(THREAD, opts)).toBe(false);
+    ran(THREAD, opts);
+    edit(opts, (doc) => { doc.hooks.PostToolUse[0].matcher = "Bash"; });
+    expect(hooksRunIn(THREAD, opts)).toBe(false);
+  });
+
+  test("forgetting the runs noted leaves no thread with hooks until the hook runs there again", () => {
+    const opts = setup();
+    ran(THREAD, opts);
+    ran(OTHER, opts);
+    forgetHookRuns(opts.runsDir);
+    expect(hooksRunIn(THREAD, opts) || hooksRunIn(OTHER, opts)).toBe(false);
+    expect(lastHookRun(opts)).toBeNull();
+    ran(THREAD, opts);
     expect(hooksRunIn(THREAD, opts)).toBe(true);
   });
 
   test("Codex rewriting its own config leaves a thread as it was: an idle one, where the hook cannot run, stays one with hooks", () => {
     const opts = setup();
-    noteHookRan(THREAD, opts.runsDir, new Date(Date.now() - 30_000));
+    ran(THREAD, opts, new Date(Date.now() - 30_000));
     const home = join(dirname(opts.hooksPath), "codex-home");
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "config.toml"), "model = \"m\"\n");
@@ -250,19 +285,21 @@ describe("whether Codex runs the hooks in a thread", () => {
   });
 
   test("asked with a window, only where the hook ran within it: hooks Codex stopped running show nowhere else", () => {
-    const opts = setup(3 * 3600_000);
-    noteHookRan(THREAD, opts.runsDir, new Date(Date.now() - 2 * 3600_000));
+    const opts = setup();
+    ran(THREAD, opts, new Date(Date.now() - 2 * 3600_000));
     expect(hooksRunIn(THREAD, opts)).toBe(true);
     expect(hooksRunIn(THREAD, { ...opts, within: RECENT_HOOK_RUN_MS })).toBe(false);
-    noteHookRan(THREAD, opts.runsDir);
+    ran(THREAD, opts);
     expect(hooksRunIn(THREAD, { ...opts, within: RECENT_HOOK_RUN_MS })).toBe(true);
     expect(hooksRunIn(THREAD, { ...opts, within: RECENT_HOOK_RUN_MS, now: Date.now() + RECENT_HOOK_RUN_MS + 1000 })).toBe(false);
   });
 
-  test("hooks turned off, or a hooks file gone, run nowhere, whatever ran before", () => {
+  test("hooks turned off, ours taken out, or a hooks file gone, run nowhere, whatever ran before", () => {
     const opts = setup();
-    noteHookRan(THREAD, opts.runsDir);
+    ran(THREAD, opts);
     expect(hooksRunIn(THREAD, { ...opts, enabled: false })).toBe(false);
+    writeFileSync(opts.hooksPath, JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "mine" }] }] } }));
+    expect(hooksRunIn(THREAD, opts)).toBe(false);
     // `config codex-hook off` removes the file when ours were all it held.
     rmSync(opts.hooksPath);
     expect(hooksRunIn(THREAD, opts)).toBe(false);
@@ -270,8 +307,8 @@ describe("whether Codex runs the hooks in a thread", () => {
 
   test("an id that is not a thread's is never one", () => {
     const opts = setup();
-    noteHookRan(THREAD, opts.runsDir);
-    noteHookRan("../escape", opts.runsDir);
+    ran(THREAD, opts);
+    ran("../escape", opts);
     expect(readdirSync(opts.runsDir)).toEqual([THREAD]);
     expect(hooksRunIn("../escape", opts)).toBe(false);
   });
@@ -280,9 +317,9 @@ describe("whether Codex runs the hooks in a thread", () => {
     const opts = setup();
     const stale = "01a0985a-445b-7ee2-85b5-0000000000aa";
     const recent = "01a0985a-445b-7ee2-85b5-0000000000bb";
-    noteHookRan(stale, opts.runsDir, new Date(Date.now() - 8 * 24 * 3600 * 1000));
-    noteHookRan(recent, opts.runsDir, new Date(Date.now() - 6 * 24 * 3600 * 1000));
-    noteHookRan(THREAD, opts.runsDir);
+    ran(stale, opts, new Date(Date.now() - 8 * 24 * 3600 * 1000));
+    ran(recent, opts, new Date(Date.now() - 6 * 24 * 3600 * 1000));
+    ran(THREAD, opts);
     expect(readdirSync(opts.runsDir).sort()).toEqual([THREAD, recent].sort());
   });
 
@@ -290,10 +327,10 @@ describe("whether Codex runs the hooks in a thread", () => {
     const opts = setup();
     expect(lastHookRun(opts)).toBeNull();
     const at = new Date(Date.now() - 5000);
-    noteHookRan(OTHER, opts.runsDir, new Date(Date.now() - 20_000));
-    noteHookRan(THREAD, opts.runsDir, at);
+    ran(OTHER, opts, new Date(Date.now() - 20_000));
+    ran(THREAD, opts, at);
     expect(lastHookRun(opts)).toEqual({ at: at.getTime(), current: true });
-    touch(opts.hooksPath);
+    edit(opts, (doc) => { doc.hooks.Stop.unshift({ hooks: [{ type: "command", command: "first" }] }); });
     expect(lastHookRun(opts)).toEqual({ at: at.getTime(), current: false });
   });
 });

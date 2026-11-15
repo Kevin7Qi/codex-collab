@@ -20,7 +20,7 @@ import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, send
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 import { replyComesByItself } from "./task";
 import { channelName } from "../claude-channel";
-import { noteHookRan } from "../codex-hooks";
+import { hookCommand, installCodexHooks, noteHookRan } from "../codex-hooks";
 import type { TaskRecord } from "../claude-tasks";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
@@ -221,15 +221,15 @@ function removeConfig(): void {
   rmSync(join(TEST_HOME, ".codex-collab", "config.json"), { force: true });
 }
 
-/** Codex runs the hooks in THREAD: they are on (with `cfg`), their file was
- *  written earlier, and the hook has run there since — which also hands
- *  over whatever earlier cases left for the thread. Returns what undoes it. */
+/** Our hooks as `config codex-hook on` writes them, for a stand-in install. */
+const HOOK_COMMAND = hookCommand("/opt/bun", "/home/u/.local/bin/codex-collab");
+
+/** Codex runs the hooks in THREAD: they are on (with `cfg`), ours are in its
+ *  hooks file, and the hook has run there with them — which also hands over
+ *  whatever earlier cases left for the thread. Returns what undoes it. */
 function hooksRunning(cfg: Record<string, unknown> = {}): () => void {
   const hooksFile = join(TEST_HOME, ".codex", "hooks.json");
-  mkdirSync(dirname(hooksFile), { recursive: true });
-  writeFileSync(hooksFile, "{}\n");
-  const before = new Date(Date.now() - 60_000);
-  utimesSync(hooksFile, before, before);
+  installCodexHooks(HOOK_COMMAND, hooksFile);
   writeConfig({ "codex-hook": "on", ...cfg });
   spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
   return () => {
@@ -2597,12 +2597,9 @@ describeUnix("a Codex thread's address", () => {
     registerFake(fake);
     const COMES = "its reply comes to this thread by itself when it arrives, so there is no need to check on it";
     const hook = (input: Record<string, unknown>) => spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ session_id: THREAD, ...input }), encoding: "utf-8" });
-    // The user turned the hooks on; their file was written before.
+    // The user turned the hooks on: ours are in Codex's hooks file.
     const hooksFile = join(TEST_HOME, ".codex", "hooks.json");
-    mkdirSync(dirname(hooksFile), { recursive: true });
-    writeFileSync(hooksFile, "{}\n");
-    const before = new Date(Date.now() - 60_000);
-    utimesSync(hooksFile, before, before);
+    installCodexHooks(HOOK_COMMAND, hooksFile);
     writeConfig({ "codex-hook": "on" });
     try {
       // No sign yet that Codex runs the hook in this thread: the reply is
@@ -2635,11 +2632,17 @@ describeUnix("a Codex thread's address", () => {
       writeConfig({ "codex-hook": "off" });
       expect((await runCli(["send", "--to", "slow-claude", "third", "--no-wait"])).stdout).toContain("Not waiting; its reply is kept.");
       writeConfig({ "codex-hook": "on" });
-      // The hooks file changed since the hook ran: Codex may want the user's
-      // trust again before it runs them, so nothing is promised.
-      const later = new Date(Date.now() + 5000);
-      utimesSync(hooksFile, later, later);
-      expect((await runCli(["send", "--to", "slow-claude", "fourth", "--no-wait"])).stdout).toContain("Not waiting; its reply is kept.");
+      // The user edits the hooks file by hand. A hook of theirs after ours
+      // leaves ours as Codex trusts them: the promise stands.
+      const doc = JSON.parse(readFileSync(hooksFile, "utf-8"));
+      doc.hooks.Stop.push({ hooks: [{ type: "command", command: "notify-me" }] });
+      writeFileSync(hooksFile, JSON.stringify(doc, null, 2));
+      expect((await runCli(["send", "--to", "slow-claude", "fourth", "--no-wait"])).stdout).toContain(`Not waiting; ${COMES}.`);
+      // One put before ours moves them, and Codex keys its trust by the
+      // place: until the hook runs again, nothing is promised.
+      doc.hooks.Stop.unshift({ hooks: [{ type: "command", command: "check-first" }] });
+      writeFileSync(hooksFile, JSON.stringify(doc, null, 2));
+      expect((await runCli(["send", "--to", "slow-claude", "fifth", "--no-wait"])).stdout).toContain("Not waiting; its reply is kept.");
     } finally {
       removeConfig();
       rmSync(hooksFile, { force: true });
@@ -2649,18 +2652,16 @@ describeUnix("a Codex thread's address", () => {
   test("a task whose reply comes to an address of its own, or from no thread, is never said to come by itself", () => {
     const dir = mkdtempSync(join(TEST_HOME, "comes-"));
     const hooks = { runsDir: join(dir, "runs"), hooksPath: join(dir, "hooks.json"), enabled: true };
-    writeFileSync(hooks.hooksPath, "{}\n");
-    const longAgo = new Date(Date.now() - 3 * 3600_000);
-    utimesSync(hooks.hooksPath, longAgo, longAgo);
-    noteHookRan(THREAD, hooks.runsDir);
+    installCodexHooks(HOOK_COMMAND, hooks.hooksPath);
+    noteHookRan(THREAD, hooks.runsDir, undefined, hooks.hooksPath);
     const env = { CODEX_THREAD_ID: THREAD };
     const base = { id: "0a0b0c0d", cwd: WS, threadId: THREAD, senderName: channelName(WS, THREAD) } as TaskRecord;
     expect(replyComesByItself(base, env, hooks)).toBe(true);
     expect(replyComesByItself({ ...base, senderName: `codex(52e2b36a-ws-${base.id})` }, env, hooks)).toBe(false);
     expect(replyComesByItself({ ...base, senderName: undefined }, env, hooks)).toBe(false);
     expect(replyComesByItself({ ...base, threadId: null }, {}, hooks)).toBe(false);
-    // A thread in whose turns the hook has not run for two hours, though its
-    // file has not changed: Codex no longer runs it there (trust withdrawn).
+    // A thread in whose turns the hook has not run for two hours, though ours
+    // have not changed: Codex no longer runs it there (trust withdrawn).
     const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
     utimesSync(join(hooks.runsDir, THREAD), twoHoursAgo, twoHoursAgo);
     expect(replyComesByItself(base, env, hooks)).toBe(false);

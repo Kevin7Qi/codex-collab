@@ -597,6 +597,23 @@ describe.skipIf(process.platform === "win32")("CLI skill sync and config codex-r
     expect(cli("config", "codex-hook").stdout).toContain("not set");
   });
 
+  it("config codex-hook forgets the runs of the hook when it changes ours, since Codex's trust in them may have gone with the change", () => {
+    mkdirSync(join(dirs, "codex-hooks"), { recursive: true });
+    writeFileSync(hooksPath, "{}");
+    const runs = join(home, ".codex-collab", "hook-runs");
+    const note = join(runs, "01a0985a-445b-7ee2-85b5-52e2b36a6ba4");
+    mkdirSync(runs, { recursive: true });
+    writeFileSync(note, "");
+    expect(cli("config", "codex-hook", "on").exitCode).toBe(0);
+    expect(existsSync(note)).toBe(false);
+    // On again with ours as they were: what ran since stands.
+    writeFileSync(note, "");
+    expect(cli("config", "codex-hook", "on").exitCode).toBe(0);
+    expect(existsSync(note)).toBe(true);
+    expect(cli("config", "codex-hook", "off").exitCode).toBe(0);
+    expect(existsSync(note)).toBe(false);
+  });
+
   it("config address-idle takes seconds or off", () => {
     expect(cli("config", "address-idle", "3600").exitCode).toBe(0);
     expect(cli("config", "address-idle").stdout).toContain("address-idle: 3600");

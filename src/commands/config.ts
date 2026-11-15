@@ -10,7 +10,7 @@ import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 import { claudeConfigFile, claudeTrusts, codexConfigFile, codexTrust, isSpawnTrustSetting, trustReachesHome } from "../claude-trust";
 import { underCodex } from "./send";
-import { codexHookEnabled, codexHooksInSync, codexHooksPath, hooksAfterOurs, installCodexHooks, lastHookRun, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "../codex-hooks";
+import { codexHookEnabled, codexHooksInSync, codexHooksPath, forgetHookRuns, hooksAfterOurs, installCodexHooks, lastHookRun, ourHooksPrint, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "../codex-hooks";
 import { DEFAULT_ADDRESS_IDLE_SEC, claimEveryMessage } from "../claude-channel";
 
 /** `config codex-rule on|off` is applied as it is set: the setting IS the
@@ -75,9 +75,11 @@ function applyCodexHook(on: boolean): void {
  *  that cannot be saved puts the hooks file back as it was, byte for byte.
  *  Turned on, the hooks hand over what arrives from now on: what is in the
  *  mailboxes already went out through `send` and `task`, or was there to be
- *  read, and would come back as a flood. */
+ *  read, and would come back as a flood. Runs of the hook noted before a
+ *  change to ours say nothing of them after it (`forgetHookRuns`). */
 function setCodexHookAndSave(cfg: UserConfig, on: boolean): void {
   const before = snapshotCodexHooks();
+  const printBefore = ourHooksPrint();
   const wasOn = codexHooksInSync() !== null;
   const moved = on ? [] : hooksAfterOurs();
   try {
@@ -97,6 +99,7 @@ function setCodexHookAndSave(cfg: UserConfig, on: boolean): void {
     }
     die(`Could not save config to ${config.configFile}: ${e instanceof Error ? e.message : String(e)} — ${undone}.`);
   }
+  if (ourHooksPrint() !== printBefore) forgetHookRuns();
   if (on && !wasOn) claimEveryMessage();
   if (moved.length > 0) {
     console.log(`Note: hooks of your own came after codex-collab's in ${codexHooksPath()} (${moved.join(", ")}) and have moved up. Codex keys its trust in a hook by its place in the file, so it asks you to trust them again, and they do not run until you do.`);

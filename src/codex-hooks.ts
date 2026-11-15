@@ -11,9 +11,10 @@
 // Whether they do run is known only from the hook itself: each time Codex
 // runs it in a thread, it notes so (`noteHookRan`), and `send` and `task`
 // tell Codex its reply comes by itself, and a wake starts a turn, only where
-// that note is newer than our hooks file (`hooksRunIn`); the promise also
-// needs a recent one (`RECENT_HOOK_RUN_MS`).
+// our hooks are still where and what they were at that run (`hooksRunIn`);
+// the promise also needs a recent one (`RECENT_HOOK_RUN_MS`).
 
+import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -292,8 +293,50 @@ export function codexHooksInSync(command: string = hookCommand(), path: string =
   return ours === HOOK_EVENTS.length && right === HOOK_EVENTS.length;
 }
 
-/** Where the hook notes when Codex last ran it in each thread: an empty
- *  file per thread, named by its id, whose time is that run's. */
+/** A value with its objects' keys in order, so that one written again with
+ *  its keys moved about reads the same. */
+function canonical(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(canonical);
+  if (v && typeof v === "object") return Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical((v as Record<string, unknown>)[k])]));
+  return v;
+}
+
+/** What Codex's trust in our hooks rests on, as the hooks file has it now,
+ *  in short: each of ours with its place — event, group, handler, the key
+ *  Codex keeps that trust under — and what Codex hashes for it, which is the
+ *  handler and its group's other fields (the matcher). Nothing else in the
+ *  file counts: the user's own hooks, other events, the layout. Null when
+ *  the file holds none of ours, or cannot be read. */
+export function ourHooksPrint(path: string = codexHooksPath()): string | null {
+  let doc: HooksDoc;
+  try {
+    doc = readDoc(path);
+  } catch {
+    return null;
+  }
+  // This install's command, worked out once; any install's is ours too
+  // (`isOurHandler`), so one this process cannot tell (no script path)
+  // leaves that.
+  let command = "";
+  try { command = hookCommand(); } catch { /* no script path */ }
+  const ours: Array<[string, unknown]> = [];
+  for (const [event, groups] of Object.entries(doc.hooks ?? {})) {
+    if (!Array.isArray(groups)) continue;
+    groups.forEach((g, i) => {
+      const handlers = (g as { hooks?: unknown } | null)?.hooks;
+      if (!Array.isArray(handlers)) return;
+      const { hooks: _, ...group } = g as Record<string, unknown>;
+      handlers.forEach((h, j) => { if (isOurHandler(h, command)) ours.push([`${event}:${i}:${j}`, canonical({ group, h })]); });
+    });
+  }
+  if (ours.length === 0) return null;
+  ours.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return createHash("sha256").update(JSON.stringify(ours)).digest("hex").slice(0, 32);
+}
+
+/** Where the hook notes when Codex last ran it in each thread: a file per
+ *  thread, named by its id, whose time is that run's, holding what our hooks
+ *  were then (`ourHooksPrint`). */
 export function hookRunsDir(): string {
   return join(config.dataDir, "hook-runs");
 }
@@ -301,21 +344,24 @@ export function hookRunsDir(): string {
 /** How long a thread's note is kept after the hook last ran in it. */
 const HOOK_RUN_KEEP_MS = 7 * 24 * 3600 * 1000;
 
-/** Note that Codex ran the hook in this thread just now. Codex runs it after
- *  every tool call in every thread, so this is one write, to a file that is
- *  there already; a thread's first note also clears the notes of threads
- *  the hook has not run in for a week. Never throws: the hook's work goes on
- *  whether or not this was written. */
-export function noteHookRan(threadId: string, dir: string = hookRunsDir(), now: Date = new Date()): void {
+/** Note that Codex ran the hook in this thread just now, with our hooks as
+ *  the file has them. Codex runs it after every tool call in every thread,
+ *  so this is a read and a touch of a file that is there already; a
+ *  thread's first note also clears the notes of threads the hook has not
+ *  run in for a week. Never throws: the hook's work goes on whether or not
+ *  this was written. */
+export function noteHookRan(threadId: string, dir: string = hookRunsDir(), now: Date = new Date(), hooksPath: string = codexHooksPath()): void {
   if (!isThreadId(threadId)) return;
   const path = join(dir, threadId);
+  const print = ourHooksPrint(hooksPath) ?? "";
   try {
+    if (readFileSync(path, "utf-8") !== print) writeFileSync(path, print, { mode: 0o600 });
     utimesSync(path, now, now);
     return;
   } catch { /* the thread's first */ }
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(path, "", { mode: 0o600 });
+    writeFileSync(path, print, { mode: 0o600 });
     utimesSync(path, now, now);
   } catch {
     return;
@@ -354,18 +400,41 @@ export const RECENT_HOOK_RUN_MS = 3600 * 1000;
  *  ago (ms; `now` is a test seam). */
 type HookSettings = { runsDir?: string; hooksPath?: string; enabled?: boolean; within?: number; now?: number };
 
-/** Whether a run of the hook at `ran` (ms) still says Codex runs it: the
- *  user has them on, our hooks file is there (`config codex-hook off`
- *  removes it when ours were all it held), and it has not changed since —
- *  Codex asks for the user's trust again in a hook whose command changed. A
- *  change in the same instant counts as after. Codex's own config, where it
- *  keeps that trust, is not looked at: Codex writes it for reasons of its
- *  own, and an idle thread, where the hook cannot run, would read as one
- *  without hooks after every such write. */
-function stillRuns(ran: number | null, opts: HookSettings): boolean {
-  if (ran === null || !(opts.enabled ?? codexHookEnabled())) return false;
-  const hooksChanged = mtimeOf(opts.hooksPath ?? codexHooksPath());
-  return hooksChanged !== null && hooksChanged < ran;
+/** A thread's note: when the hook last ran there, and what our hooks were. */
+function readNote(path: string): { at: number; print: string } | null {
+  try {
+    return { at: statSync(path).mtimeMs, print: readFileSync(path, "utf-8") };
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a note still says Codex runs the hook: the user has them on, and
+ *  our hooks are where and what they were when it ran, which is what
+ *  Codex's trust in them rests on. An edit that moves or changes one of
+ *  ours (Codex asks for the user's trust in it again), or takes them out,
+ *  makes it false until the hook runs again; other edits to the file leave
+ *  it as it was. Codex's own config, where it keeps that trust, is not
+ *  looked at: Codex writes it for reasons of its own, and an idle thread,
+ *  where the hook cannot run, would read as one without hooks after every
+ *  such write. */
+function stillRuns(note: { at: number; print: string } | null, opts: HookSettings): boolean {
+  if (note === null || !(opts.enabled ?? codexHookEnabled())) return false;
+  const now = ourHooksPrint(opts.hooksPath ?? codexHooksPath());
+  return now !== null && note.print === now;
+}
+
+/** Forget every run noted: `config codex-hook` changed our hooks, and Codex
+ *  may have let go of its trust in them meanwhile, so that a hook that ran
+ *  before says nothing of them now. */
+export function forgetHookRuns(dir: string = hookRunsDir()): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) if (isThreadId(name)) rmSync(join(dir, name), { force: true });
 }
 
 /** Whether the hook has run in this thread at all within the week its runs
@@ -375,23 +444,22 @@ export function hookRanIn(threadId: string, runsDir: string = hookRunsDir()): bo
 }
 
 /** Whether Codex runs our hooks in this thread as things stand: they are on,
- *  and the hook ran there since our hooks file last changed (`stillRuns`).
+ *  and the hook ran there with our hooks as they are now (`stillRuns`).
  *  Then whatever reaches the thread's mailbox is handed to it by itself,
- *  during a turn or with the user's next message. A change to the file makes
- *  this false until the hook runs again, at the thread's next turn, since
- *  Codex asks for the user's trust again after our hook's command changes. */
+ *  during a turn or with the user's next message. A change to ours makes
+ *  this false until the hook runs again, at the thread's next turn. */
 export function hooksRunIn(threadId: string, opts: HookSettings = {}): boolean {
   if (!isThreadId(threadId)) return false;
-  const ran = mtimeOf(join(opts.runsDir ?? hookRunsDir(), threadId));
-  if (ran !== null && opts.within !== undefined && (opts.now ?? Date.now()) - ran > opts.within) return false;
-  return stillRuns(ran, opts);
+  const note = readNote(join(opts.runsDir ?? hookRunsDir(), threadId));
+  if (note !== null && opts.within !== undefined && (opts.now ?? Date.now()) - note.at > opts.within) return false;
+  return stillRuns(note, opts);
 }
 
-/** When Codex last ran the hook in any thread (ms), and whether no setting
- *  has changed since; null when there is no note of any run. */
+/** When Codex last ran the hook in any thread (ms), and whether our hooks
+ *  are as they were then; null when there is no note of any run. */
 export function lastHookRun(opts: HookSettings = {}): { at: number; current: boolean } | null {
   const dir = opts.runsDir ?? hookRunsDir();
-  let latest: number | null = null;
+  let latest: { at: number; print: string } | null = null;
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -400,8 +468,8 @@ export function lastHookRun(opts: HookSettings = {}): { at: number; current: boo
   }
   for (const name of names) {
     if (!isThreadId(name)) continue;
-    const at = mtimeOf(join(dir, name));
-    if (at !== null && (latest === null || at > latest)) latest = at;
+    const note = readNote(join(dir, name));
+    if (note !== null && (latest === null || note.at > latest.at)) latest = note;
   }
-  return latest === null ? null : { at: latest, current: stillRuns(latest, opts) };
+  return latest === null ? null : { at: latest.at, current: stillRuns(latest, opts) };
 }
