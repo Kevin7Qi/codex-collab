@@ -2624,7 +2624,9 @@ describeUnix("a Codex thread's address", () => {
     const waited = await runCli(["task", "wait", id2, "--timeout", "20"]);
     expect(waited.stdout).toContain(`task: ${id2}  status: lost`);
     expect(inboxTexts().some((t) => t.startsWith(`task ${id2} `))).toBe(true);
-    expect(hook()).toBe("");
+    // (Only its own notice: a receiver of an earlier case may end now and
+    // tell the thread.)
+    expect(hook()).not.toContain(`task ${id2} `);
     // A receiver that is stopped says so on its way out.
     const fourth = startFake("waiting-claude", { reply: null });
     registerFake(fourth);
@@ -2767,9 +2769,10 @@ describeUnix("a Codex thread's address", () => {
       expect(text).toStartWith("<codex_delegation>");
       expect(text).toContain(`[message from waking-claude, its reply to task ${id} ("long job")]\n\njob finished: all green`);
       expect(asked).toContain("thread/resume");
-      // Handed over: no hook gives it to Codex again.
+      // Handed over: no hook gives it to Codex again. (Only this reply: a
+      // receiver of an earlier case may end now and tell the thread.)
       const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
-      expect(hooked.stdout).toBe("");
+      expect(hooked.stdout).not.toContain("job finished: all green");
     } finally {
       restore();
       server.stop(true);
