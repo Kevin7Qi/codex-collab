@@ -358,16 +358,18 @@ export function threadStateDirs(threadId: string, root: string = join(config.dat
  *  `accept` takes; every other message is shown to `onOther` once. One look
  *  every `pollMs`, a listing of a small directory; `lookNow()` makes one at
  *  once and returns what it found, for a caller about to decide that nothing
- *  came — a reply that landed since the last look is still the reply. */
+ *  came — a reply that landed since the last look is still the reply.
+ *  `skip`: messages of that first millisecond that came before the watch,
+ *  passed over without a word. */
 export function watchInbox(
   stateDir: string,
   threadId: string,
   sinceMs: number,
   accept: (m: ChannelMessage) => boolean,
-  opts: { pollMs?: number; onOther?: (m: ChannelMessage) => void } = {},
+  opts: { pollMs?: number; onOther?: (m: ChannelMessage) => void; skip?: Iterable<string> } = {},
 ): { message: Promise<ChannelMessage>; lookNow(): ChannelMessage | null; stop(): void } {
   const pollMs = opts.pollMs ?? (Number(process.env.CODEX_COLLAB_INBOX_POLL_MS) || 1000);
-  const seen = new Set<string>();
+  const seen = new Set<string>(opts.skip ?? []);
   let found: ChannelMessage | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   const stop = () => { if (timer) clearInterval(timer); timer = null; };

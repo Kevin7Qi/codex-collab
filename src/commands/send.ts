@@ -75,7 +75,7 @@ import { acquireLockAsync } from "../lock";
 import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from "../claude-trust";
 import { codexThreadCwd } from "../codex-session";
 import { wakeThread } from "../codex-wake";
-import { isThreadId, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
+import { isThreadId, messageIdsSince, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
 import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
 import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
@@ -1193,11 +1193,14 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   phase = "delivering";
   const joinedTurn = sessionStatusNow(target.pid) === "busy";
   const deliveryStartedAt = new Date().toISOString();
-  updateTask(stateDir, task.id, { deliveryStartedAt, joinedTurn });
   // The mailbox is read from this moment: a session can answer before its
-  // delivery is noted done.
+  // delivery is noted done. What it holds already, stored earlier in this
+  // same millisecond, came before the delivery, and is no reply to it.
+  const mailboxBefore = channel && threadId ? messageIdsSince(stateDir, threadId, Date.parse(deliveryStartedAt)) : [];
+  updateTask(stateDir, task.id, { deliveryStartedAt, joinedTurn, ...(mailboxBefore.length > 0 ? { mailboxBefore } : {}) });
   inbox = channel && threadId
     ? watchInbox(stateDir, threadId, Date.parse(deliveryStartedAt), (m) => fromTarget(m.replyPath), {
+      skip: mailboxBefore,
       onOther: (m) => console.log(`A message from ${m.fromName} arrived for the thread; still waiting for ${target.name}.`),
     })
     : null;

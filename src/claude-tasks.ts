@@ -61,6 +61,9 @@ export interface TaskRecord {
   /** When the receiver began delivering: from then on the message may have
    *  reached the session, whatever becomes of the receiver. */
   deliveryStartedAt?: string;
+  /** The thread's messages already in its mailbox in that millisecond: they
+   *  came before the delivery, and none of them is the reply. */
+  mailboxBefore?: string[];
   /** Whether the message found the session in a turn already running, where
    *  it found it idle otherwise: what tells one task's error from another's. */
   joinedTurn?: boolean;

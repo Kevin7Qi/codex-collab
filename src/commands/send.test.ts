@@ -19,7 +19,7 @@ import { spawnedSessionName } from "../claude-sessions";
 import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, sweepDeadReceivers, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 import { replyComesByItself } from "./task";
-import { channelName } from "../claude-channel";
+import { channelName, writeMessage } from "../claude-channel";
 import { hookCommand, installCodexHooks, noteHookRan } from "../codex-hooks";
 import type { TaskRecord } from "../claude-tasks";
 
@@ -2869,6 +2869,27 @@ describeUnix("a Codex thread's address", () => {
     await waitFor(() => taskRecord(other)?.status === "replied", 10_000);
     expect((taskRecord(other)!.reply as { text: string }).text).toBe("short answer");
     expect(inboxTexts().some((t) => t.startsWith(`task ${other} `))).toBe(false);
+  });
+
+  test("a message already in the mailbox when a task's delivery starts is never its reply: not to its receiver, nor to the host once that receiver is gone", async () => {
+    const quick = startFake("quick-claude");
+    registerFake(quick);
+    expect((await runCli(["send", "--to", "quick-claude", "open the mailbox"])).code).toBe(0);
+    const root = join(TEST_HOME, ".codex-collab", "workspaces");
+    const state = readdirSync(root).map((d) => join(root, d)).find((d) => existsSync(join(d, "channels", THREAD)))!;
+    const fake = startFake("steady-claude", { reply: null });
+    registerFake(fake);
+    // An update the session sent as the next delivery started, in the same
+    // millisecond: stored here a little ahead, so that it surely shares it.
+    const early = writeMessage(state, THREAD, { fromName: "steady-claude", replyPath: fake.socketPath, text: "an update from before" }, Date.now() + 5000);
+    const id = taskIdOf((await runCli(["send", "--to", "steady-claude", "a long one", "--no-wait"])).stdout);
+    expect(taskRecord(id)!.mailboxBefore).toEqual([early.id]);
+    await new Promise((r) => setTimeout(r, 800));
+    expect(taskRecord(id)!.status).toBe("running");
+    // Its receiver killed outright: the host does not take it for the answer either.
+    process.kill((taskRecord(id)!.receiver as { pid: number }).pid, "SIGKILL");
+    await waitFor(() => taskRecord(id)?.status === "failed", 10_000);
+    expect(taskRecord(id)!.reply).toBeUndefined();
   });
 
   test("with codex-wake on, a task that ends without a reply wakes a thread idle on the shared app-server with its notice", async () => {

@@ -187,6 +187,18 @@ describe("the mailbox", () => {
     watch.stop();
   });
 
+  test("a watch passes over, without a word, what its first millisecond held before it began", async () => {
+    const state = freshState();
+    const before = writeMessage(state, THREAD, { fromName: "asked", replyPath: "/s", text: "an update from before" }, 5_000);
+    const others: string[] = [];
+    const watch = watchInbox(state, THREAD, 5_000, (m) => m.replyPath === "/s", { pollMs: 20, skip: [before.id], onOther: (m) => others.push(m.text) });
+    expect(watch.lookNow()).toBeNull();
+    writeMessage(state, THREAD, { fromName: "asked", replyPath: "/s", text: "the reply" }, 5_000);
+    expect((await watch.message).text).toBe("the reply");
+    expect(others).toEqual([]);
+    watch.stop();
+  });
+
   test("lookNow finds a reply that landed since the last look", () => {
     const state = freshState();
     const watch = watchInbox(state, THREAD, 0, () => true, { pollMs: 60_000 });

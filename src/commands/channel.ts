@@ -643,7 +643,8 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       // The session may have answered before its receiver went: the answer
       // is in the mailbox, and it is the task's reply.
       const since = Date.parse(t.deliveryStartedAt ?? t.deliveredAt ?? t.createdAt);
-      const answer = messagesSince(stateDir, t.threadId, since).find((m) => !isNotice(m) && m.replyPath === t.target.socketPath);
+      const before = new Set(t.mailboxBefore ?? []);
+      const answer = messagesSince(stateDir, t.threadId, since).find((m) => !isNotice(m) && m.replyPath === t.target.socketPath && !before.has(m.id));
       if (answer) {
         try { updateTask(stateDir, t.id, { status: "replied", reply: { text: answer.text, fromName: answer.fromName, id: answer.id, at: answer.at }, error: undefined, finishedAt: new Date().toISOString() }); } catch { /* the next look */ }
         log(`task ${t.id} lost its receiver after its answer came: recorded as replied`);
