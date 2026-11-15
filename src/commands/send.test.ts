@@ -2694,7 +2694,12 @@ describeUnix("a Codex thread's address", () => {
     await waitFor(() => inboxTexts().includes("and here is the long part"));
     const listed = await runCli(["messages"]);
     expect(listed.code).toBe(0);
-    expect(listed.stdout).toMatch(new RegExp(`MESSAGE (\\d{13}-[0-9a-f]{8}) FROM chatty-claude \\([^)]+ ago\\), its reply to task ${id}:\\n  pong: summarise it\\nMESSAGE (\\d{13}-[0-9a-f]{8}) FROM chatty-claude \\([^)]+ ago\\):\\n  and here is the long part\\n$`));
+    // Each on its own: the thread's mailbox is shared by the file's cases,
+    // and a receiver of an earlier case may end now and leave a notice
+    // between or after them.
+    expect(listed.stdout).toMatch(new RegExp(`MESSAGE (\\d{13}-[0-9a-f]{8}) FROM chatty-claude \\([^)]+ ago\\), its reply to task ${id}:\\n  pong: summarise it\\n`));
+    expect(listed.stdout).toMatch(/MESSAGE (\d{13}-[0-9a-f]{8}) FROM chatty-claude \([^)]+ ago\):\n  and here is the long part\n/);
+    expect(listed.stdout.indexOf("pong: summarise it")).toBeLessThan(listed.stdout.indexOf("and here is the long part"));
     const later = /MESSAGE (\d{13}-[0-9a-f]{8}) FROM chatty-claude \([^)]+ ago\):\n  and here is the long part/.exec(listed.stdout)![1];
     const one = await runCli(["messages", later]);
     expect(one.stdout).toMatch(new RegExp(`^MESSAGE ${later} FROM chatty-claude \\([^)]+ ago\\):\\n  and here is the long part\\n$`));
