@@ -11,11 +11,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaul
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
-import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
+import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, sweepDeadReceivers, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 import { replyComesByItself } from "./task";
 import { channelName } from "../claude-channel";
@@ -477,6 +478,49 @@ describeUnix("send helpers", () => {
     expect(insideCodexSandbox({ CODEX_SANDBOX: "seatbelt" })).toBe(true);
     // Codex keeps this one set on commands it runs outside the sandbox.
     expect(insideCodexSandbox({ CODEX_SANDBOX_NETWORK_DISABLED: "1" })).toBe(false);
+  });
+
+  test("sweepDeadReceivers removes what a dead process left, but not a socket bound at its path since it was asked", async () => {
+    // A temp root and registry of its own: a socket path has a ~104-byte ceiling.
+    const tmp = mkdtempSync("/tmp/ccs-");
+    const saved = { sessions: process.env.CODEX_COLLAB_SESSIONS_DIR, tmp: process.env.TMPDIR };
+    process.env.CODEX_COLLAB_SESSIONS_DIR = join(tmp, "sessions");
+    process.env.TMPDIR = tmp;
+    let server: ReturnType<typeof createServer> | null = null;
+    try {
+      const root = join(tmp, `codex-collab-${process.getuid!()}`);
+      mkdirSync(join(tmp, "sessions"), { recursive: true });
+      mkdirSync(root, { recursive: true });
+      const dead = spawnSync("true").pid!;
+      const leftBy = (name: string) => {
+        const socket = join(root, `thread-${name}.sock`);
+        writeFileSync(socket, "");
+        const entry = join(tmp, "sessions", `${name}.json`);
+        writeFileSync(entry, JSON.stringify({ pid: dead, messagingSocketPath: socket }));
+        return { socket, entry };
+      };
+      const gone = leftBy("gone");
+      const taken = leftBy("taken");
+      // Left a while before the sweep, as a dead process's socket was.
+      await Bun.sleep(20);
+      const removed = await sweepDeadReceivers(async (socket) => {
+        // A host starts while the sweep asks, and listens where the dead one did.
+        if (socket === taken.socket) {
+          unlinkSync(socket);
+          server = createServer();
+          await new Promise<void>((r) => server!.listen(socket, r));
+        }
+        return true;
+      });
+      expect(removed).toBe(2);
+      expect([existsSync(gone.entry), existsSync(gone.socket)]).toEqual([false, false]);
+      expect([existsSync(taken.entry), existsSync(taken.socket)]).toEqual([false, true]);
+    } finally {
+      (server as ReturnType<typeof createServer> | null)?.close();
+      if (saved.sessions === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR; else process.env.CODEX_COLLAB_SESSIONS_DIR = saved.sessions;
+      if (saved.tmp === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = saved.tmp;
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   test("codexThreadId accepts Codex's thread id and nothing odd", () => {

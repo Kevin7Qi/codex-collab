@@ -26,7 +26,7 @@
 
 import { connect, createServer, type Server } from "node:net";
 import { spawn } from "node:child_process";
-import { closeSync, constants as fsConstants, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
@@ -780,8 +780,11 @@ function howFarItGot(record: TaskRecord): string {
  *  anything is removed — the process is gone, AND nothing answers at the
  *  socket — because from inside a pid namespace of its own every host process
  *  looks gone, while a connection that a sandbox refuses is not "nobody
- *  there". Returns how many were removed. */
-export async function sweepDeadReceivers(): Promise<number> {
+ *  there". A socket is removed only if it is still the file that was asked:
+ *  a channel host listens at the path a dead one used, and one that started
+ *  meanwhile has a socket of its own there. Returns how many were removed.
+ *  (`nobodyAt` is a test seam.) */
+export async function sweepDeadReceivers(nobodyAt: (socket: string) => Promise<boolean> = nobodyListensAt): Promise<number> {
   let files: string[];
   try {
     files = readdirSync(sessionsDir());
@@ -803,16 +806,33 @@ export async function sweepDeadReceivers(): Promise<number> {
     const socket = entry?.messagingSocketPath;
     if (typeof socket !== "string" || !ours.some((p) => socket.startsWith(p)) || entry.pid === process.pid) continue;
     if (procIdentity(entry) !== "dead") continue;
-    const nobodyThere = await new Promise<boolean>((resolve) => {
-      const sock = connect({ path: socket }, () => { sock.destroy(); resolve(false); });
-      sock.on("error", (e: NodeJS.ErrnoException) => resolve(e.code === "ECONNREFUSED" || e.code === "ENOENT"));
-      sock.setTimeout(1000, () => { sock.destroy(); resolve(false); });
-    });
-    if (!nobodyThere) continue;
-    try { unlinkSync(socket); } catch { /* gone */ }
+    const asked = fileAt(socket);
+    if (!(await nobodyAt(socket))) continue;
+    if (asked !== null && fileAt(socket) === asked) { try { unlinkSync(socket); } catch { /* gone */ } }
     try { unlinkSync(path); removed++; } catch { /* gone */ }
   }
   return removed;
+}
+
+/** Whether nothing listens at the socket: refused, or no file there. */
+function nobodyListensAt(socket: string): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const sock = connect({ path: socket }, () => { sock.destroy(); resolve(false); });
+    sock.on("error", (e: NodeJS.ErrnoException) => resolve(e.code === "ECONNREFUSED" || e.code === "ENOENT"));
+    sock.setTimeout(1000, () => { sock.destroy(); resolve(false); });
+  });
+}
+
+/** Which file is at the path, or null for none: its inode, and when it was
+ *  made, since a file made there later can be given the inode number of
+ *  one removed before it. */
+function fileAt(path: string): string | null {
+  try {
+    const s = lstatSync(path, { bigint: true });
+    return `${s.dev}:${s.ino}:${s.ctimeNs}`;
+  } catch {
+    return null;
+  }
 }
 
 /** Write one envelope to a session's messaging socket. */
