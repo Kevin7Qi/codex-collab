@@ -7,8 +7,9 @@
 // The reply leg is exercised for real: the fake connects back to the address
 // the receiver advertised.
 
-import { afterAll, afterEach, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -26,7 +27,11 @@ const TEST_HOME = mkdtempSync(join(tmpdir(), "codex-collab-send-home-"));
 const REGISTRY = join(TEST_HOME, "sessions");
 const JOBS = join(TEST_HOME, "jobs");
 const WS = join(TEST_HOME, "ws");
-const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
+/** The Codex thread the CLI runs in (CODEX_THREAD_ID): one of its own for
+ *  each case (beforeEach). A task an earlier case left waiting may end late,
+ *  on a slow runner, and tell its thread; it is not this case's thread, so
+ *  its notice is not in this case's mailbox, nor woken for. */
+let THREAD = randomUUID();
 /** Where the hook notes that Codex ran it in a thread, under this HOME. */
 const HOOK_RUNS = join(TEST_HOME, ".codex-collab", "hook-runs");
 
@@ -414,6 +419,10 @@ function spawnedRecords(): unknown[] {
   return [];
 }
 
+beforeEach(() => {
+  THREAD = randomUUID();
+});
+
 beforeAll(() => {
   mkdirSync(REGISTRY, { recursive: true });
   mkdirSync(WS, { recursive: true });
@@ -477,10 +486,11 @@ describeUnix("send helpers", () => {
   });
 
   test("senderName names the thread, the workspace and the task — one address per task", () => {
-    expect(senderName(WS, THREAD, "abc12345")).toBe(`codex(01a0985a-${workspaceSuffix(WS)}-abc12345)`);
+    const thread = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
+    expect(senderName(WS, thread, "abc12345")).toBe(`codex(01a0985a-${workspaceSuffix(WS)}-abc12345)`);
     expect(senderName(WS, null, "abc12345")).toBe(`codex(shell-${workspaceSuffix(WS)}-abc12345)`);
     // Short enough to show whole wherever Claude Code lists its peers.
-    expect(senderName(WS, THREAD, "abc12345").length).toBeLessThanOrEqual(40);
+    expect(senderName(WS, thread, "abc12345").length).toBeLessThanOrEqual(40);
   });
 
   test("composeMessage says who is asking and where the reply goes, and names no deadline", () => {
@@ -764,7 +774,7 @@ describeUnix("send", () => {
     expect(fake.received).toHaveLength(1);
     // The thread's random tail and the workspace: a Codex thread id starts
     // with a clock that two threads a minute apart share.
-    expect(fake.received[0].fromName).toBe(`codex(b36a6ba4-${workspaceSuffix(WS)})`);
+    expect(fake.received[0].fromName).toBe(`codex(${THREAD.replace(/-/g, "").slice(-8)}-${workspaceSuffix(WS)})`);
     expect(fake.received[0].fromName).toBe(channelName(WS, THREAD));
     expect(fake.received[0].text).toContain(`Codex thread ${THREAD}. This peer is that thread's address`);
     expect(fake.received[0].text).not.toContain("waits up to");
