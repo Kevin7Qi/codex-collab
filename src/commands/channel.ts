@@ -23,6 +23,7 @@ import {
   channelName,
   channelSocketPath,
   channelsDir,
+  claimHost,
   claudeEntries,
   contactAt,
   contactRunning,
@@ -35,6 +36,7 @@ import {
   loadContacts,
   messagesSince,
   readHostState,
+  releaseHostClaim,
   addressIdleMs,
   lastActivityOf,
   recordActivity,
@@ -48,6 +50,7 @@ import {
   writeMessage,
   writeNotice,
   type Contact,
+  type HostClaim,
   type HostState,
 } from "../claude-channel";
 import { TASK_KEEP_MS, listTasks, loadTask, settled, updateTask, type TaskRecord } from "../claude-tasks";
@@ -136,6 +139,22 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   } catch (e) {
     log(`cannot start: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
+  }
+  // The addresses are this host's from here, before it opens anything: one
+  // started while this one gets ready — its state is not written yet — finds
+  // the claim and leaves them to it.
+  let ownStart: string | null = procStartTicksOf(process.pid);
+  if (ownStart === null) { try { ownStart = procStartOf(process.pid); } catch { /* ps unavailable */ } }
+  let holder: HostClaim | null;
+  try {
+    holder = claimHost(stateDir, { pid: process.pid, procStart: ownStart, pidDomain: ownPidDomain(), startedAt: new Date().toISOString() });
+  } catch (e) {
+    log(`cannot start: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
+  if (holder) {
+    log(`host ${holder.pid} holds this workspace's addresses`);
+    process.exit(0);
   }
 
   const addresses = new Map<string, Address>();
@@ -247,6 +266,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     try { control?.close(); } catch { /* closed */ }
     unlinkOwn(controlPath, controlIno);
     if (readHostState(stateDir)?.pid === process.pid) { try { unlinkSync(hostStateFile(stateDir)); } catch { /* gone */ } }
+    releaseHostClaim(stateDir, process.pid);
   });
   process.on("SIGHUP", () => process.exit(129));
   const fatal = (e: unknown) => {
@@ -565,9 +585,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   try { controlIno = statSync(controlPath).ino; } catch { /* removed already */ }
 
   // Ready: from here on a client finds this host by its state file.
-  let procStart: string | null = procStartTicksOf(process.pid);
-  if (procStart === null) { try { procStart = procStartOf(process.pid); } catch { /* ps unavailable */ } }
-  const state: HostState = { pid: process.pid, procStart, pidDomain: ownPidDomain(), control: controlPath, startedAt: new Date().toISOString() };
+  const state: HostState = { pid: process.pid, procStart: ownStart, pidDomain: ownPidDomain(), control: controlPath, startedAt: new Date().toISOString() };
   const stateTmp = `${hostStateFile(stateDir)}.${process.pid}.tmp`;
   writeFileSync(stateTmp, JSON.stringify(state) + "\n", { mode: 0o600 });
   renameSync(stateTmp, hostStateFile(stateDir));

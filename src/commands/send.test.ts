@@ -3044,6 +3044,41 @@ describeUnix("a Codex thread's address", () => {
     await waitFor(() => !alive(host.pid) && hostState() === null && !existsSync(host.control), 5000);
   });
 
+  test("a host started while another has claimed the addresses leaves them to it, and one started after that host went takes them", async () => {
+    const fake = startFake("claimed-claude");
+    registerFake(fake);
+    expect((await runCli(["send", "--to", "claimed-claude", "hi"])).code).toBe(0);
+    const first = hostState()!;
+    const root = join(TEST_HOME, ".codex-collab", "workspaces");
+    const claim = readdirSync(root).map((d) => join(root, d, "channels")).find((c) => existsSync(join(c, "host.json")))! + "/host.claim";
+    const claimant = () => (existsSync(claim) ? JSON.parse(readFileSync(claim, "utf-8")).pid as number : null);
+    // A host has the claim while it runs, and lets go when it stops.
+    expect(claimant()).toBe(first.pid);
+    process.kill(first.pid, "SIGTERM");
+    await waitFor(() => !alive(first.pid) && claimant() === null, 5000);
+    // One getting ready: its claim, and no state yet (a stand-in process).
+    const getting = spawn("sleep", ["30"], { stdio: "ignore" });
+    try {
+      writeFileSync(claim, JSON.stringify({ pid: getting.pid, procStart: null, pidDomain: null, startedAt: new Date().toISOString() }));
+      const second = await runCli(["channel-host", "--dir", WS]);
+      expect(second.code).toBe(0);
+      expect(second.stdout).toContain(`host ${getting.pid} holds this workspace's addresses`);
+      expect(hostState()).toBeNull();
+      expect(claimant()).toBe(getting.pid!);
+      // That one is killed outright, its claim left behind: the next host takes over.
+      getting.kill("SIGKILL");
+      await waitFor(() => !alive(getting.pid!), 5000);
+      const third = runCliLive(["channel-host", "--dir", WS]);
+      await waitFor(() => !!hostState() && alive(hostState()!.pid), 10_000);
+      expect(claimant()).toBe(hostState()!.pid);
+      third.child.kill("SIGTERM");
+      await third.done;
+      expect(claimant()).toBeNull();
+    } finally {
+      getting.kill("SIGKILL");
+    }
+  });
+
   test("a host killed outright is replaced while a task waits: what it left is removed, the address comes back, and the reply still arrives", async () => {
     const fake = startFake("steady-claude", { reply: null });
     registerFake(fake);

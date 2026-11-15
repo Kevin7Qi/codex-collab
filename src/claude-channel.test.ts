@@ -5,6 +5,7 @@
 // host itself, with real sessions' registrations, is in commands/send.test.ts.
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -20,6 +21,10 @@ import {
   channelSocketPath,
   claimDelivery,
   claimEveryMessage,
+  claimHost,
+  hostClaimFile,
+  readHostClaim,
+  releaseHostClaim,
   isDelivered,
   recordSocketPath,
   recordedSocketPath,
@@ -356,6 +361,72 @@ describeUnix("reaching the host", () => {
       await expect(openChannel(state, ROOT, "not-a-thread", contact())).rejects.toBeInstanceOf(ChannelRefused);
     } finally {
       server.close();
+    }
+  });
+
+  const claimOf = (pid: number, startedAt = new Date()) => ({ pid, procStart: null, pidDomain: null, startedAt: startedAt.toISOString() });
+  const answering = (path: string) => standIn(path, () => ({ ok: true, name: "codex(b36a6ba4-x)", socketPath: "/thread.sock" }));
+  const ready = (state: string, path: string) =>
+    writeFileSync(hostStateFile(state), JSON.stringify({ pid: process.pid, procStart: null, pidDomain: null, control: path, startedAt: new Date().toISOString() }));
+
+  test("one host has the addresses at a time: a claim whose host runs, or cannot be checked, stands; one whose host went is taken over; a host lets go only of its own", () => {
+    const state = freshState();
+    mkdirSync(join(state, "channels"), { recursive: true });
+    const running = (pids: number[]) => (e: Record<string, unknown>) => (pids.includes(e.pid as number) ? "live" as const : "dead" as const);
+    expect(claimHost(state, claimOf(101), running([]))).toBeNull();
+    expect(readHostClaim(state)?.pid).toBe(101);
+    expect(claimHost(state, claimOf(102), running([101]))?.pid).toBe(101);
+    expect(claimHost(state, claimOf(102), () => "unverifiable")?.pid).toBe(101);
+    expect(readHostClaim(state)?.pid).toBe(101);
+    // The first went without letting go (killed outright): the next takes over.
+    expect(claimHost(state, claimOf(102), running([]))).toBeNull();
+    expect(readHostClaim(state)?.pid).toBe(102);
+    releaseHostClaim(state, 101);
+    expect(readHostClaim(state)?.pid).toBe(102);
+    releaseHostClaim(state, 102);
+    expect(readHostClaim(state)).toBeNull();
+  });
+
+  test("openChannel waits for a host that claimed the addresses and is still getting ready, and starts none of its own", async () => {
+    const state = freshState();
+    mkdirSync(join(state, "channels"), { recursive: true });
+    const path = join(ROOT, `h-${++n}.sock`);
+    // Started by a task that went before it was ready: its claim, no state yet.
+    const host = spawn("sleep", ["30"], { stdio: "ignore" });
+    writeFileSync(hostClaimFile(state), JSON.stringify(claimOf(host.pid!)));
+    let server: Server | null = null;
+    const getsReady = setTimeout(() => { server = answering(path); ready(state, path); }, 300);
+    let started = 0;
+    try {
+      const got = await openChannel(state, ROOT, THREAD, contact(), { start: () => { started++; } });
+      expect(got.name).toBe("codex(b36a6ba4-x)");
+      expect(started).toBe(0);
+      expect(host.exitCode === null && host.signalCode === null).toBe(true);
+    } finally {
+      clearTimeout(getsReady);
+      host.kill("SIGKILL");
+      (server as Server | null)?.close();
+    }
+  });
+
+  test("a host that claimed the addresses and is still not ready long after it started is replaced", async () => {
+    const state = freshState();
+    mkdirSync(join(state, "channels"), { recursive: true });
+    const path = join(ROOT, `h-${++n}.sock`);
+    const stuck = spawn("sleep", ["30"], { stdio: "ignore" });
+    writeFileSync(hostClaimFile(state), JSON.stringify(claimOf(stuck.pid!, new Date(Date.now() - 60_000))));
+    let server: Server | null = null;
+    let started = 0;
+    try {
+      const got = await openChannel(state, ROOT, THREAD, contact(), {
+        start: () => { started++; server = answering(path); ready(state, path); },
+      });
+      expect(got.name).toBe("codex(b36a6ba4-x)");
+      expect(started).toBe(1);
+      expect(stuck.exitCode !== null || stuck.signalCode !== null).toBe(true);
+    } finally {
+      stuck.kill("SIGKILL");
+      (server as Server | null)?.close();
     }
   });
 });

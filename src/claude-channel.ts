@@ -30,8 +30,8 @@ import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { config, mailboxRoot, workspaceHash } from "./config";
 import { verifyMailboxDir } from "./questions";
-import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix } from "./peer";
-import { acquireLockAsync } from "./lock";
+import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcIdentity } from "./peer";
+import { acquireLockAsync, acquireLockSync } from "./lock";
 import { spawnEnv } from "./claude-sessions";
 
 /** A Codex thread id as Codex hands it to its shell: a UUID. Every path built
@@ -517,6 +517,61 @@ export function readHostState(stateDir: string): HostState | null {
   }
 }
 
+/** The workspace's addresses are one host's at a time: a host claims them
+ *  before it opens anything, and lets go when it exits. Its state comes
+ *  later, once it is ready, so the claim is what a host still getting ready
+ *  is known by. */
+export interface HostClaim {
+  pid: number;
+  procStart: string | null;
+  pidDomain: string | null;
+  startedAt: string;
+}
+
+export function hostClaimFile(stateDir: string): string {
+  return join(channelsDir(stateDir), "host.claim");
+}
+
+export function readHostClaim(stateDir: string): HostClaim | null {
+  try {
+    const c = JSON.parse(readFileSync(hostClaimFile(stateDir), "utf-8"));
+    return c && typeof c.pid === "number" ? c as HostClaim : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the process a host's state or claim names is still that host. */
+export function hostIdentity(host: { pid: number; procStart?: string | null; pidDomain?: string | null } | null, identify: typeof procIdentity = procIdentity): ProcIdentity {
+  if (!host) return "dead";
+  return identify({ pid: host.pid, ...(host.procStart ? { procStart: host.procStart } : {}), ...(host.pidDomain ? { pidDomain: host.pidDomain } : {}) });
+}
+
+/** Claim the workspace's addresses for `me`. Null once they are its; else
+ *  the claim of the host that has them, which is running (or cannot be
+ *  checked from here, and is left alone all the same). A claim whose host
+ *  has gone is taken over. Under a lock of its own, so that of two hosts
+ *  starting at once one sees the other's claim. */
+export function claimHost(stateDir: string, me: HostClaim, identify: typeof procIdentity = procIdentity): HostClaim | null {
+  const release = acquireLockSync(join(channelsDir(stateDir), "host.claim.lock"), { staleThresholdMs: 10_000 });
+  try {
+    const held = readHostClaim(stateDir);
+    if (held && held.pid !== me.pid && hostIdentity(held, identify) !== "dead") return held;
+    const tmp = `${hostClaimFile(stateDir)}.${me.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(me) + "\n", { mode: 0o600 });
+    renameSync(tmp, hostClaimFile(stateDir));
+    return null;
+  } finally {
+    release();
+  }
+}
+
+/** Let go of the workspace's addresses, if `pid` has them. */
+export function releaseHostClaim(stateDir: string, pid: number): void {
+  if (readHostClaim(stateDir)?.pid !== pid) return;
+  try { unlinkSync(hostClaimFile(stateDir)); } catch { /* gone */ }
+}
+
 /** One request to the host: a line out, a line back. Rejects when nothing
  *  answers within `timeoutMs`. */
 export function askHost(control: string, request: Record<string, unknown>, timeoutMs = 5000): Promise<Record<string, unknown>> {
@@ -616,19 +671,32 @@ export async function openChannel(
   try {
     const again = await ask();
     if (again) return again;
-    // A host that wrote its state and does not answer is stopped or stuck,
-    // and its addresses reach nobody: it goes, so that a new one can take
-    // the names. A pid that is no longer that host is left alone, and one
-    // this process cannot check is not replaced: two hosts would take each
-    // other's sockets.
-    const stale = readHostState(stateDir);
-    const identity = () => stale ? procIdentity({ pid: stale.pid, ...(stale.procStart ? { procStart: stale.procStart } : {}), ...(stale.pidDomain ? { pidDomain: stale.pidDomain } : {}) }) : "dead";
-    if (identity() === "unverifiable") throw new Error(`the channel host (pid ${stale!.pid}) does not answer, and cannot be checked from here`);
-    if (identity() === "live") {
-      try { process.kill(stale!.pid, "SIGTERM"); } catch { /* gone */ }
-      const until = Date.now() + 3000;
-      while (Date.now() < until && identity() === "live") await Bun.sleep(50);
-      if (identity() === "live") { try { process.kill(stale!.pid, "SIGKILL"); } catch { /* gone */ } }
+    // A host still getting ready, which a task that went before it was
+    // started: waited for as long as its starter would have.
+    const starting = readHostClaim(stateDir);
+    if (starting && hostIdentity(starting) === "live") {
+      const deadline = Date.parse(starting.startedAt) + HOST_START_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        await Bun.sleep(50);
+        const opened = await ask();
+        if (opened) return opened;
+      }
+    }
+    // A host that does not answer is stopped or stuck, and its addresses
+    // reach nobody: it goes, so that a new one can take the names. That is
+    // the one whose state is written, and one that claimed the addresses
+    // and is still not ready. A pid that is no longer that host is left
+    // alone, and one this process cannot check is not replaced: two hosts
+    // would take each other's sockets.
+    for (const stale of [readHostState(stateDir), readHostClaim(stateDir)]) {
+      const identity = () => hostIdentity(stale);
+      if (identity() === "unverifiable") throw new Error(`the channel host (pid ${stale!.pid}) does not answer, and cannot be checked from here`);
+      if (identity() === "live") {
+        try { process.kill(stale!.pid, "SIGTERM"); } catch { /* gone */ }
+        const until = Date.now() + 3000;
+        while (Date.now() < until && identity() === "live") await Bun.sleep(50);
+        if (identity() === "live") { try { process.kill(stale!.pid, "SIGKILL"); } catch { /* gone */ } }
+      }
     }
     try { unlinkSync(hostStateFile(stateDir)); } catch { /* none */ }
     (opts.start ?? startHost)(cwd, stateDir);
