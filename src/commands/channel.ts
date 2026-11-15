@@ -608,18 +608,20 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   // while Codex may have been told the reply comes by itself. The host tells
   // the thread instead: the notice first, then the record, which ends the
   // task so that this happens once. The receiver is verifiably gone, so the
-  // record has no other writer left.
-  const noticeLostReceivers = () => {
+  // record has no other writer left. Returns the threads with a task still
+  // waiting on its reply at the thread's address.
+  const noticeLostReceivers = (): Set<string> => {
+    const waiting = new Set<string>();
     for (const listed of listTasks(stateDir)) {
       if (listed.status !== "running" || !isThreadId(listed.threadId) || listed.senderName !== channelName(listed.cwd, listed.threadId)) continue;
-      if (settled(listed).status === "running") continue;
+      if (settled(listed).status === "running") { waiting.add(listed.threadId); continue; }
       // Its receiver is gone; read the record again. A receiver writes how
       // its task ended before it exits, so one that finished between the
       // listing and now has said so, and only a task that still reads as
       // running lost its receiver.
       const t = loadTask(stateDir, listed.id);
       if (!t || t.status !== "running" || !isThreadId(t.threadId)) continue;
-      if (settled(t).status === "running") continue;
+      if (settled(t).status === "running") { waiting.add(t.threadId); continue; }
       // The session may have answered before its receiver went: the answer
       // is in the mailbox, and it is the task's reply.
       const since = Date.parse(t.deliveryStartedAt ?? t.deliveredAt ?? t.createdAt);
@@ -641,6 +643,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       log(`told Codex thread ${t.threadId} that task ${t.id} lost its receiver`);
       scheduleWake(t.threadId);
     }
+    return waiting;
   };
   // At once, for what went while no host ran (a restarted machine), then
   // with every look.
@@ -648,14 +651,16 @@ export async function handleChannelHost(args: string[]): Promise<void> {
 
   // ── Who is still there ──
   setInterval(() => {
-    noticeLostReceivers();
+    const waiting = noticeLostReceivers();
     const now = claudeEntries();
     const idleMs = idleLimitMs();
     for (const a of [...addresses.values()]) {
       // Nothing through it for the idle limit: it goes, as it would with
       // nobody left to talk to. The thread's next send opens it again, on
-      // the socket it had.
-      if (idleMs !== null && Date.now() - a.lastActive > idleMs) {
+      // the socket it had. Never while a task of the thread waits: its
+      // receiver asks for the address only now and then, and a reply in
+      // between would find no socket.
+      if (idleMs !== null && Date.now() - a.lastActive > idleMs && !waiting.has(a.threadId)) {
         closeAddress(a, `nothing has passed through it for ${formatDuration(idleMs)} (config address-idle)`);
         // Whom it talked to goes too, so that a host started later leaves it
         // shut and its folder is swept once its messages are: the next send

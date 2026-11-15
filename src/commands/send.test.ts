@@ -2946,6 +2946,29 @@ describeUnix("a Codex thread's address", () => {
     }
   });
 
+  test("an address stays open past config address-idle while a task of its thread waits, and the reply comes", async () => {
+    const quick = startFake("quick-claude");
+    registerFake(quick);
+    const slow = startFake("slow-claude", { reply: null });
+    registerFake(slow);
+    try {
+      // A host that looks every 300 ms (this run's setting)…
+      expect((await runCli(["send", "--to", "quick-claude", "start the host"])).code).toBe(0);
+      // …and a task whose receiver asks for the address only every 5 s.
+      const id = taskIdOf((await runCli(["send", "--to", "slow-claude", "a long one", "--no-wait"], { CODEX_COLLAB_CHANNEL_CHECK_MS: "5000" })).stdout);
+      const socket = slow.received[0].replyPath;
+      writeConfig({ "address-idle": 1 });
+      // Past the idle limit twice over, between two of the receiver's asks.
+      await new Promise((r) => setTimeout(r, 2500));
+      expect(existsSync(socket)).toBe(true);
+      speak(slow, socket, "still here");
+      await waitFor(() => taskRecord(id)?.status === "replied", 10_000);
+      expect((taskRecord(id)!.reply as { text: string }).text).toBe("still here");
+    } finally {
+      removeConfig();
+    }
+  });
+
   test("a socket removed under a running host is made again where it was, and the reply still comes", async () => {
     const fake = startFake("swept-claude");
     registerFake(fake);
