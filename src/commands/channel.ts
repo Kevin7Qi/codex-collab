@@ -699,7 +699,10 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         return false;
       });
       if (changed) persist(a);
-      if (a.contacts.length === 0) {
+      // Nor while a task of the thread waits: the session it waits on may be
+      // one Claude Code is bringing back as a new process, which replies here
+      // the moment it is back. The task's receiver says when the wait is over.
+      if (a.contacts.length === 0 && !waiting.has(a.threadId)) {
         closeAddress(a, "no Claude Code session it has talked to is running");
         continue;
       }
