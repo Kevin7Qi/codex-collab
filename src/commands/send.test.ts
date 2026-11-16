@@ -10,7 +10,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -2392,11 +2392,18 @@ describeUnix("send", () => {
     const id = taskIdOf((await runCli(["send", "--to", "bg-claude", "a long job", "--no-wait"], env)).stdout);
     await waitFor(() => first.received.length === 1);
     const replyPath = first.received[0].replyPath;
+    // Which file is at the reply address: one made there again is another.
+    const fileAt = (path: string): string | null => {
+      try { const s = lstatSync(path, { bigint: true }); return `${s.ino}:${s.ctimeNs}`; } catch { return null; }
+    };
+    const address = fileAt(replyPath);
+    expect(address).not.toBeNull();
     // It dies mid-turn; Claude Code brings the job back as a new process,
-    // under the same job and session id, with a socket of its own.
+    // under the same job and session id, with a socket of its own — after
+    // longer than the channel host takes to count a session gone.
     firstProcess.kill("SIGKILL");
     first.server.stop(true);
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 1500));
     const second = startFake("bg-claude", { reply: null });
     registerFake(second, { kind: "bg", jobId: "cafe000b", sessionId: sid, status: "busy" });
     await waitFor(() => typeof taskRecord(id)?.restartedAt === "string", 10_000);
@@ -2404,6 +2411,9 @@ describeUnix("send", () => {
     expect(record.status).toBe("running");
     expect(record.target.socketPath).toBe(second.socketPath);
     expect((await runCli(["task", "status", id])).stdout).toMatch(/restarted .* ago, by Claude Code after its process exited/);
+    // The address the reply goes to stayed open all the while the task
+    // waited: never closed, and opened again only when next asked for.
+    expect(fileAt(replyPath)).toBe(address);
     // The new process finishes the turn and replies.
     speak(second, replyPath, "finished after the restart");
     const waited = await runCli(["task", "wait", id, "--timeout", "20"]);
