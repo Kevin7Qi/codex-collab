@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { buildRegistryEntry, procIdentity, procStartOf, procStartTicksOf } from "./peer";
-import { config, mailboxRoot } from "./config";
+import { config, mailboxRoot, resolveWorkspaceDir } from "./config";
 import { createTask, updateTask } from "./claude-tasks";
 import {
   CLAUDE_CHILD_MARKERS,
@@ -259,6 +259,19 @@ describeUnix("listClaudeSessions", () => {
     const [s] = listClaudeSessions({ cwd: wsA, stateDir });
     expect(s.spawned?.id).toBe("abc12345");
     expect(listClaudeSessions({ cwd: wsA })[0].spawned).toBeNull();
+  });
+
+  test("listed from every workspace, a session codex-collab started is marked from its own workspace's records", () => {
+    clearRegistry();
+    register(`${sleeper.pid}.json`, { name: "claude(ws-b-def456)", kind: "bg", cwd: wsB });
+    const stateA = join(root, "state-a");
+    const stateB = join(root, "state-b");
+    recordSpawnedSession(stateB, { id: "def45678", pid: sleeper.pid!, name: "claude(ws-b-def456)", startedAt: "2026-09-13T00:00:00.000Z", lingerSec: 60, sessionId: "00000000-0000-4000-8000-000000000001" });
+    const stateDirOf = (cwd: string) => (resolveWorkspaceDir(cwd) === resolveWorkspaceDir(wsB) ? stateB : join(root, "state-other"));
+    const [s] = listClaudeSessions({ cwd: wsA, all: true, stateDir: stateA, stateDirOf });
+    expect(s.spawned?.id).toBe("def45678");
+    // From its own workspace, its records are the caller's own.
+    expect(listClaudeSessions({ cwd: wsB, stateDir: stateB })[0].spawned?.id).toBe("def45678");
   });
 
   test("a pid a started session once had, now the user's session, is not ours", () => {

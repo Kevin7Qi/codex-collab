@@ -20,7 +20,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renam
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { resolveWorkspaceDir } from "./config";
+import { resolveStateDir, resolveWorkspaceDir } from "./config";
 import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./peer";
 import { outstandingTasksFor } from "./claude-tasks";
 import { acquireLockSync } from "./lock";
@@ -167,8 +167,10 @@ function entryLiveness(entry: Record<string, unknown>): "verified" | "socket" | 
  *  repo root and a Codex run in a subdirectory see each other); `all`
  *  lists every workspace. codex-collab's own registrations — brokers,
  *  thread peers, a task's receiver — are never Claude sessions and are
- *  left out. */
-export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?: string; name?: string }): ClaudeSession[] {
+ *  left out. With `stateDir` (the caller's workspace's), a session
+ *  codex-collab started is marked from the records of the workspace it was
+ *  started for; another workspace's are found by `stateDirOf` (a test seam). */
+export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?: string; name?: string; stateDirOf?: (cwd: string) => string }): ClaudeSession[] {
   const dir = sessionsDir();
   let files: string[];
   try {
@@ -177,7 +179,21 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
     return [];
   }
   const ours = opts.all ? null : resolveWorkspaceDir(opts.cwd);
-  const spawned = opts.stateDir ? readSpawnedSessions(opts.stateDir) : [];
+  const callers = ours ?? resolveWorkspaceDir(opts.cwd);
+  // Each workspace's records, read once.
+  const records = new Map<string, SpawnedSession[]>();
+  const spawnedFor = (cwd: string): SpawnedSession[] => {
+    if (!opts.stateDir) return [];
+    const stateDir = opts.all && cwd && existsSync(cwd) && resolveWorkspaceDir(cwd) !== callers
+      ? (opts.stateDirOf ?? resolveStateDir)(cwd)
+      : opts.stateDir;
+    let list = records.get(stateDir);
+    if (list === undefined) {
+      list = readSpawnedSessions(stateDir);
+      records.set(stateDir, list);
+    }
+    return list;
+  };
   const sessions: ClaudeSession[] = [];
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
@@ -213,7 +229,7 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
       jobId: typeof entry.jobId === "string" ? entry.jobId : null,
       verified: liveness === "verified",
       statusUpdatedAt: typeof entry.statusUpdatedAt === "number" ? entry.statusUpdatedAt : null,
-      spawned: spawnedRecordFor(spawned, entryIdentity(entry, pid)),
+      spawned: spawnedRecordFor(spawnedFor(cwd), entryIdentity(entry, pid)),
     });
   }
   // Interactive sessions first, then by name: the one the user is looking
