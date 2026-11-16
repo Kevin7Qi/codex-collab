@@ -215,3 +215,46 @@ export function describeTurnError(e: TurnError): string {
 export function describeTrouble(t: TurnTrouble): string {
   return t.count > 1 ? `${describeTurnError(t.last)} (${t.count} since delivery)` : describeTurnError(t.last);
 }
+
+/** What a session's latest reply ran on: the model Claude Code sent it to,
+ *  which names the version an alias such as `opus` stood for, and the effort
+ *  it sent, null when it sent none (to a model without effort levels it
+ *  sends none, whatever was asked for). */
+export interface RanOn {
+  model: string;
+  effort: string | null;
+}
+
+/** The last reply the transcript records, as `RanOn`. A reply Claude Code
+ *  made up itself, for an API error, names no model it ran on (`<synthetic>`)
+ *  and is passed over. null when the transcript is missing or unreadable, or
+ *  has no reply in its tail yet. */
+export function ranOn(sessionId: string | null | undefined): RanOn | null {
+  if (!sessionId) return null;
+  const file = transcriptPath(sessionId);
+  if (!file) return null;
+  let lines: string[];
+  try {
+    lines = tail(file).split("\n");
+  } catch {
+    return null;
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    let e: Record<string, unknown>;
+    try {
+      e = JSON.parse(lines[i]);
+    } catch {
+      continue;
+    }
+    if (e?.type !== "assistant") continue;
+    const model = (e.message as { model?: unknown } | undefined)?.model;
+    if (typeof model !== "string" || !model || model.startsWith("<")) continue;
+    return { model, effort: typeof e.effort === "string" && e.effort ? e.effort : null };
+  }
+  return null;
+}
+
+/** What a session runs on, as a listing or a notice says it. */
+export function describeRanOn(r: RanOn): string {
+  return `${r.model}, ${r.effort ? `${r.effort} effort` : "no effort level"}`;
+}

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { conversationMovedSince, describeTrouble, describeTurnError, firstSaidSince, lastTurnError, transcriptPath, turnEndedOnError, turnErrorsSince, turnTrouble } from "./claude-transcript";
+import { conversationMovedSince, describeRanOn, describeTrouble, describeTurnError, firstSaidSince, lastTurnError, ranOn, transcriptPath, turnEndedOnError, turnErrorsSince, turnTrouble } from "./claude-transcript";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-transcripts-"));
 const SID = "4da729ee-d7cf-46e2-b700-a5bfab15c4a6";
@@ -117,3 +117,32 @@ describe("what the transcript says went wrong", () => {
     expect(turnTrouble(SID, "2026-09-22T01:00:00.000Z")?.count).toBe(2);
     expect(turnTrouble(SID, "2026-09-22T02:00:00.000Z")).toBeNull();
   });});
+
+describe("what a session runs on", () => {
+  test("the model and effort of its last reply, past one Claude Code made up for an error; none before its first", () => {
+    const dir = join(ROOT, "-home-user-project");
+    const sid = "44444444-4444-4444-8444-444444444444";
+    const reply = (model: string, effort?: string) => entry({ type: "assistant", message: { model }, ...(effort ? { effort } : {}) });
+    writeFileSync(join(dir, `${sid}.jsonl`), [
+      entry({ type: "user" }),
+      reply("claude-opus-5", "high"),
+      // The alias the session was started on, resolved to a version, at the
+      // effort it was asked for.
+      reply("claude-opus-5-5", "xhigh"),
+      entry({ type: "assistant", message: { model: "<synthetic>" }, isApiErrorMessage: true }),
+      entry({ type: "user" }),
+      "{ cut off",
+    ].join("\n"));
+    expect(ranOn(sid)).toEqual({ model: "claude-opus-5-5", effort: "xhigh" });
+    // A model without effort levels is sent none, whatever was asked for.
+    const plain = "55555555-5555-4555-8555-555555555555";
+    writeFileSync(join(dir, `${plain}.jsonl`), reply("claude-haiku-4-5-20251001") + "\n");
+    expect(ranOn(plain)).toEqual({ model: "claude-haiku-4-5-20251001", effort: null });
+    expect(describeRanOn({ model: "claude-haiku-4-5-20251001", effort: null })).toBe("claude-haiku-4-5-20251001, no effort level");
+    expect(describeRanOn({ model: "claude-opus-5-5", effort: "xhigh" })).toBe("claude-opus-5-5, xhigh effort");
+    // No reply yet, a transcript that cannot be read, or none at all.
+    expect(ranOn("11111111-1111-4111-8111-111111111111")).toBeNull();
+    expect(ranOn("66666666-6666-4666-8666-666666666666")).toBeNull();
+    expect(ranOn(null)).toBeNull();
+  });
+});

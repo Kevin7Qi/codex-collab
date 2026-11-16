@@ -95,7 +95,7 @@ export async function handleSkill(args: string[]): Promise<void> {
   // it for the same reason).
   const normalize = (s: string) => s.replace(/\r\n/g, "\n");
   const targets: Array<{ label: string; dir: string; file: string; expected: string; installed: string | null; create: boolean; effect: string }> = [
-    { label: "SKILL.md", dir, file: "SKILL.md", expected: expectedSkillMd(), installed: installedSkillMd(dir), create: false, effect: "takes effect in new Claude Code sessions" },
+    { label: "SKILL.md", dir, file: "SKILL.md", expected: expectedSkillMd(), installed: installedSkillMd(dir), create: false, effect: "Claude Code reads it the next time it loads the skill; a session that has loaded it already keeps the old text until it loads it again" },
   ];
   if (process.platform !== "win32") {
     const installedCodex = installedCodexSkillMd();
@@ -458,5 +458,5 @@ async function downloadAndInstall(release: ReleaseInfo): Promise<void> {
   console.log(
     "\nBrokers from the previous version are bypassed from now on and retire on idle; in-flight runs finish undisturbed.",
   );
-  console.log(`Updated to ${release.version}. New Claude Code sessions pick up the new skill automatically.`);
+  console.log(`Updated to ${release.version}. Claude Code reads the new skill the next time it loads it.`);
 }

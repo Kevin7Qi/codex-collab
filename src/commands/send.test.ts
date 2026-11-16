@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
-import { codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, sweepDeadReceivers, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
+import { choiceNotAppliedNote, codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, sweepDeadReceivers, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 import { replyComesByItself } from "./task";
 import { channelName, writeMessage } from "../claude-channel";
@@ -571,6 +571,31 @@ describeUnix("peers", () => {
     expect(lines[2]).toMatch(/^ {2}claude\(ws-abc123\) +idle +background +started by codex-collab · idle 4m 0s · stops after 30m 0s idle$/);
   });
 
+  test("a session's row says what it runs on, from its transcript, and a started one also what it was asked for", () => {
+    const base = { status: "idle" as const, cwd: "/", entrypoint: "cli", tmux: null, socketPath: "/s", procStart: null, verified: true, statusUpdatedAt: null };
+    const own = { ...base, pid: 1, name: "Explore", kind: "interactive", sessionId: "own", spawned: null };
+    const started = { ...base, pid: 2, name: "claude(ws-abc123)", kind: "bg", sessionId: "started", spawned: { id: "x", pid: 2, name: "claude(ws-abc123)", startedAt: "t", lingerSec: 1800, model: "opus", effort: "xhigh" } };
+    const ran = (s: { sessionId: string | null }) =>
+      s.sessionId === "own" ? { model: "claude-fable-5-2", effort: "high" } : s.sessionId === "started" ? { model: "claude-opus-5-5", effort: "xhigh" } : null;
+    const lines = formatSessions([own, started], Date.now(), ran).split("\n");
+    expect(lines[1]).toMatch(/^ {2}Explore +idle +interactive +runs claude-fable-5-2, high effort$/);
+    expect(lines[2]).toMatch(/^ {2}claude\(ws-abc123\) +idle +background +started by codex-collab · asked for opus, xhigh effort · runs claude-opus-5-5, xhigh effort · stops after 30m 0s idle$/);
+    // Before its first reply, what it was asked for is all there is.
+    expect(formatSessions([started], Date.now(), () => null)).toMatch(/started by codex-collab · asked for opus, xhigh effort · stops after 30m 0s idle$/);
+  });
+
+  test("a session that will not take a new model or effort is named by what it runs on, once it has replied", () => {
+    const base = { status: "idle" as const, cwd: "/", entrypoint: "cli", tmux: null, socketPath: "/s", procStart: null, verified: true, statusUpdatedAt: null, sessionId: null };
+    const own = { ...base, pid: 1, name: "Explore", kind: "interactive", spawned: null };
+    expect(choiceNotAppliedNote(own, "opus", undefined, { model: "claude-fable-5-2", effort: "high" }))
+      .toBe("Explore is the user's own session and runs on what they chose (claude-fable-5-2, high effort): --model and --effort apply only to a session `send` starts, so yours did not apply (`send --new` starts one).");
+    const started = { ...base, pid: 2, name: "claude(ws-abc123)", kind: "bg", spawned: { id: "x", pid: 2, name: "claude(ws-abc123)", startedAt: "t", lingerSec: 1800, model: "opus", effort: "xhigh" } };
+    expect(choiceNotAppliedNote(started, "opus", "xhigh", null)).toBeNull();
+    expect(choiceNotAppliedNote(started, undefined, "max", { model: "claude-opus-5-5", effort: "xhigh" }))
+      .toBe("claude(ws-abc123) is already running on claude-opus-5-5, xhigh effort: --model and --effort apply only when `send` starts a session, so yours did not apply.");
+    expect(choiceNotAppliedNote(started, undefined, "max", null)).toContain("is already running on opus, xhigh effort:");
+  });
+
   test("a session says where it lives: the VS Code panel and a tmux pane are as interactive as a terminal, and harder to find", () => {
     const row = (name: string, entrypoint: string | null, tmux: string | null) =>
       ({ pid: 1, name, status: "idle" as const, kind: "interactive", entrypoint, tmux, cwd: "/", socketPath: "/s", sessionId: null, procStart: null, verified: true, statusUpdatedAt: null, spawned: null });
@@ -1107,9 +1132,10 @@ describeUnix("send", () => {
       expect(args[args.indexOf("--effort") + 1]).toBe("high");
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ model: "opus", effort: "high" }));
       // The session is live now, and what it runs on is fixed: `peers` shows
-      // it, and a different choice on a later send is reported, not dropped.
+      // what it was asked for, and a different choice on a later send is
+      // reported, not dropped.
       const listed = await runCli(["peers"]);
-      expect(listed.stdout).toContain("started by codex-collab · opus, high effort");
+      expect(listed.stdout).toContain("started by codex-collab · asked for opus, high effort");
       const again = await runCli(["send", "quick lookup", "-m", "haiku", "-r", "low"], { PATH: `${binDir}:${process.env.PATH}` });
       expect(again.code).toBe(0);
       expect(again.stdout).toContain(`${fake.name} is already running on opus, high effort: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`);

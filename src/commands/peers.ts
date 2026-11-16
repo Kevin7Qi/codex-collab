@@ -8,6 +8,7 @@
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
 import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, reaperLog, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { outstandingTasksFor } from "../claude-tasks";
+import { describeRanOn, ranOn, type RanOn } from "../claude-transcript";
 import { insideCodexSandbox, resumeWindowSec, sandboxHint } from "./send";
 import { die, formatDuration, loadUserConfig, parseOptions } from "./shared";
 
@@ -27,8 +28,9 @@ export function whereItLives(s: Pick<ClaudeSession, "entrypoint" | "tmux">): str
   return null;
 }
 
-/** One line per session, columns aligned. Exported for tests. */
-export function formatSessions(sessions: ClaudeSession[], now = Date.now()): string {
+/** One line per session, columns aligned. What each runs on comes from its
+ *  transcript (`ranOnOf` is a test seam). Exported for tests. */
+export function formatSessions(sessions: ClaudeSession[], now = Date.now(), ranOnOf: (s: ClaudeSession) => RanOn | null = (s) => ranOn(s.sessionId)): string {
   // A row is marked only where the mark tells rows apart. From inside
   // Codex's sandbox no process can be checked, so EVERY row would carry it —
   // that case gets one line under the table instead (`unverifiedNotice`).
@@ -40,9 +42,14 @@ export function formatSessions(sessions: ClaudeSession[], now = Date.now()): str
     if (!s.verified && mixed) notes.push("unverified: its process cannot be checked from here");
     if (s.spawned) {
       notes.push("started by codex-collab");
-      // What a started session runs on is fixed when it starts, so it is
-      // what a Codex session needs to see before sending it harder work.
-      if (s.spawned.model || s.spawned.effort) notes.push(describeModelChoice(s.spawned.model, s.spawned.effort));
+      if (s.spawned.model || s.spawned.effort) notes.push(`asked for ${describeModelChoice(s.spawned.model, s.spawned.effort)}`);
+    }
+    // What a session runs on is what a Codex session needs to see before
+    // sending it harder work: Claude Code may have resolved or dropped what
+    // was asked for, and the user's own sessions run on their choice.
+    const ran = ranOnOf(s);
+    if (ran) notes.push(`runs ${describeRanOn(ran)}`);
+    if (s.spawned) {
       const idle = idleFor(s, now);
       if (idle) notes.push(`idle ${idle}`);
       notes.push(`stops after ${formatDuration(s.spawned.lingerSec * 1000)} idle`);
@@ -161,6 +168,7 @@ export async function handlePeers(args: string[]): Promise<void> {
       tmux: s.tmux,
       verified: s.verified,
       spawned: s.spawned ? { id: s.spawned.id, startedAt: s.spawned.startedAt, lingerSec: s.spawned.lingerSec, model: s.spawned.model ?? null, effort: s.spawned.effort ?? null } : null,
+      ranOn: ranOn(s.sessionId),
     })), null, 2));
     return;
   }
