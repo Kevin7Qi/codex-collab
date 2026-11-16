@@ -57,7 +57,7 @@ When a task of this thread ends without a reply (failed, lost, blocked or expire
 
 ## Choosing a model
 
-`--model <model>` (`-m`) and `--effort <level>` (`-r`) set the model and effort when `send` starts or resumes a session. With no `--effort`, it runs at `high`, or at the user's `config spawn-effort`. The choice holds until the session next stops. The levels, lowest first, are `low`, `medium`, `high`, `xhigh` and `max`; a model without `xhigh` or `max` (`claude-opus-4-6`, for one) runs those at `high`. `codex-collab peers` shows what a started session runs on; `send` reports when a choice could not apply. A session the user opened keeps the model and effort they chose. The user's account pays for a session `send` starts, so choose the model and effort with the task's complexity and cost in mind.
+`--model <model>` (`-m`) and `--effort <level>` (`-r`) set the model and effort when `send` starts or resumes a session. With no `--effort`, it runs at `high`, or at the user's `config spawn-effort`. The choice holds until the session next stops. The levels, lowest first, are `low`, `medium`, `high`, `xhigh` and `max`; a model without `xhigh` or `max` (`claude-opus-4-6`, for one) runs those at `high`. `codex-collab peers` shows what each session runs on, from its last reply, and what a started one was asked for; `send` reports when a choice could not apply. A session the user opened keeps the model and effort they chose. The user's account pays for a session `send` starts, so choose the model and effort with the task's complexity and cost in mind.
 
 `codex-collab models --claude` prints the available models. `--model` also accepts any full version string.
 

@@ -68,7 +68,7 @@ import {
   WorkspaceNotTrustedError,
   type ClaudeSession,
 } from "../claude-sessions";
-import { conversationMovedSince, describeTrouble, firstSaidSince, turnEndedOnError, turnTrouble } from "../claude-transcript";
+import { conversationMovedSince, describeRanOn, describeTrouble, firstSaidSince, ranOn, turnEndedOnError, turnTrouble, type RanOn } from "../claude-transcript";
 import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
@@ -371,14 +371,16 @@ export function resumeWindowSec(cfg: UserConfig): number {
 
 /** What to tell Codex when it chose a model or effort for a session that
  *  was already running: the choice is made at start and cannot change after.
- *  null when what it asked for is what the session runs on anyway. */
-export function choiceNotAppliedNote(target: ClaudeSession, askedModel?: string, askedEffort?: string): string | null {
+ *  null when what it asked for is what the session was started on anyway.
+ *  What the session runs on is its transcript's word, where it has replied
+ *  (`ran`, a test seam), else what it was started on. */
+export function choiceNotAppliedNote(target: ClaudeSession, askedModel?: string, askedEffort?: string, ran: RanOn | null = ranOn(target.sessionId)): string | null {
   if (!target.spawned) {
-    return `${target.name} is the user's own session and runs on what they chose: --model and --effort apply only to a session \`send\` starts, so yours did not apply (\`send --new\` starts one).`;
+    return `${target.name} is the user's own session and runs on what they chose${ran ? ` (${describeRanOn(ran)})` : ""}: --model and --effort apply only to a session \`send\` starts, so yours did not apply (\`send --new\` starts one).`;
   }
   const { model, effort } = target.spawned;
   if ((askedModel === undefined || askedModel === model) && (askedEffort === undefined || askedEffort === effort)) return null;
-  return `${target.name} is already running on ${describeModelChoice(model, effort)}: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`;
+  return `${target.name} is already running on ${ran ? describeRanOn(ran) : describeModelChoice(model, effort)}: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`;
 }
 
 export async function handleSend(args: string[]): Promise<void> {
