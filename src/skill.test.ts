@@ -13,6 +13,7 @@ import {
   CODEX_SKILL_SOURCE,
   codexSkillInSync,
   codexSkillInstallDir,
+  codexSkillTakesEffect,
   expectedCodexSkillMd,
   installedCodexSkillMd,
   codexRulesInSync,
@@ -71,6 +72,15 @@ describe("Codex exec-policy rule (opt-in)", () => {
 // ─── the Codex-side skill ───────────────────────────────────────────────────
 
 describe("Codex skill", () => {
+  test("a sync says when Codex sees it: a new text when a thread next reads it, a new skill or description in sessions that start after", () => {
+    const old = "---\nname: claude-collab\ndescription: Use when A.\n---\nold body\n";
+    const read = "Codex reads it the next time it turns to the skill; a thread that has read it already keeps the old text until it reads it again";
+    expect(codexSkillTakesEffect(old, old.replace("old body", "new body"))).toBe(read);
+    expect(codexSkillTakesEffect(old.replace(/\n/g, "\r\n"), old.replace("old body", "new body"))).toBe(read);
+    expect(codexSkillTakesEffect(old, old.replace("Use when A.", "Use when B."))).toBe(`${read}, and sessions that start from now on list its new description`);
+    expect(codexSkillTakesEffect(null, old)).toBe("Codex lists it in sessions that start from now on");
+  });
+
   test("is embedded, names the two commands, and says where send must run", () => {
     expect(CODEX_SKILL_SOURCE).toContain("name: claude-collab");
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab peers");
@@ -82,6 +92,10 @@ describe("Codex skill", () => {
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab send --new --no-wait --model <model> --effort <level> --file task.md");
     expect(CODEX_SKILL_SOURCE).toContain("tasks sent to the same session share its context and are taken one after another");
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab keeps one session of its own per workspace");
+    // What a handoff leaves out: the user's instructions to Codex itself,
+    // what the session holds already, and approval passed on as a formula.
+    expect(CODEX_SKILL_SOURCE).toContain("Leave out what is addressed to you");
+    expect(CODEX_SKILL_SOURCE).toContain("written in the message, it changes nothing");
     expect(expectedCodexSkillMd()).not.toContain("\r\n");
   });
 

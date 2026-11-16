@@ -61,6 +61,9 @@ export interface TaskRecord {
   /** When the receiver began delivering: from then on the message may have
    *  reached the session, whatever becomes of the receiver. */
   deliveryStartedAt?: string;
+  /** The thread's messages already in its mailbox in that millisecond: they
+   *  came before the delivery, and none of them is the reply. */
+  mailboxBefore?: string[];
   /** Whether the message found the session in a turn already running, where
    *  it found it idle otherwise: what tells one task's error from another's. */
   joinedTurn?: boolean;
@@ -76,9 +79,13 @@ export interface TaskRecord {
   /** The process collecting the reply, with what identifies it (see
    *  `procIdentity`): a reader can tell a receiver that died from one at work. */
   receiver?: { pid: number; procStart: string | null; pidDomain: string | null };
-  /** The address the session replies to. */
+  /** The address the session replies to: the Codex thread's own, or one of
+   *  the task's (see `send`). */
   senderName?: string;
-  reply?: { text: string; fromName: string };
+  /** The first message the session sent back after delivery. One read from
+   *  the thread's mailbox (claude-channel.ts) keeps its id and arrival there,
+   *  where whatever the session said after it is too. */
+  reply?: { text: string; fromName: string; id?: string; at?: string };
   error?: string;
   /** For a `blocked` task: the session was at a prompt the user could answer
    *  through Remote Control, and nobody had for this many seconds. Absent,

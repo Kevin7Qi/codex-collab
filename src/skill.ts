@@ -38,6 +38,18 @@ export function expectedCodexSkillMd(): string {
   return CODEX_SKILL_SOURCE.replace(/\r\n/g, "\n");
 }
 
+/** When Codex sees a Codex skill written over `installed` (null: none was
+ *  installed). A session starts with a list of skills, each with its
+ *  description and file; Codex reads the file itself when it turns to the
+ *  skill. So new text reaches a thread the next time it reads the file, and
+ *  a new skill or description only sessions that start after. */
+export function codexSkillTakesEffect(installed: string | null, expected: string): string {
+  if (installed === null) return "Codex lists it in sessions that start from now on";
+  const description = (text: string) => /^description:.*$/m.exec(text.replace(/\r\n/g, "\n"))?.[0] ?? null;
+  const read = "Codex reads it the next time it turns to the skill; a thread that has read it already keeps the old text until it reads it again";
+  return description(installed) === description(expected) ? read : `${read}, and sessions that start from now on list its new description`;
+}
+
 /** Installed Codex SKILL.md content, or null if missing/unreadable. */
 export function installedCodexSkillMd(dir: string = codexSkillInstallDir()): string | null {
   try {

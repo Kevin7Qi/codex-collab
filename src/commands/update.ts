@@ -17,6 +17,7 @@ import {
   expectedCodexRules,
   installedCodexRules,
   codexSkillInstallDir,
+  codexSkillTakesEffect,
   expectedCodexSkillMd,
   expectedSkillMd,
   installedCodexSkillMd,
@@ -97,7 +98,8 @@ export async function handleSkill(args: string[]): Promise<void> {
     { label: "SKILL.md", dir, file: "SKILL.md", expected: expectedSkillMd(), installed: installedSkillMd(dir), create: false, effect: "takes effect in new Claude Code sessions" },
   ];
   if (process.platform !== "win32") {
-    targets.push({ label: "Codex SKILL.md", dir: codexSkillInstallDir(), file: "SKILL.md", expected: expectedCodexSkillMd(), installed: installedCodexSkillMd(), create: true, effect: "takes effect in new Codex sessions" });
+    const installedCodex = installedCodexSkillMd();
+    targets.push({ label: "Codex SKILL.md", dir: codexSkillInstallDir(), file: "SKILL.md", expected: expectedCodexSkillMd(), installed: installedCodex, create: true, effect: codexSkillTakesEffect(installedCodex, expectedCodexSkillMd()) });
     // The exec-policy rule only for a user who opted in (config codex-rule on).
     if (codexRuleEnabled()) {
       const rules = codexRulesInstallPath();
