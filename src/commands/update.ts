@@ -36,21 +36,7 @@ import {
   saveUpdateState,
   updateStateFile,
 } from "../update";
-import { die, parseOptions } from "./shared";
-
-/** Gate a write on explicit consent: --yes, or an interactive y/N prompt.
- *  Exits 1 otherwise — after the caller has already printed what would change. */
-function requireConsent(yes: boolean, question: string, nonInteractiveHint: string): void {
-  if (yes) return;
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    // Bun's confirm() appends its own " [y/N] " — don't add one to the message.
-    if (confirm(question)) return;
-    console.error("Aborted — nothing was changed.");
-    process.exit(1);
-  }
-  console.error(`Not applied (no --yes in a non-interactive session). ${nonInteractiveHint}`);
-  process.exit(1);
-}
+import { die, parseOptions, requireConsent } from "./shared";
 
 // ---------------------------------------------------------------------------
 // skill render | sync

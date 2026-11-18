@@ -295,6 +295,10 @@ Commands:
                           changelog; with consent (prompt or --yes) download,
                           build, and reinstall (--check: report only;
                           --skip: mute notices for the latest release)
+  uninstall [--yes]       Remove codex-collab from this machine: its Codex
+                          hooks and rule, both skills, the command and its
+                          state, once what it left running is stopped; shows
+                          what goes and asks first (--yes: without prompting)
   health                  Check prerequisites
   peer [status|up]        Show this workspace's peer — capability, broker,
                           registry entry, socket — or start one with 'up'
@@ -359,7 +363,7 @@ Options:
   --json                  JSON output (threads, peek commands)
   --all                   List all threads without the display limit
   --discover              Merge server-side threads into the local list (threads)
-  --yes                   (skill sync, update) Apply without prompting — pass
+  --yes                   (skill sync, update, uninstall) Apply without prompting — pass
                           only after the user has explicitly agreed
   --check                 (update) Show the latest release without installing
   --skip                  (update) Mute update notices for the latest release
@@ -527,7 +531,7 @@ async function main() {
   const knownCommands = new Set([
     "run", "review", "threads", "jobs", "kill", "follow", "output", "progress",
     "config", "models", "templates", "approve", "decline", "clean", "delete", "health",
-    "peek", "version", "ask", "answer", "questions", "next", "skill", "update",
+    "peek", "version", "ask", "answer", "questions", "next", "skill", "update", "uninstall",
     "peer", "peers", "send", "task", "tasks", "messages", "hook", "reap-claude", "recv-task", "channel-host",
   ]);
   if (!knownCommands.has(command)) {
@@ -601,6 +605,8 @@ async function main() {
       return (await import("./commands/update")).handleSkill(rest);
     case "update":
       return (await import("./commands/update")).handleUpdate(rest);
+    case "uninstall":
+      return (await import("./commands/uninstall")).handleUninstall(rest);
     case "peek":
       return (await import("./commands/peek")).handlePeek(rest);
     case "peer":

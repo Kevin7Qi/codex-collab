@@ -105,6 +105,14 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 
 </details>
 
+### 卸载
+
+```bash
+codex-collab uninstall
+```
+
+它会先列出将要停止和删除的内容，并在动手之前征求确认（无终端可询问时需传入 `--yes`）。它首先停止 codex-collab 留下的进程：各工作区的 broker、通道主机、等待回复的进程，以及它启动且处于空闲的 Claude Code 会话。随后删除它写入 Codex 的 hooks 和规则（你自己的 hooks 保持不变）、Codex 与 Claude Code 两侧的 skill、`~/.codex-collab/`（包括其中你自己的提示模板，计划中会一一列出）、它的邮箱目录，以及 `codex-collab` 命令。在 Windows 上，`%USERPROFILE%\.local\bin` 会留在 PATH 中：`install.ps1` 仅在缺失时才添加它，且不记录是否由它添加；若该目录中已没有你的其他文件，可自行将其移出 PATH。若有 Codex 回合正在运行，或它启动的会话仍在工作，卸载不做任何改动，并说明如何结束这些工作。你在 Codex 中的线程、在 Claude Code 中的对话，以及当初安装所用的目录都会保留。
+
 ## 快速开始
 
 ```bash
@@ -172,6 +180,7 @@ Codex 用来联系 Claude 的命令（`peers`、`send`、`task`）见[跨会话�
 | `clean` | 清理过期日志和失效映射 |
 | `skill sync [--yes]` | 当已安装的 SKILL.md 与可执行文件或模板集不一致时重新生成。先打印 diff，确认后才写入 |
 | `update` | 检查是否有新版本，确认后下载安装。详见[升级](#升级) |
+| `uninstall [--yes]` | 从本机移除 codex-collab，确认后执行。详见[卸载](#卸载) |
 | `health` | 检查依赖项、登录状态，显示 broker 当前连接的 app-server，并报告 Codex 端技能安装与执行策略状态 |
 | `version` | 打印版本号（也可在命令前使用 `-v`/`--version`） |
 

@@ -191,6 +191,20 @@ export function die(msg: string): never {
   process.exit(1);
 }
 
+/** Gate a write on explicit consent: --yes, or an interactive y/N prompt.
+ *  Exits 1 otherwise — after the caller has already printed what would change. */
+export function requireConsent(yes: boolean, question: string, nonInteractiveHint: string): void {
+  if (yes) return;
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    // Bun's confirm() appends its own " [y/N] " — don't add one to the message.
+    if (confirm(question)) return;
+    console.error("Aborted — nothing was changed.");
+    process.exit(1);
+  }
+  console.error(`Not applied (no --yes in a non-interactive session). ${nonInteractiveHint}`);
+  process.exit(1);
+}
+
 // ---------------------------------------------------------------------------
 // Exit codes
 // ---------------------------------------------------------------------------

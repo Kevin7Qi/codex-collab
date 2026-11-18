@@ -105,6 +105,14 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 
 </details>
 
+### Uninstalling
+
+```bash
+codex-collab uninstall
+```
+
+It lists what it will stop and remove, then asks before doing anything (`--yes` when there is no terminal to ask). It first stops what codex-collab left running: workspace brokers, channel hosts, waits on replies, and the Claude Code sessions it started that are idle. Then it removes its hooks and rule from Codex (your own hooks stay), the Codex and Claude Code skills, `~/.codex-collab/` (with any prompt templates of your own there, which the plan names), its mailboxes, and the `codex-collab` command. On Windows, `%USERPROFILE%\.local\bin` stays on your PATH, since `install.ps1` adds it only when it is missing and keeps no note of having done so; take it off if nothing else of yours is in it. While a Codex turn runs, or a session it started is working, it changes nothing and says how to end that work. Your threads in Codex and conversations in Claude Code stay, and so does the folder you installed from.
+
 ## Quick Start
 
 ```bash
@@ -172,6 +180,7 @@ The commands Codex uses to reach Claude (`peers`, `send`, `task`) are under [Pee
 | `clean` | Delete old logs and stale mappings |
 | `skill sync [--yes]` | Regenerate the installed SKILL.md when it drifts from the binary or template set. Prints the diff, applies only on confirmation |
 | `update` | Check for a newer release and install it with confirmation. See [Upgrading](#upgrading) |
+| `uninstall [--yes]` | Remove codex-collab from this machine, with confirmation. See [Uninstalling](#uninstalling) |
 | `health` | Check dependencies and authentication, name the app-server the broker runs on, and report Codex-side skill and exec-policy status |
 | `version` | Print version (also `-v`/`--version` before a command) |
 
