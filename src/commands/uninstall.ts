@@ -1,7 +1,9 @@
 // src/commands/uninstall.ts — `codex-collab uninstall`: take off this machine
 // everything codex-collab put on it. That is the hooks and the rule it gave
-// Codex, both skills, the command, its state and mailboxes, and the processes
-// it left running.
+// Codex, both skills, the command, its mailboxes, and the processes it left
+// running. Its records in ~/.codex-collab — settings, thread records, logs,
+// the user's own templates — stay for a later install unless the user asks
+// for them to go too: at a terminal it asks, and `--purge` says so ahead.
 //
 // Work in flight holds it up: a Codex turn that is running, or a Claude Code
 // session codex-collab started that is busy, would lose its work. A task
@@ -18,7 +20,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { config, mailboxRoot } from "../config";
-import { codexHooksPath, hooksAfterOurs, ourHooksPrint, removeCodexHooks } from "../codex-hooks";
+import { codexHooksPath, forgetHookRuns, hooksAfterOurs, ourHooksPrint, removeCodexHooks } from "../codex-hooks";
 import { codexRulesInstallPath, codexSkillInstallDir, removeCodexRules, skillInstallDir } from "../skill";
 import { listRuns } from "../threads";
 import { listTasks, settled } from "../claude-tasks";
@@ -397,7 +399,11 @@ function devCheckout(): string | null {
   }
 }
 
-async function makePlan(): Promise<Plan> {
+/** What the uninstall asks of the records in ~/.codex-collab: that they go
+ *  (`purge`), and if not, whether the user is asked about them next. */
+interface RecordsChoice { purge: boolean; askNext: boolean }
+
+async function makePlan(records: RecordsChoice): Promise<Plan> {
   const plan: Plan = { busy: [], blockers: [], stops: [], removals: [], stays: [], after: [] };
   for (const stateDir of workspaceStateDirs()) await surveyWorkspace(stateDir, plan);
 
@@ -414,6 +420,9 @@ async function makePlan(): Promise<Plan> {
       run: () => {
         try {
           removeCodexHooks(hooksPath);
+          // The notes that Codex ran them in a thread say nothing once they
+          // are gone, and the records may stay for a later install.
+          forgetHookRuns();
           return null;
         } catch (e) {
           return `could not take the hooks out of ${hooksPath}: ${e instanceof Error ? e.message : String(e)}`;
@@ -452,7 +461,9 @@ async function makePlan(): Promise<Plan> {
     let templates = 0;
     try { templates = readdirSync(join(config.dataDir, "templates")).filter((f) => f.endsWith(".md")).length; } catch { /* none */ }
     const yours = templates > 0 ? `, with your ${templates} prompt template${templates === 1 ? "" : "s"} in ${join(config.dataDir, "templates")}` : "";
-    plan.removals.push({ what: `codex-collab's settings, thread records and logs in ${config.dataDir}${yours}`, run: () => removeTree(config.dataDir) });
+    const what = `codex-collab's records in ${config.dataDir}: settings, thread records and logs${yours}`;
+    if (records.purge) plan.removals.push({ what, run: () => removeTree(config.dataDir) });
+    else plan.stays.push(`${what}, for a later install to pick up; ${records.askNext ? "you are asked next whether to delete them" : "`--purge` deletes them as well"}`);
     // Read as it is, unparsed or not: the uninstall must not depend on it.
     let spawnTrust: unknown;
     try { spawnTrust = JSON.parse(readFileSync(join(config.dataDir, "config.json"), "utf-8"))?.["spawn-trust"]; } catch { /* unreadable: none */ }
@@ -526,12 +537,14 @@ function refuseIfBusy(plan: Plan): void {
 }
 
 export async function handleUninstall(args: string[]): Promise<void> {
-  // Only the bare flag agrees, and nothing else is taken: `--yes=false`
-  // parses as --yes with a stray argument, and another command's option
-  // (`--check`, `--dir`) means something this does not do.
-  const other = args.filter((a) => a !== "--yes");
-  if (other.length > 0) die(`uninstall takes no arguments other than --yes (got: ${other.join(" ")})`);
+  // Only the bare flags are taken: `--yes=false` parses as --yes with a
+  // stray argument, and another command's option (`--check`, `--dir`) means
+  // something this does not do.
+  const other = args.filter((a) => a !== "--yes" && a !== "--purge");
+  if (other.length > 0) die(`uninstall takes no arguments other than --yes and --purge (got: ${other.join(" ")})`);
   const yes = args.includes("--yes");
+  const interactive = !!process.stdin.isTTY && !!process.stdout.isTTY;
+  let purge = args.includes("--purge");
   // Stopping sessions goes through Claude Code, and the files are outside
   // what the sandbox may write: inside it, this would stop nothing and
   // remove little.
@@ -540,20 +553,28 @@ export async function handleUninstall(args: string[]): Promise<void> {
     console.error("Rerun this command outside the sandbox (with escalated permissions).");
     process.exit(1);
   }
-  const shown = await makePlan();
+  const records = existsSync(config.dataDir);
+  const shown = await makePlan({ purge, askNext: !purge && records && interactive && !yes });
   refuseIfBusy(shown);
   if (shown.removals.length === 0 && shown.stops.length === 0) {
-    console.log("Nothing of codex-collab's is left to remove.");
+    console.log(records
+      ? `Nothing of codex-collab's is left to remove but its records in ${config.dataDir}, which stay (\`--purge\` deletes them).`
+      : "Nothing of codex-collab's is left to remove.");
     return;
   }
   if (shown.stops.length > 0) console.log(`codex-collab uninstall stops:\n${list(shown.stops.map((s) => s.what))}\n`);
   if (shown.removals.length > 0) console.log(`It removes:\n${list(shown.removals.map((s) => s.what))}\n`);
   console.log(`These stay:\n${list(shown.stays)}\n`);
-  requireConsent(yes, "Uninstall codex-collab?", "Run `codex-collab uninstall --yes` to uninstall.");
+  requireConsent(yes, "Uninstall codex-collab?", "Run `codex-collab uninstall --yes` to uninstall, keeping its records, or add `--purge` to delete them as well.");
+  // The records are the user's: they go only when asked, and the question
+  // comes once the uninstall itself is agreed.
+  if (!purge && records && interactive && !yes) {
+    purge = confirm(`Also delete codex-collab's records in ${config.dataDir} (settings, thread records, logs, templates of your own)? They cannot be recovered.`);
+  }
 
   // The plan may have gone stale while it was read: what runs now decides,
   // and what it would stop that was not shown is asked about again.
-  const now = await makePlan();
+  const now = await makePlan({ purge, askNext: false });
   refuseIfBusy(now);
   const unseen = now.stops.filter((s) => !shown.stops.some((x) => x.what === s.what));
   if (unseen.length > 0) {
@@ -573,7 +594,7 @@ export async function handleUninstall(args: string[]): Promise<void> {
   }
   // Anything of codex-collab's at work or running again by now was put to
   // use while it stopped: removing its files under it would lose that work.
-  const last = await makePlan();
+  const last = await makePlan({ purge, askNext: false });
   refuseIfBusy({ ...last, busy: [] });
   if (last.busy.length > 0 || last.stops.length > 0) {
     console.error("codex-collab was put to use while it was being uninstalled:");
@@ -581,6 +602,8 @@ export async function handleUninstall(args: string[]): Promise<void> {
     console.error("Nothing was removed; what was stopped starts again when it is next needed. Run `codex-collab uninstall` again once that work is done.");
     process.exit(1);
   }
+  // Said once it is done, while the records can still be read.
+  const hooksBack = !purge && last.removals.some((s) => s.critical) && hookSettingOn();
   const failures: string[] = [];
   for (const step of last.removals) {
     const out = await step.run();
@@ -597,5 +620,18 @@ export async function handleUninstall(args: string[]): Promise<void> {
     process.exit(1);
   }
   console.log("\ncodex-collab is uninstalled.");
+  if (!purge && existsSync(config.dataDir)) {
+    console.log(`Its records stay in ${config.dataDir}: a later install picks them up, and deleting the folder removes them for good.`);
+    if (hooksBack) console.log("After a reinstall, `codex-collab config codex-hook on` puts the Codex hooks back.");
+  }
   for (const line of last.after) console.log(line);
+}
+
+/** Whether the records say `codex-hook` is on, read as they are. */
+function hookSettingOn(): boolean {
+  try {
+    return JSON.parse(readFileSync(join(config.dataDir, "config.json"), "utf-8"))?.["codex-hook"] === "on";
+  } catch {
+    return false;
+  }
 }

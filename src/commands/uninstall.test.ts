@@ -112,13 +112,16 @@ function install(h: Home): { checkout: string; mailboxes: string } {
   writeFileSync(join(h.dataDir, "config.json"), "{ not json\n");
   mkdirSync(join(h.dataDir, "templates"), { recursive: true });
   writeFileSync(join(h.dataDir, "templates", "my-review.md"), "---\nname: my-review\n---\nmine\n");
+  // The note that Codex ran the hooks in a thread.
+  mkdirSync(join(h.dataDir, "hook-runs"), { recursive: true });
+  writeFileSync(join(h.dataDir, "hook-runs", "0199a000-0000-7000-8000-0000000000aa"), "print\n");
   const mailboxes = join(h.temp, `codex-collab-${typeof process.getuid === "function" ? process.getuid() : "u"}`);
   mkdirSync(mailboxes, { recursive: true, mode: 0o700 });
   return { checkout, mailboxes };
 }
 
 describe("uninstall", () => {
-  test("removes what codex-collab installed, after showing it, and leaves the user's own", async () => {
+  test("removes what codex-collab installed, after showing it, and leaves the user's own and its records", async () => {
     const h = makeHome();
     const { checkout, mailboxes } = install(h);
     // An entry a broker killed outright left in Claude Code's registry.
@@ -127,11 +130,11 @@ describe("uninstall", () => {
     writeFileSync(join(registry, "999999.json"), JSON.stringify({ pid: 999_999, messagingSocketPath: join(h.dataDir, "workspaces", "ws-0123456789abcdef", "peer.sock") }));
     writeFileSync(join(registry, "123.json"), JSON.stringify({ pid: 999_998, messagingSocketPath: join(h.root, "a-claude-session.sock") }));
 
-    // Only the bare flag agrees, and no other command's option is taken.
-    for (const args of [["--yes=false"], ["--check", "--yes"], ["--dir", h.root, "--yes"]]) {
+    // Only the bare flags agree, and no other command's option is taken.
+    for (const args of [["--yes=false"], ["--purge=no", "--yes"], ["--check", "--yes"], ["--dir", h.root, "--yes"]]) {
       const malformed = await uninstall(h, ...args);
       expect(malformed.code).toBe(1);
-      expect(malformed.stderr).toContain("uninstall takes no arguments other than --yes");
+      expect(malformed.stderr).toContain("uninstall takes no arguments other than --yes and --purge");
     }
     expect(existsSync(h.dataDir)).toBe(true);
 
@@ -140,7 +143,9 @@ describe("uninstall", () => {
     expect(shown).toContain("Codex asks you to trust again those that move up a place (Stop)");
     expect(shown).toContain("the Codex rule");
     expect(shown).toContain("1 entry codex-collab's processes left in Claude Code's session registry");
-    expect(shown).toContain(`with your 1 prompt template in ${join(h.dataDir, "templates")}`);
+    // The records stay, and say how they would go too.
+    const stays = shown.split("These stay:")[1] ?? "";
+    expect(stays).toContain(`codex-collab's records in ${h.dataDir}: settings, thread records and logs, with your 1 prompt template in ${join(h.dataDir, "templates")}, for a later install to pick up; \`--purge\` deletes them as well`);
     expect(shown).toContain("Not applied (no --yes in a non-interactive session)");
     // Shown, and nothing done.
     expect(existsSync(h.dataDir)).toBe(true);
@@ -157,9 +162,10 @@ describe("uninstall", () => {
       join(h.home, ".local", "bin", "codex-collab"),
       join(h.home, ".local", "bin", "codex-collab.cmd"),
       join(h.codexHome, "rules", "codex-collab.rules"),
-      h.dataDir,
       mailboxes,
       join(registry, "999999.json"),
+      // What Codex ran in which thread says nothing once the hooks are gone.
+      join(h.dataDir, "hook-runs", "0199a000-0000-7000-8000-0000000000aa"),
     ]) expect(existsSync(gone)).toBe(false);
     // The user's hooks keep their order; nothing of ours is left.
     expect(JSON.parse(readFileSync(join(h.codexHome, "hooks.json"), "utf-8"))).toEqual({
@@ -173,11 +179,36 @@ describe("uninstall", () => {
       join(h.home, ".local", "bin", "other-tool"),
       join(checkout, "src", "cli.ts"),
       join(registry, "123.json"),
+      // Its records, for a later install.
+      join(h.dataDir, "config.json"),
+      join(h.dataDir, "templates", "my-review.md"),
     ]) expect(existsSync(kept)).toBe(true);
+    expect(done.stdout).toContain(`Its records stay in ${h.dataDir}`);
 
     const again = await uninstall(h, "--yes");
     expect(again.code).toBe(0);
-    expect(again.stdout).toContain("Nothing of codex-collab's is left to remove.");
+    expect(again.stdout).toContain(`Nothing of codex-collab's is left to remove but its records in ${h.dataDir}, which stay`);
+
+    // Asked for, the records go too.
+    const purged = await uninstall(h, "--yes", "--purge");
+    expect(purged.code).toBe(0);
+    expect(purged.stdout).toContain(`Removed codex-collab's records in ${h.dataDir}`);
+    expect(existsSync(h.dataDir)).toBe(false);
+    expect((await uninstall(h, "--yes", "--purge")).stdout).toContain("Nothing of codex-collab's is left to remove.");
+  });
+
+  test("with --purge, lists the records among what it removes, and removes them with the rest", async () => {
+    const h = makeHome();
+    install(h);
+    const shown = await uninstall(h, "--purge");
+    const removes = shown.stdout.split("It removes:")[1]?.split("These stay:")[0] ?? "";
+    expect(removes).toContain(`codex-collab's records in ${h.dataDir}: settings, thread records and logs, with your 1 prompt template`);
+    expect(existsSync(h.dataDir)).toBe(true);
+    const done = await uninstall(h, "--purge", "--yes");
+    expect(done.code).toBe(0);
+    expect(existsSync(h.dataDir)).toBe(false);
+    expect(existsSync(join(h.home, ".claude", "skills", "codex-collab"))).toBe(false);
+    expect(done.stdout).not.toContain("Its records stay");
   });
 
   unixOnly("leaves a codex-collab command the installers did not make", async () => {
@@ -198,7 +229,7 @@ describe("uninstall", () => {
       expect(await plan(h)).not.toContain("the command");
       expect((await uninstall(h, "--yes")).code).toBe(0);
       expect(existsSync(command)).toBe(true);
-      expect(existsSync(h.dataDir)).toBe(false);
+      expect(existsSync(join(h.home, ".claude", "skills", "codex-collab"))).toBe(false);
     }
   });
 
@@ -292,7 +323,7 @@ describe("uninstall", () => {
     runner.kill("SIGKILL");
     await runner.exited;
     expect((await uninstall(h, "--yes")).code).toBe(0);
-    expect(existsSync(h.dataDir)).toBe(false);
+    expect(existsSync(join(h.home, ".claude", "skills", "codex-collab"))).toBe(false);
   });
 
   linuxOnly("never signals a process it cannot check, and is held up by it", async () => {
@@ -366,6 +397,6 @@ describe("uninstall", () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     for (const p of [receiver, reaper, host]) expect(await Promise.race([p.exited.then(() => true), Bun.sleep(5000).then(() => false)])).toBe(true);
     for (const p of [stranger, reused]) expect(p.exitCode).toBeNull();
-    expect(existsSync(h.dataDir)).toBe(false);
+    expect(existsSync(join(h.home, ".claude", "skills", "codex-collab"))).toBe(false);
   });
 });

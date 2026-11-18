@@ -295,10 +295,13 @@ Commands:
                           changelog; with consent (prompt or --yes) download,
                           build, and reinstall (--check: report only;
                           --skip: mute notices for the latest release)
-  uninstall [--yes]       Remove codex-collab from this machine: its Codex
-                          hooks and rule, both skills, the command and its
-                          state, once what it left running is stopped; shows
-                          what goes and asks first (--yes: without prompting)
+  uninstall [--yes] [--purge]
+                          Remove codex-collab from this machine: its Codex
+                          hooks and rule, both skills and the command, once
+                          what it left running is stopped; shows what goes
+                          and asks first (--yes: without prompting). Its
+                          records in ~/.codex-collab stay unless you say
+                          they go too (asked at a terminal; --purge)
   health                  Check prerequisites
   peer [status|up]        Show this workspace's peer — capability, broker,
                           registry entry, socket — or start one with 'up'
@@ -363,6 +366,8 @@ Options:
   --json                  JSON output (threads, peek commands)
   --all                   List all threads without the display limit
   --discover              Merge server-side threads into the local list (threads)
+  --purge                 (delete) Delete server-side; (uninstall) delete the
+                          records in ~/.codex-collab as well
   --yes                   (skill sync, update, uninstall) Apply without prompting — pass
                           only after the user has explicitly agreed
   --check                 (update) Show the latest release without installing
