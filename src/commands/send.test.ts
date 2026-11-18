@@ -3043,8 +3043,10 @@ describeUnix("a Codex thread's address", () => {
       expect((await runCli(["send", "--to", "lasting-claude", "once"])).code).toBe(0);
       const socket = fake.received[0].replyPath;
       expect(addressEntries()).toHaveLength(1);
-      // Two quiet seconds: gone, though the session is still there.
-      await waitFor(() => addressEntries().length === 0 && !existsSync(socket), 8000);
+      // Two quiet seconds: gone, though the session is still there, and whom
+      // it talked to with it. The host forgets them once the address is shut,
+      // so the look waits for both.
+      await waitFor(() => addressEntries().length === 0 && !existsSync(socket) && contacts().length === 0, 8000);
       expect(contacts()).toEqual([]);
       const again = await runCli(["send", "--to", "lasting-claude", "twice"]);
       expect(again.stdout).toContain("  pong: twice");
