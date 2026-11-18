@@ -52,6 +52,9 @@ interface Plan {
   /** Work in flight, each with how to end it: while any is listed, nothing
    *  is done. */
   busy: string[];
+  /** What must be put right first, each with why: while any is listed,
+   *  nothing is done either. */
+  blockers: string[];
   stops: Step[];
   removals: Step[];
   /** What stays, for the report. */
@@ -395,11 +398,15 @@ function devCheckout(): string | null {
 }
 
 async function makePlan(): Promise<Plan> {
-  const plan: Plan = { busy: [], stops: [], removals: [], stays: [], after: [] };
+  const plan: Plan = { busy: [], blockers: [], stops: [], removals: [], stays: [], after: [] };
   for (const stateDir of workspaceStateDirs()) await surveyWorkspace(stateDir, plan);
 
+  // A hooks file that cannot be read may hold hooks of ours, which would go
+  // on running the command once it is gone: it is put right first.
   const hooksPath = codexHooksPath();
-  if (ourHooksPrint(hooksPath) !== null) {
+  const unreadable = hooksFileProblem(hooksPath);
+  if (unreadable) plan.blockers.push(`${hooksPath} cannot be read (${unreadable}), so whether codex-collab's hooks are in it is unknown: put it right, then run this again`);
+  else if (ourHooksPrint(hooksPath) !== null) {
     const moved = hooksAfterOurs(hooksPath);
     plan.removals.push({
       what: `codex-collab's hooks in ${hooksPath}; your own hooks there stay`
@@ -487,8 +494,30 @@ function list(steps: string[]): string {
   return steps.map((s) => `  - ${s}`).join("\n");
 }
 
-/** Work in flight: say what, and stop with nothing changed. */
+/** What is wrong with a hooks file that is there, or null when it reads as
+ *  one (or is not there). */
+function hooksFileProblem(path: string): string | null {
+  if (!existsSync(path)) return null;
+  try {
+    const doc = JSON.parse(readFileSync(path, "utf-8"));
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) return "it holds no JSON object";
+    const hooks = (doc as { hooks?: unknown }).hooks;
+    if (hooks !== undefined && (!hooks || typeof hooks !== "object" || Array.isArray(hooks))) return `its "hooks" is not an object`;
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** Work in flight, or something to put right first: say what, and stop with
+ *  nothing changed. */
 function refuseIfBusy(plan: Plan): void {
+  if (plan.blockers.length > 0) {
+    console.error("codex-collab cannot be uninstalled yet:");
+    console.error(list(plan.blockers));
+    console.error("Nothing was changed.");
+    process.exit(1);
+  }
   if (plan.busy.length === 0) return;
   console.error("codex-collab is not uninstalled while work is in flight, which would be lost:");
   console.error(list(plan.busy));
@@ -545,6 +574,7 @@ export async function handleUninstall(args: string[]): Promise<void> {
   // Anything of codex-collab's at work or running again by now was put to
   // use while it stopped: removing its files under it would lose that work.
   const last = await makePlan();
+  refuseIfBusy({ ...last, busy: [] });
   if (last.busy.length > 0 || last.stops.length > 0) {
     console.error("codex-collab was put to use while it was being uninstalled:");
     console.error(list([...last.busy, ...last.stops.map((s) => s.what)]));

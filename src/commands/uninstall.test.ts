@@ -233,6 +233,18 @@ describe("uninstall", () => {
     expect(readFileSync(join(source, "SKILL.md"), "utf-8")).toBe("tracked source\n");
   });
 
+  test("is held up by a hooks file it cannot read, which may hold hooks of codex-collab's", async () => {
+    const h = makeHome();
+    install(h);
+    writeFileSync(join(h.codexHome, "hooks.json"), "{ \"hooks\": ");
+    const refused = await uninstall(h, "--yes");
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain("codex-collab cannot be uninstalled yet:");
+    expect(refused.stderr).toContain(`${join(h.codexHome, "hooks.json")} cannot be read`);
+    expect(existsSync(h.dataDir)).toBe(true);
+    expect(existsSync(join(h.home, ".claude", "skills", "codex-collab", "SKILL.md"))).toBe(true);
+  });
+
   (windows || process.getuid?.() === 0 ? test.skip : test)("keeps the command while Codex's hooks cannot be taken out", async () => {
     const h = makeHome();
     install(h);
