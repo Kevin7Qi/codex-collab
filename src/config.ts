@@ -15,9 +15,9 @@ function getHome(): string {
 
 // ─── Model aliases ──────────────────────────────────────────────────────────
 
-const MODEL_ALIASES: Record<string, string> = {
-  spark: "gpt-5.3-codex-spark",
-};
+/** Short names for model ids, resolved wherever a model is named. None ship
+ *  at the moment; the tests add their own to exercise the resolving. */
+export const MODEL_ALIASES: Record<string, string> = {};
 
 /** Every alias and the model id it stands for. Exported for the contract
  *  test that checks each target still exists on the server: an alias
@@ -287,7 +287,7 @@ export function resolveMailboxDir(cwd: string): string {
 }
 
 /**
- * Resolve model aliases. Currently: `spark → gpt-5.3-codex-spark`.
+ * Resolve model aliases (see MODEL_ALIASES).
  * Passes through unknown names. Returns undefined for undefined input.
  */
 export function resolveModel(model: string | undefined): string | undefined {
