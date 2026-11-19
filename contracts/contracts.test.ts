@@ -22,11 +22,20 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { connectDirect } from "../src/client";
 import { modelAliasTargets } from "../src/config";
-import { fetchAllPages } from "../src/models";
+import { fetchAllPages, resolveModelDefaults } from "../src/models";
+import type { AppServerClient } from "../src/client";
 import type { Model } from "../src/types";
 import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS, procStartOf, buildRegistryEntry, sniffRegistryVersion } from "../src/peer";
 
 const ENABLED = process.env.CODEX_COLLAB_CONTRACTS === "1";
+
+/** The model a contract turn runs on: the one codex-collab would pick for a
+ *  run of its own. Left to the server, a turn runs on the default in the
+ *  user's Codex config, and one this account cannot use fails every turn for
+ *  a reason that has nothing to do with the contract. */
+async function contractModel(client: AppServerClient): Promise<string | undefined> {
+  return (await resolveModelDefaults(client, {}))?.model;
+}
 
 describe.skipIf(!ENABLED)("codex app-server contracts", () => {
   test("every MODEL_ALIASES target is a model the server still lists", async () => {
@@ -79,12 +88,14 @@ describe.skipIf(!ENABLED)("codex app-server contracts", () => {
     const client = await connectDirect();
     const ids: string[] = [];
     try {
+      const model = await contractModel(client);
       for (let i = 0; i < 2; i++) {
-        const start = await client.request("thread/start", { cwd: process.cwd() }) as { thread: { id: string } };
+        const start = await client.request("thread/start", { cwd: process.cwd(), model }) as { thread: { id: string } };
         ids.push(start.thread.id);
       }
       const [t1, t2] = ids;
       const events: string[] = [];
+      const statuses: unknown[] = [];
       const done = new Map<string, () => void>();
       const completed = ids.map((id) => new Promise<void>((r) => done.set(id, r)));
       client.on("turn/started", (p: unknown) => {
@@ -93,7 +104,11 @@ describe.skipIf(!ENABLED)("codex app-server contracts", () => {
       });
       client.on("turn/completed", (p: unknown) => {
         const tid = (p as { threadId?: string })?.threadId;
-        if (tid) { events.push(`done:${tid}`); done.get(tid)?.(); }
+        if (tid) {
+          events.push(`done:${tid}`);
+          statuses.push((p as { turn?: { status?: unknown } })?.turn?.status);
+          done.get(tid)?.();
+        }
       });
       await Promise.all([
         client.request("turn/start", { threadId: t1, input: [{ type: "text", text: "Reply with the word ONE and stop. No tools." }] }),
@@ -107,6 +122,8 @@ describe.skipIf(!ENABLED)("codex app-server contracts", () => {
       const firstDone = events.findIndex((e) => e.startsWith("done:"));
       const starts = events.filter((e, i) => e.startsWith("start:") && i < firstDone).length;
       expect(starts).toBe(2);
+      // A refused turn also "completes"; only one that ran proves anything.
+      expect(statuses).toEqual(["completed", "completed"]);
     } finally {
       for (const id of ids) await client.request("thread/delete", { threadId: id }).catch(() => undefined);
       await client.close();
@@ -127,6 +144,7 @@ describe.skipIf(!ENABLED)("codex app-server contracts", () => {
       });
       const start = await client.request("thread/start", {
         cwd: process.cwd(),
+        model: await contractModel(client),
         dynamicTools: PEER_DYNAMIC_TOOLS,
       }) as { thread: { id: string } };
       threadId = start.thread.id;
