@@ -47,6 +47,9 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 
+# An older Bun fails in ways nobody would trace back to Bun; say so now.
+bun "$REPO_DIR/scripts/check-bun.ts"
+
 # Install dependencies
 echo "Installing dependencies..."
 (cd "$REPO_DIR" && bun install)

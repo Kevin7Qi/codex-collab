@@ -106,6 +106,7 @@ function setCodexHookAndSave(cfg: UserConfig, on: boolean): void {
   }
 }
 import type { Model, AccountRead } from "../types";
+import { MIN_BUN, bunTooOld } from "../bun-version";
 import {
   die,
   formatAge,
@@ -460,7 +461,7 @@ export async function handleHealth(args: string[]): Promise<void> {
   }
 
   console.log(`  codex-collab: ${config.clientVersion}`);
-  console.log(`  bun:   ${Bun.version}`);
+  console.log(`  bun:   ${Bun.version}${bunTooOld() ? ` — older than ${MIN_BUN}, the oldest codex-collab runs on: expect hangs and refusals that name no cause until it is upgraded ('bun upgrade')` : ""}`);
   // `where` on Windows returns multiple matches; show only the first
   console.log(`  codex: ${which.stdout.toString().trim().split("\n")[0].trim()}`);
 

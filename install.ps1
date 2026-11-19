@@ -45,6 +45,10 @@ $isUpgrade = Test-Path $SkillDir
 $installAction = if ($isUpgrade) { "Updating existing" } else { "Installing new" }
 $installDone = if ($isUpgrade) { "Updated" } else { "Installed" }
 
+# An older Bun fails in ways nobody would trace back to Bun; say so now.
+& bun (Join-Path $RepoDir "scripts\check-bun.ts")
+if ($LASTEXITCODE -ne 0) { exit 1 }
+
 # Install dependencies
 Write-Host "Installing dependencies..."
 Push-Location $RepoDir

@@ -25,7 +25,7 @@ import {
   type Options,
 } from "./shared";
 import { createRun, loadRun, registerThread } from "../threads";
-import { config } from "../config";
+import { config, MODEL_ALIASES } from "../config";
 import type { AppServerClient } from "../client";
 import type { Model, ThreadStartResponse } from "../types";
 
@@ -108,9 +108,14 @@ describe("parseOptions", () => {
     expect(options.explicit.has("model")).toBe(true);
   });
 
-  test("--model resolves aliases (e.g., spark)", () => {
-    const { options } = parseOptions(["--model", "spark"]);
-    expect(options.model).toBe("gpt-5.3-codex-spark");
+  test("--model resolves aliases", () => {
+    MODEL_ALIASES.quick = "gpt-test-quick";
+    try {
+      const { options } = parseOptions(["--model", "quick"]);
+      expect(options.model).toBe("gpt-test-quick");
+    } finally {
+      delete MODEL_ALIASES.quick;
+    }
   });
 
   test("--model allows dots, dashes, slashes, colons", () => {
@@ -1011,6 +1016,7 @@ describe("applyUserConfig", () => {
     configJson: string,
     explicitFlags: string[] = [],
     checkExpression: string,
+    setup = "",
   ): { stdout: string; exitCode: number; stderr: string } {
     const fakeHome = freshTmpDir("fake-home");
     const configDir = join(fakeHome, ".codex-collab");
@@ -1034,6 +1040,7 @@ import { defaultOptions, applyUserConfig } from "./src/commands/shared";
 const opts = defaultOptions();
 ${addExplicit}
 ${setValues}
+${setup}
 applyUserConfig(opts);
 console.log(JSON.stringify(${checkExpression}));
 `);
@@ -1148,13 +1155,14 @@ console.log(JSON.stringify(${checkExpression}));
 
   test("model alias is resolved from config", () => {
     const { stdout, exitCode } = runApplyConfig(
-      JSON.stringify({ model: "spark" }),
+      JSON.stringify({ model: "quick" }),
       [],
       `{ model: opts.model }`,
+      `(await import("./src/config")).MODEL_ALIASES.quick = "gpt-test-quick";`,
     );
     expect(exitCode).toBe(0);
     const result = JSON.parse(stdout);
-    expect(result.model).toBe("gpt-5.3-codex-spark");
+    expect(result.model).toBe("gpt-test-quick");
   });
 
   test("missing config file is tolerated", () => {

@@ -638,7 +638,7 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
     }
   }
 
-  // Resolve model aliases (e.g., "spark" → "gpt-5.3-codex-spark")
+  // Resolve model aliases
   options.model = resolveModel(options.model);
 
   return { positional, options };

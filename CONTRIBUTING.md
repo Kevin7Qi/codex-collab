@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Bun](https://bun.sh/) >= 1.0
+- [Bun](https://bun.sh/) >= 1.3.14
 - [Codex CLI](https://github.com/openai/codex) with `app-server` support
 
 ## Development Setup

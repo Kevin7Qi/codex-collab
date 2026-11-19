@@ -849,7 +849,7 @@ export function buildDelegation(input: string, threadId: string): string {
  *  Canonicalizing matters more here than on the CLI. A conversation restates
  *  its model on every turn it starts, so an alias reaching thread/start
  *  unresolved does not fail once; it fails every turn for the life of the
- *  conversation, and `config model spark` would do that to all of them. */
+ *  conversation, and an alias set as the workspace default would do that to all of them. */
 export function conversationModel(
   header: string | undefined,
   workspaceDefault: string | undefined,

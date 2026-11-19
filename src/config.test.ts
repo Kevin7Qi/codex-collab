@@ -9,6 +9,7 @@ import {
   resolveWorkspaceDir,
   resolveStateDir,
   resolveModel,
+  MODEL_ALIASES,
   validateEffort,
   loadTemplate,
   loadTemplateWithMeta,
@@ -121,8 +122,13 @@ describe("resolveStateDir", () => {
 // ─── resolveModel ───────────────────────────────────────────────────────────
 
 describe("resolveModel", () => {
-  test("resolves spark alias", () => {
-    expect(resolveModel("spark")).toBe("gpt-5.3-codex-spark");
+  test("resolves an alias", () => {
+    MODEL_ALIASES.quick = "gpt-test-quick";
+    try {
+      expect(resolveModel("quick")).toBe("gpt-test-quick");
+    } finally {
+      delete MODEL_ALIASES.quick;
+    }
   });
 
   test("passes through unknown model names", () => {

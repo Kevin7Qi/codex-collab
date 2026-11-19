@@ -3,7 +3,7 @@
 // behavior is exercised end to end by the contract tests, not here.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { config, mailboxRoot } from "./config";
+import { config, mailboxRoot, MODEL_ALIASES } from "./config";
 import { listRuns } from "./threads";
 import net from "node:net";
 import { spawn } from "node:child_process";
@@ -55,6 +55,9 @@ const onWindows = process.platform === "win32";
 // answer set or clear the variable themselves.
 const prevPeerEnv = process.env.CODEX_COLLAB_PEER;
 beforeAll(() => { process.env.CODEX_COLLAB_PEER = "on"; });
+// No alias ships, so the alias tests bring one.
+beforeAll(() => { MODEL_ALIASES.quick = "gpt-test-quick"; });
+afterAll(() => { delete MODEL_ALIASES.quick; });
 afterAll(() => {
   if (prevPeerEnv === undefined) delete process.env.CODEX_COLLAB_PEER;
   else process.env.CODEX_COLLAB_PEER = prevPeerEnv;
@@ -393,7 +396,7 @@ describe("parseHeaders", () => {
   test("a model alias resolves at the header, not at the server", () => {
     // A conversation restates its model on EVERY turn, so an alias that
     // reached thread/start unresolved would fail the conversation forever.
-    expect(parseHeaders("model: spark\nx").headers.model).toBe("gpt-5.3-codex-spark");
+    expect(parseHeaders("model: quick\nx").headers.model).toBe("gpt-test-quick");
     // Non-aliases pass through untouched.
     expect(parseHeaders("model: gpt-5.6-luna\nx").headers.model).toBe("gpt-5.6-luna");
   });
@@ -1272,8 +1275,8 @@ describe.skipIf(onWindows)("conversation resilience", () => {
     };
     const peer = createPeer(host);
     try {
-      await send("model: spark\ndo it", () => threadStarts.length === 1);
-      expect(threadStarts[0].model).toBe("gpt-5.3-codex-spark");
+      await send("model: quick\ndo it", () => threadStarts.length === 1);
+      expect(threadStarts[0].model).toBe("gpt-test-quick");
     } finally {
       peer.stop();
       cleanup();
@@ -2613,12 +2616,12 @@ describe("conversationModel", () => {
     // Both sources reach thread/start, and a conversation restates its model
     // on every turn it starts — so an alias slipping through either one
     // poisons that conversation for good rather than failing a single turn.
-    expect(conversationModel("spark", undefined)).toBe("gpt-5.3-codex-spark");
-    expect(conversationModel(undefined, "spark")).toBe("gpt-5.3-codex-spark");
+    expect(conversationModel("quick", undefined)).toBe("gpt-test-quick");
+    expect(conversationModel(undefined, "quick")).toBe("gpt-test-quick");
   });
 
   test("a header beats the workspace default", () => {
-    expect(conversationModel("gpt-5.6-luna", "spark")).toBe("gpt-5.6-luna");
+    expect(conversationModel("gpt-5.6-luna", "quick")).toBe("gpt-5.6-luna");
   });
 
   test("non-aliases pass through, and nothing configured stays nothing", () => {
