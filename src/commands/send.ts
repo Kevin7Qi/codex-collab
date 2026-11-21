@@ -560,8 +560,24 @@ export async function handleSend(args: string[]): Promise<void> {
     // session asked for by its label is not passed over for a live one whose
     // name merely begins the same way.
     const exact = resolveSession(sessions, targetName, { exact: true }).session;
-    const stopped = exact ? null : stoppedSessionNamed(stateDir, targetName);
-    const { session, ambiguous } = exact || stopped ? { session: exact, ambiguous: [] } : resolveSession(sessions, targetName);
+    let stopped = exact ? null : stoppedSessionNamed(stateDir, targetName);
+    // A task's id, in full, stands for the session that task went to: live,
+    // it is messaged; stopped, and one codex-collab started, it is resumed. A
+    // live session of that very name comes first, and no label has the shape.
+    const task = !exact && !stopped && isTaskId(targetName) ? loadTask(stateDir, targetName) : null;
+    let viaTask: ClaudeSession | null = null;
+    if (task) {
+      const went = task.target;
+      viaTask = sessions.find((x) => (went.sessionId ? x.sessionId === went.sessionId : x.name === went.name)) ?? null;
+      if (!viaTask) stopped = stoppedSessions(stateDir).find((r) => (went.sessionId ? r.sessionId === went.sessionId : r.name === went.name)) ?? null;
+      if (!viaTask && !stopped) {
+        die(`Task ${task.id} went to ${went.name}, which is not live${went.spawned
+          ? ", and its conversation is no longer on record to resume."
+          : ". It is a session of the user's own, which only they can open again."}`);
+      }
+      notes.push(`Task ${task.id} went to ${(viaTask ?? stopped)!.name}: this message goes there too.`);
+    }
+    const { session, ambiguous } = exact || viaTask || stopped ? { session: exact ?? viaTask, ambiguous: [] } : resolveSession(sessions, targetName);
     if (session) {
       target = session;
     } else if (ambiguous.length > 1) {
@@ -576,7 +592,7 @@ export async function handleSend(args: string[]): Promise<void> {
       const live = sessions.length ? `Live here: ${sessions.map((s) => s.name).join(", ")}.` : "No Claude Code session is live in this workspace.";
       const resumable = stoppedSessions(stateDir).map((r) => r.label ?? r.name);
       const asLabel = sessionLabel(targetName);
-      die(`No live Claude Code session named "${targetName}" in this workspace. ${live}` +
+      die(`No live Claude Code session named "${targetName}" in this workspace${isTaskId(targetName) ? ", and no task of that id" : ""}. ${live}` +
         (resumable.length ? ` Stopped, and resumed by name: ${resumable.join(", ")}.` : "") +
         (asLabel ? `\nTo start one with that label: codex-collab send --new --name ${asLabel} "…"` : ""));
     }

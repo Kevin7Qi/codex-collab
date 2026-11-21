@@ -1452,7 +1452,9 @@ describeUnix("send", () => {
       expect(existsSync(join(binDir, "bg.log"))).toBe(false);
 
       // The default session, then one with a label beside it.
-      expect((await runCli(["send", "one"], env)).stdout).toContain(`Started ${main.name}`);
+      const first = await runCli(["send", "one"], env);
+      expect(first.stdout).toContain(`Started ${main.name}`);
+      const mainTask = taskIdOf(first.stdout);
       const started = await runCli(["send", "--new", "--name", "Docs", "write the docs"], env);
       expect(started.code).toBe(0);
       expect(started.stdout).toContain(`Starting a new session of codex-collab's own for this workspace, ${docs.name}, in the background…`);
@@ -1465,6 +1467,13 @@ describeUnix("send", () => {
       expect((await runCli(["send", "docs", "and the changelog"], env)).stdout).toContain("docs says: and the changelog");
       expect((await runCli(["send", "DOCS", "and the readme"], env)).stdout).toContain("docs says: and the readme");
       expect((await runCli(["send", main.name, "two"], env)).stdout).toContain("main says: two");
+      // A task's id, in full, stands for the session that task went to.
+      const viaTask = await runCli(["send", taskIdOf(started.stdout), "one more thing"], env);
+      expect(viaTask.stdout).toContain(`Task ${taskIdOf(started.stdout)} went to ${docs.name}: this message goes there too.`);
+      expect(viaTask.stdout).toContain("docs says: one more thing");
+      const noTask = await runCli(["send", "0000ffff", "hello"], env);
+      expect(noTask.code).toBe(1);
+      expect(noTask.stderr).toContain(`No live Claude Code session named "0000ffff" in this workspace, and no task of that id.`);
       const unnamed = await runCli(["send", "which one?"], env);
       expect(unnamed.code).toBe(1);
       expect(unnamed.stderr).toContain(`codex-collab send "docs" "…"`);
@@ -1500,14 +1509,31 @@ describeUnix("send", () => {
       expect(starts()[2]).toContain(`--bg -n ${docs.name} --resume 00000000-0000-4000-8000-0000000000d1 `);
       // A plain send now finds one live session, and uses it.
       expect((await runCli(["send", "anyone?"], env)).stdout).toContain("docs says: anyone?");
-      // The default one is still there to resume, by its name.
-      const back = await runCli(["send", main.name, "three"], env);
+      // The default one is still there to resume: by its name, or as here by
+      // a task that went to it.
+      const back = await runCli(["send", mainTask, "three"], env);
+      expect(back.stdout).toContain(`Task ${mainTask} went to ${main.name}: this message goes there too.`);
       expect(back.stdout).toContain(`resuming ${main.name}`);
+      expect(back.stdout).toContain("main says: three");
       expect(starts()[3]).toContain(`--bg -n ${main.name} --resume 00000000-0000-4000-8000-0000000000a1 `);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
     }
+  });
+
+  test("a task that went to the user's own session reaches it while it is live, and is refused once it has gone", async () => {
+    await settleSpawnState();
+    const users = startFake("the-users-own", { reply: (t) => `theirs says: ${t.split("\n")[0]}` });
+    registerFake(users);
+    const sent = await runCli(["send", "a question"]);
+    const id = taskIdOf(sent.stdout);
+    expect((await runCli(["send", id, "and another"])).stdout).toContain("theirs says: and another");
+    users.stop();
+    for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+    const gone = await runCli(["send", id, "still there?"]);
+    expect(gone.code).toBe(1);
+    expect(gone.stderr).toContain(`Task ${id} went to the-users-own, which is not live. It is a session of the user's own, which only they can open again.`);
   });
 
   test("--new starts nothing where starting sessions is off", async () => {
