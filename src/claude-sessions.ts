@@ -69,6 +69,10 @@ export interface SpawnedSession {
   id: string;
   pid: number;
   name: string;
+  /** The label Codex gave it (`send --new --name <label>`), which is part of
+   *  its name and what it is addressed by. Absent for the workspace's default
+   *  session, which has none. */
+  label?: string;
   startedAt: string;
   /** Seconds of idleness after which the reaper stops it. */
   lingerSec: number;
@@ -82,14 +86,21 @@ export interface SpawnedSession {
   effort?: string;
   /** Set once the session has been stopped (or found gone). Claude Code
    *  keeps a stopped session's conversation, so the record is kept too: it
-   *  is what lets the next `send` resume that conversation instead of
+   *  is what lets a later `send` resume that conversation instead of
    *  starting from nothing. Its `pid` means nothing any more. */
   stoppedAt?: string;
 }
 
-/** How long a stopped session stays worth resuming (seconds), by default.
- *  Long enough for work that spans days; `config spawn-resume` changes it. */
+/** How long a stopped default session is picked up again by a plain `send`
+ *  (seconds), by default. Long enough for work that spans days; `config
+ *  spawn-resume` changes it. A session asked for by name is resumed whenever
+ *  its record is still there. */
 export const DEFAULT_SPAWN_RESUME_SEC = 7 * 24 * 3600;
+
+/** How long a stopped session's record is kept (ms). Claude Code clears its
+ *  own history of a conversation after about as long, and a record of one it
+ *  can no longer resume is no use. */
+export const STOPPED_RECORD_KEEP_MS = 30 * 24 * 3600 * 1000;
 
 /** Default idle linger for a spawned session (seconds): an hour, which is
  *  also how long a prompt in it waits for a user who can reach it through
@@ -324,9 +335,9 @@ export function remoteControlReaches(jobId: string): boolean {
   return !!job && typeof job.bridgeSessionId === "string" && job.bridgeSessionId !== "" && job.bridgeOutboundOnly !== true;
 }
 
-/** Resolve a session by the name Codex gave: exact match first, then a
- *  unique case-insensitive prefix. `ambiguous` lists the candidates when
- *  a prefix matches several. */
+/** Resolve a session by the name Codex gave: exact match first, then the
+ *  label of a session codex-collab started, then a unique case-insensitive
+ *  prefix. `ambiguous` lists the candidates when a prefix matches several. */
 export function resolveSession(
   sessions: ClaudeSession[],
   name: string,
@@ -334,6 +345,8 @@ export function resolveSession(
   const exact = sessions.find((s) => s.name === name);
   if (exact) return { session: exact, ambiguous: [] };
   const needle = name.toLowerCase();
+  const labelled = sessions.find((s) => s.spawned?.label === needle);
+  if (labelled) return { session: labelled, ambiguous: [] };
   const matches = sessions.filter((s) => s.name.toLowerCase().startsWith(needle));
   if (matches.length === 1) return { session: matches[0], ambiguous: [] };
   return { session: null, ambiguous: matches };
@@ -384,28 +397,37 @@ function withRecordsLock<T>(stateDir: string, fn: () => T): T {
   }
 }
 
-export function recordSpawnedSession(stateDir: string, session: SpawnedSession): void {
+/** The records worth keeping: every running one, and each stopped one
+ *  until it has been stopped too long for Claude Code to still resume. */
+function keptRecords(sessions: SpawnedSession[], now: number): SpawnedSession[] {
+  return sessions.filter((s) => !s.stoppedAt || now - Date.parse(s.stoppedAt) <= STOPPED_RECORD_KEEP_MS);
+}
+
+export function recordSpawnedSession(stateDir: string, session: SpawnedSession, opts: { now?: number; supersedes?: string } = {}): void {
   mkdirSync(stateDir, { recursive: true });
   withRecordsLock(stateDir, () => {
-    // A session now running supersedes whatever was stopped before it: it
-    // is either that conversation resumed or the one chosen in its place,
-    // and a workspace has one started session to resume, not a history.
-    const rest = readSpawnedSessions(stateDir).filter((s) => !s.stoppedAt && s.pid !== session.pid && s.id !== session.id);
-    writeSpawnedSessions(stateDir, [...rest, session]);
+    // A session now running supersedes the stopped one of its name: it is
+    // either that conversation resumed (`supersedes`, the record it was
+    // resumed from) or the one chosen in its place. The sessions of other
+    // names keep their records, stopped ones too: each is resumed by its
+    // own name.
+    const rest = readSpawnedSessions(stateDir).filter((s) =>
+      s.pid !== session.pid && s.id !== session.id && s.id !== opts.supersedes && !(s.stoppedAt && s.name === session.name));
+    writeSpawnedSessions(stateDir, keptRecords([...rest, session], opts.now ?? Date.now()));
   });
 }
 
 /** Keep a stopped session's record, marked as stopped, so its conversation
- *  can be resumed. Only the latest stopped session is kept. */
+ *  can be resumed. One stopped record is kept per name: the latest. */
 export function markSpawnedSessionStopped(stateDir: string, id: string, when: Date = new Date()): void {
   if (!existsSync(spawnedSessionsFile(stateDir))) return;
   withRecordsLock(stateDir, () => {
     const all = readSpawnedSessions(stateDir);
     const mine = all.find((s) => s.id === id);
     if (!mine) return;
-    const running = all.filter((s) => !s.stoppedAt && s.id !== id);
+    const others = all.filter((s) => s.id !== id && !(s.stoppedAt && s.name === mine.name));
     // Without a session id there is nothing to resume by.
-    writeSpawnedSessions(stateDir, mine.sessionId ? [...running, { ...mine, stoppedAt: when.toISOString() }] : running);
+    writeSpawnedSessions(stateDir, keptRecords(mine.sessionId ? [...others, { ...mine, stoppedAt: when.toISOString() }] : others, when.getTime()));
   });
 }
 
@@ -421,14 +443,27 @@ export function updateSpawnedSessionProcess(stateDir: string, id: string, pid: n
   });
 }
 
-/** The stopped session the next `send` should resume, if any: the one this
- *  workspace recorded, stopped no longer than `windowSec` ago. */
+/** The stopped session a plain `send` picks up again, if any: the
+ *  workspace's default session — the one with no label — stopped no longer
+ *  than `windowSec` ago. A labelled session is resumed only when asked for
+ *  (`stoppedSessions`). */
 export function resumableSession(stateDir: string, windowSec: number, now: number = Date.now()): SpawnedSession | null {
   if (!(windowSec > 0)) return null;
-  const stopped = readSpawnedSessions(stateDir)
-    .filter((s) => s.stoppedAt && s.sessionId && now - Date.parse(s.stoppedAt) <= windowSec * 1000)
+  return stoppedSessions(stateDir, now).find((s) => !s.label && now - Date.parse(s.stoppedAt!) <= windowSec * 1000) ?? null;
+}
+
+/** Every stopped session of this workspace whose conversation may still be
+ *  resumed, latest first. */
+export function stoppedSessions(stateDir: string, now: number = Date.now()): SpawnedSession[] {
+  return keptRecords(readSpawnedSessions(stateDir), now)
+    .filter((s) => s.stoppedAt && s.sessionId)
     .sort((a, b) => Date.parse(b.stoppedAt!) - Date.parse(a.stoppedAt!));
-  return stopped[0] ?? null;
+}
+
+/** The stopped session a name or a label asks for, whenever it stopped. */
+export function stoppedSessionNamed(stateDir: string, name: string, now: number = Date.now()): SpawnedSession | null {
+  const needle = name.toLowerCase();
+  return stoppedSessions(stateDir, now).find((s) => s.name === name || s.label === needle) ?? null;
 }
 
 export function forgetSpawnedSession(stateDir: string, id: string): void {
@@ -442,18 +477,38 @@ export function forgetSpawnedSession(stateDir: string, id: string): void {
 
 // ─── Starting a session ─────────────────────────────────────────────────────
 
+/** The longest label a session can be given. The whole name has forty
+ *  characters, `claude(` … `-<hash6>)` takes sixteen of them, and a label
+ *  this long still leaves the workspace eight. */
+export const MAX_LABEL_LENGTH = 16;
+
+/** What a label must be, said to whoever gave one that is not. */
+export const LABEL_RULE = `lowercase letters, digits and dashes, starting with a letter and not ending with a dash, at most ${MAX_LABEL_LENGTH} characters, and not eight hex characters (a task id looks like that)`;
+
+/** The label as it is kept (lowercase), or null when it cannot be one. No
+ *  spaces: a label goes where a session's name goes, before the message. And
+ *  never the shape of a task id, which goes there too. */
+export function sessionLabel(given: string): string | null {
+  const label = given.toLowerCase();
+  if (label.length > MAX_LABEL_LENGTH || !/^[a-z](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) return null;
+  if (/^[0-9a-f]{8}$/.test(label)) return null;
+  return label;
+}
+
 /** The name a session codex-collab starts for this workspace registers
- *  under: claude(<workspace>-<hash6>), the mirror of the broker's
- *  codex(<workspace>-<hash6>) front door. */
-export function spawnedSessionName(cwd: string): string {
+ *  under: claude(<workspace>-<hash6>) for the default session, the mirror
+ *  of the broker's codex(<workspace>-<hash6>) front door, and
+ *  claude(<workspace>-<label>-<hash6>) for one with a label. */
+export function spawnedSessionName(cwd: string, label?: string): string {
   // Same derivation as the broker's front door (peerNameFor): the readable
-  // half names the workspace ROOT, and the hash is never truncated.
+  // half names the workspace ROOT, and neither the label nor the hash is
+  // ever cut: the workspace's part gives way.
   const dir = basename(resolveWorkspaceDir(cwd))
     .replace(/[^a-zA-Z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  const suffix = workspaceSuffix(cwd);
-  const room = 40 - "claude()".length - suffix.length - 1;
-  return `claude(${(dir || "workspace").slice(0, room)}-${suffix})`;
+  const tail = label ? `${label}-${workspaceSuffix(cwd)}` : workspaceSuffix(cwd);
+  const room = 40 - "claude()".length - tail.length - 1;
+  return `claude(${(dir || "workspace").slice(0, room)}-${tail})`;
 }
 
 /** The first task a spawned session runs: what it is, who will write to
@@ -740,8 +795,12 @@ export interface SpawnClaudeOptions {
   effort?: string;
   /** `claude --autocompact`; the default when left out. */
   autocompact?: string;
-  /** A stopped session (see `resumableSession`) to continue instead of
-   *  starting a new one: same conversation, new process. */
+  /** The label of the session to start (`send --new --name`); none for the
+   *  workspace's default session. A resumed session keeps its own. */
+  label?: string;
+  /** A stopped session (see `resumableSession`, `stoppedSessionNamed`) to
+   *  continue instead of starting a new one: same conversation and name,
+   *  new process. */
   resume?: SpawnedSession;
   /** `config spawn-trust`: with `codex`, a folder Claude Code refuses is
    *  marked trusted in Claude Code when Codex trusts it, and tried again. */
@@ -760,7 +819,8 @@ export interface SpawnClaudeOptions {
  *  for Codex when the session cannot be started or never registers. */
 export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<ClaudeSession> {
   const wsRoot = resolveWorkspaceDir(opts.cwd);
-  const name = spawnedSessionName(opts.cwd);
+  const label = opts.resume ? opts.resume.label : opts.label;
+  const name = spawnedSessionName(opts.cwd, label);
   const lingerSec = opts.lingerSec ?? DEFAULT_SPAWN_LINGER_SEC;
   const bin = opts.claudeBin ?? "claude";
   // The model and effort are the caller's to choose, because the user pays
@@ -846,8 +906,8 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   // it against later entries, and a start time computed here could be in the
   // other representation (see procIdentity) — every entry would then read
   // as someone else's, and the session would be forgotten, never stopped.
-  const record: SpawnedSession = { id, pid: session.pid, name, startedAt: new Date().toISOString(), lingerSec, procStart: session.procStart ?? undefined, sessionId: session.sessionId, model: opts.model, effort: opts.effort };
-  recordSpawnedSession(opts.stateDir, record);
+  const record: SpawnedSession = { id, pid: session.pid, name, ...(label ? { label } : {}), startedAt: new Date().toISOString(), lingerSec, procStart: session.procStart ?? undefined, sessionId: session.sessionId, model: opts.model, effort: opts.effort };
+  recordSpawnedSession(opts.stateDir, record, { supersedes: opts.resume?.id });
   (opts.startReaper ?? startReaper)(record, opts.cwd);
   return { ...session, spawned: record };
 }

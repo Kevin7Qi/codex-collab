@@ -39,6 +39,7 @@ import {
   resumableSession,
   resumedSessionBrief,
   runReaper,
+  sessionLabel,
   sessionStatusNow,
   SPAWN_MAX_LIFETIME_SEC,
   spawnClaudeSession,
@@ -46,6 +47,9 @@ import {
   spawnEnv,
   spawnedSessionBrief,
   spawnedSessionName,
+  STOPPED_RECORD_KEEP_MS,
+  stoppedSessionNamed,
+  stoppedSessions,
   stopSpawnedSession,
   setProcProbesForTests,
   setProcStartReaderForTests,
@@ -385,6 +389,21 @@ describeUnix("resolveSession", () => {
     expect(r.ambiguous.map((s) => s.name)).toEqual(["Explore messaging", "explore-two"]);
     expect(resolveSession(sessions, "nobody")).toEqual({ session: null, ambiguous: [] });
   });
+
+  test("a session codex-collab started answers to its label, in any case, before any prefix is tried", () => {
+    const record = (label?: string): SpawnedSession => ({ id: "aaaa1111", pid: 1, name: "n", startedAt: "t", lingerSec: 60, ...(label ? { label } : {}) });
+    const own = [
+      { ...sessions[2], spawned: record() },
+      { ...sessions[2], name: "claude(ws-a-docs-abc123)", spawned: record("docs") },
+      // A user's session that happens to begin with the same word.
+      { ...sessions[0], name: "docs for the release" },
+    ];
+    expect(resolveSession(own, "docs").session?.name).toBe("claude(ws-a-docs-abc123)");
+    expect(resolveSession(own, "Docs").session?.name).toBe("claude(ws-a-docs-abc123)");
+    // The default session has no label; it is found by its name, as before.
+    expect(resolveSession(own, "claude(ws-a-abc123)").session?.spawned?.label).toBeUndefined();
+    expect(resolveSession(own, "claude(ws-a-").ambiguous.map((s) => s.name)).toEqual(["claude(ws-a-abc123)", "claude(ws-a-docs-abc123)"]);
+  });
 });
 
 describeUnix("spawned-session records", () => {
@@ -436,6 +455,41 @@ describeUnix("stopped sessions and resuming", () => {
     markSpawnedSessionStopped(stateDir, "nope");
     markSpawnedSessionStopped(join(root, "state-never"), "nope");
     expect(existsSync(join(root, "state-never"))).toBe(false);
+  });
+
+  test("each name keeps its own stopped session: a plain send resumes the default one, and any is found by its name or label", () => {
+    const stateDir = join(root, "state-named");
+    const now = Date.parse("2026-11-21T12:00:00.000Z");
+    const ago = (min: number) => new Date(now - min * 60_000);
+    recordSpawnedSession(stateDir, rec("aaaa1111", { pid: 5001 }));
+    recordSpawnedSession(stateDir, rec("bbbb2222", { pid: 5002, name: "claude(ws-a-docs-x)", label: "docs" }));
+    recordSpawnedSession(stateDir, rec("cccc3333", { pid: 5003, name: "claude(ws-a-tests-x)", label: "tests" }));
+    markSpawnedSessionStopped(stateDir, "aaaa1111", ago(30));
+    markSpawnedSessionStopped(stateDir, "bbbb2222", ago(20));
+    // Stopping one leaves the others' records as they are, running or stopped.
+    expect(readSpawnedSessions(stateDir).map((s) => [s.id, !!s.stoppedAt])).toEqual([["cccc3333", false], ["aaaa1111", true], ["bbbb2222", true]]);
+    expect(stoppedSessions(stateDir, now).map((s) => s.id)).toEqual(["bbbb2222", "aaaa1111"]);
+    // A plain send means the default session, though a labelled one stopped later.
+    expect(resumableSession(stateDir, 3600, now)?.id).toBe("aaaa1111");
+    // By label, in any case, or by full name; whenever it stopped.
+    expect(stoppedSessionNamed(stateDir, "docs", now)?.id).toBe("bbbb2222");
+    expect(stoppedSessionNamed(stateDir, "DOCS", now)?.id).toBe("bbbb2222");
+    expect(stoppedSessionNamed(stateDir, "claude(ws-a-docs-x)", now)?.id).toBe("bbbb2222");
+    expect(stoppedSessionNamed(stateDir, "claude(ws-a-x)", now + 10 * 24 * 3600_000)?.id).toBe("aaaa1111");
+    expect(resumableSession(stateDir, 3600, now + 10 * 24 * 3600_000)).toBeNull();
+    // A running session is not a stopped one, and nobody is not anybody.
+    expect(stoppedSessionNamed(stateDir, "tests", now)).toBeNull();
+    expect(stoppedSessionNamed(stateDir, "nobody", now)).toBeNull();
+    // Started again under its name, a session takes the place of its own
+    // stopped record only.
+    recordSpawnedSession(stateDir, rec("dddd4444", { pid: 5004, name: "claude(ws-a-docs-x)", label: "docs" }), { now });
+    expect(readSpawnedSessions(stateDir).map((s) => s.id).sort()).toEqual(["aaaa1111", "cccc3333", "dddd4444"]);
+    // Past the time Claude Code keeps a conversation, a stopped record is
+    // no longer offered, and goes at the next write.
+    const later = now + STOPPED_RECORD_KEEP_MS + 3600_000;
+    expect(stoppedSessions(stateDir, later)).toEqual([]);
+    recordSpawnedSession(stateDir, rec("eeee5555", { pid: 5005, name: "claude(ws-a-more-x)", label: "more" }), { now: later });
+    expect(readSpawnedSessions(stateDir).map((s) => s.id).sort()).toEqual(["cccc3333", "dddd4444", "eeee5555"]);
   });
 
   test("a stopped record's pid never marks a live session as ours", () => {
@@ -571,6 +625,27 @@ describeUnix("spawn helpers", () => {
   test("spawnedSessionName mirrors the front door's shape", () => {
     expect(spawnedSessionName(wsA)).toMatch(/^claude\(ws-a-[0-9a-f]{6}\)$/);
     expect(spawnedSessionName(join(wsA, "sub"))).toBe(spawnedSessionName(wsA));
+    // A label goes between the workspace and the hash, and is never cut: the
+    // workspace's part gives way to keep the name within forty characters.
+    expect(spawnedSessionName(wsA, "docs")).toMatch(/^claude\(ws-a-docs-[0-9a-f]{6}\)$/);
+    const long = join(root, "a-workspace-with-quite-a-long-name");
+    mkdirSync(long, { recursive: true });
+    const longest = spawnedSessionName(long, "sixteen-chars-ab");
+    expect(longest).toMatch(/^claude\(a-worksp-sixteen-chars-ab-[0-9a-f]{6}\)$/);
+    expect(longest.length).toBe(40);
+    expect(spawnedSessionName(long).length).toBe(40);
+  });
+
+  test("a label is lowercase letters, digits and dashes, short, and never shaped like a task id", () => {
+    for (const ok of ["docs", "login-bug", "review2", "a", "sixteen-chars-ab"]) expect(sessionLabel(ok)).toBe(ok);
+    // Given in capitals, it is kept in lowercase.
+    expect(sessionLabel("Login-Bug")).toBe("login-bug");
+    for (const bad of ["", "login bug", "fix_it", "-x", "x-", "2fast", "a.b", "a/b", "seventeen-chars-a", "deadbeef", "DEADBEEF", "cafe0001"]) {
+      expect(sessionLabel(bad)).toBeNull();
+    }
+    // Hex of another length is no task id.
+    expect(sessionLabel("cafe")).toBe("cafe");
+    expect(sessionLabel("deadbeef0")).toBe("deadbeef0");
   });
 
   test("spawnEnv drops the Claude child markers and Codex's command markers, nothing else", () => {
