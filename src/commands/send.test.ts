@@ -1146,7 +1146,7 @@ describeUnix("send", () => {
     }
   });
 
-  test("the model and effort Codex chooses reach the session it starts, ahead of the configured default", async () => {
+  test("the model and effort Codex chooses reach the session it starts, ahead of the configured default, and restart an idle one that runs on another", async () => {
     await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-spawn-choice");
     const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
@@ -1161,15 +1161,50 @@ describeUnix("send", () => {
       expect(args[args.indexOf("--model") + 1]).toBe("opus");
       expect(args[args.indexOf("--effort") + 1]).toBe("high");
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ model: "opus", effort: "high" }));
-      // The session is live now, and what it runs on is fixed: `peers` shows
-      // what it was asked for, and a different choice on a later send is
-      // reported, not dropped.
+      // The session is live now: `peers` shows what it was asked for.
+      const env = { PATH: `${binDir}:${process.env.PATH}` };
+      const lastArgs = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+      const bgs = () => readFileSync(join(binDir, "bg.log"), "utf-8");
+      const entryOf = () => readdirSync(REGISTRY).map((f) => join(REGISTRY, f)).find((f) => {
+        const e = JSON.parse(readFileSync(f, "utf-8"));
+        try { process.kill(e.pid, 0); return e.name === fake.name; } catch { return false; }
+      })!;
       const listed = await runCli(["peers"]);
       expect(listed.stdout).toContain("started by codex-collab · asked for opus, high effort");
-      const again = await runCli(["send", "quick lookup", "-m", "haiku", "-r", "low"], { PATH: `${binDir}:${process.env.PATH}` });
+      // The same choice again changes nothing, and says nothing.
+      const same = await runCli(["send", "and this", "-m", "opus", "-r", "high"], env);
+      expect(same.code).toBe(0);
+      expect(same.stdout).not.toContain("Restart");
+      expect(bgs()).toBe("bg\n");
+      // In a turn, it is not stopped under its work: refused, nothing sent.
+      const idle = readFileSync(entryOf(), "utf-8");
+      writeFileSync(entryOf(), JSON.stringify({ ...JSON.parse(idle), status: "busy" }));
+      const busy = await runCli(["send", "quick lookup", "-m", "haiku"], env);
+      expect(busy.code).toBe(1);
+      expect(busy.stderr).toContain(`${fake.name} runs on opus, high effort, and cannot be restarted on haiku, high effort now: it is in a turn.`);
+      expect(bgs()).toBe("bg\n");
+      writeFileSync(entryOf(), idle);
+      const before = fake.received.length;
+      // Idle, it is stopped and resumed on the new choice, with its
+      // conversation, and then given the message.
+      const again = await runCli(["send", "quick lookup", "-m", "haiku", "-r", "low"], env);
       expect(again.code).toBe(0);
-      expect(again.stdout).toContain(`${fake.name} is already running on opus, high effort: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`);
-      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
+      expect(again.stdout).toContain(`Restarting ${fake.name} on haiku, low effort, with its conversation so far (it ran on opus, high effort)…`);
+      expect(again.stdout).toContain(`Restarted ${fake.name} on haiku, low effort (its conversation so far is intact; it ran on opus, high effort;`);
+      expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
+      expect(bgs()).toBe("bg\nbg\n");
+      expect(lastArgs()[lastArgs().indexOf("--resume") + 1]).toBe("s");
+      expect(lastArgs()[lastArgs().indexOf("--model") + 1]).toBe("haiku");
+      expect(lastArgs()[lastArgs().indexOf("--effort") + 1]).toBe("low");
+      expect(fake.received.length).toBe(before + 1);
+      expect(spawnedRecords()).toEqual([expect.objectContaining({ model: "haiku", effort: "low" })]);
+      // Only one of the two given: the other stays as it was.
+      const effortOnly = await runCli(["send", "think harder", "-r", "max"], env);
+      expect(effortOnly.code).toBe(0);
+      expect(effortOnly.stdout).toContain(`Restarted ${fake.name} on haiku, max effort`);
+      expect(lastArgs()[lastArgs().indexOf("--model") + 1]).toBe("haiku");
+      expect(lastArgs()[lastArgs().indexOf("--effort") + 1]).toBe("max");
+      expect(bgs()).toBe("bg\nbg\nbg\n");
     } finally {
       removeConfig();
       killFakeSleepers(binDir);

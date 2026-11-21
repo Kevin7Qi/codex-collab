@@ -51,6 +51,7 @@ import {
   isClaudeEffort,
   isModelName,
   isSpawnEffortSetting,
+  jobHasWorkInFlight,
   LABEL_RULE,
   listClaudeSessions,
   markSpawnedSessionStopped,
@@ -74,7 +75,7 @@ import {
   type SpawnedSession,
 } from "../claude-sessions";
 import { conversationMovedSince, describeRanOn, describeTrouble, firstSaidSince, ranOn, turnEndedOnError, turnTrouble, type RanOn } from "../claude-transcript";
-import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord } from "../claude-tasks";
+import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord, outstandingTasksFor } from "../claude-tasks";
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
 import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from "../claude-trust";
@@ -389,8 +390,10 @@ export function resumeWindowSec(cfg: UserConfig): number {
 }
 
 /** What to tell Codex when it chose a model or effort for a session that
- *  was already running: the choice is made at start and cannot change after.
- *  null when what it asked for is what the session was started on anyway.
+ *  was already running, and the choice did not apply: the session is the
+ *  user's own, or starting sessions is off, so one codex-collab started was
+ *  not restarted on it. null when what it asked for is what the session was
+ *  started on anyway.
  *  What the session runs on is its transcript's word, where it has replied
  *  (`ran`, a test seam), else what it was started on. */
 export function choiceNotAppliedNote(target: ClaudeSession, askedModel?: string, askedEffort?: string, ran: RanOn | null = ranOn(target.sessionId)): string | null {
@@ -400,6 +403,59 @@ export function choiceNotAppliedNote(target: ClaudeSession, askedModel?: string,
   const { model, effort } = target.spawned;
   if ((askedModel === undefined || askedModel === model) && (askedEffort === undefined || askedEffort === effort)) return null;
   return `${target.name} is already running on ${ran ? describeRanOn(ran) : describeModelChoice(model, effort)}: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`;
+}
+
+/** What a session `send` starts runs with, as the user's config has it: the
+ *  linger, the model and effort where nothing is asked for, the compaction
+ *  window, and whether Codex's trust in a folder is carried over. A setting
+ *  that cannot be used is said so once, and the default stands in. */
+function spawnSettings(cfg: UserConfig): { lingerSec: number; model?: string; effort?: string; autocompact?: string; spawnTrust: SpawnTrustSetting } {
+  let lingerSec = DEFAULT_SPAWN_LINGER_SEC;
+  if (cfg.linger !== undefined) {
+    if (typeof cfg.linger === "number" && Number.isInteger(cfg.linger) && cfg.linger > 0 && cfg.linger <= MAX_TIMEOUT_SECONDS) {
+      lingerSec = cfg.linger;
+    } else {
+      console.error(`[codex] Warning: ignoring invalid linger in config: ${cfg.linger}`);
+    }
+  }
+  let model: string | undefined;
+  if (cfg["spawn-model"] !== undefined) {
+    if (isModelName(cfg["spawn-model"])) model = cfg["spawn-model"];
+    else console.error(`[codex] Warning: ignoring invalid spawn-model in config: ${cfg["spawn-model"]}`);
+  }
+  // The effort: the configured default, then ours (DEFAULT_SPAWN_EFFORT);
+  // `spawn-effort auto` passes none.
+  if (cfg["spawn-effort"] !== undefined && !isSpawnEffortSetting(cfg["spawn-effort"])) {
+    console.error(`[codex] Warning: ignoring invalid spawn-effort in config: ${cfg["spawn-effort"]}`);
+  }
+  const effort = spawnEffortFor(cfg["spawn-effort"]);
+  let autocompact: string | undefined;
+  if (cfg["spawn-autocompact"] !== undefined) {
+    if (isAutocompactWindow(cfg["spawn-autocompact"])) autocompact = cfg["spawn-autocompact"];
+    else console.error(`[codex] Warning: ignoring invalid spawn-autocompact in config: ${cfg["spawn-autocompact"]}`);
+  }
+  // Off unless the user turned it on: anything else carries nothing over.
+  let spawnTrust: SpawnTrustSetting = "off";
+  if (cfg["spawn-trust"] !== undefined) {
+    if (isSpawnTrustSetting(cfg["spawn-trust"])) spawnTrust = cfg["spawn-trust"];
+    else console.error(`[codex] Warning: ignoring invalid spawn-trust in config: ${cfg["spawn-trust"]}`);
+  }
+  return { lingerSec, model, effort, autocompact, spawnTrust };
+}
+
+/** Why a session codex-collab started cannot be stopped and resumed on
+ *  another model or effort right now, or null when it is idle with nothing
+ *  waiting on it. */
+function restartBlocker(target: ClaudeSession, ours: SpawnedSession, stateDir: string): string | null {
+  if (!ours.sessionId) return "Claude Code gave it no session id, so its conversation could not be resumed";
+  const status = sessionStatusNow(target.pid) ?? target.status;
+  if (status !== "idle") {
+    return status === "busy" ? "it is in a turn" : status === "waiting" ? "it is at a prompt" : status === "shell" ? "a command of its own is still running" : `it reports ${status}`;
+  }
+  if (jobHasWorkInFlight(ours.id)) return "it has work in flight";
+  const waiting = outstandingTasksFor(stateDir, { pid: target.pid, sessionId: target.sessionId });
+  if (waiting.length > 0) return `${waiting.length === 1 ? "a task still waits" : `${waiting.length} tasks still wait`} on its reply (${waiting.map((t) => t.id).join(", ")})`;
+  return null;
 }
 
 export async function handleSend(args: string[]): Promise<void> {
@@ -544,41 +600,13 @@ export async function handleSend(args: string[]): Promise<void> {
       }
       die(notLive + (cfg.spawn === "off" ? " (starting one is off: `codex-collab config spawn on` enables it)." : " (--no-spawn)."));
     }
-    let lingerSec = DEFAULT_SPAWN_LINGER_SEC;
-    if (cfg.linger !== undefined) {
-      if (typeof cfg.linger === "number" && Number.isInteger(cfg.linger) && cfg.linger > 0 && cfg.linger <= MAX_TIMEOUT_SECONDS) {
-        lingerSec = cfg.linger;
-      } else {
-        console.error(`[codex] Warning: ignoring invalid linger in config: ${cfg.linger}`);
-      }
-    }
+    const set = spawnSettings(cfg);
+    const { lingerSec, autocompact, spawnTrust } = set;
     // Flag, then the user's configured default, then nothing — which leaves
-    // the session on the user's Claude Code default model.
-    let model = askedModel;
-    if (model === undefined && cfg["spawn-model"] !== undefined) {
-      if (isModelName(cfg["spawn-model"])) model = cfg["spawn-model"];
-      else console.error(`[codex] Warning: ignoring invalid spawn-model in config: ${cfg["spawn-model"]}`);
-    }
-    // The effort: flag, then the configured default, then ours
-    // (DEFAULT_SPAWN_EFFORT); `spawn-effort auto` passes none.
-    let effort: string | undefined = askedEffort;
-    if (effort === undefined) {
-      if (cfg["spawn-effort"] !== undefined && !isSpawnEffortSetting(cfg["spawn-effort"])) {
-        console.error(`[codex] Warning: ignoring invalid spawn-effort in config: ${cfg["spawn-effort"]}`);
-      }
-      effort = spawnEffortFor(cfg["spawn-effort"]);
-    }
-    let autocompact: string | undefined;
-    if (cfg["spawn-autocompact"] !== undefined) {
-      if (isAutocompactWindow(cfg["spawn-autocompact"])) autocompact = cfg["spawn-autocompact"];
-      else console.error(`[codex] Warning: ignoring invalid spawn-autocompact in config: ${cfg["spawn-autocompact"]}`);
-    }
-    // Off unless the user turned it on: anything else carries nothing over.
-    let spawnTrust: SpawnTrustSetting = "off";
-    if (cfg["spawn-trust"] !== undefined) {
-      if (isSpawnTrustSetting(cfg["spawn-trust"])) spawnTrust = cfg["spawn-trust"];
-      else console.error(`[codex] Warning: ignoring invalid spawn-trust in config: ${cfg["spawn-trust"]}`);
-    }
+    // the session on the user's Claude Code default model. The effort: flag,
+    // then the configured default, then ours.
+    const model = askedModel ?? set.model;
+    const effort = askedEffort ?? set.effort;
     // One spawn per workspace at a time: two sends racing here would each
     // start a session under the same name. The second waits, then finds the
     // first's session live and uses it.
@@ -664,12 +692,63 @@ export async function handleSend(args: string[]): Promise<void> {
     }
   }
 
-  // A model or effort Codex chose applies only to a session started just
-  // now. Where it could not apply, say so: Codex should know what it is
-  // actually talking to before it weighs the reply.
+  // A model or effort Codex chose for a session that is running already. One
+  // codex-collab started, idle, is stopped and resumed on the new choice,
+  // with its conversation: the choice is made when a session starts, and a
+  // resumed one is a new process. Whichever of the two is not given stays as
+  // it was. In a turn it is refused, since stopping it would lose the turn.
+  // A user's own session keeps what they chose; Codex is told, so that it
+  // knows what it is talking to before it weighs the reply.
   if (!startedHere && (askedModel !== undefined || askedEffort !== undefined)) {
-    const note = choiceNotAppliedNote(target, askedModel, askedEffort);
-    if (note) notes.push(note);
+    const ours = target.spawned;
+    const model = askedModel ?? ours?.model;
+    const effort = askedEffort ?? ours?.effort;
+    const cfg = loadUserConfig();
+    if (ours && (model !== ours.model || effort !== ours.effort) && !options.noSpawn && cfg.spawn !== "off") {
+      const choice = describeModelChoice(model, effort);
+      const was = describeModelChoice(ours.model, ours.effort);
+      const refuse = (why: string): string =>
+        `${target.name} runs on ${was}, and cannot be restarted on ${choice} now: ${why}.\nSend again once it is idle, or leave --model and --effort out to message it as it runs.`;
+      const blocked = restartBlocker(target, ours, stateDir);
+      if (blocked) die(refuse(blocked));
+      let release: () => void;
+      try {
+        release = await acquireLockAsync(join(stateDir, "spawn.lock"), { maxAttempts: 2000, staleThresholdMs: 120_000 });
+      } catch {
+        die("Another `codex-collab send` is still starting a Claude Code session for this workspace — retry in a moment.");
+      }
+      const fail = (message: string): never => {
+        release();
+        return die(message);
+      };
+      try {
+        // Looked at again under the lock: a message may have reached it since.
+        const again = restartBlocker(target, ours, stateDir);
+        if (again) fail(refuse(again));
+        console.log(`Restarting ${target.name} on ${choice}, with its conversation so far (it ran on ${was})…`);
+        const { gone, signalled } = await stopSpawnedSession(ours);
+        if (!gone) {
+          fail(`${target.name} is still running on ${was}: \`claude stop\` did not take, and ${signalled
+            ? "the session came back after a signal"
+            : "its process could not be verified as one codex-collab started, so no signal was sent"}. Nothing was sent.${sandboxHint()}`);
+        }
+        markSpawnedSessionStopped(stateDir, ours.id);
+        const record = stoppedSessionNamed(stateDir, target.name) ?? fail(`${target.name} was stopped, and its record is gone: nothing was sent.`);
+        const set = spawnSettings(cfg);
+        try {
+          target = await spawnClaudeSession({ cwd, stateDir, lingerSec: set.lingerSec, model, effort, autocompact: set.autocompact, spawnTrust: set.spawnTrust, resume: record });
+        } catch (e) {
+          fail(`${record.name} was stopped to restart it on ${choice}, and could not be resumed: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}\nIts conversation is kept: \`codex-collab send ${JSON.stringify(record.label ?? record.name)} "…"\` tries again. Nothing was sent.`);
+        }
+        notes.push(`Restarted ${target.name} on ${choice} (its conversation so far is intact; it ran on ${was}; it stops after ${formatDuration(set.lingerSec * 1000)} idle).`);
+        startedHere = true;
+      } finally {
+        release();
+      }
+    } else {
+      const note = choiceNotAppliedNote(target, askedModel, askedEffort);
+      if (note) notes.push(note);
+    }
   }
 
   // ── Record the task, and hand it to a receiver of its own ──
