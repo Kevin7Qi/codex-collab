@@ -1500,8 +1500,16 @@ describeUnix("send", () => {
       expect(nobody.stderr).toContain(`Stopped, and resumed by name: `);
       expect(nobody.stderr).toContain(`To start one with that label: codex-collab send --new --name tests "…"`);
       // The labelled one is resumed by its label, with its own conversation;
-      // the default one stays stopped.
+      // the default one stays stopped. A session of the user's own whose
+      // name merely begins with the label is not taken for it.
+      const users = startFake("docs-of-the-user", { reply: () => "not for me" });
+      registerFake(users);
       const resumed = await runCli(["send", "docs", "pick it up"], env);
+      expect(users.received).toHaveLength(0);
+      users.stop();
+      for (const f of readdirSync(REGISTRY)) {
+        if (JSON.parse(readFileSync(join(REGISTRY, f), "utf-8")).name === users.name) unlinkSync(join(REGISTRY, f));
+      }
       expect(resumed.code).toBe(0);
       expect(resumed.stdout).toContain(`${docs.name} is not live — resuming ${docs.name}`);
       expect(resumed.stdout).toContain("docs says: pick it up");
