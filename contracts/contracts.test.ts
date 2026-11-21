@@ -4,8 +4,12 @@
 //
 // Opt-in: `CODEX_COLLAB_CONTRACTS=1 bun test contracts/` — requires the real
 // `codex` CLI (Codex contracts spend a few trivial model turns) and, for the
-// registry contracts, the real `claude` CLI. The registry contracts write
-// probe entries into the REAL ~/.claude/sessions and remove them in cleanup.
+// Claude contracts, the real `claude` CLI. The registry contracts write probe
+// entries into the REAL ~/.claude/sessions and remove them in cleanup; the
+// background-session contracts start two background sessions in the current
+// folder (which Claude Code must trust) — one trivial Sonnet turn at low
+// effort, and one on a model that does not exist, which no model runs — and
+// stop, remove and delete them afterwards, transcripts included.
 //
 // What is pinned, and where it came from (see docs/interfaces.md):
 //   codex: thread/start accepts dynamicTools + developerInstructions;
@@ -14,10 +18,21 @@
 //          item/tool/call delivers plaintext arguments and returns results.
 //   claude: a registry entry lists only while its pid names a live process
 //          whose procStart matches exactly; socket path is NOT validated.
+//          A background session's entry is `kind: "bg"` with its `jobId`,
+//          `procStart`, `sessionId` and a `status` of busy/idle/waiting/shell;
+//          its job's state.json names the same session, and a finished turn
+//          leaves it `state: "done"`, `tempo` not active, and `inFlight`
+//          counts (tasks, queued, kinds, drainableMonitors) of no work;
+//          `claude stop` retires it with no signal needed. Its transcript's
+//          replies carry `message.model` (an alias resolved to a version)
+//          and the `effort` sent. An API error is a reply with
+//          `isApiErrorMessage`, `apiErrorStatus` and `error` (the reason),
+//          made up by Claude Code (`message.model: "<synthetic>"`), and its
+//          job ends `state: "failed"`.
 
 import { describe, expect, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { connectDirect } from "../src/client";
@@ -25,7 +40,9 @@ import { modelAliasTargets } from "../src/config";
 import { fetchAllPages, resolveModelDefaults } from "../src/models";
 import type { AppServerClient } from "../src/client";
 import type { Model } from "../src/types";
-import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS, procStartOf, buildRegistryEntry, sniffRegistryVersion } from "../src/peer";
+import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS, procStartOf, buildRegistryEntry, sniffRegistryVersion, sessionsDir } from "../src/peer";
+import { SPAWN_PERMISSION_MODE, SPAWN_SETTINGS, jobHasWorkInFlight, jobSessionId, jobsDir, listClaudeSessions, parseBackgroundId, sessionStatusNow, spawnEnv, stopSpawnedSession } from "../src/claude-sessions";
+import { ranOn, transcriptPath, turnEndedOnError } from "../src/claude-transcript";
 
 const ENABLED = process.env.CODEX_COLLAB_CONTRACTS === "1";
 
@@ -278,4 +295,122 @@ describe.skipIf(!ENABLED || registryBlocked !== null)("claude session-registry c
       impostor.kill();
     }
   }, 30_000);
+});
+
+describe.skipIf(!ENABLED || registryBlocked !== null)("claude background-session contracts", () => {
+  /** Start a background session as codex-collab does (`spawnClaudeSession`),
+   *  on `model`, with one short instruction. Its job id. */
+  function startBackground(name: string, model: string, effort?: string): string {
+    const out = execFileSync(
+      "claude",
+      ["--bg", "-n", name, "--permission-mode", SPAWN_PERMISSION_MODE, "--settings", JSON.stringify(SPAWN_SETTINGS), "--model", model, ...(effort ? ["--effort", effort] : []), "Reply with the word OK and nothing else. Use no tools."],
+      { cwd: process.cwd(), env: spawnEnv(), encoding: "utf-8", timeout: 60_000, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const id = parseBackgroundId(out);
+    if (!id) throw new Error(`no job id in what \`claude --bg\` printed: ${out}`);
+    return id;
+  }
+
+  /** Leave nothing of a probe behind: the job, and its transcript. */
+  function removeJob(id: string, sessionId: string | null): void {
+    for (const verb of ["stop", "rm"]) {
+      try { execFileSync("claude", [verb, id], { env: spawnEnv(), stdio: "ignore", timeout: 15_000 }); } catch { /* stopped, or gone */ }
+    }
+    const transcript = sessionId ? transcriptPath(sessionId) : null;
+    if (transcript) {
+      rmSync(transcript, { force: true });
+      rmSync(transcript.replace(/\.jsonl$/, ""), { recursive: true, force: true });
+    }
+  }
+
+  function jobState(id: string): Record<string, unknown> | null {
+    try { return JSON.parse(readFileSync(join(jobsDir(), id, "state.json"), "utf-8")); } catch { return null; }
+  }
+
+  function registryEntryOf(id: string): Record<string, unknown> | null {
+    for (const file of readdirSync(sessionsDir())) {
+      if (!file.endsWith(".json")) continue;
+      try {
+        const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
+        if (entry?.jobId === id) return entry;
+      } catch { /* half-written, or not an entry */ }
+    }
+    return null;
+  }
+
+  async function until<T>(look: () => T | null | undefined | false, ms: number, what: string): Promise<T> {
+    const end = Date.now() + ms;
+    for (;;) {
+      const seen = look();
+      if (seen) return seen;
+      if (Date.now() > end) throw new Error(`waited ${ms / 1000}s for ${what}`);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  test("a background session's registry entry, job state and transcript say what codex-collab reads of them", async () => {
+    const name = `contract-bg-${process.pid}`;
+    const id = startBackground(name, "sonnet", "low");
+    let sessionId: string | null = null;
+    try {
+      // The registry entry: a background session, naming its job, with what
+      // identifies its process.
+      const entry = await until(() => registryEntryOf(id), 30_000, "its registry entry");
+      expect(entry.kind).toBe("bg");
+      expect(typeof entry.pid).toBe("number");
+      expect(typeof entry.procStart).toBe("string");
+      expect(typeof entry.sessionId).toBe("string");
+      sessionId = entry.sessionId as string;
+      const pid = entry.pid as number;
+      // The job's state names the same session.
+      expect(jobSessionId(id)).toBe(sessionId);
+      expect(listClaudeSessions({ cwd: process.cwd(), all: true }).find((s) => s.pid === pid)).toEqual(expect.objectContaining({ kind: "bg", jobId: id, sessionId }));
+
+      // Every status it reports is one codex-collab knows, and the turn ends
+      // idle, its job done, with nothing counted in flight.
+      const statuses = new Set<string>();
+      await until(() => {
+        const status = sessionStatusNow(pid);
+        if (status) statuses.add(status);
+        return status === "idle" && jobState(id)?.state === "done";
+      }, 90_000, "the turn to end");
+      for (const status of statuses) expect(["busy", "idle", "waiting", "shell"]).toContain(status);
+      const job = jobState(id)!;
+      expect(job.tempo).not.toBe("active");
+      expect(job.inFlight).toEqual({ tasks: expect.any(Number), queued: expect.any(Number), kinds: expect.any(Array), drainableMonitors: expect.any(Number) });
+      expect(jobHasWorkInFlight(id)).toBe(false);
+
+      // The transcript: what the reply ran on, the alias resolved to a
+      // version, and the effort it was sent with.
+      const ran = ranOn(sessionId);
+      expect(ran?.model).toMatch(/^claude-sonnet-/);
+      expect(ran?.effort).toBe("low");
+
+      // `claude stop` retires it: codex-collab's stop sees it gone, with no
+      // signal needed.
+      const stopped = await stopSpawnedSession({ id, pid, name, startedAt: new Date().toISOString(), lingerSec: 60, procStart: entry.procStart as string, sessionId });
+      expect(stopped).toEqual({ gone: true, signalled: false });
+    } finally {
+      removeJob(id, sessionId);
+    }
+  }, 180_000);
+
+  test("an API error is in the transcript as codex-collab reads it, and is not taken for a model the session ran on", async () => {
+    const id = startBackground(`contract-error-${process.pid}`, "claude-no-such-model-0-0");
+    let sessionId: string | null = null;
+    try {
+      await until(() => jobState(id)?.state === "failed", 90_000, "the job to fail");
+      sessionId = jobSessionId(id);
+      expect(sessionId).not.toBeNull();
+      // Settled: nothing it holds is work.
+      expect(jobState(id)?.tempo).not.toBe("active");
+      expect(jobHasWorkInFlight(id)).toBe(false);
+      // The turn ended on the error, with the API's status and reason.
+      expect(turnEndedOnError(sessionId)).toEqual(expect.objectContaining({ status: 404, reason: "model_not_found" }));
+      // Claude Code made that reply up; it names no model the session ran on.
+      expect(ranOn(sessionId)).toBeNull();
+    } finally {
+      removeJob(id, sessionId);
+    }
+  }, 150_000);
 });

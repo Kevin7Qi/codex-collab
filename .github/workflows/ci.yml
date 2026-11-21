@@ -12,12 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        bun: [latest]
-        include:
-          # The oldest Bun codex-collab says it runs on (package.json's
-          # engines.bun), on the platform where an older one fails first.
-          - os: macos-latest
-            bun: "1.3.14"
+        # The latest Bun, and the oldest codex-collab says it runs on
+        # (package.json's engines.bun), so that the number stays true.
+        bun: [latest, "1.3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
