@@ -83,7 +83,7 @@ import { codexThreadCwd } from "../codex-session";
 import { wakeThread } from "../codex-wake";
 import { isThreadId, messageIdsSince, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
 import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
-import { MAX_TIMEOUT_SECONDS, die, formatDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
+import { MAX_TIMEOUT_SECONDS, die, formatDuration, formatLongDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
 
 /** Where `send --file` may read when Codex runs it: inside the folder the
  *  Codex session works in, as Codex's own record of the thread says, never
@@ -669,7 +669,7 @@ export async function handleSend(args: string[]): Promise<void> {
           : resumableSession(stateDir, resumeWindowSec(cfg));
         let resumed: ClaudeSession | null = null;
         if (stopped) {
-          const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
+          const ago = formatLongDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
           console.log(`${notLive} — resuming ${stopped.name}, stopped ${ago} ago, with its conversation so far…`);
           // A resumed session is a new process, and runs on what is chosen
           // now, as a new one would: the flags, else the configured defaults.

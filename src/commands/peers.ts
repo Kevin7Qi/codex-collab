@@ -10,7 +10,7 @@ import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, rea
 import { outstandingTasksFor } from "../claude-tasks";
 import { describeRanOn, ranOn, type RanOn } from "../claude-transcript";
 import { insideCodexSandbox, resumeWindowSec, sandboxHint } from "./send";
-import { die, formatDuration, loadUserConfig, parseOptions } from "./shared";
+import { die, formatDuration, formatLongDuration, loadUserConfig, parseOptions } from "./shared";
 
 function idleFor(session: ClaudeSession, now: number): string | null {
   if (session.status !== "idle" || session.statusUpdatedAt === null) return null;
@@ -182,7 +182,7 @@ export async function handlePeers(args: string[]): Promise<void> {
     if (stoppedHere.length === 0) return;
     console.log("Stopped, each resumed with its conversation by a send that names it:");
     for (const r of stoppedHere) {
-      const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(r.stoppedAt!)));
+      const ago = formatLongDuration(Math.max(1000, Date.now() - Date.parse(r.stoppedAt!)));
       console.log(`  ${r.name}  stopped ${ago} ago  ·  codex-collab send ${JSON.stringify(r.label ?? r.name)} "…"`);
     }
   };
@@ -193,7 +193,7 @@ export async function handlePeers(args: string[]): Promise<void> {
       // again decides how much a Codex session needs to explain.
       const stopped = resumableSession(stateDir, resumeWindowSec(loadUserConfig()));
       if (stopped) {
-        const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
+        const ago = formatLongDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
         console.log(`\`codex-collab send "…"\` resumes ${stopped.name}, stopped ${ago} ago, with its conversation so far (\`--new\` starts a new session instead).`);
       } else {
         console.log("`codex-collab send \"…\"` starts one in the background and messages it.");
