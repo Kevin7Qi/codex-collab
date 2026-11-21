@@ -161,24 +161,33 @@ messages work inside it.
 
 Which session send reaches
   send "<session>" "…"  That live session (or --to <session>; a unique prefix
-                        will do). codex-collab's own session,
-                        claude(<workspace>-…), is resumed by its name when it
-                        has stopped, with its conversation.
+                        will do). A session codex-collab started also answers
+                        to its label, and is resumed by its label or name when
+                        it has stopped, with its conversation.
+  send <task-id> "…"    The session that task went to, resumed if it is one
+                        codex-collab started and it has stopped.
   send "…"              The only live session in this workspace — the user's
                         own, if that is the one live. With none live:
-                        codex-collab's own, resumed if it stopped within a week
-                        (config spawn-resume), else started. With several live:
-                        refused, with their names.
+                        codex-collab's default session, resumed if it stopped
+                        within a week (config spawn-resume), else started.
+                        With several live: refused, with their names.
   send --new "…"        A new session of codex-collab's own, with a new
                         conversation, even while the user's sessions are live;
-                        never one of theirs. Refused while codex-collab's own
-                        session is live, as there is one per workspace: message
-                        it by name, or stop it first. --fresh is the same.
+                        never one of theirs. --fresh is the same.
+  send --new --name <label> "…"
+                        The same, with a label: claude(<workspace>-<label>-…),
+                        beside the default session and any others. A label is
+                        lowercase letters, digits and dashes, starting with a
+                        letter, at most 16 characters. Quote the message.
+                        --new is refused while the session of that name is
+                        live: message it, or stop it first.
 
-codex-collab keeps one session of its own per workspace: a git repository
-(each worktree apart), or outside any repository, the folder itself. Outside a
-repository, then, each folder can have a session of its own (-d <folder>).
-Several tasks sent to one session share its conversation and take turns.
+A workspace is a git repository (each worktree apart), or outside any
+repository, the folder itself (-d <folder>). It has a default session of
+codex-collab's own, claude(<workspace>-…), and as many labelled ones as are
+started beside it. Several tasks sent to one session share its conversation
+and take turns. 'peers' lists the live sessions and the stopped ones, each
+with how it is resumed.
 
 A session codex-collab starts works in its workspace in Claude Code's auto
 permission mode, can edit files and run commands, and stops after 60 idle
@@ -200,7 +209,9 @@ Options for send
   -m, --model <model>   For a session send starts or resumes: fable, opus,
                         sonnet, or a full model name ('models --claude').
   -r, --effort <level>  low, medium, high, xhigh or max (default high, or
-                        config spawn-effort).
+                        config spawn-effort). Given to an idle session
+                        codex-collab started that runs on another choice,
+                        they restart it on the new one, with its conversation.
   --no-spawn            Never start or resume a session.
   -d, --dir <folder>    Send as if from <folder>: its workspace, its session.
   --file <path>         Read the message from a file. Run by Codex, it reads
@@ -232,6 +243,8 @@ Examples
   codex-collab send --new -m fable -r xhigh "Review paper/ for argument gaps"
   codex-collab send "claude(myrepo-a1b2c3)" "And the tests?"
   codex-collab send "claude(myrepo-a1b2c3)" --file prompt.md
+  codex-collab send --new --name docs "Bring the README up to date"
+  codex-collab send docs "And the changelog?"
   codex-collab send --no-wait "Run the benchmarks"      (then: task wait <id>)
   codex-collab send -d figures/fig2 --new --no-wait --file fig2-task.md
 `);
