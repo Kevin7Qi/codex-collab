@@ -51,10 +51,14 @@ import {
   isClaudeEffort,
   isModelName,
   isSpawnEffortSetting,
+  LABEL_RULE,
   listClaudeSessions,
   markSpawnedSessionStopped,
   resolveSession,
   resumableSession,
+  sessionLabel,
+  stoppedSessionNamed,
+  stoppedSessions,
   findRestartedSession,
   promptNow,
   remoteControlReaches,
@@ -67,6 +71,7 @@ import {
   transientSessionId,
   WorkspaceNotTrustedError,
   type ClaudeSession,
+  type SpawnedSession,
 } from "../claude-sessions";
 import { conversationMovedSince, describeRanOn, describeTrouble, firstSaidSince, ranOn, turnEndedOnError, turnTrouble, type RanOn } from "../claude-transcript";
 import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, nextTurnAfter, taskLogFile, taskMaxWaitSec, updateTask, type TaskRecord } from "../claude-tasks";
@@ -216,18 +221,32 @@ export function sandboxHint(): string {
 
 /** Refused: several sessions are live and none was named. */
 function severalLive(sessions: ClaudeSession[]): string {
+  // The default session, live among them, leaves `--new` a label to take.
+  const beside = sessions.some((s) => s.spawned && !s.spawned.label) ? "codex-collab send --new --name <label> \"…\"" : "codex-collab send --new \"…\"";
   return "Several Claude Code sessions are live in this workspace — name one:\n" +
-    sessions.map((s) => `  codex-collab send ${JSON.stringify(s.name)} "…"`).join("\n") +
-    "\nor start a new session of codex-collab's own beside them:\n  codex-collab send --new \"…\"";
+    sessions.map((s) => `  codex-collab send ${JSON.stringify(s.spawned?.label ?? s.name)} "…"`).join("\n") +
+    `\nor start a new session of codex-collab's own beside them:\n  ${beside}`;
 }
 
-/** Refused: `--new` while codex-collab's own session for the workspace is
- *  live. There is one, under one name; it is messaged by that name, or
- *  stopped for a new conversation. */
-function ownSessionLive(name: string): string {
-  return `${name}, codex-collab's own session for this workspace, is live, and there is one per workspace.\n` +
-    `  To message it:           codex-collab send ${JSON.stringify(name)} "…"\n` +
-    `  For a new conversation:  codex-collab peers stop ${JSON.stringify(name)}, then send --new again`;
+/** Refused: `--new` for a name whose session is live. There is one session
+ *  to a name: it is messaged by that name, stopped for a new conversation
+ *  under it, or left alone for another session beside it. */
+function ownSessionLive(name: string, label: string | undefined): string {
+  const again = label ? `send --new --name ${label}` : "send --new";
+  return `${name}, a session codex-collab started here, is live, and there is one session to a name.\n` +
+    `  To message it:           codex-collab send ${JSON.stringify(label ?? name)} "…"\n` +
+    `  For a new conversation:  codex-collab peers stop ${JSON.stringify(label ?? name)}, then ${again} again\n` +
+    `  For another beside it:   codex-collab send --new --name <label> "…"`;
+}
+
+/** How a session there is none of yet is started: the workspace's default
+ *  (`any`: resumed if it stopped lately; `named`: asked for by name, resumed
+ *  whenever it stopped), or a new one (`new`), with a label or without. */
+interface Start {
+  how: "any" | "named" | "new";
+  /** The name the session will have. */
+  name: string;
+  label?: string;
 }
 
 /** Split Codex's arguments into target and message: `--to <name>`; else,
@@ -454,31 +473,56 @@ export async function handleSend(args: string[]): Promise<void> {
   let target!: ClaudeSession;
   let startedHere = false;
   const notes: string[] = [];
-  // The session codex-collab starts for this workspace always has this name,
-  // resumed or new: named when it is not live, it is started again.
-  const startedName = spawnedSessionName(cwd);
-  let start: "any" | "named" | "new" | null = null;
+  // The workspace's default session, the one with no label, always has this
+  // name, resumed or new; a labelled one has its label in its name. Named
+  // when it is not live, a session codex-collab started is started again.
+  const defaultName = spawnedSessionName(cwd);
+  let start: Start | null = null;
+  // `--name` gives the session `--new` starts its label. Without `--new` it
+  // would name nothing: a session there is already is addressed by its label
+  // where a name goes.
+  let label: string | undefined;
+  if (options.name !== null) {
+    if (!options.newSession) {
+      die(`--name gives a new session its label, so it goes with --new:\n  codex-collab send --new --name ${options.name} "…"\nA session there is already is addressed by its label: codex-collab send ${JSON.stringify(options.name)} "…"`);
+    }
+    label = sessionLabel(options.name) ?? die(`"${options.name}" cannot be a session's label. A label is ${LABEL_RULE}.`);
+  }
   if (options.newSession) {
     // `--new` (or `--fresh`): a new session of codex-collab's own, with a new
     // conversation, whatever else is live — never a session the user opened.
-    // There is one per workspace, under one name, so a live one is refused
+    // There is one session to a name, so a live one of that name is refused
     // (under the spawn lock, below, which also sees one another `send` has
     // just started).
-    if (targetName && targetName !== startedName) {
-      die(`--new starts a new session of codex-collab's own, so it takes no other session's name ("${targetName}"). To message ${targetName}, leave --new out.`);
+    const name = spawnedSessionName(cwd, label);
+    if (targetName && targetName !== name) {
+      die(`--new starts a new session of codex-collab's own, so it takes no other session's name ("${targetName}"). To message ${targetName}, leave --new out; to give the new session a label: --new --name <label>.`);
     }
-    start = "new";
+    start = { how: "new", name, label };
   } else if (targetName) {
-    const { session, ambiguous } = resolveSession(sessions, targetName);
+    // A name or a label in full comes first, live or stopped: a stopped
+    // session asked for by its label is not passed over for a live one whose
+    // name merely begins the same way.
+    const exact = resolveSession(sessions, targetName, { exact: true }).session;
+    const stopped = exact ? null : stoppedSessionNamed(stateDir, targetName);
+    const { session, ambiguous } = exact || stopped ? { session: exact, ambiguous: [] } : resolveSession(sessions, targetName);
     if (session) {
       target = session;
     } else if (ambiguous.length > 1) {
       die(`"${targetName}" matches several sessions: ${ambiguous.map((s) => s.name).join(", ")} — name one exactly.`);
-    } else if (targetName === startedName) {
-      start = "named";
+    } else if (stopped) {
+      // A session codex-collab started and stopped, asked for by its name or
+      // its label: resumed, whenever it stopped.
+      start = { how: "named", name: stopped.name, label: stopped.label };
+    } else if (targetName === defaultName) {
+      start = { how: "named", name: defaultName };
     } else {
-      const live = sessions.length ? `Live here: ${sessions.map((s) => s.name).join(", ")}` : "No Claude Code session is live in this workspace.";
-      die(`No live Claude Code session named "${targetName}" in this workspace. ${live}`);
+      const live = sessions.length ? `Live here: ${sessions.map((s) => s.name).join(", ")}.` : "No Claude Code session is live in this workspace.";
+      const resumable = stoppedSessions(stateDir).map((r) => r.label ?? r.name);
+      const asLabel = sessionLabel(targetName);
+      die(`No live Claude Code session named "${targetName}" in this workspace. ${live}` +
+        (resumable.length ? ` Stopped, and resumed by name: ${resumable.join(", ")}.` : "") +
+        (asLabel ? `\nTo start one with that label: codex-collab send --new --name ${asLabel} "…"` : ""));
     }
   } else if (sessions.length === 1) {
     target = sessions[0];
@@ -486,13 +530,16 @@ export async function handleSend(args: string[]): Promise<void> {
   } else if (sessions.length > 1) {
     die(severalLive(sessions));
   } else {
-    start = "any";
+    start = { how: "any", name: defaultName };
   }
   if (start) {
+    const how = start.how;
+    const startName = start.name;
+    const startLabel = start.label;
     const cfg = loadUserConfig();
-    const notLive = start === "named" ? `${startedName} is not live` : "No Claude Code session is live in this workspace";
+    const notLive = how === "named" ? `${startName} is not live` : "No Claude Code session is live in this workspace";
     if (options.noSpawn || cfg.spawn === "off") {
-      if (start === "new") {
+      if (how === "new") {
         die(cfg.spawn === "off" ? "--new starts a session, and starting one is off: `codex-collab config spawn on` enables it." : "--new starts a session, which --no-spawn rules out.");
       }
       die(notLive + (cfg.spawn === "off" ? " (starting one is off: `codex-collab config spawn on` enables it)." : " (--no-spawn)."));
@@ -555,22 +602,27 @@ export async function handleSend(args: string[]): Promise<void> {
     };
     try {
       const again = listClaudeSessions({ cwd, stateDir });
-      // `--new` cannot start a second session under codex-collab's one name
-      // — live before this `send`, or started by another while it waited.
-      const ownMeanwhile = start === "new" ? again.find((s) => s.name === startedName) : undefined;
-      if (ownMeanwhile) fail(ownSessionLive(ownMeanwhile.name));
-      const startedMeanwhile = start === "named" ? again.find((s) => s.name === startedName) : start === "any" && again.length === 1 ? again[0] : undefined;
-      if (start === "any" && again.length > 1) {
+      // `--new` cannot start a second session under one name — live before
+      // this `send`, or started by another while it waited.
+      const ownMeanwhile = how === "new" ? again.find((s) => s.name === startName) : undefined;
+      if (ownMeanwhile) fail(ownSessionLive(ownMeanwhile.name, startLabel));
+      const startedMeanwhile = how === "named" ? again.find((s) => s.name === startName) : how === "any" && again.length === 1 ? again[0] : undefined;
+      if (how === "any" && again.length > 1) {
         fail(severalLive(again));
       } else if (startedMeanwhile) {
         target = startedMeanwhile;
         notes.push(`Sending to ${target.name} — a background Claude Code session started for this workspace just now.`);
       } else {
-        // A session stopped for idling still has its conversation: pick it
-        // up again rather than explain everything to a new one. `--new`,
-        // or a resume that fails (the conversation was removed, or has aged
-        // out of Claude Code's own history), starts a new session instead.
-        const stopped = start === "new" ? null : resumableSession(stateDir, resumeWindowSec(cfg));
+        // A stopped session still has its conversation: pick it up again
+        // rather than explain everything to a new one. Asked for by name, it
+        // is resumed whenever it stopped; with no name given, the default
+        // session is, if it stopped within `spawn-resume`. `--new`, or a
+        // resume that fails (the conversation was removed, or has aged out
+        // of Claude Code's own history), starts a new session instead, under
+        // the same name.
+        const stopped: SpawnedSession | null = how === "new" ? null
+          : how === "named" ? stoppedSessionNamed(stateDir, startName)
+          : resumableSession(stateDir, resumeWindowSec(cfg));
         let resumed: ClaudeSession | null = null;
         if (stopped) {
           const ago = formatDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
@@ -589,8 +641,8 @@ export async function handleSend(args: string[]): Promise<void> {
             console.log(`Could not resume it (${(e instanceof Error ? e.message : String(e)).split("\n")[0]}) — starting a new session instead.`);
             forgetSpawnedSession(stateDir, stopped.id);
           }
-        } else if (start === "new") {
-          console.log("Starting a new session of codex-collab's own for this workspace, in the background…");
+        } else if (how === "new") {
+          console.log(`Starting a new session of codex-collab's own for this workspace${startLabel ? `, ${startName}` : ""}, in the background…`);
         } else {
           console.log(`${notLive} — starting one in the background…`);
         }
@@ -598,7 +650,7 @@ export async function handleSend(args: string[]): Promise<void> {
           target = resumed;
         } else {
           try {
-            target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact, spawnTrust });
+            target = await spawnClaudeSession({ cwd, stateDir, lingerSec, model, effort, autocompact, spawnTrust, label: startLabel });
           } catch (e) {
             if (e instanceof WorkspaceNotTrustedError) fail(e.message);
             fail((e instanceof Error ? e.message : String(e)) + sandboxHint());

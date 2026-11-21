@@ -137,6 +137,8 @@ export interface Options {
   /** send: a new session of codex-collab's own, with a new conversation,
    *  whatever else is live (`--new`, or `--fresh`). */
   newSession: boolean;
+  /** send: the label of the session `--new` starts (`--name`). */
+  name: string | null;
   /** peers: every workspace, not only this one (also lifts `threads`' limit). */
   all: boolean;
   /** skill render: the Codex-side skill instead of Claude's. */
@@ -345,6 +347,7 @@ export function defaultOptions(): Options {
     file: null,
     noWait: false,
     noSpawn: false,
+    name: null,
     newSession: false,
     all: false,
     codex: false,
@@ -616,6 +619,12 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.noSpawn = true;
     } else if (arg === "--new" || arg === "--fresh") {
       options.newSession = true;
+    } else if (arg === "--name") {
+      if (!hasFlagValue(argv, i)) {
+        console.error("Error: --name requires a label for the session --new starts");
+        process.exit(1);
+      }
+      options.name = argv[++i];
     } else if (arg === "--codex") {
       options.codex = true;
     } else if (arg === "--rules") {

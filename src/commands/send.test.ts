@@ -277,6 +277,36 @@ function killFakeSleepers(binDir: string): void {
   } catch { /* none started */ }
 }
 
+/** A fake `claude` that starts a session under each of several names, each
+ *  with a socket, a session id and a job id of its own, and keeps the
+ *  arguments of every start (`args.log`, a line per start). */
+function writeFakeClaudeNamed(binDir: string, sessions: Array<{ name: string; socketPath: string; sessionId: string }>): void {
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "claude"), `#!/bin/sh
+case "$1" in
+  --bg)
+    echo bg >> "${binDir}/bg.log"
+    printf '%s\n' "$*" >> "${binDir}/args.log"
+    n=$(wc -l < "${binDir}/bg.log" | tr -d ' ')
+    id="cafe010$n"
+    case "$3" in
+${sessions.map((x) => `      "${x.name}") sock="${x.socketPath}"; sid="${x.sessionId}" ;;`).join("\n")}
+      *) echo "no fake session named $3" >&2; exit 1 ;;
+    esac
+    echo "backgrounded · $id · $3"
+    sleep 300 </dev/null >/dev/null 2>&1 &
+    pid=$!
+    echo "$pid" >> "${binDir}/sleepers"
+    start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')
+    now="$(date +%s)000"
+    printf '{"pid":%s,"sessionId":"%s","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","jobId":"%s","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
+      "$pid" "$sid" "$(pwd)" "$now" "$start" "$id" "$sock" "$3" "$now" "$now" > "$CODEX_COLLAB_SESSIONS_DIR/$pid.json"
+    ;;
+  stop) echo "stop $2" >> "${binDir}/stop.log" ;;
+esac
+`, { mode: 0o755 });
+}
+
 /** End the fake session a spawn-path test started, and leave its record
  *  stopped at `when` — as if its reaper had stopped it then. */
 async function stopSpawnedAt(binDir: string, when: Date): Promise<void> {
@@ -1296,7 +1326,7 @@ describeUnix("send", () => {
   test("--new starts a session of codex-collab's own beside the user's, never messages theirs, and is refused while its own is live", async () => {
     await settleSpawnState();
     // The user's own session, at work in this workspace.
-    const users = startFake("CIMantics-narrative", { reply: () => "from the user's session" });
+    const users = startFake("the-users-session", { reply: () => "from the user's session" });
     registerFake(users);
     const binDir = join(TEST_HOME, "bin-spawn-new");
     const own = startFake(spawnedSessionName(WS), { reply: () => "from codex-collab's own" });
@@ -1321,14 +1351,16 @@ describeUnix("send", () => {
       // and says how to message it or start afresh.
       const again = await runCli(["send", "--new", "another"], env);
       expect(again.code).toBe(1);
-      expect(again.stderr).toContain(`${own.name}, codex-collab's own session for this workspace, is live, and there is one per workspace.`);
+      expect(again.stderr).toContain(`${own.name}, a session codex-collab started here, is live, and there is one session to a name.`);
       expect(again.stderr).toContain(`codex-collab send ${JSON.stringify(own.name)} "…"`);
       expect(again.stderr).toContain(`codex-collab peers stop ${JSON.stringify(own.name)}, then send --new again`);
+      expect(again.stderr).toContain(`codex-collab send --new --name <label> "…"`);
       // Two live and no name: refused, with both names and --new.
       const unnamed = await runCli(["send", "which one?"], env);
       expect(unnamed.code).toBe(1);
       expect(unnamed.stderr).toContain(`codex-collab send ${JSON.stringify(users.name)} "…"`);
-      expect(unnamed.stderr).toContain(`codex-collab send --new "…"`);
+      // The default session is one of them, so a new one takes a label.
+      expect(unnamed.stderr).toContain(`codex-collab send --new --name <label> "…"`);
       // Its own stops, the user's stays: peers says how to resume it, and
       // --new starts a new conversation instead of resuming that one.
       killFakeSleepers(binDir);
@@ -1345,14 +1377,98 @@ describeUnix("send", () => {
         writeFileSync(f, JSON.stringify(records.map((rec) => ({ ...rec, stoppedAt: new Date().toISOString() }))));
       }
       const listed = await runCli(["peers"]);
-      expect(listed.stdout).toContain(`codex-collab's own session here, ${own.name}, stopped`);
-      expect(listed.stdout).toContain(`resume it, with its conversation: codex-collab send ${JSON.stringify(own.name)} "…"`);
+      expect(listed.stdout).toContain("Stopped, each resumed with its conversation by a send that names it:");
+      expect(listed.stdout).toMatch(new RegExp(`${own.name.replace(/[()]/g, "\\$&")}  stopped .* ago  ·  codex-collab send ${JSON.stringify(own.name).replace(/[()]/g, "\\$&")} "…"`));
       const fresh = await runCli(["send", "--new", "start over"], env);
       expect(fresh.code).toBe(0);
       expect(fresh.stdout).toContain("Starting a new session of codex-collab's own for this workspace");
       expect(argsOf()).not.toContain("--resume");
       expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\nbg\n");
       expect(users.received).toHaveLength(0);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("--new --name starts a labelled session beside the default one; each is messaged by its label or name, and resumed by it once stopped", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-named-sessions");
+    const main = startFake(spawnedSessionName(WS), { reply: (t) => `main says: ${t.split("\n")[0]}` });
+    const docs = startFake(spawnedSessionName(WS, "docs"), { reply: (t) => `docs says: ${t.split("\n")[0]}` });
+    writeFakeClaudeNamed(binDir, [
+      { name: main.name, socketPath: main.socketPath, sessionId: "00000000-0000-4000-8000-0000000000a1" },
+      { name: docs.name, socketPath: docs.socketPath, sessionId: "00000000-0000-4000-8000-0000000000d1" },
+    ]);
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    const starts = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+    writeConfig({ linger: 600 });
+    try {
+      expect(docs.name).toMatch(/^claude\(ws-docs-[0-9a-f]{6}\)$/);
+      // A label has rules, and goes only with --new.
+      const loose = await runCli(["send", "--name", "docs", "hello"], env);
+      expect(loose.code).toBe(1);
+      expect(loose.stderr).toContain("--name gives a new session its label, so it goes with --new:");
+      for (const bad of ["two words", "fix_it", "deadbeef"]) {
+        const refused = await runCli(["send", "--new", "--name", bad, "hello"], env);
+        expect(refused.code).toBe(1);
+        expect(refused.stderr).toContain(`"${bad}" cannot be a session's label. A label is lowercase letters, digits and dashes`);
+      }
+      expect(existsSync(join(binDir, "bg.log"))).toBe(false);
+
+      // The default session, then one with a label beside it.
+      expect((await runCli(["send", "one"], env)).stdout).toContain(`Started ${main.name}`);
+      const started = await runCli(["send", "--new", "--name", "Docs", "write the docs"], env);
+      expect(started.code).toBe(0);
+      expect(started.stdout).toContain(`Starting a new session of codex-collab's own for this workspace, ${docs.name}, in the background…`);
+      expect(started.stdout).toContain(`Started ${docs.name}`);
+      expect(started.stdout).toContain("docs says: write the docs");
+      expect(starts()[1]).toContain(`--bg -n ${docs.name} `);
+      expect((spawnedRecords() as Array<{ name: string; label?: string }>).map((r) => [r.name, r.label])).toEqual([[main.name, undefined], [docs.name, "docs"]]);
+
+      // By its label, in any case, or by its name; never by guessing.
+      expect((await runCli(["send", "docs", "and the changelog"], env)).stdout).toContain("docs says: and the changelog");
+      expect((await runCli(["send", "DOCS", "and the readme"], env)).stdout).toContain("docs says: and the readme");
+      expect((await runCli(["send", main.name, "two"], env)).stdout).toContain("main says: two");
+      const unnamed = await runCli(["send", "which one?"], env);
+      expect(unnamed.code).toBe(1);
+      expect(unnamed.stderr).toContain(`codex-collab send "docs" "…"`);
+      expect(unnamed.stderr).toContain(`codex-collab send ${JSON.stringify(main.name)} "…"`);
+      // One session to a name: a live one is not started over.
+      const twice = await runCli(["send", "--new", "--name", "docs", "again"], env);
+      expect(twice.code).toBe(1);
+      expect(twice.stderr).toContain(`${docs.name}, a session codex-collab started here, is live, and there is one session to a name.`);
+      expect(twice.stderr).toContain(`codex-collab peers stop "docs", then send --new --name docs again`);
+      const listed = JSON.parse((await runCli(["peers", "--json"])).stdout) as Array<{ name: string; spawned: { label: string | null } | null }>;
+      expect(listed.map((x) => [x.name, x.spawned?.label ?? null]).sort()).toEqual([[docs.name, "docs"], [main.name, null]].sort());
+      expect(starts()).toHaveLength(2);
+
+      // Both stop. Each keeps its record, and `peers` says how each comes back.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 60_000));
+      const stopped = await runCli(["peers"]);
+      expect(stopped.stdout).toContain("Stopped, each resumed with its conversation by a send that names it:");
+      expect(stopped.stdout).toContain(`codex-collab send "docs" "…"`);
+      expect(stopped.stdout).toContain(`codex-collab send ${JSON.stringify(main.name)} "…"`);
+      // A name nobody has: refused, with who can be resumed and how one is started.
+      const nobody = await runCli(["send", "tests", "run them"], env);
+      expect(nobody.code).toBe(1);
+      expect(nobody.stderr).toContain(`No live Claude Code session named "tests" in this workspace.`);
+      expect(nobody.stderr).toContain(`Stopped, and resumed by name: `);
+      expect(nobody.stderr).toContain(`To start one with that label: codex-collab send --new --name tests "…"`);
+      // The labelled one is resumed by its label, with its own conversation;
+      // the default one stays stopped.
+      const resumed = await runCli(["send", "docs", "pick it up"], env);
+      expect(resumed.code).toBe(0);
+      expect(resumed.stdout).toContain(`${docs.name} is not live — resuming ${docs.name}`);
+      expect(resumed.stdout).toContain("docs says: pick it up");
+      expect(starts()).toHaveLength(3);
+      expect(starts()[2]).toContain(`--bg -n ${docs.name} --resume 00000000-0000-4000-8000-0000000000d1 `);
+      // A plain send now finds one live session, and uses it.
+      expect((await runCli(["send", "anyone?"], env)).stdout).toContain("docs says: anyone?");
+      // The default one is still there to resume, by its name.
+      const back = await runCli(["send", main.name, "three"], env);
+      expect(back.stdout).toContain(`resuming ${main.name}`);
+      expect(starts()[3]).toContain(`--bg -n ${main.name} --resume 00000000-0000-4000-8000-0000000000a1 `);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);

@@ -437,6 +437,7 @@ const VALUE_FLAGS = new Set([
   "--budget",
   "--to",
   "--file",
+  "--name",
 ]);
 
 // Boolean flags recognized by commands/shared.ts parseOptions. Combined with

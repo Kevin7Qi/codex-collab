@@ -337,16 +337,19 @@ export function remoteControlReaches(jobId: string): boolean {
 
 /** Resolve a session by the name Codex gave: exact match first, then the
  *  label of a session codex-collab started, then a unique case-insensitive
- *  prefix. `ambiguous` lists the candidates when a prefix matches several. */
+ *  prefix (unless `exact`). `ambiguous` lists the candidates when a prefix
+ *  matches several. */
 export function resolveSession(
   sessions: ClaudeSession[],
   name: string,
+  opts: { exact?: boolean } = {},
 ): { session: ClaudeSession | null; ambiguous: ClaudeSession[] } {
   const exact = sessions.find((s) => s.name === name);
   if (exact) return { session: exact, ambiguous: [] };
   const needle = name.toLowerCase();
   const labelled = sessions.find((s) => s.spawned?.label === needle);
   if (labelled) return { session: labelled, ambiguous: [] };
+  if (opts.exact) return { session: null, ambiguous: [] };
   const matches = sessions.filter((s) => s.name.toLowerCase().startsWith(needle));
   if (matches.length === 1) return { session: matches[0], ambiguous: [] };
   return { session: null, ambiguous: matches };
