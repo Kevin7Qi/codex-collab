@@ -165,6 +165,14 @@ function speak(fake: FakeSession, replyPath: string, text: string): void {
   Bun.connect({ unix: replyPath, socket: { open(s) { s.write(line); s.end(); }, data() {}, error() {} } });
 }
 
+/** Wait until a fake session has taken in `n` messages. A `send` returns
+ *  once its message is written to the session's socket; the fake reads it in
+ *  this process a moment later, which on a loaded machine is after the
+ *  command has returned. */
+async function got(fake: FakeSession, n = 1): Promise<void> {
+  await waitFor(() => fake.received.length >= n, 10_000);
+}
+
 async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
   const until = Date.now() + ms;
   while (!cond()) {
@@ -277,6 +285,41 @@ function killFakeSleepers(binDir: string): void {
   } catch { /* none started */ }
 }
 
+/** A fake `claude` that starts a session under each of several names, each
+ *  with a socket, a session id and a job id of its own, and keeps the
+ *  arguments of every start (`args.log`, a line per start). */
+function writeFakeClaudeNamed(binDir: string, sessions: Array<{ name: string; socketPath: string; sessionId: string }>): void {
+  // `sessionId` is all but the last character: each start gets one more, the
+  // number of the start, as Claude Code gives a resumed session a new id.
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "claude"), `#!/bin/sh
+case "$1" in
+  --bg)
+    # A file named "refuse" makes every start fail, as a model Claude Code
+    # will not take does.
+    if [ -e "${binDir}/refuse" ]; then echo "error: model not available" >&2; exit 1; fi
+    echo bg >> "${binDir}/bg.log"
+    printf '%s\n' "$*" >> "${binDir}/args.log"
+    n=$(wc -l < "${binDir}/bg.log" | tr -d ' ')
+    id="cafe010$n"
+    case "$3" in
+${sessions.map((x) => `      "${x.name}") sock="${x.socketPath}"; sid="${x.sessionId}$n" ;;`).join("\n")}
+      *) echo "no fake session named $3" >&2; exit 1 ;;
+    esac
+    echo "backgrounded · $id · $3"
+    sleep 300 </dev/null >/dev/null 2>&1 &
+    pid=$!
+    echo "$pid" >> "${binDir}/sleepers"
+    start=$(TZ=UTC LC_ALL=C ps -o lstart= -p "$pid" | sed 's/^ *//;s/ *$//')
+    now="$(date +%s)000"
+    printf '{"pid":%s,"sessionId":"%s","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","jobId":"%s","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
+      "$pid" "$sid" "$(pwd)" "$now" "$start" "$id" "$sock" "$3" "$now" "$now" > "$CODEX_COLLAB_SESSIONS_DIR/$pid.json"
+    ;;
+  stop) echo "stop $2" >> "${binDir}/stop.log" ;;
+esac
+`, { mode: 0o755 });
+}
+
 /** End the fake session a spawn-path test started, and leave its record
  *  stopped at `when` — as if its reaper had stopped it then. */
 async function stopSpawnedAt(binDir: string, when: Date): Promise<void> {
@@ -292,15 +335,43 @@ async function stopSpawnedAt(binDir: string, when: Date): Promise<void> {
   }
 }
 
-/** Spawn-path tests share one workspace, and a reaper an earlier test left
- *  behind (polling every 500ms) still writes to its records when it finds
- *  its session gone: it marks it stopped — which the next test's `send`
- *  would then resume. Let such a reaper finish, then start from no records. */
+/** The reapers still running under the test HOME. Each keeps a log named
+ *  for its session and its pid while it runs, and is taken for one only
+ *  while that pid runs `reap-claude`. */
+function liveReapers(): number[] {
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  const pids: number[] = [];
+  let dirs: string[] = [];
+  try { dirs = readdirSync(root); } catch { return pids; }
+  for (const d of dirs) {
+    let names: string[] = [];
+    try { names = readdirSync(join(root, d, "reapers")); } catch { continue; }
+    for (const name of names) {
+      const m = /-(\d+)\.log$/.exec(name);
+      if (!m) continue;
+      const ps = spawnSync("ps", ["-p", m[1], "-o", "args="], { encoding: "utf-8" });
+      if (ps.status === 0 && ps.stdout.includes("reap-claude")) pids.push(Number(m[1]));
+    }
+  }
+  return pids;
+}
+
+/** Spawn-path tests share one workspace, and the fake `claude` gives every
+ *  session the same job id. A reaper an earlier test left behind takes the
+ *  next test's session for its own, come back as another process, and stops
+ *  it after its own test's linger; or, finding its session gone, marks it
+ *  stopped, which the next test's `send` would then resume. So each such
+ *  test starts with no reaper running and no records: the reapers are
+ *  stopped and seen gone, however slow the machine is. */
 async function settleSpawnState(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 900));
+  for (const pid of liveReapers()) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  await waitFor(() => liveReapers().length === 0, 15_000);
   const root = join(TEST_HOME, ".codex-collab", "workspaces");
   try {
-    for (const d of readdirSync(root)) rmSync(join(root, d, "spawned-claude.json"), { force: true });
+    for (const d of readdirSync(root)) {
+      rmSync(join(root, d, "spawned-claude.json"), { force: true });
+      rmSync(join(root, d, "reapers"), { recursive: true, force: true });
+    }
   } catch { /* no state yet */ }
 }
 
@@ -923,6 +994,7 @@ describeUnix("send", () => {
     expect(r.stdout).not.toContain("REPLY");
     expect(r.stdout).not.toContain("codex-collab task");
     // Delivered before `send` said so — not merely queued.
+    await got(fake, 1);
     expect(fake.received).toHaveLength(1);
     expect(fake.received[0].text.startsWith("long job\n\n(From Codex thread")).toBe(true);
     speak(fake, fake.received[0].replyPath, "job done");
@@ -944,6 +1016,7 @@ describeUnix("send", () => {
     await waitFor(() => inboxTexts().includes("one more thing about one"));
     const second = await runCli(["send", "two", "--no-wait"]);
     const id = taskIdOf(second.stdout);
+    await got(fake, 2);
     const [first, later] = fake.received;
     expect(later.fromName).toBe(first.fromName);
     expect(later.replyPath).toBe(first.replyPath);
@@ -1116,7 +1189,7 @@ describeUnix("send", () => {
     }
   });
 
-  test("the model and effort Codex chooses reach the session it starts, ahead of the configured default", async () => {
+  test("the model and effort Codex chooses reach the session it starts, ahead of the configured default, and restart an idle one that runs on another", async () => {
     await settleSpawnState();
     const binDir = join(TEST_HOME, "bin-spawn-choice");
     const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
@@ -1131,15 +1204,50 @@ describeUnix("send", () => {
       expect(args[args.indexOf("--model") + 1]).toBe("opus");
       expect(args[args.indexOf("--effort") + 1]).toBe("high");
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ model: "opus", effort: "high" }));
-      // The session is live now, and what it runs on is fixed: `peers` shows
-      // what it was asked for, and a different choice on a later send is
-      // reported, not dropped.
+      // The session is live now: `peers` shows what it was asked for.
+      const env = { PATH: `${binDir}:${process.env.PATH}` };
+      const lastArgs = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+      const bgs = () => readFileSync(join(binDir, "bg.log"), "utf-8");
+      const entryOf = () => readdirSync(REGISTRY).map((f) => join(REGISTRY, f)).find((f) => {
+        const e = JSON.parse(readFileSync(f, "utf-8"));
+        try { process.kill(e.pid, 0); return e.name === fake.name; } catch { return false; }
+      })!;
       const listed = await runCli(["peers"]);
       expect(listed.stdout).toContain("started by codex-collab · asked for opus, high effort");
-      const again = await runCli(["send", "quick lookup", "-m", "haiku", "-r", "low"], { PATH: `${binDir}:${process.env.PATH}` });
+      // The same choice again changes nothing, and says nothing.
+      const same = await runCli(["send", "and this", "-m", "opus", "-r", "high"], env);
+      expect(same.code).toBe(0);
+      expect(same.stdout).not.toContain("Restart");
+      expect(bgs()).toBe("bg\n");
+      // In a turn, it is not stopped under its work: refused, nothing sent.
+      const idle = readFileSync(entryOf(), "utf-8");
+      writeFileSync(entryOf(), JSON.stringify({ ...JSON.parse(idle), status: "busy" }));
+      const busy = await runCli(["send", "quick lookup", "-m", "haiku"], env);
+      expect(busy.code).toBe(1);
+      expect(busy.stderr).toContain(`${fake.name} runs on opus, high effort, and cannot be restarted on haiku, high effort now: it is in a turn.`);
+      expect(bgs()).toBe("bg\n");
+      writeFileSync(entryOf(), idle);
+      const before = fake.received.length;
+      // Idle, it is stopped and resumed on the new choice, with its
+      // conversation, and then given the message.
+      const again = await runCli(["send", "quick lookup", "-m", "haiku", "-r", "low"], env);
       expect(again.code).toBe(0);
-      expect(again.stdout).toContain(`${fake.name} is already running on opus, high effort: --model and --effort apply only when \`send\` starts a session, so yours did not apply.`);
-      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
+      expect(again.stdout).toContain(`Restarting ${fake.name} on haiku, low effort, with its conversation so far (it ran on opus, high effort)…`);
+      expect(again.stdout).toContain(`Restarted ${fake.name} on haiku, low effort (its conversation so far is intact; it ran on opus, high effort;`);
+      expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
+      expect(bgs()).toBe("bg\nbg\n");
+      expect(lastArgs()[lastArgs().indexOf("--resume") + 1]).toBe("s");
+      expect(lastArgs()[lastArgs().indexOf("--model") + 1]).toBe("haiku");
+      expect(lastArgs()[lastArgs().indexOf("--effort") + 1]).toBe("low");
+      expect(fake.received.length).toBe(before + 1);
+      expect(spawnedRecords()).toEqual([expect.objectContaining({ model: "haiku", effort: "low" })]);
+      // Only one of the two given: the other stays as it was.
+      const effortOnly = await runCli(["send", "think harder", "-r", "max"], env);
+      expect(effortOnly.code).toBe(0);
+      expect(effortOnly.stdout).toContain(`Restarted ${fake.name} on haiku, max effort`);
+      expect(lastArgs()[lastArgs().indexOf("--model") + 1]).toBe("haiku");
+      expect(lastArgs()[lastArgs().indexOf("--effort") + 1]).toBe("max");
+      expect(bgs()).toBe("bg\nbg\nbg\n");
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
@@ -1296,7 +1404,7 @@ describeUnix("send", () => {
   test("--new starts a session of codex-collab's own beside the user's, never messages theirs, and is refused while its own is live", async () => {
     await settleSpawnState();
     // The user's own session, at work in this workspace.
-    const users = startFake("CIMantics-narrative", { reply: () => "from the user's session" });
+    const users = startFake("the-users-session", { reply: () => "from the user's session" });
     registerFake(users);
     const binDir = join(TEST_HOME, "bin-spawn-new");
     const own = startFake(spawnedSessionName(WS), { reply: () => "from codex-collab's own" });
@@ -1321,14 +1429,16 @@ describeUnix("send", () => {
       // and says how to message it or start afresh.
       const again = await runCli(["send", "--new", "another"], env);
       expect(again.code).toBe(1);
-      expect(again.stderr).toContain(`${own.name}, codex-collab's own session for this workspace, is live, and there is one per workspace.`);
+      expect(again.stderr).toContain(`${own.name}, a session codex-collab started here, is live, and there is one session to a name.`);
       expect(again.stderr).toContain(`codex-collab send ${JSON.stringify(own.name)} "…"`);
       expect(again.stderr).toContain(`codex-collab peers stop ${JSON.stringify(own.name)}, then send --new again`);
+      expect(again.stderr).toContain(`codex-collab send --new --name <label> "…"`);
       // Two live and no name: refused, with both names and --new.
       const unnamed = await runCli(["send", "which one?"], env);
       expect(unnamed.code).toBe(1);
       expect(unnamed.stderr).toContain(`codex-collab send ${JSON.stringify(users.name)} "…"`);
-      expect(unnamed.stderr).toContain(`codex-collab send --new "…"`);
+      // The default session is one of them, so a new one takes a label.
+      expect(unnamed.stderr).toContain(`codex-collab send --new --name <label> "…"`);
       // Its own stops, the user's stays: peers says how to resume it, and
       // --new starts a new conversation instead of resuming that one.
       killFakeSleepers(binDir);
@@ -1345,8 +1455,8 @@ describeUnix("send", () => {
         writeFileSync(f, JSON.stringify(records.map((rec) => ({ ...rec, stoppedAt: new Date().toISOString() }))));
       }
       const listed = await runCli(["peers"]);
-      expect(listed.stdout).toContain(`codex-collab's own session here, ${own.name}, stopped`);
-      expect(listed.stdout).toContain(`resume it, with its conversation: codex-collab send ${JSON.stringify(own.name)} "…"`);
+      expect(listed.stdout).toContain("Stopped, each resumed with its conversation by a send that names it:");
+      expect(listed.stdout).toMatch(new RegExp(`${own.name.replace(/[()]/g, "\\$&")}  stopped .* ago  ·  codex-collab send ${JSON.stringify(own.name).replace(/[()]/g, "\\$&")} "…"`));
       const fresh = await runCli(["send", "--new", "start over"], env);
       expect(fresh.code).toBe(0);
       expect(fresh.stdout).toContain("Starting a new session of codex-collab's own for this workspace");
@@ -1357,6 +1467,204 @@ describeUnix("send", () => {
       removeConfig();
       killFakeSleepers(binDir);
     }
+  });
+
+  test("--new --name starts a labelled session beside the default one; each is messaged by its label or name, and resumed by it once stopped", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-named-sessions");
+    const main = startFake(spawnedSessionName(WS), { reply: (t) => `main says: ${t.split("\n")[0]}` });
+    const docs = startFake(spawnedSessionName(WS, "docs"), { reply: (t) => `docs says: ${t.split("\n")[0]}` });
+    writeFakeClaudeNamed(binDir, [
+      { name: main.name, socketPath: main.socketPath, sessionId: "00000000-0000-4000-8000-0000000000a" },
+      { name: docs.name, socketPath: docs.socketPath, sessionId: "00000000-0000-4000-8000-0000000000d" },
+    ]);
+    const env = { PATH: `${binDir}:${process.env.PATH}` };
+    const starts = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
+    writeConfig({ linger: 600 });
+    try {
+      expect(docs.name).toMatch(/^claude\(ws-docs-[0-9a-f]{6}\)$/);
+      // A label has rules, and goes only with --new.
+      const loose = await runCli(["send", "--name", "docs", "hello"], env);
+      expect(loose.code).toBe(1);
+      expect(loose.stderr).toContain("--name gives a new session its label, so it goes with --new:");
+      for (const bad of ["two words", "fix_it", "deadbeef"]) {
+        const refused = await runCli(["send", "--new", "--name", bad, "hello"], env);
+        expect(refused.code).toBe(1);
+        expect(refused.stderr).toContain(`"${bad}" cannot be a session's label. A label is lowercase letters, digits and dashes`);
+      }
+      expect(existsSync(join(binDir, "bg.log"))).toBe(false);
+
+      // The default session, then one with a label beside it.
+      const first = await runCli(["send", "one"], env);
+      expect(first.stdout).toContain(`Started ${main.name}`);
+      const mainTask = taskIdOf(first.stdout);
+      const started = await runCli(["send", "--new", "--name", "Docs", "write the docs"], env);
+      expect(started.code).toBe(0);
+      expect(started.stdout).toContain(`Starting a new session of codex-collab's own for this workspace, ${docs.name}, in the background…`);
+      expect(started.stdout).toContain(`Started ${docs.name}`);
+      expect(started.stdout).toContain("docs says: write the docs");
+      expect(starts()[1]).toContain(`--bg -n ${docs.name} `);
+      expect((spawnedRecords() as Array<{ name: string; label?: string }>).map((r) => [r.name, r.label])).toEqual([[main.name, undefined], [docs.name, "docs"]]);
+
+      // By its label, in any case, or by its name; never by guessing.
+      expect((await runCli(["send", "docs", "and the changelog"], env)).stdout).toContain("docs says: and the changelog");
+      expect((await runCli(["send", "DOCS", "and the readme"], env)).stdout).toContain("docs says: and the readme");
+      expect((await runCli(["send", main.name, "two"], env)).stdout).toContain("main says: two");
+      // A task's id, in full, stands for the session that task went to.
+      const docsTask = taskIdOf(started.stdout);
+      const viaTask = await runCli(["send", docsTask, "one more thing"], env);
+      expect(viaTask.stdout).toContain(`Task ${docsTask} went to ${docs.name}: this message goes there too.`);
+      expect(viaTask.stdout).toContain("docs says: one more thing");
+      const noTask = await runCli(["send", "0000ffff", "hello"], env);
+      expect(noTask.code).toBe(1);
+      expect(noTask.stderr).toContain(`No live Claude Code session named "0000ffff" in this workspace, and no task of that id.`);
+      const unnamed = await runCli(["send", "which one?"], env);
+      expect(unnamed.code).toBe(1);
+      expect(unnamed.stderr).toContain(`codex-collab send "docs" "…"`);
+      expect(unnamed.stderr).toContain(`codex-collab send ${JSON.stringify(main.name)} "…"`);
+      // One session to a name: a live one is not started over.
+      const twice = await runCli(["send", "--new", "--name", "docs", "again"], env);
+      expect(twice.code).toBe(1);
+      expect(twice.stderr).toContain(`${docs.name}, a session codex-collab started here, is live, and there is one session to a name.`);
+      expect(twice.stderr).toContain(`codex-collab peers stop "docs", then send --new --name docs again`);
+      const listed = JSON.parse((await runCli(["peers", "--json"])).stdout) as Array<{ name: string; spawned: { label: string | null } | null }>;
+      expect(listed.map((x) => [x.name, x.spawned?.label ?? null]).sort()).toEqual([[docs.name, "docs"], [main.name, null]].sort());
+      expect(starts()).toHaveLength(2);
+
+      // Both stop. Each keeps its record, and `peers` says how each comes back.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 60_000));
+      const stopped = await runCli(["peers"]);
+      expect(stopped.stdout).toContain("Stopped, each resumed with its conversation by a send that names it:");
+      expect(stopped.stdout).toContain(`codex-collab send "docs" "…"`);
+      expect(stopped.stdout).toContain(`codex-collab send ${JSON.stringify(main.name)} "…"`);
+      // A name nobody has: refused, with who can be resumed and how one is started.
+      const nobody = await runCli(["send", "tests", "run them"], env);
+      expect(nobody.code).toBe(1);
+      expect(nobody.stderr).toContain(`No live Claude Code session named "tests" in this workspace.`);
+      expect(nobody.stderr).toContain(`Stopped, and resumed by name: `);
+      expect(nobody.stderr).toContain(`To start one with that label: codex-collab send --new --name tests "…"`);
+      // The labelled one is resumed by its label, with its own conversation;
+      // the default one stays stopped. A session of the user's own whose
+      // name merely begins with the label is not taken for it.
+      const users = startFake("docs-of-the-user", { reply: () => "not for me" });
+      registerFake(users);
+      const resumed = await runCli(["send", "docs", "pick it up"], env);
+      expect(users.received).toHaveLength(0);
+      users.stop();
+      for (const f of readdirSync(REGISTRY)) {
+        if (JSON.parse(readFileSync(join(REGISTRY, f), "utf-8")).name === users.name) unlinkSync(join(REGISTRY, f));
+      }
+      expect(resumed.code).toBe(0);
+      expect(resumed.stdout).toContain(`${docs.name} is not live — resuming ${docs.name}`);
+      expect(resumed.stdout).toContain("docs says: pick it up");
+      expect(starts()).toHaveLength(3);
+      expect(starts()[2]).toContain(`--bg -n ${docs.name} --resume 00000000-0000-4000-8000-0000000000d2 `);
+      // A plain send now finds one live session, and uses it.
+      expect((await runCli(["send", "anyone?"], env)).stdout).toContain("docs says: anyone?");
+      // The default one is still there to resume: by its name, or as here by
+      // a task that went to it.
+      const back = await runCli(["send", mainTask, "three"], env);
+      expect(back.stdout).toContain(`Task ${mainTask} went to ${main.name}: this message goes there too.`);
+      expect(back.stdout).toContain(`resuming ${main.name}`);
+      expect(back.stdout).toContain("main says: three");
+      expect(starts()[3]).toContain(`--bg -n ${main.name} --resume 00000000-0000-4000-8000-0000000000a1 `);
+      // Resumed, it has a session id of its own, and the tasks that went to
+      // it before still reach it: the conversation is the same.
+      const stillThere = await runCli(["send", mainTask, "four"], env);
+      expect(stillThere.stdout).toContain("main says: four");
+      expect(stillThere.stdout).toContain(`Task ${mainTask} went to ${main.name}: this message goes there too.`);
+      expect(starts()).toHaveLength(4);
+      expect((await runCli(["send", docsTask, "five"], env)).stdout).toContain("docs says: five");
+      expect(starts()).toHaveLength(4);
+
+      // Stopped again, a label that is stopped already is said to be, and a
+      // live session that begins the same way is left alone.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 60_000));
+      const already = await runCli(["peers", "stop", "docs"]);
+      expect(already.code).toBe(0);
+      expect(already.stdout).toContain(`${docs.name} is stopped already. Its conversation is kept: \`codex-collab send "docs" "…"\``);
+      // A follow-up whose conversation cannot be resumed goes nowhere, and
+      // keeps its record: put right, the same follow-up resumes it.
+      writeFileSync(join(binDir, "refuse"), "");
+      const failed = await runCli(["send", mainTask, "six"], env);
+      expect(failed.code).toBe(1);
+      expect(failed.stderr).toContain(`The conversation task ${mainTask} went to could not be resumed (`);
+      expect(failed.stderr).toContain("Nothing was sent, and its record is kept");
+      rmSync(join(binDir, "refuse"));
+      const retried = await runCli(["send", mainTask, "six"], env);
+      expect(retried.stdout).toContain(`resuming ${main.name}`);
+      expect(retried.stdout).toContain("main says: six");
+      expect(starts()).toHaveLength(5);
+      // A new conversation under the label is not the one the old task went
+      // to: a follow-up to that task is refused, and starts nothing.
+      expect((await runCli(["send", "--new", "--name", "docs", "start over"], env)).stdout).toContain(`Started ${docs.name}`);
+      expect(starts()).toHaveLength(6);
+      const orphan = await runCli(["send", docsTask, "and then?"], env);
+      expect(orphan.code).toBe(1);
+      expect(orphan.stderr).toContain(`Task ${docsTask} went to ${docs.name}, which is not live, and its conversation is no longer on record to resume.`);
+      expect(starts()).toHaveLength(6);
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a label that would give the default session's name, in a workspace whose own name is cut to fit, is refused", async () => {
+    // Twenty-five characters: the default name takes it whole, and with the
+    // label "docs" it is cut to twenty, just before its own "-docs".
+    const ws = join(TEST_HOME, "abcdefghijklmnopqrst-docs");
+    mkdirSync(ws, { recursive: true });
+    expect(spawnedSessionName(ws, "docs")).toBe(spawnedSessionName(ws));
+    const refused = await runCliIn(["send", "--new", "--name", "docs", "hello"], ws, cliEnv({}));
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain(`With the label "docs" the session's name would be ${spawnedSessionName(ws)}, the name of this workspace's default session`);
+    expect(refused.stderr).toContain("Choose another label.");
+  });
+
+  test("two labels that come to one name, in a workspace whose own name is cut to fit each, do not share it: the second is refused", async () => {
+    // "docs" leaves the workspace twenty characters and "abc-docs" sixteen,
+    // and both names read claude(abcdefghijklmnop-abc-docs-<hash>).
+    const ws = join(TEST_HOME, "abcdefghijklmnop-abc-project");
+    mkdirSync(ws, { recursive: true });
+    const name = spawnedSessionName(ws, "docs");
+    expect(spawnedSessionName(ws, "abc-docs")).toBe(name);
+    const binDir = join(TEST_HOME, "bin-label-clash");
+    const fake = startFake(name, { reply: () => "ok" });
+    writeFakeClaudeNamed(binDir, [{ name, socketPath: fake.socketPath, sessionId: "00000000-0000-4000-8000-0000000000c" }]);
+    const env = cliEnv({ PATH: `${binDir}:${process.env.PATH}` });
+    try {
+      expect((await runCliIn(["send", "--new", "--name", "docs", "hello"], ws, env)).stdout).toContain(`Started ${name}`);
+      const second = await runCliIn(["send", "--new", "--name", "abc-docs", "hello"], ws, env);
+      expect(second.code).toBe(1);
+      expect(second.stderr).toContain(`With the label "abc-docs" the session's name would be ${name}, which is the name of the session labelled "docs" here`);
+      // Stopped, the first keeps its record: the second label still cannot take it.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 60_000));
+      const later = await runCliIn(["send", "--new", "--name", "abc-docs", "hello"], ws, env);
+      expect(later.code).toBe(1);
+      expect(later.stderr).toContain("Choose another label.");
+      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
+      // Stopped too long ago to be resumed, it holds the name no longer.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 31 * 24 * 3600_000));
+      const free = await runCliIn(["send", "--new", "--name", "abc-docs", "hello"], ws, env);
+      expect(free.code).toBe(0);
+      expect(free.stdout).toContain(`Started ${name}`);
+    } finally {
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a task that went to the user's own session reaches it while it is live, and is refused once it has gone", async () => {
+    await settleSpawnState();
+    const users = startFake("the-users-own", { reply: (t) => `theirs says: ${t.split("\n")[0]}` });
+    registerFake(users);
+    const sent = await runCli(["send", "a question"]);
+    const id = taskIdOf(sent.stdout);
+    expect((await runCli(["send", id, "and another"])).stdout).toContain("theirs says: and another");
+    users.stop();
+    for (const f of readdirSync(REGISTRY)) unlinkSync(join(REGISTRY, f));
+    const gone = await runCli(["send", id, "still there?"]);
+    expect(gone.code).toBe(1);
+    expect(gone.stderr).toContain(`Task ${id} went to the-users-own, which is not live. It is a session of the user's own, which only they can open again.`);
   });
 
   test("--new starts nothing where starting sessions is off", async () => {
@@ -1939,6 +2247,7 @@ describeUnix("send", () => {
     expect(failed.stdout).toContain("the process collecting the reply is gone");
     // Killed outright, it removed nothing: its registration and its socket
     // are still there — until the next receiver, or `clean`, comes by.
+    await got(other, 1);
     const leftover = other.received[0].replyPath;
     expect(existsSync(join(REGISTRY, `${receiver}.json`))).toBe(true);
     expect(existsSync(leftover)).toBe(true);
@@ -2065,7 +2374,8 @@ describeUnix("send", () => {
     expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "replied" }));
     expect(taskRecord(id)).not.toHaveProperty("error");
     const after = await runCli(["task", "status", id], env);
-    expect(after.stdout).not.toContain("529");
+    // By its reason: the thread's id is random, and may hold those digits.
+    expect(after.stdout).not.toContain("server_error");
     expect(after.stdout).not.toContain("without replying");
   });
 
@@ -2117,8 +2427,9 @@ describeUnix("send", () => {
     const r = await runCli(["send", "a long job", "--timeout", "1"], env);
     expect(r.code).toBe(3);
     expect(r.stdout).toContain("no reply from working-claude within 1s");
-    expect(r.stdout).not.toContain("529");
-    expect((await runCli(["task", "status", taskIdOf(r.stdout)], env)).stdout).not.toContain("529");
+    // By its reason: the thread's id is random, and may hold those digits.
+    expect(r.stdout).not.toContain("server_error");
+    expect((await runCli(["task", "status", taskIdOf(r.stdout)], env)).stdout).not.toContain("server_error");
   });
 
   test("a started session that hit an error and carried on is never reported as dead", async () => {
@@ -2617,6 +2928,7 @@ describeUnix("a Codex thread's address", () => {
     registerFake(fake, { status: "busy" });
     const a = taskIdOf((await runCli(["send", "check the intro", "--no-wait"])).stdout);
     const b = taskIdOf((await runCli(["send", "and the abstract too", "--no-wait"])).stdout);
+    await got(fake, 2);
     expect(fake.received.map((m) => m.fromName)).toEqual([channelName(WS, THREAD), channelName(WS, THREAD)]);
     speak(fake, fake.received[0].replyPath, "both read: fine");
     for (const id of [a, b]) {
@@ -2748,6 +3060,7 @@ describeUnix("a Codex thread's address", () => {
     const id = taskIdOf((await runCli(["send", "--to", "retrying-claude", "ping", "--no-wait"])).stdout);
     const line = JSON.stringify({ ...JSON.parse(buildEnvelope({ text: "pong once", ourSocketPath: fake.socketPath, ourName: fake.name, mode: "prompting" })), msg_id: `retry-${id}` }) + "\n";
     for (let i = 0; i < 2; i++) {
+      await got(fake, 1);
       Bun.connect({ unix: fake.received[0].replyPath, socket: { open(s) { s.write(line); s.end(); }, data() {}, error() {} } });
       await new Promise((r) => setTimeout(r, 150));
     }
@@ -2772,6 +3085,7 @@ describeUnix("a Codex thread's address", () => {
     const id = taskIdOf((await runCli(["send", "--to", "asked-claude", "a question", "--no-wait"])).stdout);
     const bystander = startFake("other-claude");
     registerFake(bystander, { sessionId: "00000000-0000-4000-8000-0000000000bb" });
+    await got(asked, 1);
     speak(bystander, asked.received[0].replyPath, "fyi from elsewhere");
     await waitFor(() => inboxTexts().includes("fyi from elsewhere"));
     await waitFor(() => contacts().some((c) => c.name === "other-claude"));
@@ -2818,6 +3132,7 @@ describeUnix("a Codex thread's address", () => {
       const fake = startFake("helpful-claude", { reply: null });
       registerFake(fake);
       const id = taskIdOf((await runCli(["send", "--to", "helpful-claude", "look into it", "--no-wait"], { CODEX_THREAD_ID: other })).stdout);
+      await got(fake, 1);
       speak(fake, fake.received[0].replyPath, "looked: fine");
       speak(fake, fake.received[0].replyPath, "and one more thing");
       await waitFor(() => (hostLog().match(new RegExp(`Codex thread ${other}: no codex-collab hook has run in it`, "g")) ?? []).length === 1, 10_000);
@@ -2864,6 +3179,7 @@ describeUnix("a Codex thread's address", () => {
       const fake = startFake("waking-claude", { reply: null });
       registerFake(fake);
       const id = taskIdOf((await runCli(["send", "long job", "--no-wait"])).stdout);
+      await got(fake, 1);
       speak(fake, fake.received[0].replyPath, "job finished: all green");
       await waitFor(() => started.length === 1, 10_000);
       expect(started[0].threadId).toBe(THREAD);
@@ -2899,6 +3215,7 @@ describeUnix("a Codex thread's address", () => {
     const other = taskIdOf((await runCli(["send", "--to", "steady-claude", "a short one", "--no-wait"])).stdout);
     const second = (taskRecord(other)!.receiver as { pid: number }).pid;
     process.kill(second, "SIGSTOP");
+    await got(fake, 2);
     speak(fake, fake.received[1].replyPath, "short answer");
     await waitFor(() => inboxTexts().includes("short answer"));
     process.kill(second, "SIGKILL");
@@ -2996,6 +3313,7 @@ describeUnix("a Codex thread's address", () => {
       const fake = startFake("busy-claude", { reply: null });
       registerFake(fake);
       await runCli(["send", "while you work", "--no-wait"]);
+      await got(fake, 1);
       speak(fake, fake.received[0].replyPath, "a reply mid-turn");
       await waitFor(() => inboxTexts().includes("a reply mid-turn"));
       // Looked at once it came, in a turn; then the turn ends.
@@ -3066,6 +3384,7 @@ describeUnix("a Codex thread's address", () => {
       expect((await runCli(["send", "--to", "quick-claude", "start the host"])).code).toBe(0);
       // …and a task whose receiver asks for the address only every 5 s.
       const id = taskIdOf((await runCli(["send", "--to", "slow-claude", "a long one", "--no-wait"], { CODEX_COLLAB_CHANNEL_CHECK_MS: "5000" })).stdout);
+      await got(slow, 1);
       const socket = slow.received[0].replyPath;
       writeConfig({ "address-idle": 1 });
       // Past the idle limit twice over, between two of the receiver's asks.

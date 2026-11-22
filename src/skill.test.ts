@@ -91,7 +91,12 @@ describe("Codex skill", () => {
     expect(CODEX_SKILL_SOURCE).toContain("A session started any other way (`claude --bg`, a terminal) is outside most of that");
     expect(CODEX_SKILL_SOURCE).toContain("codex-collab send --new --no-wait --model <model> --effort <level> --file task.md");
     expect(CODEX_SKILL_SOURCE).toContain("tasks sent to the same session share its context and are taken one after another");
-    expect(CODEX_SKILL_SOURCE).toContain("codex-collab keeps one session of its own per workspace");
+    // One default session, and labelled ones beside it for work that needs
+    // a context apart.
+    expect(CODEX_SKILL_SOURCE).toContain("A workspace has a default session of codex-collab's own");
+    expect(CODEX_SKILL_SOURCE).toContain('codex-collab send --new --name <label> "…"');
+    expect(CODEX_SKILL_SOURCE).toContain("Each session spends the user's Claude usage, so start one for a reason.");
+    expect(CODEX_SKILL_SOURCE).toContain("Always quote the message");
     // What a handoff leaves out: the user's instructions to Codex itself,
     // what the session holds already, and approval passed on as a formula.
     expect(CODEX_SKILL_SOURCE).toContain("Leave out what is addressed to you");

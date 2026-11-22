@@ -137,6 +137,8 @@ export interface Options {
   /** send: a new session of codex-collab's own, with a new conversation,
    *  whatever else is live (`--new`, or `--fresh`). */
   newSession: boolean;
+  /** send: the label of the session `--new` starts (`--name`). */
+  name: string | null;
   /** peers: every workspace, not only this one (also lifts `threads`' limit). */
   all: boolean;
   /** skill render: the Codex-side skill instead of Claude's. */
@@ -345,6 +347,7 @@ export function defaultOptions(): Options {
     file: null,
     noWait: false,
     noSpawn: false,
+    name: null,
     newSession: false,
     all: false,
     codex: false,
@@ -616,6 +619,12 @@ export function parseOptions(args: string[]): { positional: string[]; options: O
       options.noSpawn = true;
     } else if (arg === "--new" || arg === "--fresh") {
       options.newSession = true;
+    } else if (arg === "--name") {
+      if (!hasFlagValue(argv, i)) {
+        console.error("Error: --name requires a label for the session --new starts");
+        process.exit(1);
+      }
+      options.name = argv[++i];
     } else if (arg === "--codex") {
       options.codex = true;
     } else if (arg === "--rules") {
@@ -1289,6 +1298,16 @@ export function formatDuration(ms: number): string {
   const min = Math.floor(sec / 60);
   const rem = sec % 60;
   return `${min}m ${rem}s`;
+}
+
+/** A duration that may run to weeks, such as how long ago a session
+ *  stopped: as `formatDuration` has it under an hour, then hours and
+ *  minutes, then whole days. */
+export function formatLongDuration(ms: number): string {
+  if (ms < 3_600_000) return formatDuration(ms);
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours < 48) return `${hours}h ${Math.floor((ms % 3_600_000) / 60_000)}m`;
+  return `${Math.floor(hours / 24)} days`;
 }
 
 export function formatAge(unixTimestamp: number): string {

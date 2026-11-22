@@ -13,6 +13,7 @@ import {
   resolveApproval,
   sandboxModeLabel,
   formatDuration,
+  formatLongDuration,
   isThreadProcessAlive,
   defaultOptions,
   recordTerminalRunState,
@@ -1702,6 +1703,19 @@ describe("turnOverrides: Guardian auto mode", () => {
     opts.resumeId = "abc123";
 
     expect(turnOverrides(opts)).toEqual({});
+  });
+});
+
+// ─── formatLongDuration ────────────────────────────────────────────────────
+
+describe("formatLongDuration", () => {
+  test("under an hour as formatDuration has it, then hours and minutes, then whole days", () => {
+    expect(formatLongDuration(59_000)).toBe("59s");
+    expect(formatLongDuration(59 * 60_000)).toBe("59m 0s");
+    expect(formatLongDuration(3_600_000)).toBe("1h 0m");
+    expect(formatLongDuration(47 * 3_600_000 + 59 * 60_000)).toBe("47h 59m");
+    expect(formatLongDuration(48 * 3_600_000)).toBe("2 days");
+    expect(formatLongDuration(18 * 24 * 3_600_000 + 5 * 3_600_000)).toBe("18 days");
   });
 });
 
