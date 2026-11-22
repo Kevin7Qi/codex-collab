@@ -287,6 +287,9 @@ function writeFakeClaudeNamed(binDir: string, sessions: Array<{ name: string; so
   writeFileSync(join(binDir, "claude"), `#!/bin/sh
 case "$1" in
   --bg)
+    # A file named "refuse" makes every start fail, as a model Claude Code
+    # will not take does.
+    if [ -e "${binDir}/refuse" ]; then echo "error: model not available" >&2; exit 1; fi
     echo bg >> "${binDir}/bg.log"
     printf '%s\n' "$*" >> "${binDir}/args.log"
     n=$(wc -l < "${binDir}/bg.log" | tr -d ' ')
@@ -1542,14 +1545,26 @@ describeUnix("send", () => {
       const already = await runCli(["peers", "stop", "docs"]);
       expect(already.code).toBe(0);
       expect(already.stdout).toContain(`${docs.name} is stopped already. Its conversation is kept: \`codex-collab send "docs" "…"\``);
+      // A follow-up whose conversation cannot be resumed goes nowhere, and
+      // keeps its record: put right, the same follow-up resumes it.
+      writeFileSync(join(binDir, "refuse"), "");
+      const failed = await runCli(["send", mainTask, "six"], env);
+      expect(failed.code).toBe(1);
+      expect(failed.stderr).toContain(`The conversation task ${mainTask} went to could not be resumed (`);
+      expect(failed.stderr).toContain("Nothing was sent, and its record is kept");
+      rmSync(join(binDir, "refuse"));
+      const retried = await runCli(["send", mainTask, "six"], env);
+      expect(retried.stdout).toContain(`resuming ${main.name}`);
+      expect(retried.stdout).toContain("main says: six");
+      expect(starts()).toHaveLength(5);
       // A new conversation under the label is not the one the old task went
       // to: a follow-up to that task is refused, and starts nothing.
       expect((await runCli(["send", "--new", "--name", "docs", "start over"], env)).stdout).toContain(`Started ${docs.name}`);
-      expect(starts()).toHaveLength(5);
+      expect(starts()).toHaveLength(6);
       const orphan = await runCli(["send", docsTask, "and then?"], env);
       expect(orphan.code).toBe(1);
       expect(orphan.stderr).toContain(`Task ${docsTask} went to ${docs.name}, which is not live, and its conversation is no longer on record to resume.`);
-      expect(starts()).toHaveLength(5);
+      expect(starts()).toHaveLength(6);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
@@ -1566,6 +1581,33 @@ describeUnix("send", () => {
     expect(refused.code).toBe(1);
     expect(refused.stderr).toContain(`With the label "docs" the session's name would be ${spawnedSessionName(ws)}, the name of this workspace's default session`);
     expect(refused.stderr).toContain("Choose another label.");
+  });
+
+  test("two labels that come to one name, in a workspace whose own name is cut to fit each, do not share it: the second is refused", async () => {
+    // "docs" leaves the workspace twenty characters and "abc-docs" sixteen,
+    // and both names read claude(abcdefghijklmnop-abc-docs-<hash>).
+    const ws = join(TEST_HOME, "abcdefghijklmnop-abc-project");
+    mkdirSync(ws, { recursive: true });
+    const name = spawnedSessionName(ws, "docs");
+    expect(spawnedSessionName(ws, "abc-docs")).toBe(name);
+    const binDir = join(TEST_HOME, "bin-label-clash");
+    const fake = startFake(name, { reply: () => "ok" });
+    writeFakeClaudeNamed(binDir, [{ name, socketPath: fake.socketPath, sessionId: "00000000-0000-4000-8000-0000000000c" }]);
+    const env = cliEnv({ PATH: `${binDir}:${process.env.PATH}` });
+    try {
+      expect((await runCliIn(["send", "--new", "--name", "docs", "hello"], ws, env)).stdout).toContain(`Started ${name}`);
+      const second = await runCliIn(["send", "--new", "--name", "abc-docs", "hello"], ws, env);
+      expect(second.code).toBe(1);
+      expect(second.stderr).toContain(`With the label "abc-docs" the session's name would be ${name}, which is the name of the session labelled "docs" here`);
+      // Stopped, the first keeps its record: the second label still cannot take it.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 60_000));
+      const later = await runCliIn(["send", "--new", "--name", "abc-docs", "hello"], ws, env);
+      expect(later.code).toBe(1);
+      expect(later.stderr).toContain("Choose another label.");
+      expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
+    } finally {
+      killFakeSleepers(binDir);
+    }
   });
 
   test("a task that went to the user's own session reaches it while it is live, and is refused once it has gone", async () => {

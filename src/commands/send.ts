@@ -74,6 +74,7 @@ import {
   stopSpawnedSession,
   transientSessionId,
   WorkspaceNotTrustedError,
+  readSpawnedSessions,
   type ClaudeSession,
   type SpawnedSession,
 } from "../claude-sessions";
@@ -235,11 +236,13 @@ function severalLive(sessions: ClaudeSession[]): string {
 /** Refused: `--new` for a name whose session is live. There is one session
  *  to a name: it is messaged by that name, stopped for a new conversation
  *  under it, or left alone for another session beside it. */
-function ownSessionLive(name: string, label: string | undefined): string {
+function ownSessionLive(name: string, label: string | undefined, live: ClaudeSession[]): string {
   const again = label ? `send --new --name ${label}` : "send --new";
+  // By its label, unless another live session has that very name.
+  const address = JSON.stringify(addressOf({ name, label }, live.filter((s) => s.name !== name)));
   return `${name}, a session codex-collab started here, is live, and there is one session to a name.\n` +
-    `  To message it:           codex-collab send ${JSON.stringify(label ?? name)} "…"\n` +
-    `  For a new conversation:  codex-collab peers stop ${JSON.stringify(label ?? name)}, then ${again} again\n` +
+    `  To message it:           codex-collab send ${address} "…"\n` +
+    `  For a new conversation:  codex-collab peers stop ${address}, then ${again} again\n` +
     `  For another beside it:   codex-collab send --new --name <label> "…"`;
 }
 
@@ -545,6 +548,9 @@ export async function handleSend(args: string[]): Promise<void> {
   // when it is not live, a session codex-collab started is started again.
   const defaultName = spawnedSessionName(cwd);
   let start: Start | null = null;
+  // Set when a task's id named a live session: the conversation it must
+  // still be once the workspace's lock is held.
+  let liveConversation: Start["conversation"];
   // `--name` gives the session `--new` starts its label. Without `--new` it
   // would name nothing: a session there is already is addressed by its label
   // where a name goes.
@@ -600,6 +606,7 @@ export async function handleSend(args: string[]): Promise<void> {
           : ". It is a session of the user's own, which only they can open again."}`);
       }
       if (stopped && id) conversation = { taskId: task.id, sessionId: id };
+      if (viaTask && id) liveConversation = { taskId: task.id, sessionId: id };
       notes.push(`Task ${task.id} went to ${(viaTask ?? stopped)!.name}: this message goes there too.`);
     }
     const { session, ambiguous } = exact || viaTask || stopped ? { session: exact ?? viaTask, ambiguous: [] } : resolveSession(sessions, targetName);
@@ -683,7 +690,14 @@ export async function handleSend(args: string[]): Promise<void> {
       // `--new` cannot start a second session under one name — live before
       // this `send`, or started by another while it waited.
       const ownMeanwhile = how === "new" ? again.find((s) => s.name === startName) : undefined;
-      if (ownMeanwhile) fail(ownSessionLive(ownMeanwhile.name, startLabel));
+      // Two labels can come to one name where a long workspace name is cut
+      // to fit, each by its own length. The name is then the other's, live or
+      // stopped: started under it, this session would take its record.
+      const clash = how === "new" ? readSpawnedSessions(stateDir).find((r) => r.name === startName && (r.label ?? "") !== (startLabel ?? "")) : undefined;
+      if (clash) {
+        fail(`With the label "${startLabel}" the session's name would be ${startName}, which is the name of the session labelled "${clash.label}" here (the workspace's own name is cut to fit each). Choose another label.`);
+      }
+      if (ownMeanwhile) fail(ownSessionLive(ownMeanwhile.name, startLabel, again));
       // Named by a task, only the conversation that task went to will do.
       const startedMeanwhile = how === "named"
         ? again.find((s) => bound ? !!s.spawned && holdsConversation(s.spawned, bound.sessionId) : s.name === startName)
@@ -724,11 +738,12 @@ export async function handleSend(args: string[]): Promise<void> {
             // to resume once the user has trusted the folder.
             if (e instanceof WorkspaceNotTrustedError) fail(e.message);
             const why = (e instanceof Error ? e.message : String(e)).split("\n")[0];
-            forgetSpawnedSession(stateDir, stopped.id);
             // A follow-up to a task is for that conversation: a new session
-            // would get it without what it follows up on.
-            if (bound) fail(`The conversation task ${bound.taskId} went to could not be resumed (${why}). Nothing was sent: \`codex-collab send --new${startLabel ? ` --name ${startLabel}` : ""} "…"\` starts a new one, with the task explained again.`);
+            // would get it without what it follows up on. Its record stays,
+            // so that the same follow-up works once what failed is put right.
+            if (bound) fail(`The conversation task ${bound.taskId} went to could not be resumed (${why}). Nothing was sent, and its record is kept: send again once that is put right, or \`codex-collab send --new${startLabel ? ` --name ${startLabel}` : ""} "…"\` starts a new conversation, with the task explained again.`);
             console.log(`Could not resume it (${why}) — starting a new session instead.`);
+            forgetSpawnedSession(stateDir, stopped.id);
           }
         } else if (how === "new") {
           console.log(`Starting a new session of codex-collab's own for this workspace${startLabel ? `, ${startName}` : ""}, in the background…`);
@@ -752,6 +767,22 @@ export async function handleSend(args: string[]): Promise<void> {
       letGo();
       throw e;
     }
+  }
+
+  // A session codex-collab started that was live all along: taken under the
+  // lock as well, and looked up again before anything is decided about it,
+  // since another `send` may have restarted it on another model, or started
+  // a new conversation under its name, while this one waited. Named by a
+  // task, it must still hold the conversation that task went to.
+  if (target.spawned && !held) {
+    await takeLock();
+    const bound = liveConversation;
+    const now = listClaudeSessions({ cwd, stateDir }).find((s) => s.name === target.name && !!s.spawned);
+    if (!now) fail(`${target.name} stopped just now, before the message was sent. Send again: it is resumed by its name.`);
+    if (bound && !holdsConversation(now.spawned!, bound.sessionId)) {
+      fail(`Task ${bound.taskId} went to ${target.name}, and a new conversation was started under that name just now. Nothing was sent.`);
+    }
+    target = now;
   }
 
   // A model or effort Codex chose for a session that is running already. One
@@ -791,7 +822,7 @@ export async function handleSend(args: string[]): Promise<void> {
         try {
           target = await spawnClaudeSession({ cwd, stateDir, lingerSec: set.lingerSec, model, effort, autocompact: set.autocompact, spawnTrust: set.spawnTrust, resume: record });
         } catch (e) {
-          fail(`${record.name} was stopped to restart it on ${choice}, and could not be resumed: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}\nIts conversation is kept: \`codex-collab send ${JSON.stringify(record.label ?? record.name)} "…"\` tries again. Nothing was sent.`);
+          fail(`${record.name} was stopped to restart it on ${choice}, and could not be resumed: ${(e instanceof Error ? e.message : String(e)).split("\n")[0]}\nIts conversation is kept: \`codex-collab send ${JSON.stringify(addressOf(record, listClaudeSessions({ cwd, stateDir })))} "…"\` tries again. Nothing was sent.`);
         }
         notes.push(`Restarted ${target.name} on ${choice} (its conversation so far is intact; it ran on ${was}; it stops after ${formatDuration(set.lingerSec * 1000)} idle).`);
         startedHere = true;
@@ -803,16 +834,6 @@ export async function handleSend(args: string[]): Promise<void> {
       const note = choiceNotAppliedNote(target, askedModel, askedEffort);
       if (note) notes.push(note);
     }
-  }
-
-  // A session codex-collab started that was live all along: taken under the
-  // lock as well, and looked up again, since another `send` may have
-  // restarted it on another model while this one waited.
-  if (target.spawned && !held) {
-    await takeLock();
-    const now = listClaudeSessions({ cwd, stateDir }).find((s) => s.name === target.name && !!s.spawned);
-    if (!now) fail(`${target.name} stopped just now, before the message was sent. Send again: it is resumed by its name.`);
-    target = now;
   }
 
   // ── Record the task, and hand it to a receiver of its own ──
