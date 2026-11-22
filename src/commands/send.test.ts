@@ -2335,7 +2335,8 @@ describeUnix("send", () => {
     expect(taskRecord(id)).toEqual(expect.objectContaining({ status: "replied" }));
     expect(taskRecord(id)).not.toHaveProperty("error");
     const after = await runCli(["task", "status", id], env);
-    expect(after.stdout).not.toContain("529");
+    // By its reason: the thread's id is random, and may hold those digits.
+    expect(after.stdout).not.toContain("server_error");
     expect(after.stdout).not.toContain("without replying");
   });
 
@@ -2387,8 +2388,9 @@ describeUnix("send", () => {
     const r = await runCli(["send", "a long job", "--timeout", "1"], env);
     expect(r.code).toBe(3);
     expect(r.stdout).toContain("no reply from working-claude within 1s");
-    expect(r.stdout).not.toContain("529");
-    expect((await runCli(["task", "status", taskIdOf(r.stdout)], env)).stdout).not.toContain("529");
+    // By its reason: the thread's id is random, and may hold those digits.
+    expect(r.stdout).not.toContain("server_error");
+    expect((await runCli(["task", "status", taskIdOf(r.stdout)], env)).stdout).not.toContain("server_error");
   });
 
   test("a started session that hit an error and carried on is never reported as dead", async () => {
