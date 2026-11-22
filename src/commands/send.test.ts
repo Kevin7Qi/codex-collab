@@ -165,6 +165,14 @@ function speak(fake: FakeSession, replyPath: string, text: string): void {
   Bun.connect({ unix: replyPath, socket: { open(s) { s.write(line); s.end(); }, data() {}, error() {} } });
 }
 
+/** Wait until a fake session has taken in `n` messages. A `send` returns
+ *  once its message is written to the session's socket; the fake reads it in
+ *  this process a moment later, which on a loaded machine is after the
+ *  command has returned. */
+async function got(fake: FakeSession, n = 1): Promise<void> {
+  await waitFor(() => fake.received.length >= n, 10_000);
+}
+
 async function waitFor(cond: () => boolean, ms = 5000): Promise<void> {
   const until = Date.now() + ms;
   while (!cond()) {
@@ -327,15 +335,43 @@ async function stopSpawnedAt(binDir: string, when: Date): Promise<void> {
   }
 }
 
-/** Spawn-path tests share one workspace, and a reaper an earlier test left
- *  behind (polling every 500ms) still writes to its records when it finds
- *  its session gone: it marks it stopped — which the next test's `send`
- *  would then resume. Let such a reaper finish, then start from no records. */
+/** The reapers still running under the test HOME. Each keeps a log named
+ *  for its session and its pid while it runs, and is taken for one only
+ *  while that pid runs `reap-claude`. */
+function liveReapers(): number[] {
+  const root = join(TEST_HOME, ".codex-collab", "workspaces");
+  const pids: number[] = [];
+  let dirs: string[] = [];
+  try { dirs = readdirSync(root); } catch { return pids; }
+  for (const d of dirs) {
+    let names: string[] = [];
+    try { names = readdirSync(join(root, d, "reapers")); } catch { continue; }
+    for (const name of names) {
+      const m = /-(\d+)\.log$/.exec(name);
+      if (!m) continue;
+      const ps = spawnSync("ps", ["-p", m[1], "-o", "args="], { encoding: "utf-8" });
+      if (ps.status === 0 && ps.stdout.includes("reap-claude")) pids.push(Number(m[1]));
+    }
+  }
+  return pids;
+}
+
+/** Spawn-path tests share one workspace, and the fake `claude` gives every
+ *  session the same job id. A reaper an earlier test left behind takes the
+ *  next test's session for its own, come back as another process, and stops
+ *  it after its own test's linger; or, finding its session gone, marks it
+ *  stopped, which the next test's `send` would then resume. So each such
+ *  test starts with no reaper running and no records: the reapers are
+ *  stopped and seen gone, however slow the machine is. */
 async function settleSpawnState(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 900));
+  for (const pid of liveReapers()) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+  await waitFor(() => liveReapers().length === 0, 15_000);
   const root = join(TEST_HOME, ".codex-collab", "workspaces");
   try {
-    for (const d of readdirSync(root)) rmSync(join(root, d, "spawned-claude.json"), { force: true });
+    for (const d of readdirSync(root)) {
+      rmSync(join(root, d, "spawned-claude.json"), { force: true });
+      rmSync(join(root, d, "reapers"), { recursive: true, force: true });
+    }
   } catch { /* no state yet */ }
 }
 
@@ -958,6 +994,7 @@ describeUnix("send", () => {
     expect(r.stdout).not.toContain("REPLY");
     expect(r.stdout).not.toContain("codex-collab task");
     // Delivered before `send` said so — not merely queued.
+    await got(fake, 1);
     expect(fake.received).toHaveLength(1);
     expect(fake.received[0].text.startsWith("long job\n\n(From Codex thread")).toBe(true);
     speak(fake, fake.received[0].replyPath, "job done");
@@ -979,6 +1016,7 @@ describeUnix("send", () => {
     await waitFor(() => inboxTexts().includes("one more thing about one"));
     const second = await runCli(["send", "two", "--no-wait"]);
     const id = taskIdOf(second.stdout);
+    await got(fake, 2);
     const [first, later] = fake.received;
     expect(later.fromName).toBe(first.fromName);
     expect(later.replyPath).toBe(first.replyPath);
@@ -2209,6 +2247,7 @@ describeUnix("send", () => {
     expect(failed.stdout).toContain("the process collecting the reply is gone");
     // Killed outright, it removed nothing: its registration and its socket
     // are still there — until the next receiver, or `clean`, comes by.
+    await got(other, 1);
     const leftover = other.received[0].replyPath;
     expect(existsSync(join(REGISTRY, `${receiver}.json`))).toBe(true);
     expect(existsSync(leftover)).toBe(true);
@@ -2889,6 +2928,7 @@ describeUnix("a Codex thread's address", () => {
     registerFake(fake, { status: "busy" });
     const a = taskIdOf((await runCli(["send", "check the intro", "--no-wait"])).stdout);
     const b = taskIdOf((await runCli(["send", "and the abstract too", "--no-wait"])).stdout);
+    await got(fake, 2);
     expect(fake.received.map((m) => m.fromName)).toEqual([channelName(WS, THREAD), channelName(WS, THREAD)]);
     speak(fake, fake.received[0].replyPath, "both read: fine");
     for (const id of [a, b]) {
@@ -3020,6 +3060,7 @@ describeUnix("a Codex thread's address", () => {
     const id = taskIdOf((await runCli(["send", "--to", "retrying-claude", "ping", "--no-wait"])).stdout);
     const line = JSON.stringify({ ...JSON.parse(buildEnvelope({ text: "pong once", ourSocketPath: fake.socketPath, ourName: fake.name, mode: "prompting" })), msg_id: `retry-${id}` }) + "\n";
     for (let i = 0; i < 2; i++) {
+      await got(fake, 1);
       Bun.connect({ unix: fake.received[0].replyPath, socket: { open(s) { s.write(line); s.end(); }, data() {}, error() {} } });
       await new Promise((r) => setTimeout(r, 150));
     }
@@ -3044,6 +3085,7 @@ describeUnix("a Codex thread's address", () => {
     const id = taskIdOf((await runCli(["send", "--to", "asked-claude", "a question", "--no-wait"])).stdout);
     const bystander = startFake("other-claude");
     registerFake(bystander, { sessionId: "00000000-0000-4000-8000-0000000000bb" });
+    await got(asked, 1);
     speak(bystander, asked.received[0].replyPath, "fyi from elsewhere");
     await waitFor(() => inboxTexts().includes("fyi from elsewhere"));
     await waitFor(() => contacts().some((c) => c.name === "other-claude"));
@@ -3090,6 +3132,7 @@ describeUnix("a Codex thread's address", () => {
       const fake = startFake("helpful-claude", { reply: null });
       registerFake(fake);
       const id = taskIdOf((await runCli(["send", "--to", "helpful-claude", "look into it", "--no-wait"], { CODEX_THREAD_ID: other })).stdout);
+      await got(fake, 1);
       speak(fake, fake.received[0].replyPath, "looked: fine");
       speak(fake, fake.received[0].replyPath, "and one more thing");
       await waitFor(() => (hostLog().match(new RegExp(`Codex thread ${other}: no codex-collab hook has run in it`, "g")) ?? []).length === 1, 10_000);
@@ -3136,6 +3179,7 @@ describeUnix("a Codex thread's address", () => {
       const fake = startFake("waking-claude", { reply: null });
       registerFake(fake);
       const id = taskIdOf((await runCli(["send", "long job", "--no-wait"])).stdout);
+      await got(fake, 1);
       speak(fake, fake.received[0].replyPath, "job finished: all green");
       await waitFor(() => started.length === 1, 10_000);
       expect(started[0].threadId).toBe(THREAD);
@@ -3171,6 +3215,7 @@ describeUnix("a Codex thread's address", () => {
     const other = taskIdOf((await runCli(["send", "--to", "steady-claude", "a short one", "--no-wait"])).stdout);
     const second = (taskRecord(other)!.receiver as { pid: number }).pid;
     process.kill(second, "SIGSTOP");
+    await got(fake, 2);
     speak(fake, fake.received[1].replyPath, "short answer");
     await waitFor(() => inboxTexts().includes("short answer"));
     process.kill(second, "SIGKILL");
@@ -3268,6 +3313,7 @@ describeUnix("a Codex thread's address", () => {
       const fake = startFake("busy-claude", { reply: null });
       registerFake(fake);
       await runCli(["send", "while you work", "--no-wait"]);
+      await got(fake, 1);
       speak(fake, fake.received[0].replyPath, "a reply mid-turn");
       await waitFor(() => inboxTexts().includes("a reply mid-turn"));
       // Looked at once it came, in a turn; then the turn ends.
@@ -3338,6 +3384,7 @@ describeUnix("a Codex thread's address", () => {
       expect((await runCli(["send", "--to", "quick-claude", "start the host"])).code).toBe(0);
       // …and a task whose receiver asks for the address only every 5 s.
       const id = taskIdOf((await runCli(["send", "--to", "slow-claude", "a long one", "--no-wait"], { CODEX_COLLAB_CHANNEL_CHECK_MS: "5000" })).stdout);
+      await got(slow, 1);
       const socket = slow.received[0].replyPath;
       writeConfig({ "address-idle": 1 });
       // Past the idle limit twice over, between two of the receiver's asks.
