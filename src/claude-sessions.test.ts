@@ -34,6 +34,8 @@ import {
   readSpawnedSessions,
   reaperLog,
   reaperVerdict,
+  addressOf,
+  holdsConversation,
   recordSpawnedSession,
   resolveSession,
   resumableSession,
@@ -484,6 +486,16 @@ describeUnix("stopped sessions and resuming", () => {
     // stopped record only.
     recordSpawnedSession(stateDir, rec("dddd4444", { pid: 5004, name: "claude(ws-a-docs-x)", label: "docs" }), { now });
     expect(readSpawnedSessions(stateDir).map((s) => s.id).sort()).toEqual(["aaaa1111", "cccc3333", "dddd4444"]);
+    // A stopped record's pid is history: a session that happens to be given
+    // it takes nobody's record away.
+    recordSpawnedSession(stateDir, rec("ffff6666", { pid: 5001, name: "claude(ws-a-other-x)", label: "other" }), { now });
+    expect(readSpawnedSessions(stateDir).map((s) => s.id).sort()).toEqual(["aaaa1111", "cccc3333", "dddd4444", "ffff6666"]);
+    forgetSpawnedSession(stateDir, "ffff6666");
+    // A label addresses its session unless a live session has that very
+    // name, which a send would take first; then the full name does.
+    expect(addressOf({ name: "claude(ws-a-docs-x)", label: "docs" }, [{ name: "someone" }])).toBe("docs");
+    expect(addressOf({ name: "claude(ws-a-docs-x)", label: "docs" }, [{ name: "docs" }])).toBe("claude(ws-a-docs-x)");
+    expect(addressOf({ name: "claude(ws-a-x)" }, [])).toBe("claude(ws-a-x)");
     // Past the time Claude Code keeps a conversation, a stopped record is
     // no longer offered, and goes at the next write.
     const later = now + STOPPED_RECORD_KEEP_MS + 3600_000;
@@ -509,7 +521,7 @@ describeUnix("stopped sessions and resuming", () => {
     mkdirSync(dir, { recursive: true });
     const fake = installFakeClaude(dir, { register: true });
     const stateDir = join(root, "state-resume");
-    recordSpawnedSession(stateDir, rec("eeee5555", { model: "sonnet", effort: "low" }));
+    recordSpawnedSession(stateDir, rec("eeee5555", { model: "sonnet", effort: "low", previous: ["sess-older"] }));
     markSpawnedSessionStopped(stateDir, "eeee5555");
     try {
       const session = await spawnClaudeSession({
@@ -529,6 +541,14 @@ describeUnix("stopped sessions and resuming", () => {
       // One record again: the running session, under its new job id.
       expect(readSpawnedSessions(stateDir)).toEqual([expect.objectContaining({ id: "deadbeef", pid: session.pid, model: "sonnet" })]);
       expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
+      // Claude Code gives the resumed session an id of its own; the record
+      // keeps the ones its conversation had, which earlier tasks name.
+      const record = readSpawnedSessions(stateDir)[0];
+      expect(record.sessionId).not.toBe("sess-eeee5555");
+      expect(record.previous).toEqual(["sess-older", "sess-eeee5555"]);
+      expect(holdsConversation(record, "sess-eeee5555")).toBe(true);
+      expect(holdsConversation(record, "sess-older")).toBe(true);
+      expect(holdsConversation(record, "sess-of-another")).toBe(false);
     } finally {
       killSleeper(fake.pidFile);
     }

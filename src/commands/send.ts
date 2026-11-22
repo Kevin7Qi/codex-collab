@@ -61,6 +61,9 @@ import {
   stoppedSessionNamed,
   stoppedSessions,
   findRestartedSession,
+  addressOf,
+  holdsConversation,
+  locateSpawnedSession,
   promptNow,
   remoteControlReaches,
   sessionStatusNow,
@@ -225,7 +228,7 @@ function severalLive(sessions: ClaudeSession[]): string {
   // The default session, live among them, leaves `--new` a label to take.
   const beside = sessions.some((s) => s.spawned && !s.spawned.label) ? "codex-collab send --new --name <label> \"…\"" : "codex-collab send --new \"…\"";
   return "Several Claude Code sessions are live in this workspace — name one:\n" +
-    sessions.map((s) => `  codex-collab send ${JSON.stringify(s.spawned?.label ?? s.name)} "…"`).join("\n") +
+    sessions.map((s) => `  codex-collab send ${JSON.stringify(s.spawned ? addressOf(s.spawned, sessions) : s.name)} "…"`).join("\n") +
     `\nor start a new session of codex-collab's own beside them:\n  ${beside}`;
 }
 
@@ -248,6 +251,9 @@ interface Start {
   /** The name the session will have. */
   name: string;
   label?: string;
+  /** Set when a task's id named the session: the conversation that task
+   *  went to, which is the only one this message may reach. */
+  conversation?: { taskId: string; sessionId: string };
 }
 
 /** Split Codex's arguments into target and message: `--to <name>`; else,
@@ -448,7 +454,12 @@ function spawnSettings(cfg: UserConfig): { lingerSec: number; model?: string; ef
  *  waiting on it. */
 function restartBlocker(target: ClaudeSession, ours: SpawnedSession, stateDir: string): string | null {
   if (!ours.sessionId) return "Claude Code gave it no session id, so its conversation could not be resumed";
-  const status = sessionStatusNow(target.pid) ?? target.status;
+  // What it is doing now, from the entry it has now: Claude Code may have
+  // brought it back as another process since it was listed, and an entry
+  // that cannot be found says nothing about its being idle.
+  const entry = locateSpawnedSession(ours);
+  if (!entry) return "it is not registered at the moment, so whether it is idle cannot be seen";
+  const status = typeof entry.status === "string" ? entry.status : "unknown";
   if (status !== "idle") {
     return status === "busy" ? "it is in a turn" : status === "waiting" ? "it is at a prompt" : status === "shell" ? "a command of its own is still running" : `it reports ${status}`;
   }
@@ -543,6 +554,11 @@ export async function handleSend(args: string[]): Promise<void> {
       die(`--name gives a new session its label, so it goes with --new:\n  codex-collab send --new --name ${options.name} "…"\nA session there is already is addressed by its label: codex-collab send ${JSON.stringify(options.name)} "…"`);
     }
     label = sessionLabel(options.name) ?? die(`"${options.name}" cannot be a session's label. A label is ${LABEL_RULE}.`);
+    // A long workspace name is cut to fit, and cut just before a part that
+    // is this very label, the labelled name would be the default session's.
+    if (spawnedSessionName(cwd, label) === defaultName) {
+      die(`With the label "${label}" the session's name would be ${defaultName}, the name of this workspace's default session (the workspace's own name is cut to fit, and ends that way). Choose another label.`);
+    }
   }
   if (options.newSession) {
     // `--new` (or `--fresh`): a new session of codex-collab's own, with a new
@@ -566,15 +582,24 @@ export async function handleSend(args: string[]): Promise<void> {
     // live session of that very name comes first, and no label has the shape.
     const task = !exact && !stopped && isTaskId(targetName) ? loadTask(stateDir, targetName) : null;
     let viaTask: ClaudeSession | null = null;
+    let conversation: Start["conversation"];
     if (task) {
+      // The conversation is what the task went to, whatever name it has now.
+      // A resumed session has a new session id and keeps the ones it had; a
+      // new conversation started under the same name has none of them. A
+      // task with no session id on record names a process, live or not.
       const went = task.target;
-      viaTask = sessions.find((x) => (went.sessionId ? x.sessionId === went.sessionId : x.name === went.name)) ?? null;
-      if (!viaTask) stopped = stoppedSessions(stateDir).find((r) => (went.sessionId ? r.sessionId === went.sessionId : r.name === went.name)) ?? null;
+      const id = went.sessionId ?? null;
+      viaTask = (id
+        ? sessions.find((x) => x.sessionId === id || (!!x.spawned && holdsConversation(x.spawned, id)))
+        : sessions.find((x) => x.pid === went.pid && !!went.procStart && x.procStart === went.procStart)) ?? null;
+      if (!viaTask && id) stopped = stoppedSessions(stateDir).find((r) => holdsConversation(r, id)) ?? null;
       if (!viaTask && !stopped) {
         die(`Task ${task.id} went to ${went.name}, which is not live${went.spawned
           ? ", and its conversation is no longer on record to resume."
           : ". It is a session of the user's own, which only they can open again."}`);
       }
+      if (stopped && id) conversation = { taskId: task.id, sessionId: id };
       notes.push(`Task ${task.id} went to ${(viaTask ?? stopped)!.name}: this message goes there too.`);
     }
     const { session, ambiguous } = exact || viaTask || stopped ? { session: exact ?? viaTask, ambiguous: [] } : resolveSession(sessions, targetName);
@@ -585,12 +610,12 @@ export async function handleSend(args: string[]): Promise<void> {
     } else if (stopped) {
       // A session codex-collab started and stopped, asked for by its name or
       // its label: resumed, whenever it stopped.
-      start = { how: "named", name: stopped.name, label: stopped.label };
+      start = { how: "named", name: stopped.name, label: stopped.label, conversation };
     } else if (targetName === defaultName) {
       start = { how: "named", name: defaultName };
     } else {
       const live = sessions.length ? `Live here: ${sessions.map((s) => s.name).join(", ")}.` : "No Claude Code session is live in this workspace.";
-      const resumable = stoppedSessions(stateDir).map((r) => r.label ?? r.name);
+      const resumable = stoppedSessions(stateDir).map((r) => addressOf(r, sessions));
       const asLabel = sessionLabel(targetName);
       die(`No live Claude Code session named "${targetName}" in this workspace${isTaskId(targetName) ? ", and no task of that id" : ""}. ${live}` +
         (resumable.length ? ` Stopped, and resumed by name: ${resumable.join(", ")}.` : "") +
@@ -604,10 +629,36 @@ export async function handleSend(args: string[]): Promise<void> {
   } else {
     start = { how: "any", name: defaultName };
   }
+  // The workspace's lock, held from choosing a session codex-collab started
+  // until the task for it is recorded: a `send` that restarts one on another
+  // model then either finds this task waiting and holds off, or has done so
+  // already, and this one reaches the session as it is afterwards.
+  let held: (() => void) | null = null;
+  const letGo = (): void => { held?.(); held = null; };
+  const takeLock = async (): Promise<void> => {
+    try {
+      mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    } catch (e) {
+      die(`Could not create ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
+    }
+    try {
+      held = await acquireLockAsync(join(stateDir, "spawn.lock"), { maxAttempts: 2000, staleThresholdMs: 120_000 });
+    } catch {
+      die("Another `codex-collab send` is still starting a Claude Code session for this workspace — retry in a moment.");
+    }
+  };
+  // `die` exits there and then, and the lock would be broken only once it is
+  // stale — two minutes, which the next `send` here would spend waiting for
+  // it. So every way out while it is held lets go of it first.
+  const fail: (message: string) => never = (message) => {
+    letGo();
+    return die(message);
+  };
   if (start) {
     const how = start.how;
     const startName = start.name;
     const startLabel = start.label;
+    const bound = start.conversation;
     const cfg = loadUserConfig();
     const notLive = how === "named" ? `${startName} is not live` : "No Claude Code session is live in this workspace";
     if (options.noSpawn || cfg.spawn === "off") {
@@ -626,31 +677,17 @@ export async function handleSend(args: string[]): Promise<void> {
     // One spawn per workspace at a time: two sends racing here would each
     // start a session under the same name. The second waits, then finds the
     // first's session live and uses it.
-    try {
-      mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    } catch (e) {
-      die(`Could not create ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
-    }
-    let release: () => void;
-    try {
-      release = await acquireLockAsync(join(stateDir, "spawn.lock"), { maxAttempts: 2000, staleThresholdMs: 120_000 });
-    } catch {
-      die("Another `codex-collab send` is still starting a Claude Code session for this workspace — retry in a moment.");
-    }
-    // `die` exits there and then, and the lock would be broken only once it
-    // is stale — two minutes, which the next `send` here would spend waiting
-    // for it. So every way out of here lets go of it first.
-    const fail = (message: string): never => {
-      release();
-      return die(message);
-    };
+    await takeLock();
     try {
       const again = listClaudeSessions({ cwd, stateDir });
       // `--new` cannot start a second session under one name — live before
       // this `send`, or started by another while it waited.
       const ownMeanwhile = how === "new" ? again.find((s) => s.name === startName) : undefined;
       if (ownMeanwhile) fail(ownSessionLive(ownMeanwhile.name, startLabel));
-      const startedMeanwhile = how === "named" ? again.find((s) => s.name === startName) : how === "any" && again.length === 1 ? again[0] : undefined;
+      // Named by a task, only the conversation that task went to will do.
+      const startedMeanwhile = how === "named"
+        ? again.find((s) => bound ? !!s.spawned && holdsConversation(s.spawned, bound.sessionId) : s.name === startName)
+        : how === "any" && again.length === 1 ? again[0] : undefined;
       if (how === "any" && again.length > 1) {
         fail(severalLive(again));
       } else if (startedMeanwhile) {
@@ -665,8 +702,12 @@ export async function handleSend(args: string[]): Promise<void> {
         // of Claude Code's own history), starts a new session instead, under
         // the same name.
         const stopped: SpawnedSession | null = how === "new" ? null
+          : bound ? stoppedSessions(stateDir).find((r) => holdsConversation(r, bound.sessionId)) ?? null
           : how === "named" ? stoppedSessionNamed(stateDir, startName)
           : resumableSession(stateDir, resumeWindowSec(cfg));
+        if (bound && !stopped) {
+          fail(`Task ${bound.taskId} went to ${startName}, and its conversation is no longer on record to resume: a new one was started under that name since. Nothing was sent.`);
+        }
         let resumed: ClaudeSession | null = null;
         if (stopped) {
           const ago = formatLongDuration(Math.max(1000, Date.now() - Date.parse(stopped.stoppedAt!)));
@@ -682,8 +723,12 @@ export async function handleSend(args: string[]): Promise<void> {
             // too. Stop here, and keep the record: the conversation is there
             // to resume once the user has trusted the folder.
             if (e instanceof WorkspaceNotTrustedError) fail(e.message);
-            console.log(`Could not resume it (${(e instanceof Error ? e.message : String(e)).split("\n")[0]}) — starting a new session instead.`);
+            const why = (e instanceof Error ? e.message : String(e)).split("\n")[0];
             forgetSpawnedSession(stateDir, stopped.id);
+            // A follow-up to a task is for that conversation: a new session
+            // would get it without what it follows up on.
+            if (bound) fail(`The conversation task ${bound.taskId} went to could not be resumed (${why}). Nothing was sent: \`codex-collab send --new${startLabel ? ` --name ${startLabel}` : ""} "…"\` starts a new one, with the task explained again.`);
+            console.log(`Could not resume it (${why}) — starting a new session instead.`);
           }
         } else if (how === "new") {
           console.log(`Starting a new session of codex-collab's own for this workspace${startLabel ? `, ${startName}` : ""}, in the background…`);
@@ -703,8 +748,9 @@ export async function handleSend(args: string[]): Promise<void> {
         }
         startedHere = true;
       }
-    } finally {
-      release();
+    } catch (e) {
+      letGo();
+      throw e;
     }
   }
 
@@ -726,17 +772,8 @@ export async function handleSend(args: string[]): Promise<void> {
       const refuse = (why: string): string =>
         `${target.name} runs on ${was}, and cannot be restarted on ${choice} now: ${why}.\nSend again once it is idle, or leave --model and --effort out to message it as it runs.`;
       const blocked = restartBlocker(target, ours, stateDir);
-      if (blocked) die(refuse(blocked));
-      let release: () => void;
-      try {
-        release = await acquireLockAsync(join(stateDir, "spawn.lock"), { maxAttempts: 2000, staleThresholdMs: 120_000 });
-      } catch {
-        die("Another `codex-collab send` is still starting a Claude Code session for this workspace — retry in a moment.");
-      }
-      const fail = (message: string): never => {
-        release();
-        return die(message);
-      };
+      if (blocked) fail(refuse(blocked));
+      if (!held) await takeLock();
       try {
         // Looked at again under the lock: a message may have reached it since.
         const again = restartBlocker(target, ours, stateDir);
@@ -758,13 +795,24 @@ export async function handleSend(args: string[]): Promise<void> {
         }
         notes.push(`Restarted ${target.name} on ${choice} (its conversation so far is intact; it ran on ${was}; it stops after ${formatDuration(set.lingerSec * 1000)} idle).`);
         startedHere = true;
-      } finally {
-        release();
+      } catch (e) {
+        letGo();
+        throw e;
       }
     } else {
       const note = choiceNotAppliedNote(target, askedModel, askedEffort);
       if (note) notes.push(note);
     }
+  }
+
+  // A session codex-collab started that was live all along: taken under the
+  // lock as well, and looked up again, since another `send` may have
+  // restarted it on another model while this one waited.
+  if (target.spawned && !held) {
+    await takeLock();
+    const now = listClaudeSessions({ cwd, stateDir }).find((s) => s.name === target.name && !!s.spawned);
+    if (!now) fail(`${target.name} stopped just now, before the message was sent. Send again: it is resumed by its name.`);
+    target = now;
   }
 
   // ── Record the task, and hand it to a receiver of its own ──
@@ -781,8 +829,9 @@ export async function handleSend(args: string[]): Promise<void> {
       maxWaitSec: Math.max(taskMaxWaitSec(), timeoutSec),
     });
   } catch (e) {
-    die(`Could not record the task under ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
+    fail(`Could not record the task under ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
   }
+  letGo();
   const delivered = await startReceiver(task, stateDir, cwd);
 
   for (const note of notes) console.log(note);

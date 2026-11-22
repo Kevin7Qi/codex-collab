@@ -281,6 +281,8 @@ function killFakeSleepers(binDir: string): void {
  *  with a socket, a session id and a job id of its own, and keeps the
  *  arguments of every start (`args.log`, a line per start). */
 function writeFakeClaudeNamed(binDir: string, sessions: Array<{ name: string; socketPath: string; sessionId: string }>): void {
+  // `sessionId` is all but the last character: each start gets one more, the
+  // number of the start, as Claude Code gives a resumed session a new id.
   mkdirSync(binDir, { recursive: true });
   writeFileSync(join(binDir, "claude"), `#!/bin/sh
 case "$1" in
@@ -290,7 +292,7 @@ case "$1" in
     n=$(wc -l < "${binDir}/bg.log" | tr -d ' ')
     id="cafe010$n"
     case "$3" in
-${sessions.map((x) => `      "${x.name}") sock="${x.socketPath}"; sid="${x.sessionId}" ;;`).join("\n")}
+${sessions.map((x) => `      "${x.name}") sock="${x.socketPath}"; sid="${x.sessionId}$n" ;;`).join("\n")}
       *) echo "no fake session named $3" >&2; exit 1 ;;
     esac
     echo "backgrounded · $id · $3"
@@ -1432,8 +1434,8 @@ describeUnix("send", () => {
     const main = startFake(spawnedSessionName(WS), { reply: (t) => `main says: ${t.split("\n")[0]}` });
     const docs = startFake(spawnedSessionName(WS, "docs"), { reply: (t) => `docs says: ${t.split("\n")[0]}` });
     writeFakeClaudeNamed(binDir, [
-      { name: main.name, socketPath: main.socketPath, sessionId: "00000000-0000-4000-8000-0000000000a1" },
-      { name: docs.name, socketPath: docs.socketPath, sessionId: "00000000-0000-4000-8000-0000000000d1" },
+      { name: main.name, socketPath: main.socketPath, sessionId: "00000000-0000-4000-8000-0000000000a" },
+      { name: docs.name, socketPath: docs.socketPath, sessionId: "00000000-0000-4000-8000-0000000000d" },
     ]);
     const env = { PATH: `${binDir}:${process.env.PATH}` };
     const starts = () => readFileSync(join(binDir, "args.log"), "utf-8").trimEnd().split("\n");
@@ -1468,8 +1470,9 @@ describeUnix("send", () => {
       expect((await runCli(["send", "DOCS", "and the readme"], env)).stdout).toContain("docs says: and the readme");
       expect((await runCli(["send", main.name, "two"], env)).stdout).toContain("main says: two");
       // A task's id, in full, stands for the session that task went to.
-      const viaTask = await runCli(["send", taskIdOf(started.stdout), "one more thing"], env);
-      expect(viaTask.stdout).toContain(`Task ${taskIdOf(started.stdout)} went to ${docs.name}: this message goes there too.`);
+      const docsTask = taskIdOf(started.stdout);
+      const viaTask = await runCli(["send", docsTask, "one more thing"], env);
+      expect(viaTask.stdout).toContain(`Task ${docsTask} went to ${docs.name}: this message goes there too.`);
       expect(viaTask.stdout).toContain("docs says: one more thing");
       const noTask = await runCli(["send", "0000ffff", "hello"], env);
       expect(noTask.code).toBe(1);
@@ -1514,7 +1517,7 @@ describeUnix("send", () => {
       expect(resumed.stdout).toContain(`${docs.name} is not live — resuming ${docs.name}`);
       expect(resumed.stdout).toContain("docs says: pick it up");
       expect(starts()).toHaveLength(3);
-      expect(starts()[2]).toContain(`--bg -n ${docs.name} --resume 00000000-0000-4000-8000-0000000000d1 `);
+      expect(starts()[2]).toContain(`--bg -n ${docs.name} --resume 00000000-0000-4000-8000-0000000000d2 `);
       // A plain send now finds one live session, and uses it.
       expect((await runCli(["send", "anyone?"], env)).stdout).toContain("docs says: anyone?");
       // The default one is still there to resume: by its name, or as here by
@@ -1524,10 +1527,45 @@ describeUnix("send", () => {
       expect(back.stdout).toContain(`resuming ${main.name}`);
       expect(back.stdout).toContain("main says: three");
       expect(starts()[3]).toContain(`--bg -n ${main.name} --resume 00000000-0000-4000-8000-0000000000a1 `);
+      // Resumed, it has a session id of its own, and the tasks that went to
+      // it before still reach it: the conversation is the same.
+      const stillThere = await runCli(["send", mainTask, "four"], env);
+      expect(stillThere.stdout).toContain("main says: four");
+      expect(stillThere.stdout).toContain(`Task ${mainTask} went to ${main.name}: this message goes there too.`);
+      expect(starts()).toHaveLength(4);
+      expect((await runCli(["send", docsTask, "five"], env)).stdout).toContain("docs says: five");
+      expect(starts()).toHaveLength(4);
+
+      // Stopped again, a label that is stopped already is said to be, and a
+      // live session that begins the same way is left alone.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 60_000));
+      const already = await runCli(["peers", "stop", "docs"]);
+      expect(already.code).toBe(0);
+      expect(already.stdout).toContain(`${docs.name} is stopped already. Its conversation is kept: \`codex-collab send "docs" "…"\``);
+      // A new conversation under the label is not the one the old task went
+      // to: a follow-up to that task is refused, and starts nothing.
+      expect((await runCli(["send", "--new", "--name", "docs", "start over"], env)).stdout).toContain(`Started ${docs.name}`);
+      expect(starts()).toHaveLength(5);
+      const orphan = await runCli(["send", docsTask, "and then?"], env);
+      expect(orphan.code).toBe(1);
+      expect(orphan.stderr).toContain(`Task ${docsTask} went to ${docs.name}, which is not live, and its conversation is no longer on record to resume.`);
+      expect(starts()).toHaveLength(5);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
     }
+  });
+
+  test("a label that would give the default session's name, in a workspace whose own name is cut to fit, is refused", async () => {
+    // Twenty-five characters: the default name takes it whole, and with the
+    // label "docs" it is cut to twenty, just before its own "-docs".
+    const ws = join(TEST_HOME, "abcdefghijklmnopqrst-docs");
+    mkdirSync(ws, { recursive: true });
+    expect(spawnedSessionName(ws, "docs")).toBe(spawnedSessionName(ws));
+    const refused = await runCliIn(["send", "--new", "--name", "docs", "hello"], ws, cliEnv({}));
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toContain(`With the label "docs" the session's name would be ${spawnedSessionName(ws)}, the name of this workspace's default session`);
+    expect(refused.stderr).toContain("Choose another label.");
   });
 
   test("a task that went to the user's own session reaches it while it is live, and is refused once it has gone", async () => {

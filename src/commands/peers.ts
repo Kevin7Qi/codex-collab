@@ -6,7 +6,7 @@
 // reads.
 
 import { resolveStateDir, resolveWorkspaceDir } from "../config";
-import { describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, reaperLog, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, stoppedSessions, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
+import { addressOf, describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, reaperLog, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, stoppedSessionNamed, stoppedSessions, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { outstandingTasksFor } from "../claude-tasks";
 import { describeRanOn, ranOn, type RanOn } from "../claude-transcript";
 import { insideCodexSandbox, resumeWindowSec, sandboxHint } from "./send";
@@ -106,6 +106,14 @@ async function handlePeersStop(name: string | undefined, cwd: string): Promise<v
   const sessions = listClaudeSessions({ cwd, stateDir });
   let session: ClaudeSession | undefined;
   if (name) {
+    // A name or label in full that is a stopped session's is that session,
+    // and it is stopped: a live one whose name begins the same way is not
+    // what was asked for.
+    const already = resolveSession(sessions, name, { exact: true }).session ? null : stoppedSessionNamed(stateDir, name);
+    if (already) {
+      console.log(`${already.name} is stopped already. Its conversation is kept: \`codex-collab send ${JSON.stringify(addressOf(already, sessions))} "…"\` picks it up where it stopped.`);
+      return;
+    }
     const resolved = resolveSession(sessions, name);
     if (!resolved.session) {
       die(resolved.ambiguous.length > 1
@@ -139,7 +147,7 @@ async function handlePeersStop(name: string | undefined, cwd: string): Promise<v
       : "its process could not be verified as one codex-collab started, so no signal was sent"}. Its record is unchanged.${sandboxHint()}`);
   }
   markSpawnedSessionStopped(stateDir, ours.id);
-  console.log(`Stopped ${session.name}. Its conversation is kept: \`codex-collab send ${JSON.stringify(ours.label ?? session.name)} "…"\` picks it up where it stopped.`);
+  console.log(`Stopped ${session.name}. Its conversation is kept: \`codex-collab send ${JSON.stringify(addressOf(ours, sessions.filter((s) => s !== session)))} "…"\` picks it up where it stopped.`);
   if (waiting.length > 0) {
     console.log(`${waiting.length} task${waiting.length === 1 ? " was" : "s were"} still waiting on it (${waiting.map((t) => t.id).join(", ")}) — ${waiting.length === 1 ? "it ends" : "they end"} with no reply.`);
   }
@@ -183,7 +191,7 @@ export async function handlePeers(args: string[]): Promise<void> {
     console.log("Stopped, each resumed with its conversation by a send that names it:");
     for (const r of stoppedHere) {
       const ago = formatLongDuration(Math.max(1000, Date.now() - Date.parse(r.stoppedAt!)));
-      console.log(`  ${r.name}  stopped ${ago} ago  ·  codex-collab send ${JSON.stringify(r.label ?? r.name)} "…"`);
+      console.log(`  ${r.name}  stopped ${ago} ago  ·  codex-collab send ${JSON.stringify(addressOf(r, sessions))} "…"`);
     }
   };
   if (sessions.length === 0) {

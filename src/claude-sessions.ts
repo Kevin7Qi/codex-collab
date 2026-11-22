@@ -80,6 +80,11 @@ export interface SpawnedSession {
    *  same pid that differs is another process, never ours to stop. */
   procStart?: string;
   sessionId?: string | null;
+  /** The session ids its conversation had before: Claude Code gives a
+   *  resumed session a new one, and a task that went to it earlier names the
+   *  one it had then. A new conversation under the same name starts with
+   *  none. */
+  previous?: string[];
   /** The model and effort it was started with; absent means the user's
    *  Claude Code default. Fixed for the session's life. */
   model?: string;
@@ -414,8 +419,10 @@ export function recordSpawnedSession(stateDir: string, session: SpawnedSession, 
     // resumed from) or the one chosen in its place. The sessions of other
     // names keep their records, stopped ones too: each is resumed by its
     // own name.
+    // A stopped record's pid is history: the system may have given it to
+    // this session, and that says nothing about whose conversation it is.
     const rest = readSpawnedSessions(stateDir).filter((s) =>
-      s.pid !== session.pid && s.id !== session.id && s.id !== opts.supersedes && !(s.stoppedAt && s.name === session.name));
+      (s.stoppedAt || s.pid !== session.pid) && s.id !== session.id && s.id !== opts.supersedes && !(s.stoppedAt && s.name === session.name));
     writeSpawnedSessions(stateDir, keptRecords([...rest, session], opts.now ?? Date.now()));
   });
 }
@@ -461,6 +468,19 @@ export function stoppedSessions(stateDir: string, now: number = Date.now()): Spa
   return keptRecords(readSpawnedSessions(stateDir), now)
     .filter((s) => s.stoppedAt && s.sessionId)
     .sort((a, b) => Date.parse(b.stoppedAt!) - Date.parse(a.stoppedAt!));
+}
+
+/** Whether a record's conversation is the one a session id names: the id
+ *  it has now, or one it had before it was last resumed. */
+export function holdsConversation(record: SpawnedSession, sessionId: string): boolean {
+  return record.sessionId === sessionId || (record.previous ?? []).includes(sessionId);
+}
+
+/** How a session codex-collab started is best addressed among `live`
+ *  sessions: by its label, unless a live session has that very name, which
+ *  a `send` would take first; then by its full name. */
+export function addressOf(record: { name: string; label?: string }, live: Array<{ name: string }>): string {
+  return record.label && !live.some((s) => s.name === record.label) ? record.label : record.name;
 }
 
 /** The stopped session a name or a label asks for, whenever it stopped. */
@@ -909,7 +929,9 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   // it against later entries, and a start time computed here could be in the
   // other representation (see procIdentity) — every entry would then read
   // as someone else's, and the session would be forgotten, never stopped.
-  const record: SpawnedSession = { id, pid: session.pid, name, ...(label ? { label } : {}), startedAt: new Date().toISOString(), lingerSec, procStart: session.procStart ?? undefined, sessionId: session.sessionId, model: opts.model, effort: opts.effort };
+  // A resumed conversation keeps the ids it had, the last twenty of them.
+  const previous = opts.resume ? [...(opts.resume.previous ?? []), ...(opts.resume.sessionId ? [opts.resume.sessionId] : [])].filter((x) => x !== session.sessionId).slice(-20) : [];
+  const record: SpawnedSession = { id, pid: session.pid, name, ...(label ? { label } : {}), startedAt: new Date().toISOString(), lingerSec, procStart: session.procStart ?? undefined, sessionId: session.sessionId, ...(previous.length ? { previous } : {}), model: opts.model, effort: opts.effort };
   recordSpawnedSession(opts.stateDir, record, { supersedes: opts.resume?.id });
   (opts.startReaper ?? startReaper)(record, opts.cwd);
   return { ...session, spawned: record };
