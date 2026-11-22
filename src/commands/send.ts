@@ -693,7 +693,9 @@ export async function handleSend(args: string[]): Promise<void> {
       // Two labels can come to one name where a long workspace name is cut
       // to fit, each by its own length. The name is then the other's, live or
       // stopped: started under it, this session would take its record.
-      const clash = how === "new" ? readSpawnedSessions(stateDir).find((r) => r.name === startName && (r.label ?? "") !== (startLabel ?? "")) : undefined;
+      // A record stopped too long ago to resume holds no name any more.
+      const holding = [...readSpawnedSessions(stateDir).filter((r) => !r.stoppedAt), ...stoppedSessions(stateDir)];
+      const clash = how === "new" ? holding.find((r) => r.name === startName && (r.label ?? "") !== (startLabel ?? "")) : undefined;
       if (clash) {
         fail(`With the label "${startLabel}" the session's name would be ${startName}, which is the name of the session labelled "${clash.label}" here (the workspace's own name is cut to fit each). Choose another label.`);
       }

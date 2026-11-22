@@ -1605,6 +1605,11 @@ describeUnix("send", () => {
       expect(later.code).toBe(1);
       expect(later.stderr).toContain("Choose another label.");
       expect(readFileSync(join(binDir, "bg.log"), "utf-8")).toBe("bg\n");
+      // Stopped too long ago to be resumed, it holds the name no longer.
+      await stopSpawnedAt(binDir, new Date(Date.now() - 31 * 24 * 3600_000));
+      const free = await runCliIn(["send", "--new", "--name", "abc-docs", "hello"], ws, env);
+      expect(free.code).toBe(0);
+      expect(free.stdout).toContain(`Started ${name}`);
     } finally {
       killFakeSleepers(binDir);
     }
