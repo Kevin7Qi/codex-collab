@@ -64,7 +64,7 @@ The installer builds a self-contained bundle plus a binary shim:
 - **Windows (`install.ps1`)**
   - Claude Code skill bundle: `%USERPROFILE%\.claude\skills\codex-collab\`
   - CLI shims: `%USERPROFILE%\.local\bin\` (`codex-collab.cmd` and `codex-collab`, added to your PATH)
-  - Codex-side skill and rule are omitted since peer messaging is not supported on Windows.
+  - Codex-side skill and rule are omitted since peer messaging is currently not supported on Windows.
 
 Claude discovers the skill automatically, including in a session that is already running. The exception is your first skill: if `~/.claude/skills/` did not exist before, restart Claude Code once so the new directory is watched.
 

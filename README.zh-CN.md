@@ -64,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 - **Windows（`install.ps1`）**
   - Claude Code 技能 bundle：`%USERPROFILE%\.claude\skills\codex-collab\`
   - CLI shim：`%USERPROFILE%\.local\bin\`（`codex-collab.cmd` 与 `codex-collab`，自动加入 PATH）
-  - 由于 Windows 不支持跨会话消息，不会安装 Codex 侧技能与规则。
+  - 由于 Windows 目前暂不支持跨会话消息，不会安装 Codex 侧技能与规则。
 
 完成后 Claude 会自动发现该技能，正在运行中的会话同样生效。唯一的例外是首次安装技能：若 `~/.claude/skills/` 此前并不存在，需重启一次 Claude Code，新目录才会被监听。
 
@@ -164,7 +164,7 @@ Codex 用来联系 Claude 的命令（`peers`、`send`、`task`）见[跨会话�
 | `questions [id]` | 列出当前工作区待处理的问题；带 ID 时显示完整内容 |
 | `next` | 持续等待，直到出现需要处理的事件；完整打印内容及响应方式后退出 |
 | `approve <id>` | 批准待处理的请求 |
-| `approve --guardian [id]` | 覆盖 Guardian 的拒绝决定（不带 ID 时列出待处理的拒绝记录）；在会话下一次运行时生效 |
+| `approve --guardian [id]` | 推翻 Guardian 的拒绝决定并放行（不带 ID 时列出待处理的拒绝记录）；在会话下一次运行时生效 |
 | `decline <id>` | 拒绝待处理的请求 |
 
 </details>
