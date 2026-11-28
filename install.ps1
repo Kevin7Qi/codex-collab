@@ -173,7 +173,12 @@ if ($Dev) {
 }
 
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
-$codexSkillDir = if ($env:CODEX_COLLAB_CODEX_SKILL_DIR) { $env:CODEX_COLLAB_CODEX_SKILL_DIR } else { Join-Path $codexHome "skills\claude-collab" }
+$codexSkillPath = if ($env:CODEX_COLLAB_CODEX_SKILL_DIR) {
+    $env:CODEX_COLLAB_CODEX_SKILL_DIR
+} else {
+    Join-Path $codexHome "skills\claude-collab"
+}
+$codexSkillDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($codexSkillPath)
 $codexSkillFile = Join-Path $codexSkillDir "SKILL.md"
 if (Get-Item -LiteralPath $codexSkillFile -Force -ErrorAction SilentlyContinue) {
     Write-Host "Kept existing Codex skill at $codexSkillFile. To review and sync it, run 'codex-collab skill sync'."
