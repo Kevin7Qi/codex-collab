@@ -173,9 +173,14 @@ if ($Dev) {
 }
 
 $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
-$codexSkillDir = Join-Path $codexHome "skills\claude-collab"
-New-Item -ItemType Directory -Path $codexSkillDir -Force | Out-Null
-Generate-SkillMd -Entry $skillEntry -OutPath (Join-Path $codexSkillDir "SKILL.md") -Codex
+$codexSkillDir = if ($env:CODEX_COLLAB_CODEX_SKILL_DIR) { $env:CODEX_COLLAB_CODEX_SKILL_DIR } else { Join-Path $codexHome "skills\claude-collab" }
+$codexSkillFile = Join-Path $codexSkillDir "SKILL.md"
+if (Get-Item -LiteralPath $codexSkillFile -Force -ErrorAction SilentlyContinue) {
+    Write-Host "Kept existing Codex skill at $codexSkillFile. To review and sync it, run 'codex-collab skill sync'."
+} else {
+    New-Item -ItemType Directory -Path $codexSkillDir -Force | Out-Null
+    Generate-SkillMd -Entry $skillEntry -OutPath $codexSkillFile -Codex
+}
 
 # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
