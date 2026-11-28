@@ -434,6 +434,21 @@ describeUnix("stopped sessions and resuming", () => {
   const rec = (id: string, extra: Partial<SpawnedSession> = {}): SpawnedSession =>
     ({ id, pid: 4242, name: "claude(ws-a-x)", startedAt: "t", lingerSec: 60, sessionId: `sess-${id}`, ...extra });
 
+  test("a reaper's mark leaves alone a record replaced under the same id by a session restarted since", () => {
+    const stateDir = join(root, "state-same-id");
+    // The session a reaper watched, then the same job restarted as a new
+    // process before the reaper got to mark what it saw go.
+    recordSpawnedSession(stateDir, rec("aaaa1111", { pid: 4242 }));
+    markSpawnedSessionStopped(stateDir, "aaaa1111");
+    recordSpawnedSession(stateDir, rec("aaaa1111", { pid: 5252 }), { supersedes: "aaaa1111" });
+    markSpawnedSessionStopped(stateDir, "aaaa1111", new Date(), 4242);
+    expect(readSpawnedSessions(stateDir)).toEqual([expect.objectContaining({ id: "aaaa1111", pid: 5252 })]);
+    expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
+    // The process it does watch is marked as before.
+    markSpawnedSessionStopped(stateDir, "aaaa1111", new Date(), 5252);
+    expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeDefined();
+  });
+
   test("a stopped session stays on record for a while, the latest only, and a running one supersedes it", () => {
     const stateDir = join(root, "state-stopped");
     const now = Date.parse("2026-09-19T12:00:00.000Z");
