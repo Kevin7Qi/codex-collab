@@ -45,7 +45,7 @@ import {
 import { EventDispatcher } from "./events";
 import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
 import { resolveModelDefaults } from "./models";
-import { sessionsDir, procStartOf, procIdentity, MESSAGING_FLOOR, compareVersions, claudeCodeVersion, sniffRegistryVersion, isCodexCollabSocket, workspaceSuffix, buildRegistryEntry } from "./claude-registry";
+import { sessionsDir, procStartOf, registryProcStart, procIdentity, MESSAGING_FLOOR, compareVersions, claudeCodeVersion, sniffRegistryVersion, isCodexCollabSocket, workspaceSuffix, buildRegistryEntry } from "./claude-registry";
 import { type InboundMessage, parseEnvelope, peerModeFor, buildEnvelope } from "./claude-envelope";
 import { buildDelegation } from "./codex-session";
 
@@ -609,7 +609,7 @@ export const COLLAB_MODES: readonly CollabMode[] = ["auto", "peer", "cli"] as co
  *  would produce different files on the same machine minutes apart. */
 export function messagingSupported(): { ok: boolean; reason: string } {
   if (process.platform === "win32") {
-    return { ok: false, reason: "Windows (cross-session messaging is macOS/Linux only)" };
+    return { ok: false, reason: "Windows (codex-collab's messaging supports macOS and Linux only)" };
   }
   const version = claudeCodeVersion();
   if (version === null) {
@@ -1039,7 +1039,7 @@ export function createPeer(host: PeerHost): Peer {
         name: tpName,
         socketPath: tpSocketPath,
         version: sniffRegistryVersion(),
-        procStart: procStartOf(holder.pid),
+        procStart: registryProcStart(holder.pid),
         sessionId: randomUUID(),
       });
       writeFileSync(tpEntryPath, JSON.stringify(entry), { mode: 0o644 });
@@ -2479,7 +2479,7 @@ export function createPeer(host: PeerHost): Peer {
         name,
         socketPath,
         version: sniffRegistryVersion(),
-        procStart: procStartOf(process.pid),
+        procStart: registryProcStart(process.pid),
         sessionId: randomUUID(),
       });
       mkdirSync(sessionsDir(), { recursive: true });

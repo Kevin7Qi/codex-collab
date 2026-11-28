@@ -213,7 +213,7 @@ export async function handleConfig(args: string[]): Promise<void> {
   }
 
   if ((key === "codex-rule" || key === "codex-hook") && value === "on" && process.platform === "win32") {
-    die(`${key} is unavailable on Windows: Claude Code's cross-session messaging, which \`codex-collab send\` rides on, does not exist there.`);
+    die(`${key} is unavailable on Windows: codex-collab does not support Claude Code's cross-session messaging, which \`codex-collab send\` rides on, there yet.`);
   }
   // Turning it on is the user's consent to having folders trusted in Claude
   // Code on their behalf, so it cannot come from the agent it serves.

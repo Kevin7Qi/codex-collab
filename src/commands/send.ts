@@ -74,7 +74,7 @@ import { codexThreadCwd, insideCodexSandbox, underCodex, codexThreadId, sandboxH
 import { wakeThread } from "../codex-wake";
 import { isThreadId, messageIdsSince, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
 import { MAX_TIMEOUT_SECONDS, die, loadUserConfig, parseOptions, type UserConfig, resumeWindowSec } from "./shared";
-import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion, workspaceSuffix } from "../claude-registry";
+import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, registryProcStart, sessionsDir, sniffRegistryVersion, workspaceSuffix } from "../claude-registry";
 import { buildEnvelope, parseEnvelope } from "../claude-envelope";
 import { formatDuration, formatLongDuration } from "../format";
 import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task-outcome";
@@ -430,7 +430,7 @@ export async function handleSend(args: string[]): Promise<void> {
   const wait = !options.noWait;
 
   if (process.platform === "win32") {
-    die("codex-collab send is unavailable on Windows: Claude Code's cross-session messaging, which it rides on, does not exist there.");
+    die("codex-collab send is unavailable on Windows: codex-collab does not support Claude Code's cross-session messaging, which it rides on, there yet.");
   }
   if (insideCodexSandbox()) {
     die(
@@ -1342,7 +1342,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
         name,
         socketPath,
         version: sniffRegistryVersion(),
-        procStart: procStartOf(process.pid),
+        procStart: registryProcStart(process.pid),
         sessionId: transientSessionId(),
       })));
     } catch (e) {
