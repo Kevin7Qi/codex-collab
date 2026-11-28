@@ -9,7 +9,9 @@ export function toolCommand(name: string, ...args: string[]): string[] {
 }
 
 export function createFixture(port: number) {
-  const home = realpathSync(mkdtempSync(join(homedir(), ".cc-fixture-")));
+  // Unix broker sockets live under HOME and have a short kernel pathname limit.
+  const baseDir = process.platform === "win32" ? homedir() : "/tmp";
+  const home = realpathSync(mkdtempSync(join(baseDir, ".cc-fixture-")));
   const workspace = join(home, "ws");
   const codexHome = join(home, ".codex");
   const temp = join(home, "tmp");
