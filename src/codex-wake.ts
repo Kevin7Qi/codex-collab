@@ -50,7 +50,9 @@ export type OwnThread = { dir: string; shortId: string; running: boolean };
  *  it; null when none has. That need not be a workspace holding its mailbox:
  *  `send -d` puts the mailbox in the workspace it names. The index alone
  *  does not say so: `threads` lists there what Codex has for the folder,
- *  the user's own sessions among them. `running`: a run of ours is on it now. */
+ *  the user's own sessions among them. A thread whose latest run is a review
+ *  is not resumed: `review` forces it read-only, and a `run` would not.
+ *  `running`: a run of ours is on it now. */
 export function ownThread(threadId: string, root: string = join(config.dataDir, "workspaces")): OwnThread | null {
   let workspaces: string[];
   try { workspaces = readdirSync(root); } catch { return null; }
@@ -61,7 +63,7 @@ export function ownThread(threadId: string, root: string = join(config.dataDir, 
       if (entry.threadId !== threadId || !entry.cwd) continue;
       let run: ReturnType<typeof getLatestRun>;
       try { run = getLatestRun(stateDir, shortId); } catch { continue; }
-      if (!run) continue;
+      if (!run || run.kind !== "task") continue;
       const running = run.status === "running" && typeof run.pid === "number" && isProcessAlive(run.pid);
       return { dir: entry.cwd, shortId, running };
     }

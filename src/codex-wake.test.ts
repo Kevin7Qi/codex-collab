@@ -265,6 +265,12 @@ describe("waking a thread of codex-collab's own that no server holds", () => {
     expect(isDelivered(other, THREAD, message.id)).toBe(true);
   });
 
+  test("ownThread: a thread whose latest run is a review is not resumed", () => {
+    const { root, ws } = fresh();
+    ran(ws, { kind: "review" });
+    expect(ownThread(THREAD, root)).toBeNull();
+  });
+
   test("ownThread: a run whose process is gone is not a turn", () => {
     const { root, ws } = fresh();
     writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
