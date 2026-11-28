@@ -1218,7 +1218,7 @@ describeUnix("send", () => {
       // The detached reaper stops it once it has idled for the linger —
       // through `claude stop`, then a signal when that did not take — and
       // keeps its record, as stopped: the conversation is still Claude Code's.
-      try { await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000); } catch (e) { for (const d of readdirSync(join(TEST_HOME, ".codex-collab", "workspaces"))) { const rd = join(TEST_HOME, ".codex-collab", "workspaces", d, "reapers"); if (existsSync(rd)) for (const f of readdirSync(rd)) console.log("DBG", f, readFileSync(join(rd, f), "utf-8")); } throw e; }
+      await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toBe("stop cafe0001\n");
       await waitFor(() => (spawnedRecords() as Array<{ stoppedAt?: string }>).some((r) => r.stoppedAt), 15_000);
       // A reaper that saw its session through leaves no log behind.
@@ -2937,7 +2937,7 @@ describeUnix("send", () => {
         if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, status: "waiting" }));
       }
       // While it is being stopped it gets past the prompt, and answers.
-      try { await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000); } catch (e) { for (const d of readdirSync(join(TEST_HOME, ".codex-collab", "workspaces"))) { const rd = join(TEST_HOME, ".codex-collab", "workspaces", d, "reapers"); if (existsSync(rd)) for (const f of readdirSync(rd)) console.log("DBG", f, readFileSync(join(rd, f), "utf-8")); } throw e; }
+      await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
       speak(fake, fake.received[0].replyPath, "done after all");
       const r = await live.done;
       expect(r.code).toBe(0);
