@@ -55,6 +55,7 @@ import {
   remoteControlReaches,
   sessionStatusNow,
   spawnClaudeSession,
+  spawnLockPath,
   spawnEffortFor,
   spawnEnv,
   spawnedSessionName,
@@ -598,7 +599,7 @@ export async function handleSend(args: string[]): Promise<void> {
       die(`Could not create ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
     }
     try {
-      held = await acquireLockAsync(join(stateDir, "spawn.lock"), { maxAttempts: 2000, staleThresholdMs: 120_000 });
+      held = await acquireLockAsync(spawnLockPath(stateDir), { maxAttempts: 2000, staleThresholdMs: 120_000, releaseOnExit: true });
     } catch {
       die("Another `codex-collab send` is still starting a Claude Code session for this workspace — retry in a moment.");
     }

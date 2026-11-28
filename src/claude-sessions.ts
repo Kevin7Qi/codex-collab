@@ -22,7 +22,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { resolveStateDir, resolveWorkspaceDir } from "./config";
 import { outstandingTasksFor } from "./claude-tasks";
-import { acquireLockSync } from "./lock";
+import { acquireLockAsync, acquireLockSync } from "./lock";
 import { carryCodexTrust, codexTrustNote, type SpawnTrustSetting } from "./claude-trust";
 import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./claude-registry";
 
@@ -391,6 +391,15 @@ function writeSpawnedSessions(stateDir: string, sessions: SpawnedSession[]): voi
   writeFileSync(tmp, JSON.stringify(sessions, null, 2) + "\n");
   // rename is atomic on POSIX; a reader never sees a half-written list.
   renameSync(tmp, file);
+}
+
+/** The workspace's lock on its started sessions as a whole: `send` holds it
+ *  from choosing one until the task for it is recorded, and across a
+ *  restart; a reaper holds it while it stops one. So a session is not
+ *  stopped under a `send` that has chosen it, and one restarted under the
+ *  same id is not stopped by the reaper of the one before. */
+export function spawnLockPath(stateDir: string): string {
+  return join(stateDir, "spawn.lock");
 }
 
 /** Read-modify-write under a lock: a `send` recording a fresh session
@@ -1160,6 +1169,9 @@ export async function runReaper(
     /** A test seam: runs between a look's read of the record and its read
      *  of the registry, where a restart by `send` can land. */
     afterRecordRead?: () => void;
+    /** A test seam: runs once a look has decided to stop the session,
+     *  before it takes the workspace's lock, where a whole `send` can land. */
+    beforeStopLock?: () => void;
   } = {},
 ): Promise<"stopped" | "gone"> {
   let session = recorded;
@@ -1259,26 +1271,49 @@ export async function runReaper(
     else if (verdict === "stop" && inFlight) say("idle, but Claude Code counts work in flight for it: holding it");
     if (verdict === "stop" && (owed || inFlight)) verdict = "wait";
     if (verdict === "wait" && !owed && !inFlight) say(reachable ? `four hours old, but the user can reach it through Remote Control: it stops after ${session.lingerSec}s idle instead` : "watching");
-    // Looked at once more before anything is stopped: `claude stop` goes by
-    // the job's id, which a session restarted since may answer to.
-    const replaced = verdict === "stop" ? unwatched() : null;
-    if (replaced) {
-      say(`${replaced}: nothing left to watch`);
-      return "gone";
-    }
+    // Stopped under the workspace's lock, and looked at once more with it
+    // held: `claude stop` goes by the job's id, which a session `send`
+    // restarted since answers to, and a `send` that chose this one a moment
+    // ago has a task for it by now. One that holds the lock is in the middle
+    // of either: the next look sees what it did.
+    let release: (() => void) | null = null;
     if (verdict === "stop") {
-      say(retiring ? "four hours old and idle: stopping it" : entry?.status === "waiting" ? `at a prompt nobody answered for ${session.lingerSec}s: stopping it` : `idle for ${session.lingerSec}s: stopping it`);
-      // Recorded as stopped only once it is: a record marked stopped while
-      // its session runs makes that session read as the user's own, with
-      // nothing of ours left watching it. A stop that did not take is tried
-      // again at the next look.
-      if ((await stopSpawnedSession(session, { claudeBin: opts.claudeBin, confirmAfterMs: Math.min(pollMs, 5000), spacingMs: Math.min(pollMs, 250) })).gone) {
-        // `claude stop` keeps the conversation; keep the record that finds it.
-        markSpawnedSessionStopped(stateDir, session.id, new Date(), session.startedAt);
-        say("stopped; its conversation is kept");
-        return "stopped";
+      opts.beforeStopLock?.();
+      try {
+        release = await acquireLockAsync(spawnLockPath(stateDir), { maxAttempts: 1, staleThresholdMs: 120_000, releaseOnExit: true });
+      } catch {
+        say("a `send` is choosing or starting a session here: looking again");
+        verdict = "wait";
       }
-      say("the stop did not take: trying again at the next look");
+    }
+    if (release) {
+      try {
+        const replaced = unwatched();
+        if (replaced) {
+          say(`${replaced}: nothing left to watch`);
+          return "gone";
+        }
+        if (outstandingTasksFor(stateDir, session).length > 0) {
+          say("a task was sent to it just now: holding it");
+          verdict = "wait";
+        }
+        if (verdict === "stop") {
+          say(retiring ? "four hours old and idle: stopping it" : entry?.status === "waiting" ? `at a prompt nobody answered for ${session.lingerSec}s: stopping it` : `idle for ${session.lingerSec}s: stopping it`);
+          // Recorded as stopped only once it is: a record marked stopped while
+          // its session runs makes that session read as the user's own, with
+          // nothing of ours left watching it. A stop that did not take is tried
+          // again at the next look.
+          if ((await stopSpawnedSession(session, { claudeBin: opts.claudeBin, confirmAfterMs: Math.min(pollMs, 5000), spacingMs: Math.min(pollMs, 250) })).gone) {
+            // `claude stop` keeps the conversation; keep the record that finds it.
+            markSpawnedSessionStopped(stateDir, session.id, new Date(), session.startedAt);
+            say("stopped; its conversation is kept");
+            return "stopped";
+          }
+          say("the stop did not take: trying again at the next look");
+        }
+      } finally {
+        release();
+      }
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }

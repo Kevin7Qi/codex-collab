@@ -382,6 +382,8 @@ async function settleSpawnState(): Promise<void> {
     for (const d of readdirSync(root)) {
       rmSync(join(root, d, "spawned-claude.json"), { force: true });
       rmSync(join(root, d, "reapers"), { recursive: true, force: true });
+      // A reaper killed outright while it stops a session leaves the lock it held.
+      rmSync(join(root, d, "spawn.lock"), { force: true });
     }
   } catch { /* no state yet */ }
 }
@@ -753,6 +755,29 @@ describeUnix("peers", () => {
       expect(stopped.stdout).toContain(`Stopped ${spawnedSessionName(WS)}. Its conversation is kept:`);
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", stoppedAt: expect.any(String) }));
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test.skipIf(process.platform === "win32")("a reaper told to end while it stops a session lets go of the workspace's lock", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-reaper-killed-mid-stop");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    // `claude stop` takes a moment: the reaper is told to end in the middle
+    // of it, and does once the command returns.
+    writeFakeClaude(binDir, fake.socketPath, "s", { stopDelaySec: 3 });
+    writeConfig({ linger: 1 });
+    try {
+      expect((await runCli(["send", "hello"], { PATH: `${binDir}:${process.env.PATH}` })).code).toBe(0);
+      await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
+      const locks = () => readdirSync(join(TEST_HOME, ".codex-collab", "workspaces")).filter((d) => existsSync(join(TEST_HOME, ".codex-collab", "workspaces", d, "spawn.lock")));
+      expect(locks()).toHaveLength(1);
+      // As `uninstall` ends a reaper.
+      for (const pid of liveReapers()) process.kill(pid, "SIGTERM");
+      await waitFor(() => liveReapers().length === 0, 15_000);
+      expect(locks()).toEqual([]);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
