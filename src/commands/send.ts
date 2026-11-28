@@ -30,6 +30,7 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, o
 import { join, resolve, sep } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
+  spawnLockPath,
   CLAUDE_EFFORTS,
   DEFAULT_SPAWN_LINGER_SEC,
   describeModelChoice,
@@ -598,7 +599,7 @@ export async function handleSend(args: string[]): Promise<void> {
       die(`Could not create ${stateDir}: ${e instanceof Error ? e.message : String(e)}${sandboxHint()}`);
     }
     try {
-      held = await acquireLockAsync(join(stateDir, "spawn.lock"), { maxAttempts: 2000, staleThresholdMs: 120_000 });
+      held = await acquireLockAsync(spawnLockPath(stateDir), { maxAttempts: 2000, staleThresholdMs: 120_000 });
     } catch {
       die("Another `codex-collab send` is still starting a Claude Code session for this workspace — retry in a moment.");
     }
