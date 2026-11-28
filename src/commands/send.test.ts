@@ -382,6 +382,8 @@ async function settleSpawnState(): Promise<void> {
     for (const d of readdirSync(root)) {
       rmSync(join(root, d, "spawned-claude.json"), { force: true });
       rmSync(join(root, d, "reapers"), { recursive: true, force: true });
+      // A reaper killed outright while it stops a session leaves the lock it held.
+      rmSync(join(root, d, "spawn.lock"), { force: true });
     }
   } catch { /* no state yet */ }
 }
@@ -753,6 +755,29 @@ describeUnix("peers", () => {
       expect(stopped.stdout).toContain(`Stopped ${spawnedSessionName(WS)}. Its conversation is kept:`);
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", stoppedAt: expect.any(String) }));
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test.skipIf(process.platform === "win32")("a reaper told to end while it stops a session lets go of the workspace's lock", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-reaper-killed-mid-stop");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    // `claude stop` takes a moment: the reaper is told to end in the middle
+    // of it, and does once the command returns.
+    writeFakeClaude(binDir, fake.socketPath, "s", { stopDelaySec: 3 });
+    writeConfig({ linger: 1 });
+    try {
+      expect((await runCli(["send", "hello"], { PATH: `${binDir}:${process.env.PATH}` })).code).toBe(0);
+      await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
+      const locks = () => readdirSync(join(TEST_HOME, ".codex-collab", "workspaces")).filter((d) => existsSync(join(TEST_HOME, ".codex-collab", "workspaces", d, "spawn.lock")));
+      expect(locks()).toHaveLength(1);
+      // As `uninstall` ends a reaper.
+      for (const pid of liveReapers()) process.kill(pid, "SIGTERM");
+      await waitFor(() => liveReapers().length === 0, 15_000);
+      expect(locks()).toEqual([]);
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
@@ -1193,7 +1218,7 @@ describeUnix("send", () => {
       // The detached reaper stops it once it has idled for the linger —
       // through `claude stop`, then a signal when that did not take — and
       // keeps its record, as stopped: the conversation is still Claude Code's.
-      await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
+      try { await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000); } catch (e) { for (const d of readdirSync(join(TEST_HOME, ".codex-collab", "workspaces"))) { const rd = join(TEST_HOME, ".codex-collab", "workspaces", d, "reapers"); if (existsSync(rd)) for (const f of readdirSync(rd)) console.log("DBG", f, readFileSync(join(rd, f), "utf-8")); } throw e; }
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toBe("stop cafe0001\n");
       await waitFor(() => (spawnedRecords() as Array<{ stoppedAt?: string }>).some((r) => r.stoppedAt), 15_000);
       // A reaper that saw its session through leaves no log behind.
@@ -2912,7 +2937,7 @@ describeUnix("send", () => {
         if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, status: "waiting" }));
       }
       // While it is being stopped it gets past the prompt, and answers.
-      await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000);
+      try { await waitFor(() => existsSync(join(binDir, "stop.log")), 15_000); } catch (e) { for (const d of readdirSync(join(TEST_HOME, ".codex-collab", "workspaces"))) { const rd = join(TEST_HOME, ".codex-collab", "workspaces", d, "reapers"); if (existsSync(rd)) for (const f of readdirSync(rd)) console.log("DBG", f, readFileSync(join(rd, f), "utf-8")); } throw e; }
       speak(fake, fake.received[0].replyPath, "done after all");
       const r = await live.done;
       expect(r.code).toBe(0);

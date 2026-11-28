@@ -11,6 +11,7 @@
 //   winner's fresh lock).
 // - The stale check runs inside the retry loop, so a crashed holder costs
 //   one retry interval, not the full spin, before recovery.
+// - A lock still held when its process exits is released on the way out.
 // - release() only unlinks the lock file while it is still the one this
 //   process created (verified via inode), so a release after a stale-break
 //   cannot delete the breaker's live lock.
@@ -78,8 +79,27 @@ function tryBreakStaleLock(lockPath: string, staleThresholdMs: number): void {
   }
 }
 
+/** The locks this process holds. A process that exits with one — `die`, or
+ *  a signal the CLI turns into an exit — lets go of it on the way out: left
+ *  behind, it holds up every other process until it has gone stale. Only a
+ *  process killed outright still leaves one. Whether a holder is alive is
+ *  not asked of its pid instead: seen from another PID namespace (a sandbox)
+ *  a live holder reads as dead. */
+const heldLocks = new Set<() => void>();
+let releasesOnExit = false;
+
 function makeRelease(fd: number, lockPath: string): () => void {
-  return () => {
+  if (!releasesOnExit) {
+    releasesOnExit = true;
+    process.on("exit", () => {
+      for (const release of [...heldLocks]) release();
+    });
+  }
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    heldLocks.delete(release);
     // Verify the lock file on disk is still the one we created before
     // unlinking — after a stale-break it belongs to the breaking process.
     let stillOurs = true;
@@ -104,6 +124,8 @@ function makeRelease(fd: number, lockPath: string): () => void {
       }
     }
   };
+  heldLocks.add(release);
+  return release;
 }
 
 /**
