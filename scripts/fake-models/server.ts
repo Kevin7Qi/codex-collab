@@ -71,7 +71,7 @@ function anthropic(body: RequestBody, log: (data: object) => void) {
   }, error => log({ error: String(error) }));
 }
 
-function responses(body: RequestBody, log: (data: object) => void) {
+function responses(body: RequestBody, log: (data: object) => void, brokerGate: PromiseWithResolvers<void>) {
   const input = typeof body.input === "string" ? [] : body.input ?? [];
   const prompt = typeof body.input === "string" ? body.input : text(input.findLast(item => item.role === "user")?.content);
   const returned = input.findLast(item => item.type === "function_call_output" || item.type === "custom_tool_call_output");
@@ -98,11 +98,23 @@ function responses(body: RequestBody, log: (data: object) => void) {
     const event = (type: string, data: object) => emit(type, { sequence_number: sequence_number++, ...data });
     event("response.created", { response });
     if (prompt.includes("FIXTURE_TIMEOUT")) await Bun.sleep(4500);
+    const fail = (message: string) => event("response.failed", { response: { ...response, status: "failed", error: { code: "invalid_prompt", message } } });
     if (prompt.includes("FIXTURE_ERROR")) {
-      event("response.failed", { response: { ...response, status: "failed", error: { code: "invalid_prompt", message: "FIXTURE_MID_TURN_ERROR" } } });
+      fail("FIXTURE_MID_TURN_ERROR");
       return;
     }
-    if (marker === "FIXTURE_BROKER_A" || marker === "FIXTURE_BROKER_B" || marker === "FIXTURE_DETACH") await Bun.sleep(1700);
+    if (marker === "FIXTURE_BROKER_B") brokerGate.resolve();
+    if (marker === "FIXTURE_BROKER_A") {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<false>(resolve => { timer = setTimeout(() => resolve(false), 25_000); });
+      const overlapped = await Promise.race([brokerGate.promise.then(() => true), timeout]);
+      clearTimeout(timer);
+      if (!overlapped) {
+        fail("Second broker turn never reached the fixture");
+        return;
+      }
+    }
+    if (marker === "FIXTURE_DETACH") await Bun.sleep(1700);
     const pos = { item_id: item.id, output_index: 0 };
     if (item.type === "message") {
       event("response.output_item.added", { output_index: 0, item: { ...item, status: "in_progress", content: [] } });
@@ -121,16 +133,18 @@ function responses(body: RequestBody, log: (data: object) => void) {
 }
 
 export function startFakeServer(log: (data: object) => void) {
+  const brokerGate = Promise.withResolvers<void>();
   return Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
+    idleTimeout: 30,
     async fetch(req) {
       if (req.method !== "POST") return new Response(null, { status: 405 });
       const path = new URL(req.url).pathname;
       if (path === "/v1/messages/count_tokens") return Response.json({ input_tokens: 2 });
       if (path !== "/v1/messages" && path !== "/v1/responses") return new Response(null, { status: 404 });
       const body = await req.json() as RequestBody;
-      return path === "/v1/messages" ? anthropic(body, log) : responses(body, log);
+      return path === "/v1/messages" ? anthropic(body, log) : responses(body, log, brokerGate);
     },
   });
 }

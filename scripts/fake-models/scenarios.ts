@@ -103,14 +103,12 @@ async function broker() {
       assert.notEqual(one, two);
       const doneA = waitForTurn(a, one);
       const doneB = waitForTurn(b, two);
-      let finishedOne = false;
-      a.on("turn/completed", p => { if ((p as TurnCompletedParams).threadId === one) finishedOne = true; });
       await turn(a, one, "FIXTURE_BROKER_A");
       await assert.rejects(turn(b, one, "Unexpected same-thread turn"), (error: unknown) => (
         (error as { rpcCode?: number }).rpcCode === -32001
       ));
       await turn(b, two, "FIXTURE_BROKER_B");
-      assert(!finishedOne, "Second thread was not started concurrently with the first");
+      // The server completes A only after it receives B's model request.
       const completed = await Promise.all([doneA.wait(), doneB.wait()]);
       assert.deepEqual(completed.map(t => t.status), ["completed", "completed"]);
     } finally { await b.close(); }
