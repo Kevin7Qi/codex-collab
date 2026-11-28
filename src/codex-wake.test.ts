@@ -216,6 +216,31 @@ describe("waking a thread of codex-collab's own that no server holds", () => {
     expect(told).toEqual([[m.id], []]);
   });
 
+  test("two replies close together: each is handed over once — the second waits for the hooks once the run is going", async () => {
+    const { root, ws } = fresh();
+    const shortId = ran(ws);
+    const first = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "first" });
+    // The first wake's run is still starting when the second is tried.
+    let started!: (v: { ok: true }) => void;
+    const asked: string[] = [];
+    const resume = (_own: OwnThread, text: string) => { asked.push(text); return new Promise<{ ok: true }>((r) => { started = r; }); };
+    const none = async () => { throw new Error("ENOENT"); };
+    const one = wakeThread(THREAD, { connect: none, root, hooksRun: true, resume });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await wakeThread(THREAD, { connect: none, root, hooksRun: true, resume })).toEqual({ woke: false, why: "nothing to hand over" });
+    // The second reply lands once the run is on record as going.
+    const second = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "second" });
+    const going = () => ({ dir: "/work/project", shortId, running: true });
+    expect(await wakeThread(THREAD, { connect: none, root, hooksRun: true, resume, own: going })).toEqual({ woke: false, why: "in a turn" });
+    started({ ok: true });
+    expect(await one).toEqual({ woke: true, messages: 1 });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("first");
+    expect(asked[0]).not.toContain("second");
+    expect(isDelivered(ws, THREAD, first.id)).toBe(true);
+    expect(isDelivered(ws, THREAD, second.id)).toBe(false);
+  });
+
   test("ownThread: a thread with a run on record, and whether that run is still going", () => {
     const { root, ws } = fresh();
     expect(ownThread(THREAD, root)).toBeNull();
