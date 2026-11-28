@@ -8,11 +8,12 @@
 // a message. A thread in the middle of a turn is left to the hooks.
 //
 // A thread the shared server does not hold loaded is resumed only when it is
-// one of codex-collab's own — `run` has had a turn on it in a workspace — and then the way `run --resume` resumes it: through the workspace's
-// broker, on a private app-server as well as the shared one, as a detached
-// run that `follow`, `output` and `kill` reach. Any other thread is never
-// resumed: it may be open in a server of its own (the Codex app on local
-// files runs one), and resuming it would take its writer lock.
+// one of codex-collab's own — `run` has had a turn on it in a workspace — and
+// then the way `run --resume` resumes it: through the workspace's broker, on
+// a private app-server as well as the shared one, as a detached run that
+// `follow`, `output` and `kill` reach. Any other thread is never resumed: it
+// may be open in a server of its own (the Codex app on local files runs
+// one), and resuming it would take its writer lock.
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -90,9 +91,9 @@ export function resumeOwn(own: OwnThread, text: string): Promise<{ ok: true } | 
 /** Start a turn on `threadId` with what reached it and Codex has not been
  *  handed, if Codex runs our hooks in the thread and the shared app-server
  *  holds it idle, or it is a thread of our own that no server holds. Says
- *  what it did, or why not. `onTaken` is told what it
- *  claimed before it asks for the turn, and told [] once that is settled
- *  either way: a caller that stops in between gives those claims back.
+ *  what it did, or why not. `onTaken` is told what it claimed before it asks
+ *  for the turn, and told [] once that is settled either way: a caller that
+ *  stops in between gives those claims back.
  *
  *  The hooks are what tell, in a thread, what Codex has already read: a
  *  command it runs inside its sandbox cannot mark what it printed, and the
