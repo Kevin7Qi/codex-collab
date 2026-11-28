@@ -16,7 +16,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 ## Why
 
 - **Native peer messaging** — The workspace broker registers Codex as a peer in Claude Code's cross-session messaging, so Claude sessions message Codex directly (`SendMessage`) and Codex answers back — including asking Claude questions mid-task via a `collab.consult` tool. No CLI in the hot path.
-- **Structured communication** — Talks to Codex via JSON-RPC over stdio. Every event is typed and parseable.
+- **Structured communication** — Talks to Codex via app-server JSON-RPC: attaches to Codex's shared app-server over its control socket when one is running, or spawns a private server over stdio. Every event is typed and parseable.
 - **Event-driven progress** — Streams progress lines as Codex works, so Claude sees what's happening in real time.
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
 - **Thread reuse** — Resume existing threads to send follow-up prompts, build on previous responses, or steer the work in a new direction.
@@ -27,7 +27,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Installation
 
-Requires [Bun](https://bun.sh/) >= 1.3.14 and [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) on your PATH. Tested on Linux (Ubuntu 22.04), macOS, and Windows 10.
+Requires [Bun](https://bun.sh/) >= 1.3.14 and [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) on your PATH (tested with Codex 0.169.1–0.172.0; goals, Guardian, and memory isolation require Codex >= 0.142). Tested on Linux (Ubuntu 22.04), macOS, and Windows 10.
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
@@ -54,7 +54,7 @@ After installation, run `codex-collab health` to verify. If the command is not f
 <details>
 <summary>Where things get installed</summary>
 
-The installer builds a self-contained bundle plus a binary shim. On Linux and macOS these go to `~/.claude/skills/codex-collab/` and `~/.local/bin`. On Windows they go to `%USERPROFILE%\.claude\skills\codex-collab\`, and `install.ps1` adds the shim to your PATH.
+The installer builds a self-contained bundle plus a binary shim. On Linux and macOS these go to `~/.claude/skills/codex-collab/` and `~/.local/bin`. `install.sh` also installs the Codex-side skill at `~/.codex/skills/claude-collab/` (or `$CODEX_HOME/skills/claude-collab/`), and writes the opt-in exec-policy rule at `~/.codex/rules/codex-collab.rules` only if you enable `codex-rule` (prompted once on an interactive install, or via `codex-collab config codex-rule on`). On Windows, `install.ps1` installs to `%USERPROFILE%\.claude\skills\codex-collab\` and adds the shim in `%USERPROFILE%\.local\bin` to your PATH; the Codex-side skill and rule are omitted since peer messaging is not supported on Windows.
 
 Claude discovers the skill automatically, including in a session that is already running. The exception is your first skill: if `~/.claude/skills/` did not exist before, restart Claude Code once so the new directory is watched.
 
@@ -154,6 +154,7 @@ The commands Codex uses to reach Claude (`peers`, `send`, `task`) are under [Pee
 | `questions [id]` | List pending questions in this workspace; with an ID, show the full text |
 | `next` | Block until something needs attention, print it in full with how to respond, then exit |
 | `approve <id>` | Approve a pending request |
+| `approve --guardian [id]` | Override a Guardian denial (without an ID, list pending denials); takes effect on the thread's next run |
 | `decline <id>` | Decline a pending request |
 
 </details>
@@ -239,7 +240,7 @@ The commands Codex uses to reach Claude (`peers`, `send`, `task`) are under [Pee
 
 | Flag | Description |
 |------|-------------|
-| `--json` | JSON output for supported commands (`threads`, `peek`) |
+| `--json` | JSON output for supported commands (`threads`, `peek`, `peers`, `tasks`, `task status\|wait\|result`) |
 | `--all` | List all threads with no display limit |
 | `--discover` | Query Codex server for threads not in the local index |
 | `--limit <n>` | Limit items shown by `threads` or `peek` |

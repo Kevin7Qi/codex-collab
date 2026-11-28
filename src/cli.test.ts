@@ -80,10 +80,13 @@ describe("CLI valid commands", () => {
     expect(exitCode).toBe(0);
     expect(stdout).toContain("codex-collab");
     expect(stdout).toContain("Usage:");
+    expect(stdout).toContain("messages [<id>]");
+    expect(stdout).toContain("8  thread held by another Codex process");
+    expect(stdout).toContain("--json                  JSON output (threads, peek, peers, tasks, task)");
   });
 
-  it("send, peers, task and tasks --help print the page for working with Claude Code; other commands print the general help", () => {
-    for (const command of ["send", "peers", "task", "tasks"]) {
+  it("send, peers, task, tasks and messages --help print the page for working with Claude Code; other commands print the general help", () => {
+    for (const command of ["send", "peers", "task", "tasks", "messages"]) {
       const { stdout, exitCode } = run(command, "--help");
       expect(exitCode).toBe(0);
       expect(stdout).toContain("Claude Code sessions, from Codex");

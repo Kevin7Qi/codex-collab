@@ -340,6 +340,8 @@ Commands:
                           <sec>, default 600)
   task result <id>        Print a task's reply if it is there; never waits
   tasks [--all]           List the tasks sent from this workspace (--json)
+  messages [<id>]         What Claude Code sessions sent this Codex thread,
+                          or one message in full
   version                 Print version
 
 Options:
@@ -376,7 +378,7 @@ Options:
   --limit <n>             Number of items shown (peek, threads commands)
   --full                  Include all item types (peek command)
   --content-only          Print only result text (no progress lines)
-  --json                  JSON output (threads, peek commands)
+  --json                  JSON output (threads, peek, peers, tasks, task)
   --all                   List all threads without the display limit
   --discover              Merge server-side threads into the local list (threads)
   --purge                 (delete) Delete server-side; (uninstall) delete the
@@ -397,6 +399,8 @@ Exit codes (run, review):
                            6  broker busy and fallback unavailable (transient; retry)
                            7  goal ended blocked or usage/budget-limited —
                               Codex needs you (steer with --resume, or kill --clear)
+                           8  thread held by another Codex process (app or
+                              terminal) — wait or close it there (nothing lost)
 
 Goal mode: when a goal is active (goals = true in ~/.codex/config.toml) —
 created by Codex mid-turn or by you with run --goal — a run follows the
