@@ -17,9 +17,11 @@ bun run test:fake-models --install
 | `broker` | Two broker clients can run different threads concurrently; competing for the same thread returns `-32001`. |
 | `send` | `send` auto-spawns a Claude session, replies over the per-thread channel, and replays the reply from `messages`. |
 | `peer` | Claude's `ListAgents` finds the workspace broker, its `SendMessage` starts a Codex turn, and `collab.consult` reaches Claude and returns an answer before the final reply. |
+| `peer-default` | The same round trip without naming a Codex model; Codex 0.172.0 selects `gpt-6.2-sol` and routes consult through code mode. |
 | `failures` | A mid-stream model error fails the run; delaying a response triggers the CLI's timeout. |
 | `held` | A separate app-server holding a thread prevents resume with exit code 8. |
+| `contract` | Runs the live `item/tool/call` contract against the fixture, asserting the real callback and returned answer. |
 
-These are opt-in and do not run under `bun test` or `bun run test:ci`. The Claude messaging scenarios are skipped on Windows. The peer scenario may normalize Linux process start times **only** in its isolated synthetic entries for checkouts that still write `ps` timestamps. The tool-call scenario pins `gpt-5.4` because the observed Codex 0.172.0 default `gpt-6.2-sol` does not send conventional function tools to this provider. The `SendMessage` rule leaves automatic spawning in `auto`; it covers this one scripted action, not the classifier.
+These are opt-in and do not run under `bun test` or `bun run test:ci`. The Claude messaging scenarios are skipped on Windows. The peer scenarios may normalize Linux process start times **only** in their isolated synthetic entries for checkouts that still write `ps` timestamps. The `peer` scenario pins `gpt-5.4` to cover direct function tools; with Responses Lite, Codex instead advertises `functions.exec` in an `additional_tools` input item and exposes `collab__consult` to that tool. The `SendMessage` rule leaves automatic spawning in `auto`; it covers this one scripted action, not the classifier.
 
 The tests verify collaboration plumbing and error propagation, not real sign-in, model judgment, account-specific feature gates, Remote Control, or provider compatibility. This harness does not replace the opt-in live contracts or a real-account smoke test.

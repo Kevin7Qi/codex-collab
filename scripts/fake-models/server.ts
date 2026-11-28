@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 
 type Part = { type: string; text?: string; content?: unknown; is_error?: boolean };
 type Message = { role: string; content: string | Part[] };
-type Tool = { type?: string; name: string; tools?: Tool[] };
+type Tool = { type?: string; name: string; description?: string; tools?: Tool[] };
+type ResponseInput = Partial<Message> & { type?: string; output?: unknown; tools?: Tool[] };
 type RequestBody = {
   model: string;
   stream?: boolean;
   messages?: Message[];
-  input?: string | (Message & { type?: string; output?: unknown })[];
+  input?: string | ResponseInput[];
   tools?: Tool[];
 };
 
@@ -39,7 +40,7 @@ function anthropic(body: RequestBody, log: (data: object) => void) {
   const prompt = text(input);
   const result = Array.isArray(input) ? input.find(part => part.type === "tool_result") : undefined;
   const incoming = prompt.match(/<cross-session-message[^>]* from-name="([^"]+)"[^>]*>\s*([\s\S]*?)<\/cross-session-message>/);
-  const peer = prompt.match(/FIXTURE_PEER (codex\([^\n)]+\))/)?.[1];
+  const peer = prompt.match(/FIXTURE_PEER(_DEFAULT)? (codex\([^\n)]+\))/);
   const reply = incoming?.[2].includes("FIXTURE_SEND") ? "FIXTURE_MAILBOX_REPLY"
     : incoming?.[2].startsWith("[consult]") ? "FIXTURE_CONSULT_ANSWER" : undefined;
   const available = (name: string) => body.tools?.some(tool => tool.name === name);
@@ -48,8 +49,8 @@ function anthropic(body: RequestBody, log: (data: object) => void) {
   const block = result ? say(`Fixture tool returned: ${JSON.stringify(result.content)}`)
     : prompt.includes("FIXTURE_LIST") && available("ListAgents") ? call("ListAgents", {})
     : (peer || reply) && available("SendMessage") ? call("SendMessage", {
-      to: reply ? incoming?.[1] : peer,
-      message: reply ?? "model: gpt-5.4\n\nFIXTURE_CONSULT_TASK",
+      to: reply ? incoming?.[1] : peer?.[2],
+      message: reply ?? (peer?.[1] ? "FIXTURE_CONSULT_TASK" : "model: gpt-5.4\n\nFIXTURE_CONSULT_TASK"),
       summary: "Exercise the local peer fixture",
     })
     : incoming?.[2].includes("FIXTURE_CODEX_REPLY") ? say("FIXTURE_CLAUDE_RECEIVED_CODEX_REPLY")
@@ -73,17 +74,25 @@ function anthropic(body: RequestBody, log: (data: object) => void) {
 function responses(body: RequestBody, log: (data: object) => void) {
   const input = typeof body.input === "string" ? [] : body.input ?? [];
   const prompt = typeof body.input === "string" ? body.input : text(input.findLast(item => item.role === "user")?.content);
-  const returned = input.findLast(item => item.type === "function_call_output");
-  const namespace = body.tools?.find(tool => tool.type === "namespace" && tool.name === "collab");
-  const consult = namespace?.tools?.find(tool => tool.name === "consult") ?? body.tools?.find(tool => /(?:^|[_.])consult$/.test(tool.name ?? ""));
+  const returned = input.findLast(item => item.type === "function_call_output" || item.type === "custom_tool_call_output");
+  const tools = [...(body.tools ?? []), ...input.flatMap(item => item.type === "additional_tools" ? item.tools ?? [] : [])];
+  const namespace = tools.find(tool => tool.type === "namespace" && tool.name === "collab");
+  const consult = namespace?.tools?.find(tool => tool.name === "consult") ?? tools.find(tool => /(?:^|[_.])consult$/.test(tool.name));
+  const exec = tools.find(tool => tool.type === "namespace" && tool.name === "functions")?.tools
+    ?.find(tool => tool.type === "custom" && tool.name === "exec" && /\bcollab__consult\b/.test(tool.description ?? ""));
+  const question = prompt.includes("FIXTURE_CONSULT_TASK") ? "FIXTURE_CONSULT_QUESTION?"
+    : prompt.match(/\bCONTRACT-ARG-\d+\?/)?.[0];
+  const args = JSON.stringify({ question });
   const marker = prompt.match(/\bFIXTURE_(?:RUN|DETACH|BROKER_A|BROKER_B|HELD)\b/)?.[0];
   const part = { type: "output_text", text: returned ? `FIXTURE_CODEX_REPLY ${JSON.stringify(returned.output)}` : marker ? `${marker}_OK` : "FIXTURE_CODEX_OK", annotations: [] };
-  const item = consult && !returned && prompt.includes("FIXTURE_CONSULT_TASK")
-    ? { id: id("fc"), type: "function_call" as const, call_id: id("call"), name: consult.name, ...(namespace ? { namespace: namespace.name } : {}), arguments: JSON.stringify({ question: "FIXTURE_CONSULT_QUESTION?" }), status: "completed" }
+  const item = question && !returned && consult
+    ? { id: id("fc"), type: "function_call" as const, call_id: id("call"), name: consult.name, ...(namespace ? { namespace: namespace.name } : {}), arguments: args, status: "completed" }
+    : question && !returned && exec
+    ? { id: id("ctc"), type: "custom_tool_call" as const, call_id: id("call"), name: exec.name, namespace: "functions", input: `text(await tools.collab__consult(${args}));`, status: "completed" }
     : { id: id("msg"), type: "message" as const, role: "assistant", status: "completed", content: [part] };
   const response = { id: id("resp"), object: "response", created_at: Math.floor(Date.now() / 1000), model: body.model, output: [], status: "in_progress" };
   const usage = { input_tokens: 2, output_tokens: 3, total_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } };
-  log({ api: "responses", model: body.model, marker, consult: Boolean(consult), item, ...(returned ? { returned: returned.output } : {}) });
+  log({ api: "responses", model: body.model, marker, item, ...(returned ? { returned: returned.output } : {}) });
   return stream(async emit => {
     let sequence_number = 0;
     const event = (type: string, data: object) => emit(type, { sequence_number: sequence_number++, ...data });
@@ -101,7 +110,7 @@ function responses(body: RequestBody, log: (data: object) => void) {
       event("response.output_text.delta", { ...pos, content_index: 0, delta: part.text });
       event("response.output_text.done", { ...pos, content_index: 0, text: part.text });
       event("response.content_part.done", { ...pos, content_index: 0, part });
-    } else {
+    } else if (item.type === "function_call") {
       event("response.output_item.added", { output_index: 0, item: { ...item, status: "in_progress", arguments: "" } });
       event("response.function_call_arguments.delta", { ...pos, delta: item.arguments });
       event("response.function_call_arguments.done", { ...pos, arguments: item.arguments });

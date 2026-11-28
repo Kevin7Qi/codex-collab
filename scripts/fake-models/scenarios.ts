@@ -145,7 +145,7 @@ function normalizeFixtureRegistry() {
   }
 }
 
-async function peer() {
+async function peer(useDefaultModel = false) {
   await ok([...cli, "peer", "up"]);
   const state = readPeerState(stateDir);
   assert(state, "Broker did not register a front-door peer");
@@ -160,16 +160,18 @@ async function peer() {
     }
     assert(listed.includes(state.name), "Claude agents did not list the workspace peer");
     assert((await ok(claude("-p", "FIXTURE_LIST"))).includes(state.name), "ListAgents did not return the workspace peer");
-    const output = await ok(claude("--bg", "-n", "fixture-peer", "--permission-mode", "default", "--settings", '{"worktree":{"bgIsolation":"none"}}', `FIXTURE_PEER ${state.name}`));
+    const offset = logs().length;
+    const marker = useDefaultModel ? "FIXTURE_PEER_DEFAULT" : "FIXTURE_PEER";
+    const output = await ok(claude("--bg", "-n", useDefaultModel ? "fixture-peer-default" : "fixture-peer",
+      "--permission-mode", "default", "--settings", '{"worktree":{"bgIsolation":"none"}}', `${marker} ${state.name}`));
     const id = parseBackgroundId(output);
     assert(id, output);
     jobs.add(id);
-    await until(() => {
-      const trace = logs();
-      if (trace.includes("FIXTURE_CLAUDE_RECEIVED_CODEX_REPLY") && trace.includes("FIXTURE_CONSULT_ANSWER")) return trace;
+    const trace = await until(() => {
+      const trace = logs().slice(offset);
+      if (trace.includes("FIXTURE_CLAUDE_RECEIVED_CODEX_REPLY") && /"returned":.*FIXTURE_CONSULT_ANSWER/.test(trace)) return trace;
     }, "Claude → Codex → collab.consult → Claude", 25_000);
-    assert.match(logs(), /"name":"consult"/);
-    assert.match(logs(), /"returned":.*FIXTURE_CONSULT_ANSWER/);
+    assert.match(trace, /"name":"consult"|"type":"custom_tool_call".*tools\.collab__consult/);
   } finally {
     clearInterval(normalizer);
   }
@@ -220,7 +222,15 @@ async function cleanup() {
   }
 }
 
-const scenarios: Record<string, () => Promise<void>> = { run: runScenario, detach, broker, send, peer, failures, held };
+async function contract() {
+  const file = join(import.meta.dir, "../../contracts/contracts.test.ts");
+  const output = await ok([process.execPath, "test", file, "-t", "item/tool/call delivers plaintext"], { CODEX_COLLAB_CONTRACTS: "1" });
+  assert.match(output, /1 pass/);
+}
+
+const scenarios: Record<string, () => Promise<void>> = {
+  run: runScenario, detach, broker, send, peer, "peer-default": () => peer(true), failures, held, contract,
+};
 const selected = process.argv[2];
 if (selected && !Object.hasOwn(scenarios, selected)) throw new Error(`Unknown scenario "${selected}"; choose ${Object.keys(scenarios).join(", ")}`);
 let failed = false;
@@ -229,7 +239,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => { 
 try {
   for (const [name, scenario] of Object.entries(scenarios)) {
     if (interrupted || (selected && selected !== name)) continue;
-    if (process.platform === "win32" && (name === "send" || name === "peer")) {
+    if (process.platform === "win32" && (name === "send" || name === "peer" || name === "peer-default")) {
       console.log(`SKIP ${name} (Claude cross-session messaging unavailable on Windows)`);
       continue;
     }
