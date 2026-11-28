@@ -11,7 +11,8 @@
 //   winner's fresh lock).
 // - The stale check runs inside the retry loop, so a crashed holder costs
 //   one retry interval, not the full spin, before recovery.
-// - A lock still held when its process exits is released on the way out.
+// - A lock taken with `releaseOnExit` is released when its process exits
+//   while holding it.
 // - release() only unlinks the lock file while it is still the one this
 //   process created (verified via inode), so a release after a stale-break
 //   cannot delete the breaker's live lock.
@@ -24,6 +25,11 @@ export interface LockOptions {
   maxAttempts?: number;
   /** Age beyond which a held lock is considered orphaned (default 60s). */
   staleThresholdMs?: number;
+  /** Let go of the lock if the process exits while holding it — `die`, or
+   *  a signal the CLI turns into an exit — rather than leave it to go stale.
+   *  For a lock that guards nothing that outlives its holder. A process
+   *  killed outright still leaves it. */
+  releaseOnExit?: boolean;
 }
 
 const DEFAULT_MAX_ATTEMPTS = 600;
@@ -79,17 +85,15 @@ function tryBreakStaleLock(lockPath: string, staleThresholdMs: number): void {
   }
 }
 
-/** The locks this process holds. A process that exits with one — `die`, or
- *  a signal the CLI turns into an exit — lets go of it on the way out: left
- *  behind, it holds up every other process until it has gone stale. Only a
- *  process killed outright still leaves one. Whether a holder is alive is
- *  not asked of its pid instead: seen from another PID namespace (a sandbox)
- *  a live holder reads as dead. */
+/** The locks this process lets go of when it exits (`releaseOnExit`).
+ *  Whether a holder is alive is not asked of its pid instead: the file
+ *  records none, and seen from another PID namespace (a sandbox) a live
+ *  holder reads as dead. */
 const heldLocks = new Set<() => void>();
 let releasesOnExit = false;
 
-function makeRelease(fd: number, lockPath: string): () => void {
-  if (!releasesOnExit) {
+function makeRelease(fd: number, lockPath: string, onExit = false): () => void {
+  if (onExit && !releasesOnExit) {
     releasesOnExit = true;
     process.on("exit", () => {
       for (const release of [...heldLocks]) release();
@@ -124,7 +128,7 @@ function makeRelease(fd: number, lockPath: string): () => void {
       }
     }
   };
-  heldLocks.add(release);
+  if (onExit) heldLocks.add(release);
   return release;
 }
 
@@ -138,7 +142,7 @@ export function acquireLockSync(lockPath: string, opts?: LockOptions): () => voi
   const staleThresholdMs = opts?.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
   for (let i = 0; i < maxAttempts; i++) {
     const fd = tryOpen(lockPath);
-    if (fd !== null) return makeRelease(fd, lockPath);
+    if (fd !== null) return makeRelease(fd, lockPath, opts?.releaseOnExit);
     tryBreakStaleLock(lockPath, staleThresholdMs);
     Bun.sleepSync(30 + Math.random() * 40);
   }
@@ -155,7 +159,7 @@ export async function acquireLockAsync(lockPath: string, opts?: LockOptions): Pr
   const staleThresholdMs = opts?.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
   for (let i = 0; i < maxAttempts; i++) {
     const fd = tryOpen(lockPath);
-    if (fd !== null) return makeRelease(fd, lockPath);
+    if (fd !== null) return makeRelease(fd, lockPath, opts?.releaseOnExit);
     tryBreakStaleLock(lockPath, staleThresholdMs);
     await Bun.sleep(30 + Math.random() * 40);
   }

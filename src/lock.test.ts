@@ -12,10 +12,10 @@ beforeAll(() => { root = mkdtempSync(join(tmpdir(), "cc-lock-")); });
 afterAll(() => { rmSync(root, { recursive: true, force: true }); });
 
 /** A process that takes the lock, sets up how it ends (`then`), and says so. */
-function holder(lockPath: string, then: string): { held: Promise<void>; exited: Promise<number | null>; kill: (signal: NodeJS.Signals) => void } {
+function holder(lockPath: string, then: string, opts: { releaseOnExit?: boolean } = { releaseOnExit: true }): { held: Promise<void>; exited: Promise<number | null>; kill: (signal: NodeJS.Signals) => void } {
   const script = join(root, `holder-${Math.random().toString(16).slice(2)}.ts`);
   writeFileSync(script, `import { acquireLockSync } from ${JSON.stringify(join(import.meta.dir, "lock.ts"))};
-acquireLockSync(${JSON.stringify(lockPath)});
+acquireLockSync(${JSON.stringify(lockPath)}, ${JSON.stringify(opts)});
 ${then}
 console.log("held");
 `);
@@ -47,9 +47,17 @@ setInterval(() => {}, 1000);`);
     acquireLockSync(lockPath, { maxAttempts: 1 })();
   });
 
+  test("is left where it is when it was not taken to be released on exit", async () => {
+    const lockPath = join(root, "kept.lock");
+    const h = holder(lockPath, `setTimeout(() => process.exit(3), 100);`, {});
+    await h.held;
+    expect(await h.exited).toBe(3);
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
   test("a lock released before the exit is released once", () => {
     const lockPath = join(root, "once.lock");
-    const release = acquireLockSync(lockPath);
+    const release = acquireLockSync(lockPath, { releaseOnExit: true });
     release();
     // Taken again by another holder: a second release must leave it.
     const other = acquireLockSync(lockPath);

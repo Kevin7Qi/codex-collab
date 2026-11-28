@@ -1267,6 +1267,60 @@ describeUnix("reaper", () => {
     }
   });
 
+  test("a `send` that came and went between a look's verdict and its taking the lock is seen under the lock: its task holds the session, its restart ends the watch", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-reap-handoff");
+    mkdirSync(dir, { recursive: true });
+    const fake = installFakeClaude(dir, { register: false });
+    const own = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const ownStart = procStartOf(own.pid!);
+    const session: SpawnedSession = {
+      id: "deadbee7", pid: own.pid!, name: "claude(ws-a-x)", startedAt: "2026-09-19T12:00:00.000Z", lingerSec: 1,
+      procStart: ownStart, sessionId: "00000000-0000-4000-8000-000000000007",
+    };
+    register(`${own.pid}.json`, { pid: own.pid, procStart: ownStart, kind: "bg", statusUpdatedAt: Date.now() - 5000 });
+    try {
+      // It recorded a task for the session and let the lock go.
+      const tasked = join(root, "state-reap-handoff-task");
+      recordSpawnedSession(tasked, session);
+      let said: string[] = [];
+      let sent = 0;
+      await runReaper(session, tasked, {
+        pollMs: 10, claudeBin: fake.bin, maxRounds: 1, log: (line) => said.push(line),
+        beforeStopLock: () => {
+          sent++;
+          const task = createTask(tasked, { cwd: wsA, threadId: null, message: "m", target: { name: session.name, pid: session.pid, socketPath: "/nowhere", sessionId: session.sessionId!, procStart: ownStart, spawned: session }, maxWaitSec: 60 });
+          updateTask(tasked, task.id, { receiver: { pid: process.pid, procStart: null, pidDomain: null } });
+        },
+      });
+      expect(sent).toBe(1);
+      expect(said).toEqual(["a task was sent to it just now: holding it"]);
+      expect(existsSync(fake.stopLog)).toBe(false);
+      expect(readSpawnedSessions(tasked)).toEqual([session]);
+      expect(existsSync(spawnLockPath(tasked))).toBe(false);
+
+      // It restarted the session under the same id and let the lock go.
+      const restartedIn = join(root, "state-reap-handoff-restart");
+      const restarted: SpawnedSession = { ...session, startedAt: "2026-09-19T12:05:00.000Z" };
+      recordSpawnedSession(restartedIn, session);
+      said = [];
+      expect(await runReaper(session, restartedIn, {
+        pollMs: 10, claudeBin: fake.bin, maxRounds: 3, log: (line) => said.push(line),
+        beforeStopLock: () => {
+          markSpawnedSessionStopped(restartedIn, session.id, new Date(), session.startedAt);
+          recordSpawnedSession(restartedIn, restarted, { supersedes: session.id });
+        },
+      })).toBe("gone");
+      expect(said).toEqual(["its record is of a session started since: nothing left to watch"]);
+      expect(existsSync(fake.stopLog)).toBe(false);
+      expect(readSpawnedSessions(restartedIn)).toEqual([restarted]);
+      expect(existsSync(spawnLockPath(restartedIn))).toBe(false);
+    } finally {
+      own.kill();
+    }
+  });
+
   test("a session Claude Code brought back under a new pid is followed, recorded under it, and stopped once idle", async () => {
     clearRegistry();
     const dir = join(root, "fake-claude-respawned");

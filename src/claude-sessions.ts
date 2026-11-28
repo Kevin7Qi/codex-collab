@@ -1169,6 +1169,9 @@ export async function runReaper(
     /** A test seam: runs between a look's read of the record and its read
      *  of the registry, where a restart by `send` can land. */
     afterRecordRead?: () => void;
+    /** A test seam: runs once a look has decided to stop the session,
+     *  before it takes the workspace's lock, where a whole `send` can land. */
+    beforeStopLock?: () => void;
   } = {},
 ): Promise<"stopped" | "gone"> {
   let session = recorded;
@@ -1275,8 +1278,9 @@ export async function runReaper(
     // of either: the next look sees what it did.
     let release: (() => void) | null = null;
     if (verdict === "stop") {
+      opts.beforeStopLock?.();
       try {
-        release = await acquireLockAsync(spawnLockPath(stateDir), { maxAttempts: 1, staleThresholdMs: 120_000 });
+        release = await acquireLockAsync(spawnLockPath(stateDir), { maxAttempts: 1, staleThresholdMs: 120_000, releaseOnExit: true });
       } catch {
         say("a `send` is choosing or starting a session here: looking again");
         verdict = "wait";
