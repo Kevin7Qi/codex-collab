@@ -75,11 +75,16 @@ function responses(body: RequestBody, log: (data: object) => void, brokerGate: P
   const input = typeof body.input === "string" ? [] : body.input ?? [];
   const prompt = typeof body.input === "string" ? body.input : text(input.findLast(item => item.role === "user")?.content);
   const returned = input.findLast(item => item.type === "function_call_output" || item.type === "custom_tool_call_output");
-  const tools = [...(body.tools ?? []), ...input.flatMap(item => item.type === "additional_tools" ? item.tools ?? [] : [])];
+  const additionalTools = input.flatMap(item => item.type === "additional_tools" ? item.tools ?? [] : []);
+  const tools = [...(body.tools ?? []), ...additionalTools];
   const namespace = tools.find(tool => tool.type === "namespace" && tool.name === "collab");
   const consult = namespace?.tools?.find(tool => tool.name === "consult") ?? tools.find(tool => /(?:^|[_.])consult$/.test(tool.name));
-  const exec = tools.find(tool => tool.type === "namespace" && tool.name === "functions")?.tools
-    ?.find(tool => tool.type === "custom" && tool.name === "exec" && /\bcollab__consult\b/.test(tool.description ?? ""));
+  const findConsultExec = (tools: Tool[]) => tools
+    .filter(tool => tool.type === "namespace" && tool.name === "functions")
+    .flatMap(tool => tool.tools ?? [])
+    .find(tool => tool.type === "custom" && tool.name === "exec" && /\bcollab__consult\b/.test(tool.description ?? ""));
+  const additionalExec = findConsultExec(additionalTools);
+  const exec = additionalExec ?? findConsultExec(body.tools ?? []);
   const question = prompt.includes("FIXTURE_CONSULT_TASK") ? "FIXTURE_CONSULT_QUESTION?"
     : prompt.match(/\bCONTRACT-ARG-\d+\?/)?.[0];
   const args = JSON.stringify({ question });
@@ -92,7 +97,10 @@ function responses(body: RequestBody, log: (data: object) => void, brokerGate: P
     : { id: id("msg"), type: "message" as const, role: "assistant", status: "completed", content: [part] };
   const response = { id: id("resp"), object: "response", created_at: Math.floor(Date.now() / 1000), model: body.model, output: [], status: "in_progress" };
   const usage = { input_tokens: 2, output_tokens: 3, total_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } };
-  log({ api: "responses", model: body.model, marker, item, ...(returned ? { returned: returned.output } : {}) });
+  log({ api: "responses", model: body.model, marker, item,
+    ...(item.type === "custom_tool_call" ? { toolSource: additionalExec ? "additional_tools" : "tools" } : {}),
+    ...(returned ? { returned: returned.output } : {}),
+  });
   return stream(async emit => {
     let sequence_number = 0;
     const event = (type: string, data: object) => emit(type, { sequence_number: sequence_number++, ...data });

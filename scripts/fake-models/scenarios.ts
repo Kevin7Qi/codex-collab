@@ -170,7 +170,16 @@ async function peer(useDefaultModel = false) {
       const trace = logs().slice(offset);
       if (trace.includes("FIXTURE_CLAUDE_RECEIVED_CODEX_REPLY") && /"returned":.*FIXTURE_CONSULT_ANSWER/.test(trace)) return trace;
     }, "Claude → Codex → collab.consult → Claude", 25_000);
-    assert.match(trace, /"name":"consult"|"type":"custom_tool_call".*tools\.collab__consult/);
+    if (useDefaultModel) {
+      const usedResponsesLite = trace.trim().split("\n").some(line => {
+        const { toolSource, item } = JSON.parse(line);
+        return toolSource === "additional_tools" && item?.type === "custom_tool_call"
+          && item.namespace === "functions" && item.name === "exec" && item.input.includes("tools.collab__consult(");
+      });
+      assert(usedResponsesLite, "Default-model consult did not use functions.exec from a Responses Lite additional_tools item");
+    } else {
+      assert.match(trace, /"type":"function_call".*"name":"consult"/);
+    }
   } finally {
     clearInterval(normalizer);
   }
