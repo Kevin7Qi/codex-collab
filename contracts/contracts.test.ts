@@ -417,8 +417,11 @@ describe.skipIf(!ENABLED || registryBlocked !== null)("claude background-session
       // Settled: nothing it holds is work.
       expect(jobState(id)?.tempo).not.toBe("active");
       expect(jobHasWorkInFlight(id)).toBe(false);
-      // The turn ended on the error, with the API's status and reason.
-      expect(turnEndedOnError(sessionId)).toEqual(expect.objectContaining({ status: 404, reason: "model_not_found" }));
+      // The turn ended on the error, with the API's status and reason. The
+      // job can read failed a moment before the error is in the transcript,
+      // so wait for it as codex-collab does (it polls).
+      const ended = await until(() => turnEndedOnError(sessionId), 15_000, "the API error to be in the transcript");
+      expect(ended).toEqual(expect.objectContaining({ status: 404, reason: "model_not_found" }));
       // Claude Code made that reply up; it names no model the session ran on.
       expect(ranOn(sessionId)).toBeNull();
     } finally {
