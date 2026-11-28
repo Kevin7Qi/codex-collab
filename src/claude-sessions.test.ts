@@ -1187,6 +1187,39 @@ describeUnix("reaper", () => {
     }
   });
 
+  test("a restart that lands between a look's read of the record and its read of the registry is not followed either", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-replaced-mid-look");
+    mkdirSync(dir, { recursive: true });
+    const stateDir = join(root, "state-reap-replaced-mid-look");
+    const sid = "00000000-0000-4000-8000-000000000005";
+    const before = spawn("true", [], { stdio: "ignore" });
+    await new Promise((r) => before.on("exit", r));
+    const now = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const fake = installFakeClaude(dir, { register: false });
+    const watched: SpawnedSession = { id: "deadbee5", pid: before.pid!, name: "claude(ws-a-x)", startedAt: "2026-09-19T12:00:00.000Z", lingerSec: 1, procStart: "1", sessionId: sid };
+    const restarted: SpawnedSession = { ...watched, pid: now.pid!, procStart: procStartOf(now.pid!) ?? undefined, startedAt: "2026-09-19T12:05:00.000Z" };
+    // The record is the reaper's own when the look reads it…
+    recordSpawnedSession(stateDir, watched);
+    let looks = 0;
+    const restart = () => {
+      if (looks++ > 0) return;
+      // …and `send` has restarted the session by the time it reads the registry.
+      markSpawnedSessionStopped(stateDir, watched.id);
+      recordSpawnedSession(stateDir, restarted, { supersedes: watched.id });
+      register(`${now.pid}.json`, { pid: now.pid, procStart: restarted.procStart, sessionId: sid, name: watched.name, kind: "bg", jobId: "deadbee5", status: "idle", statusUpdatedAt: Date.now() - 5000 });
+    };
+    try {
+      expect(await runReaper(watched, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, afterRecordRead: restart })).toBe("gone");
+      expect(looks).toBe(1);
+      expect(existsSync(fake.stopLog)).toBe(false);
+      expect(readSpawnedSessions(stateDir)).toEqual([restarted]);
+    } finally {
+      now.kill();
+    }
+  });
+
   test("a session Claude Code brought back under a new pid is followed, recorded under it, and stopped once idle", async () => {
     clearRegistry();
     const dir = join(root, "fake-claude-respawned");

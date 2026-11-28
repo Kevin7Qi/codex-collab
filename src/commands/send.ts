@@ -767,7 +767,7 @@ export async function handleSend(args: string[]): Promise<void> {
             ? "the session came back after a signal"
             : "its process could not be verified as one codex-collab started, so no signal was sent"}. Nothing was sent.${sandboxHint()}`);
         }
-        markSpawnedSessionStopped(stateDir, ours.id);
+        markSpawnedSessionStopped(stateDir, ours.id, new Date(), ours.startedAt);
         const record = stoppedSessionNamed(stateDir, target.name) ?? fail(`${target.name} was stopped, and its record is gone: nothing was sent.`);
         const set = spawnSettings(cfg);
         try {
@@ -1535,7 +1535,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
         // record: one that could not be marked is the next reader's to settle,
         // and no reason to report this task as anything but what happened.
         if ((await stopSpawnedSession(target.spawned)).gone) {
-          try { markSpawnedSessionStopped(stateDir, target.spawned.id); } catch (e) { console.log(`Could not mark ${target.name} stopped: ${e instanceof Error ? e.message : String(e)}`); }
+          try { markSpawnedSessionStopped(stateDir, target.spawned.id, new Date(), target.spawned.startedAt); } catch (e) { console.log(`Could not mark ${target.name} stopped: ${e instanceof Error ? e.message : String(e)}`); }
         } else {
           stillThere = true;
         }

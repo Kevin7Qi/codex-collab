@@ -213,7 +213,7 @@ async function surveyWorkspace(stateDir: string, plan: Plan): Promise<void> {
         if (atWork(now, s.id)) return `${s.name} took up work meanwhile`;
         const { gone } = await stopSpawnedSession(s);
         if (!gone) return `${s.name} is still running`;
-        markSpawnedSessionStopped(stateDir, s.id);
+        markSpawnedSessionStopped(stateDir, s.id, new Date(), s.startedAt);
         return null;
       },
     });
