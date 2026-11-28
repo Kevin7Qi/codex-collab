@@ -626,7 +626,7 @@ export function parseBackgroundId(output: string): string | null {
 /** Where Claude Code keeps its background jobs' state (`<id>/state.json`). */
 export function jobsDir(): string {
   // Override for tests: a fake job must never land among the user's.
-  return process.env.CODEX_COLLAB_JOBS_DIR ?? join(homedir(), ".claude", "jobs");
+  return process.env.CODEX_COLLAB_JOBS_DIR ?? join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "jobs");
 }
 
 function readJobState(jobId: string): Record<string, unknown> | null {

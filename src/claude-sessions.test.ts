@@ -22,6 +22,7 @@ import {
   describeModelChoice,
   isAutocompactWindow,
   isClaudeEffort,
+  jobsDir,
   isModelName,
   isSpawnEffortSetting,
   forgetSpawnedSession,
@@ -62,6 +63,22 @@ import { buildRegistryEntry, procIdentity, procStartOf, procStartTicksOf } from 
 // Sleepers, ps and sh fakes: Unix only, like the messaging this serves.
 const onWindows = process.platform === "win32";
 const describeUnix = onWindows ? describe.skip : describe;
+
+test("job state follows the Claude profile unless explicitly overridden", () => {
+  const env = process.env;
+  const profile = env.CLAUDE_CONFIG_DIR;
+  const jobs = env.CODEX_COLLAB_JOBS_DIR;
+  try {
+    delete env.CODEX_COLLAB_JOBS_DIR;
+    env.CLAUDE_CONFIG_DIR = join(tmpdir(), "other-claude");
+    expect(jobsDir()).toBe(join(env.CLAUDE_CONFIG_DIR, "jobs"));
+    env.CODEX_COLLAB_JOBS_DIR = join(tmpdir(), "fixture-jobs");
+    expect(jobsDir()).toBe(env.CODEX_COLLAB_JOBS_DIR);
+  } finally {
+    if (profile === undefined) delete env.CLAUDE_CONFIG_DIR; else env.CLAUDE_CONFIG_DIR = profile;
+    if (jobs === undefined) delete env.CODEX_COLLAB_JOBS_DIR; else env.CODEX_COLLAB_JOBS_DIR = jobs;
+  }
+});
 
 let root: string;
 let registry: string;
