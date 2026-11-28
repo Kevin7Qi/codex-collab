@@ -330,7 +330,7 @@ codex-collab config --unset             # 取消所有设置
 
 **实验性功能：** `codex-rule`、`codex-hook` 与 `codex-wake` 默认关闭。开启后，`codex-rule` 使任何 Codex 会话执行 `codex-collab send` 与 `peers stop` 时都无需审批，`codex-hook` 在 Codex 线程自己的轮次中把 Claude 发来的消息交给它，`codex-wake` 则为此新开一个轮次（详见下文）。
 
-**已知限制：** 对于在 Codex 应用中打开的本地文件线程，`codex-wake` 无法为其新开轮次。Codex 应用运行自己的 app-server，外部无法接入，因此消息会在该线程的下一个轮次送达（开启 `codex-hook` 时，在该轮次中交付）。`codex-wake` 适用于在 Codex 共享 app-server 上处于空闲的线程：通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`。线程必须在这样的客户端中保持打开：由 `codex-collab run` 启动后无人接手的线程不会被唤起，因为 Codex 会在其轮次结束后将它卸载。
+**已知限制：** 对于在 Codex 应用中打开的本地文件线程，`codex-wake` 无法为其新开轮次。Codex 应用运行自己的 app-server，外部无法接入，因此消息会在该线程的下一个轮次送达（开启 `codex-hook` 时，在该轮次中交付）。`codex-wake` 适用于在 Codex 共享 app-server 上处于空闲的线程：通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`。codex-collab 自己运行过的线程（`codex-collab run`）则不需要这些：当没有 server 持有它时，codex-collab 会以该消息作为一次新的后台运行恢复它，在私有 app-server 上同样适用。
 
 <details><summary><code>mode</code> 与 <code>server</code></summary>
 
@@ -358,7 +358,7 @@ Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型
 
 `codex-hook`（`on` / `off`，默认 `off`）在 Codex 的 `~/.codex/hooks.json`（或 `$CODEX_HOME/hooks.json`）中、你自己的 hooks 之后添加三个 hook；`off` 或 `--unset` 只移除这三个；你的 hooks 保持原有位置，Codex 对它们的信任依赖于此。每次工具调用之后、轮次即将结束时，以及你给线程写消息时，它们把 Claude Code 会话发给该线程、而它尚未看到的消息交给它，每条只交一次；`send`、`task` 或 `messages` 已经打印过的消息视为已看到，开启 hook 时邮箱中已有的消息也是如此。若在轮次结束时交付，该轮次会继续，让 Codex 处理收到的内容。任务未得到回复就结束时，或会话的轮次因错误中止而任务仍未结束时，线程同样会收到通知。这些 hook 运行前，Codex 会先请你确认信任。只要 Codex 在过去一小时内在某个线程中运行过它们，且此后它们在文件中的位置和内容都没有变化，`send` 就会告诉该线程回复会自行送达，Codex 无需再去查看；`health` 会显示 Codex 上次运行它们的时间。一条 hook 容纳不下的长消息会被截断，并附上 `codex-collab messages <id>` 以打印全文。Windows 上不可用。
 
-`codex-wake`（`on` / `off`，默认 `off`）：当某个 Claude Code 会话在 Codex 线程于共享 app-server 上处于空闲时给它发来消息（通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`），codex-collab 会以该消息在线程上新开一个轮次，沿用线程自己的设置。在线程进行轮次期间到达的消息由 hook 交付；只有 Codex 在其中运行这些 hook（`codex-hook`）的线程才会被唤醒，因为它们记录着 Codex 已读过哪些内容。在自有 app-server 中打开的线程（使用本地文件的 Codex 应用会自行运行一个）无法从外部触达，会在其下一个轮次收到消息。
+`codex-wake`（`on` / `off`，默认 `off`）：当某个 Claude Code 会话在 Codex 线程于共享 app-server 上处于空闲时给它发来消息（通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`），codex-collab 会以该消息在线程上新开一个轮次，沿用线程自己的设置。在线程进行轮次期间到达的消息由 hook 交付；只有 Codex 在其中运行这些 hook（`codex-hook`）的线程才会被唤醒，因为它们记录着 Codex 已读过哪些内容。共享 app-server 未持有的线程，只有在 `codex-collab run` 曾在其上运行过轮次时才会被恢复：此时该消息会在线程上启动一次后台运行，等同于 `codex-collab run --resume <id> --detach`，可用 `follow`、`output` 与 `kill` 操作。其他线程一律不动：在自有 app-server 中打开的线程（使用本地文件的 Codex 应用会自行运行一个）无法从外部触达，会在其下一个轮次收到消息。codex-collab 自己的线程若正在别处以写入方式打开，也是如此，因为 Codex 只允许一个线程有一个写入方。
 
 `address-idle`（秒数或 `off`；默认 86400，即一天）：Codex 线程的地址在无任何消息经过时——没有发给它的消息、线程没有 `send`、也没有任务在等待回复——保持打开的时长。到时它会像与之交流过的 Claude Code 会话都已结束时那样关闭；线程下一次 `send` 会在同一个 socket 上重新打开它。`off` 表示只要这样的会话仍在运行就一直保持。
 
