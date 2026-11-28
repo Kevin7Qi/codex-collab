@@ -16,7 +16,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 ## 核心优势
 
 - **原生跨会话消息**：工作区 broker 会将 Codex 注册进 Claude Code 的跨会话消息体系，Claude 会话可直接向 Codex 发送消息（`SendMessage`），Codex 也会以消息回复——任务中途还能通过 `collab.consult` 工具向 Claude 提问。热路径上不再经过 CLI。
-- **结构化通信**：通过 Codex app-server JSON-RPC 协议通信——共享 app-server 运行时经由其控制 socket 接入，否则通过 stdio 启动私有实例。每个事件都有完整的类型定义，可解析、可追踪。
+- **结构化通信**：通过 Codex app-server JSON-RPC 协议通信——当 Codex 的共享 app-server 正在运行时，经由其控制 socket 接入；否则通过 stdio 启动私有实例。每个事件都有完整的类型定义，可解析、可追踪。
 - **实时进度反馈**：Codex 工作时实时推送进度，Claude 随时掌握运行状态。
 - **一键代码审查**：一条命令即可在只读沙箱中审查 PR、未提交更改或特定 commit。
 - **会话复用**：接续先前的会话继续对话，在既有上下文基础上推进，不必从头开始。
@@ -27,7 +27,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 
 ## 安装
 
-需要 [Bun](https://bun.sh/) >= 1.3.14 和 [Codex CLI](https://github.com/openai/codex)（`npm install -g @openai/codex`）并加入 PATH（已在 Codex 0.169.1–0.172.0 上测试通过；goal 模式、Guardian 与记忆隔离需要 Codex >= 0.142）。已在 Linux (Ubuntu 22.04)、macOS 与 Windows 10 上测试通过。
+需要 [Bun](https://bun.sh/) >= 1.3.14 和 [Codex CLI](https://github.com/openai/codex)（`npm install -g @openai/codex`）并加入 PATH（Goal 模式、Guardian 与记忆隔离需要 Codex >= 0.142）。已在 Linux (Ubuntu 22.04)、macOS 与 Windows 10 上搭配 Codex 0.169.1–0.172.0 测试通过。
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
@@ -54,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 <details>
 <summary>安装位置</summary>
 
-安装脚本会构建一份独立 bundle 和一个可执行文件 shim。Linux 与 macOS 上分别放置于 `~/.claude/skills/codex-collab/` 和 `~/.local/bin`；`install.sh` 同时会将 Codex 侧技能安装到 `~/.codex/skills/claude-collab/`（或 `$CODEX_HOME/skills/claude-collab/`），并在你选择启用 `codex-rule` 时（交互式安装会询问一次，或通过 `codex-collab config codex-rule on` 开启）写入执行策略规则 `~/.codex/rules/codex-collab.rules`。Windows 上 `install.ps1` 安装至 `%USERPROFILE%\.claude\skills\codex-collab\` 并把 `%USERPROFILE%\.local\bin` 中的 shim 加入 PATH；由于 Windows 不支持跨会话消息，不会安装 Codex 侧技能与规则。
+安装脚本会构建一份独立 bundle 和一个可执行文件 shim。Linux 与 macOS 上分别放置于 `~/.claude/skills/codex-collab/` 和 `~/.local/bin`；`install.sh` 同时会将 Codex 侧技能安装到 `~/.codex/skills/claude-collab/`，并在你选择启用 `codex-rule` 时（交互式安装会询问一次，或通过 `codex-collab config codex-rule on` 开启）写入 exec-policy 规则 `~/.codex/rules/codex-collab.rules`，两者在设置了 `$CODEX_HOME` 时均遵循该路径。Windows 上 `install.ps1` 安装至 `%USERPROFILE%\.claude\skills\codex-collab\` 并把 `%USERPROFILE%\.local\bin` 中的 shim 加入 PATH；由于 Windows 不支持跨会话消息，不会安装 Codex 侧技能与规则。
 
 完成后 Claude 会自动发现该技能，正在运行中的会话同样生效。唯一的例外是首次安装技能：若 `~/.claude/skills/` 此前并不存在，需重启一次 Claude Code，新目录才会被监听。
 

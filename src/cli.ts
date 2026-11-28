@@ -340,8 +340,8 @@ Commands:
                           <sec>, default 600)
   task result <id>        Print a task's reply if it is there; never waits
   tasks [--all]           List the tasks sent from this workspace (--json)
-  messages [<id>]         What Claude Code sessions sent this Codex thread,
-                          or one message in full
+  messages [<id>]         (for Codex) What Claude Code sessions sent this
+                          Codex thread, or one message in full
   version                 Print version
 
 Options:

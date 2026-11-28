@@ -27,7 +27,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Installation
 
-Requires [Bun](https://bun.sh/) >= 1.3.14 and [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) on your PATH (tested with Codex 0.169.1–0.172.0; goals, Guardian, and memory isolation require Codex >= 0.142). Tested on Linux (Ubuntu 22.04), macOS, and Windows 10.
+Requires [Bun](https://bun.sh/) >= 1.3.14 and [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) on your PATH (goals, Guardian, and memory isolation require Codex >= 0.142). Tested on Linux (Ubuntu 22.04), macOS, and Windows 10, with Codex 0.169.1–0.172.0.
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
@@ -54,7 +54,7 @@ After installation, run `codex-collab health` to verify. If the command is not f
 <details>
 <summary>Where things get installed</summary>
 
-The installer builds a self-contained bundle plus a binary shim. On Linux and macOS these go to `~/.claude/skills/codex-collab/` and `~/.local/bin`. `install.sh` also installs the Codex-side skill at `~/.codex/skills/claude-collab/` (or `$CODEX_HOME/skills/claude-collab/`), and writes the opt-in exec-policy rule at `~/.codex/rules/codex-collab.rules` only if you enable `codex-rule` (prompted once on an interactive install, or via `codex-collab config codex-rule on`). On Windows, `install.ps1` installs to `%USERPROFILE%\.claude\skills\codex-collab\` and adds the shim in `%USERPROFILE%\.local\bin` to your PATH; the Codex-side skill and rule are omitted since peer messaging is not supported on Windows.
+The installer builds a self-contained bundle plus a binary shim. On Linux and macOS these go to `~/.claude/skills/codex-collab/` and `~/.local/bin`. `install.sh` also installs the Codex-side skill at `~/.codex/skills/claude-collab/` and writes the opt-in exec-policy rule at `~/.codex/rules/codex-collab.rules` only if you enable `codex-rule` (prompted once on an interactive install, or via `codex-collab config codex-rule on`); both follow `$CODEX_HOME` when set. On Windows, `install.ps1` installs to `%USERPROFILE%\.claude\skills\codex-collab\` and adds the shim in `%USERPROFILE%\.local\bin` to your PATH; the Codex-side skill and rule are omitted since peer messaging is not supported on Windows.
 
 Claude discovers the skill automatically, including in a session that is already running. The exception is your first skill: if `~/.claude/skills/` did not exist before, restart Claude Code once so the new directory is watched.
 

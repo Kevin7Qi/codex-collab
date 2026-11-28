@@ -82,7 +82,7 @@ describe("CLI valid commands", () => {
     expect(stdout).toContain("Usage:");
     expect(stdout).toContain("messages [<id>]");
     expect(stdout).toContain("8  thread held by another Codex process");
-    expect(stdout).toContain("--json                  JSON output (threads, peek, peers, tasks, task)");
+    expect(stdout).toMatch(/--json\s+JSON output \(threads, peek, peers, tasks, task\)/);
   });
 
   it("send, peers, task, tasks and messages --help print the page for working with Claude Code; other commands print the general help", () => {
