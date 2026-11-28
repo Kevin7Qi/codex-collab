@@ -393,9 +393,6 @@ function writeSpawnedSessions(stateDir: string, sessions: SpawnedSession[]): voi
   renameSync(tmp, file);
 }
 
-/** Read-modify-write under a lock: a `send` recording a fresh session
- *  while a reaper forgets an old one must not lose either write — a lost
- *  record leaves a session no reaper will ever stop. */
 /** The workspace's lock on its started sessions as a whole: `send` holds it
  *  from choosing one until the task for it is recorded, and across a
  *  restart; a reaper holds it while it stops one. So a session is not
@@ -405,6 +402,9 @@ export function spawnLockPath(stateDir: string): string {
   return join(stateDir, "spawn.lock");
 }
 
+/** Read-modify-write under a lock: a `send` recording a fresh session
+ *  while a reaper forgets an old one must not lose either write — a lost
+ *  record leaves a session no reaper will ever stop. */
 function withRecordsLock<T>(stateDir: string, fn: () => T): T {
   const release = acquireLockSync(join(stateDir, "spawned-claude.lock"), { maxAttempts: 200, staleThresholdMs: 10_000 });
   try {

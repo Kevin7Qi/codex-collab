@@ -30,7 +30,6 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, o
 import { join, resolve, sep } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
-  spawnLockPath,
   CLAUDE_EFFORTS,
   DEFAULT_SPAWN_LINGER_SEC,
   describeModelChoice,
@@ -56,6 +55,7 @@ import {
   remoteControlReaches,
   sessionStatusNow,
   spawnClaudeSession,
+  spawnLockPath,
   spawnEffortFor,
   spawnEnv,
   spawnedSessionName,
