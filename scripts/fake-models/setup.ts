@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
 
 export const versions = { claude: "2.1.332", codex: "0.172.0" } as const;
 
@@ -60,18 +61,45 @@ trust_level = "trusted"
   return { home, workspace, env };
 }
 
-function pinnedExecutable(bin: string, name: string) {
-  const exe = Bun.which(name, { PATH: bin, cwd: bin });
-  if (!exe) return null;
-  try { return statSync(realpathSync(exe)).isFile() ? exe : null; }
+function isFile(path: string) {
+  try { return statSync(path).isFile(); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return null;
+    const { code } = error as NodeJS.ErrnoException;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    return false;
   }
 }
 
+function pinnedExecutable(bin: string, name: string) {
+  const exe = Bun.which(name, { PATH: bin, cwd: bin });
+  return exe && isFile(exe) ? exe : null;
+}
+
+function hasPinnedCodexBinary(dir: string) {
+  const { platform, arch } = process;
+  if (arch !== "x64" && arch !== "arm64") return false;
+  const target = platform === "linux" ? "unknown-linux-musl" : platform === "darwin" ? "apple-darwin" : platform === "win32" ? "pc-windows-msvc" : null;
+  if (!target) return false;
+  const launcher = join(dir, "node_modules", "@openai", "codex", "bin", "codex.js");
+  if (!isFile(launcher)) return false;
+  const require = createRequire(realpathSync(launcher));
+  let pkg: string;
+  try { pkg = dirname(realpathSync(require.resolve(`@openai/codex-${platform}-${arch}/package.json`))); }
+  catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code !== "MODULE_NOT_FOUND" && code !== "ENOENT") throw error;
+    return false;
+  }
+  const location = relative(realpathSync(dir), pkg);
+  if (location === ".." || location.startsWith(`..${sep}`) || isAbsolute(location)) return false;
+  const triple = `${arch === "x64" ? "x86_64" : "aarch64"}-${target}`;
+  const binary = platform === "win32" ? "codex.exe" : "codex";
+  return isFile(join(pkg, "vendor", triple, "bin", binary));
+}
+
 const toolBin = (dir: string) => join(dir, "node_modules", ".bin");
-const missingPinnedTool = (dir: string) => (["claude", "codex"] as const).find(name => !pinnedExecutable(toolBin(dir), name));
+const missingPinnedTool = (dir: string) => (["claude", "codex"] as const).find(name =>
+  !pinnedExecutable(toolBin(dir), name) || (name === "codex" && !hasPinnedCodexBinary(dir)));
 
 async function installPinnedTools(env: Record<string, string>) {
   const cache = join(homedir(), ".cache", "codex-collab", "fake-models");
