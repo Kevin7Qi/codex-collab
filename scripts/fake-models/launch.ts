@@ -41,7 +41,7 @@ try {
   const fixture = createFixture(server.port!);
   home = fixture.home;
   console.log(`Fixture: ${home}`);
-  await configureTools(home, fixture.env, args.includes("--install"));
+  await configureTools(fixture.env, args.includes("--install"));
   worker = Bun.spawn([process.execPath, join(import.meta.dir, "scenarios.ts"), ...names], {
     cwd: fixture.workspace,
     env: fixture.env,

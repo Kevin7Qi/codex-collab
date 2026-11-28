@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -60,18 +60,33 @@ trust_level = "trusted"
   return { home, workspace, env };
 }
 
-export async function configureTools(home: string, env: Record<string, string>, install: boolean) {
+async function installPinnedTools(env: Record<string, string>) {
+  const cache = join(homedir(), ".cache", "codex-collab", "fake-models");
+  const dir = join(cache, `${process.platform}-${process.arch}-claude-${versions.claude}-codex-${versions.codex}`);
+  if (!existsSync(dir)) {
+    mkdirSync(cache, { recursive: true });
+    const staging = mkdtempSync(join(cache, ".install-"));
+    try {
+      writeFileSync(join(staging, "package.json"), "{}\n");
+      const tools = [`@anthropic-ai/claude-code@${versions.claude}`, `@openai/codex@${versions.codex}`];
+      const installEnv = { ...env, BUN_INSTALL_CACHE_DIR: join(staging, "cache") };
+      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete installEnv[name as keyof typeof installEnv];
+      const proc = Bun.spawn([process.execPath, "add", "--trust", ...tools], { cwd: staging, env: installEnv, stdout: "inherit", stderr: "inherit" });
+      if (await proc.exited !== 0) throw new Error("Failed to install pinned fixture CLIs");
+      rmSync(installEnv.BUN_INSTALL_CACHE_DIR, { recursive: true, force: true });
+      try { renameSync(staging, dir); }
+      catch (error) { if (!existsSync(dir)) throw error; }
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  }
+  return join(dir, "node_modules", ".bin");
+}
+
+export async function configureTools(env: Record<string, string>, install: boolean) {
   const paths = [dirname(process.execPath), env.PATH ?? ""];
   if (install) {
-    const dir = join(home, "tools");
-    mkdirSync(dir);
-    writeFileSync(join(dir, "package.json"), "{}\n");
-    const tools = [`@anthropic-ai/claude-code@${versions.claude}`, `@openai/codex@${versions.codex}`];
-    const installEnv = { ...env, PATH: paths.join(delimiter), BUN_INSTALL_CACHE_DIR: join(dir, "cache") };
-    for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete installEnv[name as keyof typeof installEnv];
-    const proc = Bun.spawn([process.execPath, "add", "--trust", ...tools], { cwd: dir, env: installEnv, stdout: "inherit", stderr: "inherit" });
-    if (await proc.exited !== 0) throw new Error("Failed to install pinned fixture CLIs");
-    paths.unshift(join(dir, "node_modules", ".bin"));
+    paths.unshift(await installPinnedTools({ ...env, PATH: paths.join(delimiter) }));
   }
   env.PATH = paths.join(delimiter);
   for (const name of ["claude", "codex"] as const) {

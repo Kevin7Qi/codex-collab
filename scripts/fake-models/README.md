@@ -8,7 +8,7 @@ bun run test:fake-models peer --keep
 bun run test:fake-models --install
 ```
 
-`--install` downloads the pinned Claude Code 2.1.332 and Codex 0.172.0 packages into the fixture, not globally. Otherwise the harness uses the versions on PATH and prints them. The runner binds to a random port on loopback. Each invocation starts a private workspace and isolated HOME/CODEX_HOME, with dummy API keys and only `SendMessage` explicitly allowed in the disposable Claude profile. On Unix it uses `/tmp` so the broker socket path stays short even if your home or temp path is long. It shuts down its broker and Claude background service afterwards. Failed runs (or `--keep`) retain the directory shown at startup, including `commands.log`, `model.jsonl`, and CLI state; a successful run normally removes it.
+`--install` downloads the pinned Claude Code 2.1.332 and Codex 0.172.0 packages into a reusable, versioned cache under `~/.cache/codex-collab/fake-models/`, not globally. Otherwise the harness uses the versions on PATH and prints them. The runner binds to a random port on loopback. Each invocation starts a private workspace and isolated HOME/CODEX_HOME, with dummy API keys and only `SendMessage` explicitly allowed in the disposable Claude profile. On Unix it uses `/tmp` so the broker socket path stays short even if your home or temp path is long. It shuts down its broker and Claude background service afterwards. Failed runs (or `--keep`) retain the directory shown at startup, including `commands.log`, `model.jsonl`, and CLI state; a successful run normally removes it.
 
 | Scenario | What it checks |
 | --- | --- |
