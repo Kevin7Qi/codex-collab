@@ -118,10 +118,11 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 ### Uninstalling
 
 ```bash
-codex-collab uninstall
+codex-collab uninstall            # preview and confirm; keeps ~/.codex-collab/
+codex-collab uninstall --purge    # also remove ~/.codex-collab/ (settings, logs, templates)
 ```
 
-It lists what it will stop and remove, then asks before doing anything (`--yes` when there is no terminal to ask). It first stops what codex-collab left running: workspace brokers, channel hosts, waits on replies, and the Claude Code sessions it started that are idle. Then it removes its hooks and rule from Codex (your own hooks stay), the Codex and Claude Code skills, its mailboxes, and the `codex-collab` command. Its records in `~/.codex-collab/` (settings, thread records, logs, and any prompt templates of your own) stay for a later install to pick up: at a terminal it asks whether to delete them too, and `--purge` deletes them without asking. On Windows, `%USERPROFILE%\.local\bin` stays on your PATH, since `install.ps1` adds it only when it is missing and keeps no note of having done so; take it off if nothing else of yours is in it. While a Codex turn runs, or a session it started is working, it changes nothing and says how to end that work. Your threads in Codex and conversations in Claude Code stay, and so does the folder you installed from.
+Stops background processes and removes the CLI shim, skills, hooks, and exec-policy rule (refuses to run while a Codex turn or spawned Claude session is active; pass `--yes` non-interactively). Your Codex threads, Claude Code conversations, and own Codex hooks are untouched.
 
 ## Quick Start
 

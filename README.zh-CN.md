@@ -118,10 +118,11 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 ### 卸载
 
 ```bash
-codex-collab uninstall
+codex-collab uninstall            # 预览并确认；保留 ~/.codex-collab/
+codex-collab uninstall --purge    # 同时删除 ~/.codex-collab/（配置、日志与模板）
 ```
 
-它会先列出将要停止和删除的内容，并在动手之前征求确认（无终端可询问时需传入 `--yes`）。它首先停止 codex-collab 留下的进程：各工作区的 broker、通道主机、等待回复的进程，以及它启动且处于空闲的 Claude Code 会话。随后删除它写入 Codex 的 hooks 和规则（你自己的 hooks 保持不变）、Codex 与 Claude Code 两侧的 skill、它的邮箱目录，以及 `codex-collab` 命令。它在 `~/.codex-collab/` 中的记录（配置、线程记录、日志，以及你自己的提示模板）会保留，供日后重新安装时沿用：在终端中它会询问是否一并删除，传入 `--purge` 则不经询问直接删除。在 Windows 上，`%USERPROFILE%\.local\bin` 会留在 PATH 中：`install.ps1` 仅在缺失时才添加它，且不记录是否由它添加；若该目录中已没有你的其他文件，可自行将其移出 PATH。若有 Codex 回合正在运行，或它启动的会话仍在工作，卸载不做任何改动，并说明如何结束这些工作。你在 Codex 中的线程、在 Claude Code 中的对话，以及当初安装所用的目录都会保留。
+停止后台进程并移除 CLI shim、技能、hooks 与 exec-policy 规则（若有 Codex 回合或启动的 Claude 会话仍在运行则会中止；无终端可询问时传入 `--yes`）。你在 Codex 中的线程、Claude Code 中的对话以及你自己的 Codex hooks 均不受影响。
 
 ## 快速开始
 
