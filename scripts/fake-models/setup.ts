@@ -69,8 +69,8 @@ async function installPinnedTools(env: Record<string, string>) {
     try {
       writeFileSync(join(staging, "package.json"), "{}\n");
       const tools = [`@anthropic-ai/claude-code@${versions.claude}`, `@openai/codex@${versions.codex}`];
-      const installEnv = { ...env, BUN_INSTALL_CACHE_DIR: join(staging, "cache") };
-      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete installEnv[name as keyof typeof installEnv];
+      const installEnv: Record<string, string> = { ...env, BUN_INSTALL_CACHE_DIR: join(staging, "cache") };
+      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete installEnv[name];
       const proc = Bun.spawn([process.execPath, "add", "--trust", ...tools], { cwd: staging, env: installEnv, stdout: "inherit", stderr: "inherit" });
       if (await proc.exited !== 0) throw new Error("Failed to install pinned fixture CLIs");
       rmSync(installEnv.BUN_INSTALL_CACHE_DIR, { recursive: true, force: true });
