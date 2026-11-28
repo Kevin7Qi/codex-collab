@@ -9,7 +9,9 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDelivered, writeMessage } from "./claude-channel";
-import { wakeThread } from "./codex-wake";
+import { ownThread, wakeThread, type OwnThread } from "./codex-wake";
+import { createRun, registerThread } from "./threads";
+import type { RunRecord } from "./types";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-wake-"));
 const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";
@@ -116,5 +118,163 @@ describe("waking a thread", () => {
     const { root, ws } = fresh();
     writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
     expect(await wakeThread(THREAD, { connect: async () => { throw new Error("ENOENT"); }, root, hooksRun: true })).toEqual({ woke: false, why: "no shared app-server" });
+  });
+});
+
+describe("waking a thread of codex-collab's own that no server holds", () => {
+  /** A stand-in for `run --resume --detach`: what it was asked, and its answer. */
+  function runner(answer: { ok: true } | { ok: false; why: string } = { ok: true }) {
+    const asked: Array<{ own: OwnThread; text: string }> = [];
+    return { asked, resume: async (own: OwnThread, text: string) => { asked.push({ own, text }); return answer; } };
+  }
+
+  /** The thread as `run` leaves it: in the index, with a run on record. */
+  function ran(ws: string, patch: Partial<RunRecord> = {}): string {
+    const shortId = registerThread(ws, THREAD, { cwd: "/work/project" });
+    createRun(ws, {
+      runId: "run-1", threadId: THREAD, shortId, kind: "task", phase: null, status: "completed", pid: null,
+      sessionId: null, logFile: "logs/x.log", logOffset: 0, prompt: "p", model: null,
+      startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), elapsed: null,
+      output: null, filesChanged: null, commandsRun: null, error: null, ...patch,
+    } as RunRecord);
+    return shortId;
+  }
+
+  test("a thread `run` has had a turn on is resumed as `run` would, with no shared server and with one that has unloaded it", async () => {
+    for (const reach of ["none", "notLoaded"]) {
+      const { root, ws } = fresh();
+      const shortId = ran(ws);
+      const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+      const s = server("notLoaded");
+      const r = runner();
+      const told: string[][] = [];
+      const outcome = await wakeThread(THREAD, {
+        connect: reach === "none" ? async () => { throw new Error("ENOENT"); } : async () => s.client,
+        root, hooksRun: true, resume: r.resume, onTaken: (t) => told.push(t.map((x) => x.message.id)),
+      });
+      expect(outcome).toEqual({ woke: true, messages: 1 });
+      expect(r.asked).toEqual([{
+        own: { dir: "/work/project", shortId, running: false },
+        text: `<codex_delegation>\n  <source_thread_id>${THREAD}</source_thread_id>\n  <input>[message from claude(a)]\n\nhello</input>\n</codex_delegation>`,
+      }]);
+      // The shared server is only asked what it holds: the broker resumes.
+      expect(s.asked.map((x) => x.method)).toEqual(reach === "none" ? [] : ["thread/read"]);
+      expect(isDelivered(ws, THREAD, m.id)).toBe(true);
+      expect(told).toEqual([[m.id], []]);
+    }
+  });
+
+  test("a thread codex-collab has not run is never resumed, listed by `threads` or not: it may be open in a server of its own", async () => {
+    const { root, ws } = fresh();
+    registerThread(ws, THREAD, { cwd: "/work/project" });
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    const r = runner();
+    expect(await wakeThread(THREAD, { connect: async () => server("notLoaded").client, root, hooksRun: true, resume: r.resume }))
+      .toEqual({ woke: false, why: "not held by the shared app-server" });
+    expect(await wakeThread(THREAD, { connect: async () => { throw new Error("ENOENT"); }, root, hooksRun: true, resume: r.resume }))
+      .toEqual({ woke: false, why: "no shared app-server" });
+    expect(r.asked).toEqual([]);
+    expect(isDelivered(ws, THREAD, m.id)).toBe(false);
+  });
+
+  test("one the shared server holds is woken there, ours or not", async () => {
+    const { root, ws } = fresh();
+    ran(ws);
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    const s = server("idle");
+    const r = runner();
+    expect(await wakeThread(THREAD, { connect: async () => s.client, root, hooksRun: true, resume: r.resume })).toEqual({ woke: true, messages: 1 });
+    expect(s.asked.map((x) => x.method)).toEqual(["thread/read", "thread/resume", "turn/start"]);
+    expect(r.asked).toEqual([]);
+  });
+
+  test("a run of ours on it is a turn: the hooks hand over, and nothing is claimed", async () => {
+    const { root, ws } = fresh();
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    const r = runner();
+    const outcome = await wakeThread(THREAD, {
+      connect: async () => { throw new Error("ENOENT"); }, root, hooksRun: true, resume: r.resume,
+      own: () => ({ dir: "/work/project", shortId: "abcd1234", running: true }),
+    });
+    expect(outcome).toEqual({ woke: false, why: "in a turn" });
+    expect(r.asked).toEqual([]);
+    expect(isDelivered(ws, THREAD, m.id)).toBe(false);
+  });
+
+  test("a resume that is refused (the thread is open elsewhere) gives its messages back", async () => {
+    const { root, ws } = fresh();
+    ran(ws);
+    const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    const r = runner({ ok: false, why: "Thread is held by another process" });
+    const told: string[][] = [];
+    const outcome = await wakeThread(THREAD, {
+      connect: async () => { throw new Error("ENOENT"); }, root, hooksRun: true, resume: r.resume,
+      onTaken: (t) => told.push(t.map((x) => x.message.id)),
+    });
+    expect(outcome).toEqual({ woke: false, why: "the turn could not be started: Thread is held by another process" });
+    expect(isDelivered(ws, THREAD, m.id)).toBe(false);
+    expect(told).toEqual([[m.id], []]);
+  });
+
+  test("two replies close together: each is handed over once — the second waits for the hooks once the run is going", async () => {
+    const { root, ws } = fresh();
+    const shortId = ran(ws);
+    const first = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "first" });
+    // The first wake's run is still starting when the second is tried.
+    let started!: (v: { ok: true }) => void;
+    const asked: string[] = [];
+    const resume = (_own: OwnThread, text: string) => { asked.push(text); return new Promise<{ ok: true }>((r) => { started = r; }); };
+    const none = async () => { throw new Error("ENOENT"); };
+    const one = wakeThread(THREAD, { connect: none, root, hooksRun: true, resume });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(await wakeThread(THREAD, { connect: none, root, hooksRun: true, resume })).toEqual({ woke: false, why: "nothing to hand over" });
+    // The second reply lands once the run is on record as going.
+    const second = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "second" });
+    const going = () => ({ dir: "/work/project", shortId, running: true });
+    expect(await wakeThread(THREAD, { connect: none, root, hooksRun: true, resume, own: going })).toEqual({ woke: false, why: "in a turn" });
+    started({ ok: true });
+    expect(await one).toEqual({ woke: true, messages: 1 });
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toContain("first");
+    expect(asked[0]).not.toContain("second");
+    expect(isDelivered(ws, THREAD, first.id)).toBe(true);
+    expect(isDelivered(ws, THREAD, second.id)).toBe(false);
+  });
+
+  test("ownThread: a thread with a run on record, and whether that run is still going", () => {
+    const { root, ws } = fresh();
+    expect(ownThread(THREAD, root)).toBeNull();
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    expect(ownThread(THREAD, root)).toBeNull();
+    const shortId = ran(ws, { status: "running", pid: process.pid });
+    expect(ownThread(THREAD, root)).toEqual({ dir: "/work/project", shortId, running: true });
+  });
+
+  test("a thread whose mailbox is in another workspace than its run (`send -d`) is still one of ours", async () => {
+    const { root, ws } = fresh();
+    const other = join(root, "ws-other");
+    mkdirSync(other, { recursive: true, mode: 0o700 });
+    const shortId = ran(ws);
+    const message = writeMessage(other, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    expect(ownThread(THREAD, root)).toEqual({ dir: "/work/project", shortId, running: false });
+    const asked: OwnThread[] = [];
+    const resume = async (own: OwnThread) => { asked.push(own); return { ok: true as const }; };
+    const none = async () => { throw new Error("ENOENT"); };
+    expect(await wakeThread(THREAD, { connect: none, root, hooksRun: true, resume })).toEqual({ woke: true, messages: 1 });
+    expect(asked).toEqual([{ dir: "/work/project", shortId, running: false }]);
+    expect(isDelivered(other, THREAD, message.id)).toBe(true);
+  });
+
+  test("ownThread: a thread whose latest run is a review is not resumed", () => {
+    const { root, ws } = fresh();
+    ran(ws, { kind: "review" });
+    expect(ownThread(THREAD, root)).toBeNull();
+  });
+
+  test("ownThread: a run whose process is gone is not a turn", () => {
+    const { root, ws } = fresh();
+    writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    const shortId = ran(ws, { status: "running", pid: 2 ** 22 + 12345 });
+    expect(ownThread(THREAD, root)).toEqual({ dir: "/work/project", shortId, running: false });
   });
 });
