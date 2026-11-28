@@ -11,6 +11,7 @@ import { connectDirect, type AppServerClient } from "../../src/client";
 import { EXIT_CODES } from "../../src/commands/shared";
 import { resolveStateDir } from "../../src/config";
 import { readPeerState } from "../../src/peer";
+import { isProcessAlive } from "../../src/process";
 import type { ThreadStartResponse, TurnCompletedParams } from "../../src/types";
 import { toolCommand } from "./setup";
 
@@ -207,7 +208,7 @@ async function cleanup() {
         ? undefined : true, "fixture channel host and Claude reaper shutdown");
     }
   } finally {
-    const endpoint = loadBrokerState(stateDir)?.endpoint;
+    const { endpoint, pid } = loadBrokerState(stateDir) ?? {};
     if (endpoint && await isBrokerAlive(endpoint)) {
       const client = await connectToBroker({ endpoint });
       try { await client.request("broker/shutdown"); }
@@ -216,6 +217,9 @@ async function cleanup() {
       if (target.kind === "unix") {
         await until(() => existsSync(target.path) ? undefined : true, "broker shutdown");
       }
+    }
+    if (process.platform === "win32" && pid) {
+      await until(() => isProcessAlive(pid) ? undefined : true, `broker process ${pid} shutdown`);
     }
   }
 }

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, rmSync } from "node:fs";
+import { appendFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { startFakeServer } from "./server";
 import { configureTools, createFixture } from "./setup";
@@ -22,11 +22,17 @@ const stop = (signal: NodeJS.Signals) => worker?.kill(signal);
 async function removeProfile(path: string) {
   // The app-server can still be closing SQLite files after the broker socket closes.
   for (let attempt = 0; attempt < 4; attempt++) {
-    rmSync(path, { recursive: true, force: true, maxRetries: 2 });
-    await Bun.sleep(600);
-    if (!existsSync(path)) return;
+    try {
+      rmSync(path, { recursive: true, force: true, maxRetries: 2 });
+      return;
+    } catch (error) {
+      const { code } = error as NodeJS.ErrnoException;
+      if (attempt === 3 || (code !== "EBUSY" && code !== "EPERM")) {
+        throw new Error(`Could not remove fixture profile ${path}`, { cause: error });
+      }
+      await Bun.sleep(600);
+    }
   }
-  throw new Error(`Could not remove fixture profile ${path}`);
 }
 
 process.on("SIGINT", stop);
