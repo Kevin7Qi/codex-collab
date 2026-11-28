@@ -54,7 +54,17 @@ After installation, run `codex-collab health` to verify. If the command is not f
 <details>
 <summary>Where things get installed</summary>
 
-The installer builds a self-contained bundle plus a binary shim. On Linux and macOS these go to `~/.claude/skills/codex-collab/` and `~/.local/bin`. `install.sh` also installs the Codex-side skill at `~/.codex/skills/claude-collab/` and writes the opt-in exec-policy rule at `~/.codex/rules/codex-collab.rules` only if you enable `codex-rule` (prompted once on an interactive install, or via `codex-collab config codex-rule on`); both follow `$CODEX_HOME` when set. On Windows, `install.ps1` installs to `%USERPROFILE%\.claude\skills\codex-collab\` and adds the shim in `%USERPROFILE%\.local\bin` to your PATH; the Codex-side skill and rule are omitted since peer messaging is not supported on Windows.
+The installer builds a self-contained bundle plus a binary shim:
+
+- **Linux / macOS (`install.sh`)**
+  - Claude Code skill bundle: `~/.claude/skills/codex-collab/`
+  - CLI shim: `~/.local/bin/codex-collab`
+  - Codex-side skill: `~/.codex/skills/claude-collab/` (follows `$CODEX_HOME`)
+  - Opt-in exec-policy rule: `~/.codex/rules/codex-collab.rules` (follows `$CODEX_HOME`; written only if you enable `codex-rule` during an interactive install or via `codex-collab config codex-rule on`)
+- **Windows (`install.ps1`)**
+  - Claude Code skill bundle: `%USERPROFILE%\.claude\skills\codex-collab\`
+  - CLI shims: `%USERPROFILE%\.local\bin\` (`codex-collab.cmd` and `codex-collab`, added to your PATH)
+  - Codex-side skill and rule are omitted since peer messaging is not supported on Windows.
 
 Claude discovers the skill automatically, including in a session that is already running. The exception is your first skill: if `~/.claude/skills/` did not exist before, restart Claude Code once so the new directory is watched.
 

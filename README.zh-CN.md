@@ -54,7 +54,17 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 <details>
 <summary>安装位置</summary>
 
-安装脚本会构建一份独立 bundle 和一个可执行文件 shim。Linux 与 macOS 上分别放置于 `~/.claude/skills/codex-collab/` 和 `~/.local/bin`；`install.sh` 同时会将 Codex 侧技能安装到 `~/.codex/skills/claude-collab/`，并在你选择启用 `codex-rule` 时（交互式安装会询问一次，或通过 `codex-collab config codex-rule on` 开启）写入 exec-policy 规则 `~/.codex/rules/codex-collab.rules`，两者在设置了 `$CODEX_HOME` 时均遵循该路径。Windows 上 `install.ps1` 安装至 `%USERPROFILE%\.claude\skills\codex-collab\` 并把 `%USERPROFILE%\.local\bin` 中的 shim 加入 PATH；由于 Windows 不支持跨会话消息，不会安装 Codex 侧技能与规则。
+安装脚本会构建一份独立 bundle 和可执行文件 shim：
+
+- **Linux / macOS（`install.sh`）**
+  - Claude Code 技能 bundle：`~/.claude/skills/codex-collab/`
+  - CLI shim：`~/.local/bin/codex-collab`
+  - Codex 侧技能：`~/.codex/skills/claude-collab/`（设置了 `$CODEX_HOME` 时遵循该路径）
+  - 可选 exec-policy 规则：`~/.codex/rules/codex-collab.rules`（设置了 `$CODEX_HOME` 时遵循该路径；仅在启用 `codex-rule` 时写入——交互式安装会询问一次，或通过 `codex-collab config codex-rule on` 开启）
+- **Windows（`install.ps1`）**
+  - Claude Code 技能 bundle：`%USERPROFILE%\.claude\skills\codex-collab\`
+  - CLI shim：`%USERPROFILE%\.local\bin\`（`codex-collab.cmd` 与 `codex-collab`，自动加入 PATH）
+  - 由于 Windows 不支持跨会话消息，不会安装 Codex 侧技能与规则。
 
 完成后 Claude 会自动发现该技能，正在运行中的会话同样生效。唯一的例外是首次安装技能：若 `~/.claude/skills/` 此前并不存在，需重启一次 Claude Code，新目录才会被监听。
 
