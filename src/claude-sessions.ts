@@ -428,13 +428,17 @@ export function recordSpawnedSession(stateDir: string, session: SpawnedSession, 
 }
 
 /** Keep a stopped session's record, marked as stopped, so its conversation
- *  can be resumed. One stopped record is kept per name: the latest. */
-export function markSpawnedSessionStopped(stateDir: string, id: string, when: Date = new Date()): void {
+ *  can be resumed. One stopped record is kept per name: the latest.
+ *  `startedAt` is the start of the session the caller stopped or saw go. A
+ *  record with another start by now is a session started or resumed since
+ *  under the same id, which is running and is left alone. */
+export function markSpawnedSessionStopped(stateDir: string, id: string, when: Date = new Date(), startedAt?: string): void {
   if (!existsSync(spawnedSessionsFile(stateDir))) return;
   withRecordsLock(stateDir, () => {
     const all = readSpawnedSessions(stateDir);
     const mine = all.find((s) => s.id === id);
     if (!mine) return;
+    if (startedAt !== undefined && mine.startedAt !== startedAt) return;
     const others = all.filter((s) => s.id !== id && !(s.stoppedAt && s.name === mine.name));
     // Without a session id there is nothing to resume by.
     writeSpawnedSessions(stateDir, keptRecords(mine.sessionId ? [...others, { ...mine, stoppedAt: when.toISOString() }] : others, when.getTime()));
@@ -444,12 +448,13 @@ export function markSpawnedSessionStopped(stateDir: string, id: string, when: Da
 /** Move a running session's record to the process it runs as now: Claude
  *  Code brought it back under a new pid, and the record is what every later
  *  look and every signal goes by. */
-export function updateSpawnedSessionProcess(stateDir: string, id: string, pid: number, procStart: string | undefined): void {
+export function updateSpawnedSessionProcess(stateDir: string, id: string, pid: number, procStart: string | undefined, startedAt?: string): void {
   if (!existsSync(spawnedSessionsFile(stateDir))) return;
   withRecordsLock(stateDir, () => {
     const all = readSpawnedSessions(stateDir);
-    if (!all.some((s) => s.id === id && !s.stoppedAt)) return;
-    writeSpawnedSessions(stateDir, all.map((s) => s.id === id && !s.stoppedAt ? { ...s, pid, procStart } : s));
+    const mine = (s: SpawnedSession) => s.id === id && !s.stoppedAt && (startedAt === undefined || s.startedAt === startedAt);
+    if (!all.some(mine)) return;
+    writeSpawnedSessions(stateDir, all.map((s) => mine(s) ? { ...s, pid, procStart } : s));
   });
 }
 
@@ -1152,6 +1157,9 @@ export async function runReaper(
     maxRounds?: number;
     /** What the reaper does and why, a line at a time (see reaperLog). */
     log?: (line: string) => void;
+    /** A test seam: runs between a look's read of the record and its read
+     *  of the registry, where a restart by `send` can land. */
+    afterRecordRead?: () => void;
   } = {},
 ): Promise<"stopped" | "gone"> {
   let session = recorded;
@@ -1177,17 +1185,31 @@ export async function runReaper(
     // prompt), or its record replaced by a session started or resumed since:
     // there is nothing left here for this reaper to watch, and a session that
     // now answers to the same id is another reaper's.
-    const own = readSpawnedSessions(stateDir).find((r) => r.id === session.id);
-    if (!own || own.stoppedAt) {
-      say(own ? "its record says it was stopped: nothing left to watch" : "its record is gone: nothing left to watch");
+    const unwatched = (): string | null => {
+      const own = readSpawnedSessions(stateDir).find((r) => r.id === session.id);
+      return !own ? "its record is gone" : own.stoppedAt ? "its record says it was stopped" : own.startedAt !== session.startedAt ? "its record is of a session started since" : null;
+    };
+    const left = unwatched();
+    if (left) {
+      say(`${left}: nothing left to watch`);
       return "gone";
     }
+    opts.afterRecordRead?.();
     const entry = locateSpawnedSession(session);
+    // The record is read again once the registry has been: an entry found
+    // under another pid is this session brought back only while the record
+    // is still this reaper's, and a session `send` restarted in between
+    // answers to the same job and conversation.
+    const since = entry && entry.pid !== session.pid ? unwatched() : null;
+    if (since) {
+      say(`${since}: nothing left to watch`);
+      return "gone";
+    }
     if (entry && entry.pid !== session.pid) {
       // Brought back as a new process: the same session, its work and its
       // conversation — and still ours to watch, and to stop.
       session = { ...session, pid: entry.pid as number, procStart: typeof entry.procStart === "string" ? entry.procStart : undefined };
-      updateSpawnedSessionProcess(stateDir, session.id, session.pid, session.procStart);
+      updateSpawnedSessionProcess(stateDir, session.id, session.pid, session.procStart, session.startedAt);
       say(`Claude Code brought it back as pid ${session.pid}: watching that`);
     }
     let verdict = reaperVerdict(entry, session.pid, session.lingerSec, Date.now(), { procStart: session.procStart, sessionId: session.sessionId });
@@ -1199,7 +1221,7 @@ export async function runReaper(
       // Gone on its own — Claude Code stops an unattached session itself,
       // and a person may have. Its conversation is kept all the same, so the
       // record stays, as stopped: the next `send` can pick it up again.
-      markSpawnedSessionStopped(stateDir, session.id);
+      markSpawnedSessionStopped(stateDir, session.id, new Date(), session.startedAt);
       say("the session went away by itself: recorded as stopped");
       return "gone";
     }
@@ -1237,6 +1259,13 @@ export async function runReaper(
     else if (verdict === "stop" && inFlight) say("idle, but Claude Code counts work in flight for it: holding it");
     if (verdict === "stop" && (owed || inFlight)) verdict = "wait";
     if (verdict === "wait" && !owed && !inFlight) say(reachable ? `four hours old, but the user can reach it through Remote Control: it stops after ${session.lingerSec}s idle instead` : "watching");
+    // Looked at once more before anything is stopped: `claude stop` goes by
+    // the job's id, which a session restarted since may answer to.
+    const replaced = verdict === "stop" ? unwatched() : null;
+    if (replaced) {
+      say(`${replaced}: nothing left to watch`);
+      return "gone";
+    }
     if (verdict === "stop") {
       say(retiring ? "four hours old and idle: stopping it" : entry?.status === "waiting" ? `at a prompt nobody answered for ${session.lingerSec}s: stopping it` : `idle for ${session.lingerSec}s: stopping it`);
       // Recorded as stopped only once it is: a record marked stopped while
@@ -1245,7 +1274,7 @@ export async function runReaper(
       // again at the next look.
       if ((await stopSpawnedSession(session, { claudeBin: opts.claudeBin, confirmAfterMs: Math.min(pollMs, 5000), spacingMs: Math.min(pollMs, 250) })).gone) {
         // `claude stop` keeps the conversation; keep the record that finds it.
-        markSpawnedSessionStopped(stateDir, session.id);
+        markSpawnedSessionStopped(stateDir, session.id, new Date(), session.startedAt);
         say("stopped; its conversation is kept");
         return "stopped";
       }

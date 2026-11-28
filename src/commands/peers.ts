@@ -147,7 +147,7 @@ async function handlePeersStop(name: string | undefined, cwd: string): Promise<v
       ? "the session came back after a signal"
       : "its process could not be verified as one codex-collab started, so no signal was sent"}. Its record is unchanged.${sandboxHint()}`);
   }
-  markSpawnedSessionStopped(stateDir, ours.id);
+  markSpawnedSessionStopped(stateDir, ours.id, new Date(), ours.startedAt);
   console.log(`Stopped ${session.name}. Its conversation is kept: \`codex-collab send ${JSON.stringify(addressOf(ours, sessions.filter((s) => s !== session)))} "…"\` picks it up where it stopped.`);
   if (waiting.length > 0) {
     console.log(`${waiting.length} task${waiting.length === 1 ? " was" : "s were"} still waiting on it (${waiting.map((t) => t.id).join(", ")}) — ${waiting.length === 1 ? "it ends" : "they end"} with no reply.`);
