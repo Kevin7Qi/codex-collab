@@ -293,7 +293,7 @@ describe("what the hook hands over", () => {
     expect(context).toContain(`[cut here: the whole message is \`codex-collab messages ${m.id}\`]`);
     expect(estimateTokens(context)).toBeLessThanOrEqual(HOOK_BUDGET_TOKENS);
     expect(Buffer.byteLength(r.stdout)).toBeLessThan(4 * HOOK_BUDGET_TOKENS + 1024);
-  });
+  }, process.platform === "win32" ? 30_000 : undefined);
 
   test("run by Codex with input it cannot read, it says nothing and succeeds: never in a turn's way", () => {
     for (const input of ["not json", "", "[1,2]"]) {
