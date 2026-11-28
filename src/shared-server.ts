@@ -96,8 +96,10 @@ function sharedTransport(opts: SharedConnectOptions): { socket: Duplex; connect:
     const socket = new net.Socket();
     return { socket, connect: (ready) => { socket.connect({ path: opts.socketPath }, ready); } };
   }
-  const child = spawn("codex", ["app-server", "proxy", "--sock", opts.socketPath], {
-    env: opts.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true,
+  if (/["\r\n]/.test(opts.socketPath)) throw new Error("Invalid Windows Codex socket path");
+  const child = spawn("cmd.exe", ["/d", "/s", "/v:off", "/c", '"codex app-server proxy --sock "%CODEX_COLLAB_PROXY_SOCKET%""'], {
+    env: { ...process.env, ...opts.env, CODEX_COLLAB_PROXY_SOCKET: opts.socketPath },
+    stdio: ["pipe", "pipe", "pipe"], windowsHide: true, windowsVerbatimArguments: true,
   });
   const socket = Duplex.from({ readable: child.stdout, writable: child.stdin });
   let stderr = "";
