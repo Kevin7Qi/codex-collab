@@ -14,7 +14,7 @@ import { existsSync } from "node:fs";
 import { releaseDelivery, threadStateDirs } from "./claude-channel";
 import type { AppServerClient } from "./client";
 import { hooksRunIn } from "./codex-hooks";
-import { attachSupported, connectShared, controlSocketPath } from "./shared-server";
+import { connectShared, controlSocketPath } from "./shared-server";
 import { buildDelegation } from "./codex-session";
 import { take, undelivered, type Taken } from "./channel-delivery";
 
@@ -54,7 +54,7 @@ export async function wakeThread(
     if (opts.connect) {
       client = await opts.connect();
     } else {
-      if (!attachSupported() || !existsSync(controlSocketPath())) return { woke: false, why: "no shared app-server" };
+      if (!existsSync(controlSocketPath())) return { woke: false, why: "no shared app-server" };
       client = await connectShared({ socketPath: controlSocketPath() });
     }
   } catch {

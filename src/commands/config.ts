@@ -4,7 +4,7 @@ import { config, listTemplates, resolveStateDir, resolveWorkspaceDir } from "../
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { peerCapability, COLLAB_MODES, readConfiguredMode, resolveCollabMode, readPeerState, type PeerState } from "../peer";
-import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
+import { SERVER_PREFERENCES, controlSocketPath, serverPreference } from "../shared-server";
 import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_SPAWN_EFFORT, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isAutocompactWindow, isModelName, isSpawnEffortSetting, spawnEffortFor } from "../claude-sessions";
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 import { claudeConfigFile, claudeTrusts, codexConfigFile, codexTrust, isSpawnTrustSetting, trustReachesHome } from "../claude-trust";
@@ -212,9 +212,6 @@ export async function handleConfig(args: string[]): Promise<void> {
     die(`Invalid value for ${key}: ${value}\nValid: ${spec.hint}`);
   }
 
-  if ((key === "codex-rule" || key === "codex-hook") && value === "on" && process.platform === "win32") {
-    die(`${key} is unavailable on Windows: codex-collab does not support Claude Code's cross-session messaging, which \`codex-collab send\` rides on, there yet.`);
-  }
   // Turning it on is the user's consent to having folders trusted in Claude
   // Code on their behalf, so it cannot come from the agent it serves.
   // Turning it off, or unsetting it, is anyone's to do.
@@ -382,7 +379,6 @@ export function describeServer(
   server: { kind: string; socketPath?: string; pid?: number },
   env: NodeJS.ProcessEnv = process.env,
   socketExists: (path: string) => boolean = existsSync,
-  platform: string = process.platform,
   /** Whether the connection described runs through the workspace broker
    *  (which keeps the server it started on) or is this invocation's own. */
   brokered = true,
@@ -392,7 +388,6 @@ export function describeServer(
     return `shared — Codex's own app-server at ${server.socketPath ?? controlSocketPath(env)} (${reason}); its other clients see codex-collab's turns live`;
   }
   const pid = server.pid !== undefined ? ` (pid ${server.pid})` : "";
-  if (!attachSupported(platform)) return `private app-server${pid} — attaching to Codex's shared server is not available on Windows`;
   if (preference === "private") return `private app-server${pid} (${reason})`;
   const socket = controlSocketPath(env);
   if (!socketExists(socket)) {
@@ -470,7 +465,7 @@ export async function handleHealth(args: string[]): Promise<void> {
   try {
     account = await withClient(async (client) => {
       console.log(`  app-server: OK (${client.userAgent})`);
-      console.log(`  server: ${describeServer(client.server, process.env, existsSync, process.platform, client.isBrokered)}`);
+      console.log(`  server: ${describeServer(client.server, process.env, existsSync, client.isBrokered)}`);
       // A failure here must not fail the whole check: older codex builds may
       // not know account/read, and a busy broker or transient RPC error is
       // not evidence that the user is logged out.
@@ -490,15 +485,12 @@ export async function handleHealth(args: string[]): Promise<void> {
   console.log(`  peer: ${describePeer(options.dir)}`);
   // Codex's side of the channel: whether a Codex session in this workspace
   // can find `peers`/`send`, and whether it may run `send` without asking.
-  // Not on Windows, where neither exists.
-  if (process.platform !== "win32") {
-    console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
-    console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
-    console.log(`  codex hooks: ${describeCodexHooks(codexHookEnabled(), codexHooksInSync(), codexHooksPath(), lastHookRun())}`);
-    console.log(`  codex wake: ${describeCodexWake(loadUserConfig()["codex-wake"] === "on")}`);
-    const ws = resolveWorkspaceDir(options.dir);
-    console.log(`  claude trust: ${describeClaudeTrust(ws, claudeTrusts(ws), codexTrust(ws), loadUserConfig()["spawn-trust"], trustReachesHome(ws))}`);
-  }
+  console.log(`  codex skill: ${describeCodexSkill(codexSkillInSync(), codexSkillInstallDir())}`);
+  console.log(`  codex rule: ${describeCodexRule(codexRuleEnabled(), codexRulesInSync(), codexRulesInstallPath())}`);
+  console.log(`  codex hooks: ${describeCodexHooks(codexHookEnabled(), codexHooksInSync(), codexHooksPath(), lastHookRun())}`);
+  console.log(`  codex wake: ${describeCodexWake(loadUserConfig()["codex-wake"] === "on")}`);
+  const ws = resolveWorkspaceDir(options.dir);
+  console.log(`  claude trust: ${describeClaudeTrust(ws, claudeTrusts(ws), codexTrust(ws), loadUserConfig()["spawn-trust"], trustReachesHome(ws))}`);
 
   // Missing auth is reported, never fatal. This command's exit code answers
   // "is the installation sound?" — install.sh runs it as its own final check,

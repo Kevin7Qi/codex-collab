@@ -93,14 +93,16 @@ describe("how long an address stays open", () => {
   test("its last use is the later of what its host wrote down and its latest message, and survives a recorded socket", () => {
     const state = freshState();
     expect(lastActivityOf(state, THREAD)).toBe(0);
-    recordSocketPath(state, THREAD, "/tmp/x/thread-a.sock");
+    const pathA = process.platform === "win32" ? channelSocketPath(join(ROOT, "a"), THREAD) : "/tmp/x/thread-a.sock";
+    const pathB = process.platform === "win32" ? channelSocketPath(join(ROOT, "b"), THREAD) : "/tmp/x/thread-b.sock";
+    recordSocketPath(state, THREAD, pathA);
     recordActivity(state, THREAD, 5_000);
     expect(lastActivityOf(state, THREAD)).toBe(5_000);
     writeMessage(state, THREAD, { fromName: "x", replyPath: "/a", text: "hi" }, 9_000);
     expect(lastActivityOf(state, THREAD)).toBe(9_000);
-    recordSocketPath(state, THREAD, "/tmp/x/thread-b.sock");
+    recordSocketPath(state, THREAD, pathB);
     expect(lastActivityOf(state, THREAD)).toBe(9_000);
-    expect(recordedSocketPath(state, THREAD)).toBe("/tmp/x/thread-b.sock");
+    expect(recordedSocketPath(state, THREAD)).toBe(pathB);
   });
 });
 
@@ -109,7 +111,8 @@ describe("where an address listens", () => {
     const state = freshState();
     const fresh = threadSocketPath(state, ROOT, THREAD);
     expect(fresh).toBe(channelSocketPath(ROOT, THREAD));
-    const elsewhere = join(ROOT, `tmp-${++n}`, "codex-collab-x", "thread-b36a6ba4-1234.sock");
+    const otherDir = join(ROOT, `tmp-${++n}`);
+    const elsewhere = process.platform === "win32" ? channelSocketPath(otherDir, THREAD) : join(otherDir, "codex-collab-x", "thread-b36a6ba4-1234.sock");
     recordSocketPath(state, THREAD, elsewhere);
     expect(recordedSocketPath(state, THREAD)).toBe(elsewhere);
     expect(threadSocketPath(state, ROOT, THREAD)).toBe(elsewhere);
@@ -123,7 +126,7 @@ describe("where an address listens", () => {
     mkdirSync(dir, { recursive: true });
     chmodSync(dir, 0o775);
     recordSocketPath(state, THREAD, join(dir, "thread-x.sock"));
-    if (process.platform !== "win32") expect(threadSocketPath(state, ROOT, THREAD)).toBe(channelSocketPath(ROOT, THREAD));
+    expect(threadSocketPath(state, ROOT, THREAD)).toBe(channelSocketPath(ROOT, THREAD));
     for (const bad of ["relative/thread.sock", "/abs/not-a-socket.txt"]) {
       recordSocketPath(state, THREAD, bad);
       expect(recordedSocketPath(state, THREAD)).toBeNull();
@@ -224,6 +227,8 @@ describe("contacts", () => {
     // Claude Code gives a session a new id on /clear: its process is still it.
     expect(contactRunning(contact(), [{ pid: 4242, sessionId: "s-new", procStart: "100" }], live)).toBe(true);
     expect(contactRunning(contact(), [{ pid: 4242, sessionId: "s-new", procStart: "200" }], live)).toBe(false);
+    expect(contactRunning(contact(), [{ pid: 4242, sessionId: "s-new", procStartFt: "100" }], live)).toBe(true);
+    expect(contactRunning(contact(), [{ pid: 4242, sessionId: "s-new", procStartFt: "200" }], live)).toBe(false);
     expect(contactRunning(contact(), [{ pid: 99, sessionId: "s-1" }], dead)).toBe(false);
     expect(contactRunning(contact(), [], live)).toBe(false);
     // Unverifiable from here is no evidence it went.

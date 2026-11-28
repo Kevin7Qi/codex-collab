@@ -11,7 +11,7 @@ import { peerCapability, peerNameFor, readPeerState } from "../peer";
 import { listRuns } from "../threads";
 import { ensureConnection, isBrokerAlive, isBrokerBusyError, loadBrokerState } from "../broker";
 import { connectToBroker } from "../broker-client";
-import { attachSupported, controlSocketPath, serverPreference } from "../shared-server";
+import { controlSocketPath, serverPreference } from "../shared-server";
 import { sessionsDir } from "../claude-registry";
 import { isAlive } from "../process";
 
@@ -68,7 +68,7 @@ export async function handlePeer(args: string[]): Promise<void> {
         kind = probe.server.kind;
         await probe.close().catch(() => undefined);
       } catch { /* went away between the probe and now */ }
-      const sharedAvailable = attachSupported() && existsSync(controlSocketPath());
+      const sharedAvailable = existsSync(controlSocketPath());
       if (kind === "private" && preference === "shared") {
         // `shared` forbids the private server the broker is on — replace it
         // either way; without a socket the replacement fails and says so.

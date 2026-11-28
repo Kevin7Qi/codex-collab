@@ -280,16 +280,14 @@ describe("what the hook hands over", () => {
     expect(hookAnswer({ session_id: THREAD, hook_event_name: "PostToolUse" }, join(ROOT, "nowhere"), RUNS)).toBeNull();
   });
 
-  // Not on Windows, where there are no hooks (`config codex-hook` refuses
-  // them) and the home directory follows USERPROFILE, not this HOME.
-  test.skipIf(process.platform === "win32")("run by Codex through a pipe, its answer arrives whole however the message is written", () => {
+  test("run by Codex through a pipe, its answer arrives whole however the message is written", () => {
     // Bun drops what a pipe has not taken when the process exits straight
     // after the write: the messages in it would be claimed, and lost.
     const home = join(ROOT, `home-${++n}`);
     const ws = join(home, ".codex-collab", "workspaces", "ws");
     mkdirSync(ws, { recursive: true, mode: 0o700 });
     const m = writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "क".repeat(40_000) });
-    const r = spawnSync("bun", ["run", CLI, "hook"], { input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: THREAD, tool_response: "" }), encoding: "utf-8", env: { ...process.env, HOME: home, CODEX_COLLAB_NO_UPDATE_CHECK: "1" } });
+    const r = spawnSync(process.execPath, ["run", CLI, "hook"], { input: JSON.stringify({ hook_event_name: "PostToolUse", session_id: THREAD, tool_response: "" }), encoding: "utf-8", env: { ...process.env, HOME: home, USERPROFILE: home, CODEX_COLLAB_NO_UPDATE_CHECK: "1" } });
     expect(r.status).toBe(0);
     const context = JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string;
     expect(context).toContain(`[cut here: the whole message is \`codex-collab messages ${m.id}\`]`);

@@ -156,11 +156,6 @@ async function handlePeersStop(name: string | undefined, cwd: string): Promise<v
 
 export async function handlePeers(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);
-  if (process.platform === "win32") {
-    if (options.json) console.log("[]");
-    else console.log("codex-collab does not support Claude Code's cross-session messaging on Windows yet, so there are no sessions to reach from here.");
-    return;
-  }
   if (positional[0] === "stop") return handlePeersStop(positional[1], options.dir);
   const cwd = options.dir;
   const stateDir = resolveStateDir(cwd);

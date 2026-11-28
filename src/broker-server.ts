@@ -27,7 +27,7 @@ import { connectAppServer } from "./shared-server";
 import { terminateProcessTree, waitForProcessTreeExit } from "./process";
 import { parseEndpoint, BROKER_BUSY_RPC_CODE } from "./broker";
 import { RpcError } from "./types";
-import { config, sandboxModeOf } from "./config";
+import { config, resolveStateDir, sandboxModeOf } from "./config";
 import { inputTexts, readThreadFacts } from "./turns";
 import { adoptionFor, createPeer, type InternalOwner, type Peer } from "./peer";
 
@@ -523,10 +523,10 @@ async function main() {
   // The front-door peer: registers this broker in Claude Code's session
   // registry and serves the cross-session messaging protocol, so Claude
   // sessions can message the workspace's Codex natively. Inactive (a no-op
-  // object) on Windows, without a registry, or with CODEX_COLLAB_PEER=off.
+  // object) without a registry or with CODEX_COLLAB_PEER=off.
   const stateDir = listenTarget.kind === "unix"
     ? path.dirname(listenTarget.path)
-    : path.join(cwd, ".codex-collab-state"); // pipe endpoints never activate the peer
+    : resolveStateDir(cwd);
   const peer: Peer = createPeer({
     cwd,
     stateDir,

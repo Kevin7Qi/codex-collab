@@ -24,7 +24,7 @@ import { resolveStateDir, resolveWorkspaceDir } from "./config";
 import { outstandingTasksFor } from "./claude-tasks";
 import { acquireLockSync } from "./lock";
 import { carryCodexTrust, codexTrustNote, type SpawnTrustSetting } from "./claude-trust";
-import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./claude-registry";
+import { claudeExecutable, isCodexCollabSocket, procIdentity, entryProcStart, sessionsDir, workspaceSuffix, type ProcProbes } from "./claude-registry";
 
 /** A live Claude Code session as the registry describes it. */
 export interface ClaudeSession {
@@ -241,7 +241,7 @@ export function listClaudeSessions(opts: { cwd: string; all?: boolean; stateDir?
       cwd,
       socketPath,
       sessionId: typeof entry.sessionId === "string" ? entry.sessionId : null,
-      procStart: typeof entry.procStart === "string" ? entry.procStart : null,
+      procStart: entryProcStart(entry),
       jobId: typeof entry.jobId === "string" ? entry.jobId : null,
       verified: liveness === "verified",
       statusUpdatedAt: typeof entry.statusUpdatedAt === "number" ? entry.statusUpdatedAt : null,
@@ -845,7 +845,7 @@ export async function spawnClaudeSession(opts: SpawnClaudeOptions): Promise<Clau
   const label = opts.resume ? opts.resume.label : opts.label;
   const name = spawnedSessionName(opts.cwd, label);
   const lingerSec = opts.lingerSec ?? DEFAULT_SPAWN_LINGER_SEC;
-  const bin = opts.claudeBin ?? "claude";
+  const bin = opts.claudeBin ?? claudeExecutable();
   // The model and effort are the caller's to choose, because the user pays
   // for them: a lookup has no need of the most capable model thinking hard.
   // Whatever is not chosen stays Claude Code's own default.
@@ -955,7 +955,7 @@ function entryIdentity(entry: Record<string, unknown>, pid: number): EntryIdenti
   return {
     pid,
     sessionId: typeof entry.sessionId === "string" ? entry.sessionId : null,
-    procStart: typeof entry.procStart === "string" ? entry.procStart : null,
+    procStart: entryProcStart(entry),
     kind: typeof entry.kind === "string" ? entry.kind : null,
     jobId: typeof entry.jobId === "string" ? entry.jobId : undefined,
   };
@@ -964,7 +964,7 @@ function entryIdentity(entry: Record<string, unknown>, pid: number): EntryIdenti
 /** Stop a session we started: `claude stop` keeps its conversation
  *  resumable; a plain signal is the fallback when the CLI is unavailable —
  *  and only for a process verified to be that session. */
-export function stopClaudeSession(session: SpawnedSession, claudeBin = "claude"): "asked" | "signalled" | "untouched" {
+export function stopClaudeSession(session: SpawnedSession, claudeBin = claudeExecutable()): "asked" | "signalled" | "untouched" {
   try {
     execFileSync(claudeBin, ["stop", session.id], { encoding: "utf-8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
     return "asked";
@@ -1074,7 +1074,7 @@ export function reaperVerdict(
   // the same session is the same session id, or the same process start.
   if (identity.procStart || identity.sessionId) {
     const same = (!!identity.sessionId && entry.sessionId === identity.sessionId)
-      || (!!identity.procStart && entry.procStart === identity.procStart);
+      || (!!identity.procStart && entryProcStart(entry) === identity.procStart);
     if (!same) return "gone";
   }
   if (entryLiveness(entry) === "dead") return "gone";
@@ -1186,7 +1186,7 @@ export async function runReaper(
     if (entry && entry.pid !== session.pid) {
       // Brought back as a new process: the same session, its work and its
       // conversation — and still ours to watch, and to stop.
-      session = { ...session, pid: entry.pid as number, procStart: typeof entry.procStart === "string" ? entry.procStart : undefined };
+      session = { ...session, pid: entry.pid as number, procStart: entryProcStart(entry) ?? undefined };
       updateSpawnedSessionProcess(stateDir, session.id, session.pid, session.procStart);
       say(`Claude Code brought it back as pid ${session.pid}: watching that`);
     }

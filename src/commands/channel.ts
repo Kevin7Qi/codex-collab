@@ -13,7 +13,7 @@
 // from it and end when it does, however it ends; and what a host killed
 // outright left in the registry, the next one removes before it registers.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
@@ -59,7 +59,9 @@ import { verifyMailboxDir } from "../questions";
 import { wakeThread } from "../codex-wake";
 import { hookRanIn } from "../codex-hooks";
 import { loadUserConfig, parseOptions } from "./shared";
-import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, registryProcStart, sessionsDir, sniffRegistryVersion } from "../claude-registry";
+import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, registryProcStart, sessionsDir, sniffRegistryVersion, spawnRegistryHolder } from "../claude-registry";
+import { privateSocketUmask } from "../local-ipc";
+import { matchesPeerAuth, newPeerToken, removePeerEntry, writePeerEntry } from "../claude-registry";
 import { parseEnvelope } from "../claude-envelope";
 import { formatDuration } from "../format";
 import { type Taken } from "../channel-delivery";
@@ -86,6 +88,7 @@ const SWEEP_MS = 3600_000;
 const WAKE_DELAY_MS = Number(process.env.CODEX_COLLAB_WAKE_DELAY_MS) || 2000;
 
 interface Address {
+  token?: string;
   threadId: string;
   name: string;
   socketPath: string;
@@ -186,7 +189,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     try { saveContacts(stateDir, a.threadId, a.contacts); } catch (e) { log(`${a.name}: could not record its contacts: ${e instanceof Error ? e.message : String(e)}`); }
   };
   const removeEntry = (a: Address) => {
-    if (a.entryPath) { try { unlinkSync(a.entryPath); } catch { /* gone */ } }
+    if (a.entryPath) removePeerEntry(a.entryPath, a.socketPath);
     a.entryPath = null;
   };
   // ── Waking a thread that is idle on the shared app-server ──
@@ -288,7 +291,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       const path = join(sessionsDir(), file);
       try {
         const e = JSON.parse(readFileSync(path, "utf-8"));
-        if (e?.messagingSocketPath === socketPath && procIdentity(e) === "dead") unlinkSync(path);
+        if (e?.messagingSocketPath === socketPath && procIdentity(e) === "dead") removePeerEntry(path, socketPath);
       } catch { /* being written, or gone */ }
     }
   };
@@ -299,7 +302,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     // A liveness token: an entry's file name, its pid and a live process must
     // agree, one entry per pid. Its stdin is a pipe from this process, so it
     // ends when this process does, however that happens.
-    const holder = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    const holder = spawnRegistryHolder();
     holder.on("error", () => { /* reported by its exit */ });
     if (!holder.pid) return false;
     a.holder = holder;
@@ -330,7 +333,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     const entryPath = join(sessionsDir(), `${pid}.json`);
     try {
       mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
-      writeFileSync(entryPath, JSON.stringify(buildRegistryEntry({
+      writePeerEntry(entryPath, buildRegistryEntry({
         pid,
         cwd: wsRoot,
         name: a.name,
@@ -338,12 +341,12 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         version: sniffRegistryVersion(),
         procStart: registryProcStart(pid),
         sessionId: transientSessionId(),
-      })), { mode: 0o644 });
+      }), a.token);
       a.entryPath = entryPath;
       return true;
     } catch (e) {
       log(`${a.name}: could not register: ${e instanceof Error ? e.message : String(e)}`);
-      try { unlinkSync(entryPath); } catch { /* not written */ }
+      removePeerEntry(entryPath, a.socketPath);
       return false;
     }
   };
@@ -386,6 +389,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
     sock.setEncoding("utf8");
     sock.setTimeout(60_000, () => sock.destroy());
     let buffer = "";
+    let authorized = a.token === undefined;
     sock.on("data", (chunk: string) => {
       buffer += chunk;
       if (buffer.length > INBOUND_LIMIT) {
@@ -397,6 +401,11 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       while ((idx = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 1);
+        if (!authorized) {
+          if (!matchesPeerAuth(line, a.token!)) { sock.destroy(); return; }
+          authorized = true;
+          continue;
+        }
         if (!line) continue;
         const msg = parseEnvelope(line);
         if (!msg) {
@@ -441,14 +450,14 @@ export async function handleChannelHost(args: string[]): Promise<void> {
       // whatever this host's environment would choose.
       const usual = threadSocketPath(stateDir, wsRoot, threadId);
       const server = createServer();
-      const a: Address = { threadId, name, socketPath: usual, server, holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [], socketIno: null, lastActive, activityWritten: 0 };
+      const a: Address = { threadId, name, socketPath: usual, server, token: newPeerToken(), holder: null, entryPath: null, contacts: loadContacts(stateDir, threadId), misses: new Map(), respawns: [], socketIno: null, lastActive, activityWritten: 0 };
       server.on("connection", inbound(a));
       const listenAt = async (socketPath: string): Promise<void> => {
         sweepEntriesFor(socketPath);
         try { unlinkSync(socketPath); } catch { /* none */ }
         // Bound with group/other bits masked: connectable the moment it
         // exists, before any chmod could run.
-        const prevUmask = process.umask(0o077);
+        const restoreUmask = privateSocketUmask();
         try {
           await new Promise<void>((resolve, reject) => {
             const failed = (e: Error) => { server.off("listening", bound); reject(e); };
@@ -458,7 +467,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
             server.listen(socketPath);
           });
         } finally {
-          process.umask(prevUmask);
+          restoreUmask();
         }
       };
       try {
@@ -471,7 +480,9 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         a.socketPath = fresh;
         await listenAt(fresh);
       }
-      try { a.socketIno = statSync(a.socketPath).ino; } catch { /* removed already: nothing of ours to remove later */ }
+      if (process.platform !== "win32") {
+        try { a.socketIno = statSync(a.socketPath).ino; } catch { /* removed already: nothing of ours to remove later */ }
+      }
       if (recordedSocketPath(stateDir, threadId) !== a.socketPath) {
         try { recordSocketPath(stateDir, threadId, a.socketPath); } catch (e) { log(`${name}: could not record its socket: ${e instanceof Error ? e.message : String(e)}`); }
       }
@@ -495,6 +506,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   /** Whether the address's socket is no longer the one this host made:
    *  removed — temp space cleared under a running host — or replaced. */
   const socketGone = (a: Address): boolean => {
+    if (process.platform === "win32") return !a.server.listening;
     try {
       return a.socketIno === null ? !existsSync(a.socketPath) : statSync(a.socketPath).ino !== a.socketIno;
     } catch {
@@ -565,7 +577,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
   try { unlinkSync(controlPath); } catch { /* none */ }
   try {
     const listening = control;
-    const prevUmask = process.umask(0o077);
+    const restoreUmask = privateSocketUmask();
     try {
       await new Promise<void>((resolve, reject) => {
         listening.once("listening", resolve);
@@ -573,7 +585,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         listening.listen(controlPath);
       });
     } finally {
-      process.umask(prevUmask);
+      restoreUmask();
     }
   } catch (e) {
     log(`cannot listen at ${controlPath}: ${e instanceof Error ? e.message : String(e)}`);

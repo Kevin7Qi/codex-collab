@@ -21,7 +21,7 @@ import { readdirSync } from "node:fs";
 /** Where Claude Code keeps session transcripts, one directory per working
  *  directory. Overridable for tests, as the session registry is. */
 export function projectsDir(): string {
-  return process.env.CODEX_COLLAB_PROJECTS_DIR ?? join(homedir(), ".claude", "projects");
+  return process.env.CODEX_COLLAB_PROJECTS_DIR ?? join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
 }
 
 /** The transcript of `sessionId`, wherever it lives. A session id is unique

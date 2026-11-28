@@ -51,9 +51,7 @@ export function codexHooksPath(): string {
   return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "hooks.json");
 }
 
-/** Quoted for `sh`, which Codex runs a hook's command with. Hooks exist only
- *  where `send` does (not on Windows), so the command is the same wherever
- *  it is written — unlike `shellQuote`, which quotes for the platform. */
+/** Quoted for the Unix hook shell. */
 function shQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -65,7 +63,9 @@ function shQuote(value: string): string {
  *  current, so hooks need no rewriting, and Codex no new trust, when that
  *  changes. With no such link, or one leading elsewhere (a CLI run from
  *  another checkout), the path it runs from. */
-export function stableCliPath(cli: string = process.argv[1], links: Array<string | null> = [Bun.which("codex-collab"), join(homedir(), ".local", "bin", "codex-collab")]): string {
+export function stableCliPath(cli: string = process.argv[1], links: Array<string | null> = process.platform === "win32"
+  ? [join(homedir(), ".claude", "skills", "codex-collab", "scripts", "codex-collab")]
+  : [Bun.which("codex-collab"), join(homedir(), ".local", "bin", "codex-collab")]): string {
   let real: string;
   try {
     real = realpathSync(cli);
@@ -83,7 +83,14 @@ export function stableCliPath(cli: string = process.argv[1], links: Array<string
 
 /** The command each hook runs: Bun and this CLI by absolute path, since a
  *  hook the Codex app starts on macOS has a PATH with neither. */
-export function hookCommand(bun: string = process.execPath, cli: string = stableCliPath()): string {
+export function hookCommand(bun: string = process.execPath, cli: string = stableCliPath(), platform: string = process.platform): string {
+  if (platform === "win32") {
+    // Codex wraps the entire command in quotes for cmd.exe /C.
+    if (/["%!\r\n]/.test(bun) || /["%!\r\n]/.test(cli)) {
+      throw new Error("Codex hook paths cannot contain cmd.exe expansion characters (quotes, %, or !)");
+    }
+    return `"${bun}" "${cli}" hook`;
+  }
   return `${shQuote(bun)} ${shQuote(cli)} hook`;
 }
 
@@ -96,7 +103,7 @@ export function isOurHandler(h: unknown, current: string = hookCommand()): boole
   const command = (h as { command?: unknown } | null)?.command;
   if (typeof command !== "string") return false;
   if (command === current) return true;
-  const m = /^'(?:[^']|'\\'')+' '((?:[^']|'\\'')+)' hook$/.exec(command);
+  const m = /^'(?:[^']|'\\'')+' '((?:[^']|'\\'')+)' hook$/.exec(command) ?? /^"[^"%!\r\n]+" "([^"%!\r\n]+)" hook$/.exec(command);
   return !!m && /codex-collab/.test(m[1]);
 }
 

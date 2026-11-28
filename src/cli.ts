@@ -319,7 +319,7 @@ Commands:
   peer [status|up]        Show this workspace's peer — capability, broker,
                           registry entry, socket — or start one with 'up'
                           (peer messaging is off entirely under
-                          'config mode cli', and unavailable on Windows)
+                          'config mode cli')
   peers [--all]           (for Codex) List the Claude Code sessions live in
                           this workspace — the ones 'send' can reach
                           (--all: every workspace; --json)

@@ -16,7 +16,7 @@ const fresh = () => {
   mkdirSync(dir, { recursive: true });
   return join(dir, "hooks.json");
 };
-const COMMAND = hookCommand("/opt/bun", "/home/u/.local/bin/codex-collab");
+const COMMAND = hookCommand("/opt/bun", "/home/u/.local/bin/codex-collab", "linux");
 const read = (path: string) => JSON.parse(readFileSync(path, "utf-8"));
 const userHook = { hooks: [{ type: "command", command: "notify-me" }] };
 
@@ -27,7 +27,7 @@ afterAll(() => {
 describe("codex-collab's hooks in Codex's hooks file", () => {
   test("the command runs Bun and this CLI by absolute path, quoted", () => {
     expect(COMMAND).toBe("'/opt/bun' '/home/u/.local/bin/codex-collab' hook");
-    expect(hookCommand("/opt/bun", "/it's here/cli.ts")).toBe("'/opt/bun' '/it'\\''s here/cli.ts' hook");
+    expect(hookCommand("/opt/bun", "/it's here/cli.ts", "linux")).toBe("'/opt/bun' '/it'\\''s here/cli.ts' hook");
     expect(isOurHandler({ command: COMMAND })).toBe(true);
     expect(isOurHandler({ command: hookCommand("/opt/bun", "/home/u/src/codex-collab/src/cli.ts") })).toBe(true);
     expect(isOurHandler({ command: "notify-me" })).toBe(false);
@@ -40,6 +40,13 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
     const other = "'/opt/bun' '/home/u/other-project/src/cli.ts' hook";
     expect(isOurHandler({ command: other })).toBe(false);
     expect(isOurHandler({ command: other }, other)).toBe(true);
+  });
+
+  test("Windows hooks quote both paths for cmd and recognize prior installs", () => {
+    const command = hookCommand("C:\\Program Files\\Bun\\bun.exe", "C:\\my repo\\codex-collab\\src\\cli.ts", "win32");
+    expect(command).toBe('"C:\\Program Files\\Bun\\bun.exe" "C:\\my repo\\codex-collab\\src\\cli.ts" hook');
+    expect(isOurHandler({ command }, COMMAND)).toBe(true);
+    expect(isOurHandler({ command: '"C:\\bun.exe" "C:\\other\\src\\cli.ts" hook' }, COMMAND)).toBe(false);
   });
 
   test("hooks reach the CLI by the installer's link when it leads to this CLI, so that a checkout moving changes nothing", () => {

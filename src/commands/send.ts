@@ -26,9 +26,9 @@
 
 import { connect, createServer, type Server } from "node:net";
 import { spawn } from "node:child_process";
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
-import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
+import { config, mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
   CLAUDE_EFFORTS,
   DEFAULT_SPAWN_LINGER_SEC,
@@ -76,6 +76,8 @@ import { isThreadId, messageIdsSince, openChannel, wakeThroughHost, watchInbox, 
 import { MAX_TIMEOUT_SECONDS, die, loadUserConfig, parseOptions, type UserConfig, resumeWindowSec } from "./shared";
 import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, registryProcStart, sessionsDir, sniffRegistryVersion, workspaceSuffix } from "../claude-registry";
 import { buildEnvelope, parseEnvelope } from "../claude-envelope";
+import { isCollabPipe, localAddress, privateSocketUmask } from "../local-ipc";
+import { matchesPeerAuth, newPeerToken, peerAuthFrame, entryProcStart, removePeerEntry, writePeerEntry } from "../claude-registry";
 import { formatDuration, formatLongDuration } from "../format";
 import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task-outcome";
 
@@ -182,7 +184,7 @@ export function composeMessage(text: string, opts: { threadId: string | null; ch
  *  codex-collab process recognizes as ours (`isCodexCollabSocket`), so a
  *  task in flight is never listed as a Claude session. */
 export function taskSocketPath(id: string): string {
-  return join(mailboxRoot(), `task-${id}.sock`);
+  return localAddress(mailboxRoot(), `task-${id}`, config.dataDir);
 }
 
 /** Refused: several sessions are live and none was named. */
@@ -429,9 +431,6 @@ export async function handleSend(args: string[]): Promise<void> {
   const timeoutSec = options.explicit.has("timeout") ? options.timeout : DEFAULT_TASK_WAIT_SEC;
   const wait = !options.noWait;
 
-  if (process.platform === "win32") {
-    die("codex-collab send is unavailable on Windows: codex-collab does not support Claude Code's cross-session messaging, which it rides on, there yet.");
-  }
   if (insideCodexSandbox()) {
     die(
       "codex-collab send cannot run inside the Codex sandbox: it reaches the Claude Code session over a local socket, which the sandbox blocks.\n" +
@@ -974,12 +973,14 @@ export async function sweepDeadReceivers(nobodyAt: (socket: string) => Promise<b
       continue;
     }
     const socket = entry?.messagingSocketPath;
-    if (typeof socket !== "string" || !ours.some((p) => socket.startsWith(p)) || entry.pid === process.pid) continue;
+    if (typeof socket !== "string" || entry.pid === process.pid) continue;
+    if (!ours.some((p) => socket.startsWith(p)) && !isCollabPipe(socket, "task-") && !isCollabPipe(socket, "thread-")) continue;
     if (procIdentity(entry) !== "dead") continue;
     const asked = fileAt(socket);
     if (!(await nobodyAt(socket))) continue;
     if (asked !== null && fileAt(socket) === asked) { try { unlinkSync(socket); } catch { /* gone */ } }
-    try { unlinkSync(path); removed++; } catch { /* gone */ }
+    removePeerEntry(path, socket);
+    removed++;
   }
   return removed;
 }
@@ -1008,8 +1009,9 @@ function fileAt(path: string): string | null {
 /** Write one envelope to a session's messaging socket. */
 function deliver(socketPath: string, line: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    const payload = peerAuthFrame(socketPath) + line;
     const sock = connect({ path: socketPath }, () => {
-      sock.write(line, (err) => {
+      sock.write(payload, (err) => {
         if (err) reject(err);
         else sock.end(resolve);
       });
@@ -1086,7 +1088,7 @@ export function watchForLost(
     }
     if (!entry || entry.pid !== target.pid) return true;
     if (target.sessionId && entry.sessionId !== target.sessionId) return true;
-    if (target.procStart && entry.procStart !== target.procStart) return true;
+    if (target.procStart && entryProcStart(entry) !== target.procStart) return true;
     return procIdentity(entry) === "dead";
   };
   let timer: ReturnType<typeof setInterval> | null = null;
@@ -1121,7 +1123,7 @@ export function watchForLost(
         const back = findRestartedSession({ pid: target.pid, sessionId: target.sessionId, jobId: target.jobId });
         if (back && typeof back.pid === "number" && typeof back.messagingSocketPath === "string") {
           target.pid = back.pid;
-          target.procStart = typeof back.procStart === "string" ? back.procStart : null;
+          target.procStart = entryProcStart(back);
           target.socketPath = back.messagingSocketPath;
           if (target.spawned) target.spawned = { ...target.spawned, pid: back.pid, procStart: target.procStart ?? undefined };
           seen = 0;
@@ -1178,7 +1180,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
     if (!ownAddress) return;
     try { server?.close(); } catch { /* closed */ }
     try { unlinkSync(socketPath); } catch { /* gone */ }
-    try { unlinkSync(entryPath); } catch { /* gone */ }
+    removePeerEntry(entryPath, socketPath);
   };
   /** The address goes first and the verdict last: whoever reads a final
    *  status finds no registration of this task left behind. */
@@ -1293,10 +1295,12 @@ export async function handleRecvTask(args: string[]): Promise<void> {
   };
   if (!channel) {
     ownAddress = true;
+    const token = newPeerToken();
     try { unlinkSync(socketPath); } catch { /* none */ }
     server = createServer((sock) => {
       sock.setEncoding("utf8");
       let buffer = "";
+      let authorized = token === undefined;
       sock.on("data", (chunk: string) => {
         buffer += chunk;
         if (buffer.length > 1024 * 1024) { sock.destroy(); return; }
@@ -1304,6 +1308,11 @@ export async function handleRecvTask(args: string[]): Promise<void> {
         while ((idx = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, idx).trim();
           buffer = buffer.slice(idx + 1);
+          if (!authorized) {
+            if (!matchesPeerAuth(line, token!)) { sock.destroy(); return; }
+            authorized = true;
+            continue;
+          }
           if (!line) continue;
           const msg = parseEnvelope(line);
           if (!msg) continue;
@@ -1320,7 +1329,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
       const listening = server;
       // Bind with group/other bits masked: the socket is connectable the
       // moment it exists, before any chmod could run (as the broker does).
-      const prevUmask = process.umask(0o077);
+      const restoreUmask = privateSocketUmask();
       try {
         await new Promise<void>((resolve, reject) => {
           listening.once("listening", resolve);
@@ -1328,7 +1337,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
           listening.listen(socketPath);
         });
       } finally {
-        process.umask(prevUmask);
+        restoreUmask();
       }
     } catch (e) {
       finish({ status: "failed", error: `Could not open a socket for the reply at ${socketPath}: ${e instanceof Error ? e.message : String(e)}` }, 1);
@@ -1336,7 +1345,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
     let registerError: unknown = null;
     try {
       mkdirSync(sessionsDir(), { recursive: true, mode: 0o700 });
-      writeFileSync(entryPath, JSON.stringify(buildRegistryEntry({
+      writePeerEntry(entryPath, buildRegistryEntry({
         pid: process.pid,
         cwd: task.cwd,
         name,
@@ -1344,7 +1353,7 @@ export async function handleRecvTask(args: string[]): Promise<void> {
         version: sniffRegistryVersion(),
         procStart: registryProcStart(process.pid),
         sessionId: transientSessionId(),
-      })));
+      }), token);
     } catch (e) {
       registerError = e;
     }

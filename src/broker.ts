@@ -367,7 +367,7 @@ function spawnBrokerServer(
 
   // Use node's child_process.spawn — Bun.spawn does not expose `detached`,
   // and we need a new process group for SIGINT isolation.
-  const proc = childSpawn("bun", args, {
+  const proc = childSpawn(process.execPath, args, {
     stdio: ["ignore", logFd, logFd],
     cwd,
     detached: true,

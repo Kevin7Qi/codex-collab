@@ -70,19 +70,17 @@ try {
 # SKILL.md source + current template table) so the installers and
 # `codex-collab skill sync` share one implementation.
 #
-# The Codex-side skill (`skill render --codex`, installed by install.sh under
-# ~/.codex/skills) is deliberately not installed here: it teaches Codex the
-# `peers`/`send` commands, which need Claude Code's cross-session messaging —
-# unavailable on Windows.
 function Generate-SkillMd {
-    param([string]$Entry, [string]$OutPath)
+    param([string]$Entry, [string]$OutPath, [switch]$Codex)
     # PowerShell 5.1 decodes captured native stdout with the CONSOLE code page,
     # which mojibakes SKILL.md's non-ASCII on non-UTF-8 hosts — force UTF-8
     # around the capture and restore afterwards.
     $prevEncoding = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $lines = & bun $Entry skill render
+        $renderArgs = @("skill", "render")
+        if ($Codex) { $renderArgs += "--codex" }
+        $lines = & bun $Entry @renderArgs
         if ($LASTEXITCODE -ne 0) { throw "'skill render' failed with exit code $LASTEXITCODE" }
     } finally {
         [Console]::OutputEncoding = $prevEncoding
@@ -99,6 +97,7 @@ if ($Dev) {
 
     # Generate SKILL.md with template table (can't inject into a symlink)
     Generate-SkillMd -Entry (Join-Path $RepoDir "src\cli.ts") -OutPath (Join-Path $SkillDir "SKILL.md")
+    $skillEntry = Join-Path $RepoDir "src\cli.ts"
 
     # Symlink skill files (requires Developer Mode or elevated privileges)
     $links = @(
@@ -170,7 +169,13 @@ if ($Dev) {
     Write-Host "$installDone skill at $SkillDir"
 
     $shimTarget = Join-Path $SkillDir "scripts\codex-collab"
+    $skillEntry = $shimTarget
 }
+
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$codexSkillDir = Join-Path $codexHome "skills\claude-collab"
+New-Item -ItemType Directory -Path $codexSkillDir -Force | Out-Null
+Generate-SkillMd -Entry $skillEntry -OutPath (Join-Path $codexSkillDir "SKILL.md") -Codex
 
 # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)
 New-Item -ItemType Directory -Path $BinDir -Force | Out-Null

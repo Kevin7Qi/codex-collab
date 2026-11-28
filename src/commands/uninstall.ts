@@ -436,10 +436,8 @@ async function makePlan(records: RecordsChoice): Promise<Plan> {
   if (existsSync(rule)) {
     plan.removals.push({ what: `the Codex rule ${rule}`, run: () => { removeCodexRules(rule); return existsSync(rule) ? `could not remove ${rule}` : null; } });
   }
-  // install.ps1 installs no Codex skill: one of that name on Windows is
-  // someone else's.
   const codexSkill = codexSkillInstallDir();
-  if (process.platform !== "win32" && existsSync(codexSkill)) plan.removals.push(installedFolder("the Codex skill", codexSkill, ["SKILL.md"]));
+  if (existsSync(codexSkill)) plan.removals.push(installedFolder("the Codex skill", codexSkill, ["SKILL.md"]));
 
   const stale = staleRegistryEntries();
   if (stale.length > 0) {

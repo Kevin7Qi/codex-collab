@@ -32,7 +32,8 @@ import { config, mailboxRoot, workspaceHash } from "./config";
 import { verifyMailboxDir } from "./questions";
 import { acquireLockAsync, acquireLockSync } from "./lock";
 import { spawnEnv } from "./claude-sessions";
-import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcIdentity } from "./claude-registry";
+import { isCodexCollabSocket, procIdentity, entryProcStart, sessionsDir, workspaceSuffix, type ProcIdentity } from "./claude-registry";
+import { isCollabPipe, localAddress } from "./local-ipc";
 
 /** A Codex thread id as Codex hands it to its shell: a UUID. Every path built
  *  from one goes through this, since an id comes from the environment. */
@@ -60,7 +61,7 @@ export function channelName(cwd: string, threadId: string): string {
  *  codex-collab process recognizes it as ours (`isCodexCollabSocket`), and
  *  short enough for a unix socket path wherever the home directory is. */
 export function channelSocketPath(cwd: string, threadId: string): string {
-  return join(mailboxRoot(), `thread-${threadTag(threadId)}-${workspaceHash(cwd).slice(0, 8)}.sock`);
+  return localAddress(mailboxRoot(), `thread-${threadTag(threadId)}-${workspaceHash(cwd).slice(0, 8)}`, cwd);
 }
 
 function addressFile(stateDir: string, threadId: string): string {
@@ -94,7 +95,9 @@ function writeAddress(stateDir: string, threadId: string, record: AddressRecord)
 /** The socket a thread's address has used, as its host recorded it. */
 export function recordedSocketPath(stateDir: string, threadId: string): string | null {
   const { socketPath } = readAddress(stateDir, threadId);
-  return typeof socketPath === "string" && isAbsolute(socketPath) && socketPath.endsWith(".sock") ? socketPath : null;
+  if (typeof socketPath !== "string") return null;
+  return (process.platform === "win32" ? isCollabPipe(socketPath, `thread-${threadTag(threadId)}-`) : isAbsolute(socketPath) && socketPath.endsWith(".sock"))
+    ? socketPath : null;
 }
 
 /** Record the socket a thread's address uses. For the host alone. */
@@ -137,6 +140,7 @@ export function addressIdleMs(setting: unknown): number | null {
 export function threadSocketPath(stateDir: string, cwd: string, threadId: string): string {
   const recorded = recordedSocketPath(stateDir, threadId);
   if (recorded) {
+    if (process.platform === "win32") return recorded;
     try {
       mkdirSync(dirname(recorded), { recursive: true, mode: 0o700 });
       verifyMailboxDir(dirname(recorded));
@@ -150,7 +154,7 @@ export function threadSocketPath(stateDir: string, cwd: string, threadId: string
  *  state file, never by working the path out: the temp root follows TMPDIR,
  *  which differs between the processes that may ask. */
 export function hostControlPath(cwd: string): string {
-  return join(mailboxRoot(), `channels-${workspaceHash(cwd).slice(0, 12)}.sock`);
+  return localAddress(mailboxRoot(), `channels-${workspaceHash(cwd).slice(0, 12)}`, cwd);
 }
 
 export function channelsDir(stateDir: string): string {
@@ -477,7 +481,7 @@ export function claudeEntries(): Record<string, unknown>[] {
 export function contactRunning(c: Contact, entries: Record<string, unknown>[], identify: typeof procIdentity = procIdentity): boolean {
   return entries.some((e) => {
     const same = (!!c.sessionId && e.sessionId === c.sessionId)
-      || (e.pid === c.pid && (c.procStart === null || e.procStart === c.procStart));
+      || (e.pid === c.pid && (c.procStart === null || entryProcStart(e) === c.procStart));
     return same && identify(e) !== "dead";
   });
 }
@@ -490,7 +494,7 @@ export function contactAt(replyPath: string, entries: Record<string, unknown>[])
     name: typeof e.name === "string" ? e.name : "a Claude Code session",
     pid: e.pid,
     sessionId: typeof e.sessionId === "string" ? e.sessionId : null,
-    procStart: typeof e.procStart === "string" ? e.procStart : null,
+    procStart: entryProcStart(e),
     socketPath: replyPath,
   };
 }
