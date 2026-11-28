@@ -32,10 +32,27 @@ import {
 import { buildRegistryEntry, isCodexCollabSocket, procStartOf, sessionsDir, workspaceSuffix, compareVersions, MESSAGING_FLOOR } from "./claude-registry";
 import { claudeExecutable, matchesPeerAuth, newPeerToken, peerAuthFrame, procIdentity, entryProcStart, removePeerEntry, spawnRegistryHolder, writePeerEntry } from "./claude-registry";
 import { localAddress } from "./local-ipc";
+import { peerSocketPresent } from "./commands/peer";
 import { buildEnvelope, parseEnvelope, peerModeFor } from "./claude-envelope";
 import { buildDelegation, escapeDelegation } from "./codex-session";
 
 const onWindows = process.platform === "win32";
+
+test.skipIf(!onWindows)("peer status probes named-pipe liveness", async () => {
+  const pipe = localAddress(`peer-status-${process.pid}`, "peer");
+  const server = net.createServer();
+  expect(await peerSocketPresent(pipe)).toBe(false);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(pipe, resolve);
+  });
+  try {
+    expect(await peerSocketPresent(pipe)).toBe(true);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  expect(await peerSocketPresent(pipe)).toBe(false);
+});
 
 // The peer activates only where the mode check finds a messaging-capable
 // Claude Code on PATH; CI has none. Insist on it for this file, the way a
