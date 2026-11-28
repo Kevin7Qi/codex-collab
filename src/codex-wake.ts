@@ -16,9 +16,11 @@
 // one), and resuming it would take its writer lock.
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { releaseDelivery, threadStateDirs } from "./claude-channel";
 import type { AppServerClient } from "./client";
+import { config } from "./config";
 import { hooksRunIn } from "./codex-hooks";
 import { attachSupported, connectShared, controlSocketPath } from "./shared-server";
 import { buildDelegation } from "./codex-session";
@@ -44,12 +46,15 @@ export const WAKE_BUDGET_TOKENS = 24_000;
 /** A thread of codex-collab's own: where it runs, and what `run` calls it. */
 export type OwnThread = { dir: string; shortId: string; running: boolean };
 
-/** The thread as a workspace that holds a mailbox of it has it, when
- *  codex-collab has run a turn on it there; null otherwise. The index alone
+/** The thread as the workspace codex-collab has run a turn on it in has
+ *  it; null when none has. That need not be a workspace holding its mailbox:
+ *  `send -d` puts the mailbox in the workspace it names. The index alone
  *  does not say so: `threads` lists there what Codex has for the folder,
  *  the user's own sessions among them. `running`: a run of ours is on it now. */
-export function ownThread(threadId: string, root?: string): OwnThread | null {
-  for (const stateDir of threadStateDirs(threadId, root)) {
+export function ownThread(threadId: string, root: string = join(config.dataDir, "workspaces")): OwnThread | null {
+  let workspaces: string[];
+  try { workspaces = readdirSync(root); } catch { return null; }
+  for (const stateDir of workspaces.map((w) => join(root, w))) {
     let index: ReturnType<typeof loadThreadIndex>;
     try { index = loadThreadIndex(stateDir); } catch { continue; }
     for (const [shortId, entry] of Object.entries(index)) {

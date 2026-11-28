@@ -250,6 +250,21 @@ describe("waking a thread of codex-collab's own that no server holds", () => {
     expect(ownThread(THREAD, root)).toEqual({ dir: "/work/project", shortId, running: true });
   });
 
+  test("a thread whose mailbox is in another workspace than its run (`send -d`) is still one of ours", async () => {
+    const { root, ws } = fresh();
+    const other = join(root, "ws-other");
+    mkdirSync(other, { recursive: true, mode: 0o700 });
+    const shortId = ran(ws);
+    const message = writeMessage(other, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
+    expect(ownThread(THREAD, root)).toEqual({ dir: "/work/project", shortId, running: false });
+    const asked: OwnThread[] = [];
+    const resume = async (own: OwnThread) => { asked.push(own); return { ok: true as const }; };
+    const none = async () => { throw new Error("ENOENT"); };
+    expect(await wakeThread(THREAD, { connect: none, root, hooksRun: true, resume })).toEqual({ woke: true, messages: 1 });
+    expect(asked).toEqual([{ dir: "/work/project", shortId, running: false }]);
+    expect(isDelivered(other, THREAD, message.id)).toBe(true);
+  });
+
   test("ownThread: a run whose process is gone is not a turn", () => {
     const { root, ws } = fresh();
     writeMessage(ws, THREAD, { fromName: "claude(a)", replyPath: "/a", text: "hello" });
