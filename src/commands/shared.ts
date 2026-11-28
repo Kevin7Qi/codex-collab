@@ -1102,9 +1102,14 @@ export async function startOrResumeThread(
       isNewThread = true;
     } else {
       shortId = findShortId(ws.stateDir, threadId) ?? opts.resumeId;
+      // The turns are not asked for: nothing here reads them, and the
+      // history of a long thread can be larger than a reply may be, which
+      // ends a private app-server — with no one watching when the resume is
+      // a wake (codex-wake).
       const resumeParams: Record<string, unknown> = {
         threadId,
         persistExtendedHistory: false,
+        excludeTurns: true,
       };
       // Only forward flags that were explicitly provided on the command line
       if (opts.explicit.has("model")) resumeParams.model = opts.model;

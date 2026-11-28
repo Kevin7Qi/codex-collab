@@ -1543,6 +1543,21 @@ describe("startOrResumeThread", () => {
     expect(calls.some(c => c.method === "thread/resume")).toBe(true);
     expect(calls.some(c => c.method === "thread/memoryMode/set")).toBe(false);
   });
+
+  test("resume: does not ask for the thread's turns, whose size a reply could not hold on a long thread", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const client = recordingClient(calls, {
+      "thread/resume": () => threadStartResponse(newThreadId, "/tmp/proj"),
+    });
+    const opts = defaultOptions();
+    opts.dir = "/tmp/proj";
+    opts.resumeId = newThreadId;
+
+    await startOrResumeThread(client, opts, freshWorkspace("resume-no-turns"), undefined, "task", false);
+
+    const resume = calls.find(c => c.method === "thread/resume");
+    expect((resume?.params as Record<string, unknown>).excludeTurns).toBe(true);
+  });
 });
 
 // ─── turnOverrides ─────────────────────────────────────────────────────────

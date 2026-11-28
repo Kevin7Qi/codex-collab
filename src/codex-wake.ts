@@ -73,11 +73,12 @@ export function ownThread(threadId: string, root: string = join(config.dataDir, 
 
 /** `run - --resume <shortId> --detach` in the thread's folder, the turn's
  *  input on stdin: it answers once the turn is running, or says why it is
- *  not (the thread is held elsewhere, a turn is on it, no Codex). */
+ *  not (the thread is held elsewhere, a turn is on it, no Codex).
+ *  (CODEX_COLLAB_WAKE_CLI names another CLI to run: a test seam.) */
 export function resumeOwn(own: OwnThread, text: string): Promise<{ ok: true } | { ok: false; why: string }> {
   return new Promise((done) => {
     let err = "";
-    const proc = spawn(process.execPath, ["run", process.argv[1], "run", "-", "--resume", own.shortId, "--detach"], {
+    const proc = spawn(process.execPath, ["run", process.env.CODEX_COLLAB_WAKE_CLI || process.argv[1], "run", "-", "--resume", own.shortId, "--detach"], {
       cwd: own.dir,
       stdio: ["pipe", "ignore", "pipe"],
       windowsHide: true,

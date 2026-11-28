@@ -18,6 +18,8 @@ import { spawnedSessionName } from "../claude-sessions";
 import { choiceNotAppliedNote, composeMessage, nextExpiryLook, senderName, splitTarget, sweepDeadReceivers, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 import { channelName, writeMessage } from "../claude-channel";
+import { createRun, registerThread } from "../threads";
+import type { RunRecord } from "../types";
 import { hookCommand, installCodexHooks, noteHookRan } from "../codex-hooks";
 import type { TaskRecord } from "../claude-tasks";
 import { buildRegistryEntry, procStartOf, workspaceSuffix } from "../claude-registry";
@@ -3326,6 +3328,61 @@ describeUnix("a Codex thread's address", () => {
     } finally {
       restore();
       server.stop(true);
+    }
+  });
+
+  test("with codex-wake on, a second reply that comes while a thread of our own is being resumed starts no second run: the hooks hand it over", async () => {
+    // No shared app-server: the thread is one `run` has had a turn on, so
+    // the host resumes it as a detached run. A stand-in for the CLI takes
+    // that run's place: it notes what it was given, and is slow to start.
+    rmSync(join(TEST_HOME, ".codex", "app-server-control"), { recursive: true, force: true });
+    const host = hostState();
+    if (host) {
+      try { process.kill(host.pid, "SIGTERM"); } catch { /* gone */ }
+      await waitFor(() => hostState() === null, 5000);
+    }
+    const resumed = join(TEST_HOME, `resumed-${THREAD}.jsonl`);
+    const standIn = join(TEST_HOME, `wake-cli-${THREAD}.ts`);
+    writeFileSync(standIn, `import { appendFileSync } from "node:fs";
+const text = await Bun.stdin.text();
+appendFileSync(${JSON.stringify(resumed)}, JSON.stringify({ args: process.argv.slice(2), text }) + "\\n");
+await new Promise((r) => setTimeout(r, 3000));
+`);
+    const runs = (): Array<{ args: string[]; text: string }> => {
+      try { return readFileSync(resumed, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
+    };
+    const restore = hooksRunning({ "codex-wake": "on" });
+    try {
+      const fake = startFake("twice-claude", { reply: null });
+      registerFake(fake);
+      await runCli(["send", "long job", "--no-wait"], { CODEX_COLLAB_WAKE_CLI: standIn });
+      await got(fake, 1);
+      const root = join(TEST_HOME, ".codex-collab", "workspaces");
+      const state = readdirSync(root).map((d) => join(root, d)).find((d) => existsSync(join(d, "channels", THREAD)))!;
+      const shortId = registerThread(state, THREAD, { cwd: WS });
+      createRun(state, {
+        runId: "run-1", threadId: THREAD, shortId, kind: "task", phase: null, status: "completed", pid: null,
+        sessionId: null, logFile: "logs/x.log", logOffset: 0, prompt: "p", model: null,
+        startedAt: new Date().toISOString(), completedAt: new Date().toISOString(), elapsed: null,
+        output: null, filesChanged: null, commandsRun: null, error: null,
+      } as RunRecord);
+      speak(fake, fake.received[0].replyPath, "the first reply");
+      await waitFor(() => runs().length === 1, 10_000);
+      // The run is starting: the second reply lands now.
+      speak(fake, fake.received[0].replyPath, "the second reply");
+      await waitFor(() => inboxTexts().includes("the second reply"));
+      // Past the host's wait before a wake, and the stand-in's start.
+      await new Promise((r) => setTimeout(r, 6000));
+      expect(runs()).toHaveLength(1);
+      expect(runs()[0].args).toEqual(["run", "-", "--resume", shortId, "--detach"]);
+      expect(runs()[0].text).toContain("the first reply");
+      expect(runs()[0].text).not.toContain("the second reply");
+      // The second is the hooks' to hand over, once; the first was handed over.
+      const hooked = spawnSync("bun", ["run", CLI, "hook"], { cwd: WS, env: cliEnv({}), input: JSON.stringify({ hook_event_name: "UserPromptSubmit", session_id: THREAD }), encoding: "utf-8" });
+      expect(hooked.stdout).toContain("the second reply");
+      expect(hooked.stdout).not.toContain("the first reply");
+    } finally {
+      restore();
     }
   });
 
