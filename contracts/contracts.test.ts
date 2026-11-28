@@ -43,7 +43,7 @@ import type { Model } from "../src/types";
 import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS } from "../src/peer";
 import { SPAWN_PERMISSION_MODE, SPAWN_SETTINGS, jobHasWorkInFlight, jobSessionId, jobsDir, listClaudeSessions, parseBackgroundId, sessionStatusNow, spawnEnv, stopSpawnedSession } from "../src/claude-sessions";
 import { ranOn, transcriptPath, turnEndedOnError } from "../src/claude-transcript";
-import { procStartOf, buildRegistryEntry, sniffRegistryVersion, sessionsDir } from "../src/claude-registry";
+import { registryProcStart, buildRegistryEntry, sniffRegistryVersion, sessionsDir } from "../src/claude-registry";
 
 const ENABLED = process.env.CODEX_COLLAB_CONTRACTS === "1";
 
@@ -214,7 +214,7 @@ const registry = join(homedir(), ".claude", "sessions");
  * `bun test` never spawns `claude`.
  */
 function registryProbeBlocker(): string | null {
-  // procStartOf shells out to POSIX `ps`; peer.test.ts skips win32 for the
+  // registryProcStart reads /proc or shells out to POSIX `ps`; peer.test.ts skips win32 for the
   // same reason, mirroring peerCapability's own gate.
   if (process.platform === "win32") return "windows (procStart reads POSIX ps)";
   if (!existsSync(registry)) return "no Claude session registry";
@@ -249,11 +249,12 @@ describe.skipIf(!ENABLED || registryBlocked !== null)("claude session-registry c
     // that is live and well-named but carries the wrong procStart.
     const holder = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
     const impostor = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
-    if (!holder.pid || !impostor.pid) throw new Error("holder spawn failed");
+    const impostor2 = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    if (!holder.pid || !impostor.pid || !impostor2.pid) throw new Error("holder spawn failed");
     const cleanup: string[] = [];
     try {
       await new Promise((r) => setTimeout(r, 300));
-      const procStart = procStartOf(holder.pid);
+      const procStart = registryProcStart(holder.pid);
       const mkEntry = (pid: number, name: string, ps: typeof procStart) => buildRegistryEntry({
         pid,
         cwd: process.cwd(),
@@ -284,18 +285,28 @@ describe.skipIf(!ENABLED || registryBlocked !== null)("claude session-registry c
       put(`4900801.json`, mkEntry(4900801, "contract-deadpid", procStart));
 
       // Rejected: live pid, but procStart does not match it. Pins the exact
-      // `ps -o lstart=` string comparison our own procStartOf reproduces —
+      // string comparison against what registryProcStart reproduces (/proc
+      // clock ticks on Linux, `ps -o lstart=` on macOS) —
       // a recycled pid must not resurrect a dead session's entry.
       put(`${impostor.pid}.json`, mkEntry(impostor.pid, "contract-badprocstart", "Sat Aug  8 10:47:21 2026"));
+
+      // Rejected: the same, in the form a Linux entry carries. A start time
+      // that is ticks but not this pid's must not list either — a date
+      // string failing says nothing about whether the ticks are compared.
+      if (/^\d+$/.test(procStart)) {
+        put(`${impostor2.pid}.json`, mkEntry(impostor2.pid, "contract-badticks", String(Number(procStart) + 100000)));
+      }
 
       const names = listedNames();
       expect(names).toContain("contract-valid");
       expect(names).not.toContain("contract-deadpid");
       expect(names).not.toContain("contract-badprocstart");
+      expect(names).not.toContain("contract-badticks");
     } finally {
       for (const f of cleanup) { try { unlinkSync(f); } catch { /* gone */ } }
       holder.kill();
       impostor.kill();
+      impostor2.kill();
     }
   }, 30_000);
 });
@@ -408,8 +419,11 @@ describe.skipIf(!ENABLED || registryBlocked !== null)("claude background-session
       // Settled: nothing it holds is work.
       expect(jobState(id)?.tempo).not.toBe("active");
       expect(jobHasWorkInFlight(id)).toBe(false);
-      // The turn ended on the error, with the API's status and reason.
-      expect(turnEndedOnError(sessionId)).toEqual(expect.objectContaining({ status: 404, reason: "model_not_found" }));
+      // The turn ended on the error, with the API's status and reason. The
+      // job can read failed a moment before the error is in the transcript,
+      // so wait for it as codex-collab does (it polls).
+      const ended = await until(() => turnEndedOnError(sessionId), 15_000, "the API error to be in the transcript");
+      expect(ended).toEqual(expect.objectContaining({ status: 404, reason: "model_not_found" }));
       // Claude Code made that reply up; it names no model the session ran on.
       expect(ranOn(sessionId)).toBeNull();
     } finally {

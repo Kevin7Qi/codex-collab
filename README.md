@@ -16,7 +16,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 ## Why
 
 - **Native peer messaging** — The workspace broker registers Codex as a peer in Claude Code's cross-session messaging, so Claude sessions message Codex directly (`SendMessage`) and Codex answers back — including asking Claude questions mid-task via a `collab.consult` tool. No CLI in the hot path.
-- **Structured communication** — Talks to Codex via JSON-RPC over stdio. Every event is typed and parseable.
+- **Structured communication** — Talks to Codex via app-server JSON-RPC: attaches to Codex's shared app-server over its control socket when one is running, or spawns a private server over stdio. Every event is typed and parseable.
 - **Event-driven progress** — Streams progress lines as Codex works, so Claude sees what's happening in real time.
 - **Review automation** — One command to run code reviews for PRs, uncommitted changes, or specific commits in a read-only sandbox.
 - **Thread reuse** — Resume existing threads to send follow-up prompts, build on previous responses, or steer the work in a new direction.
@@ -27,7 +27,7 @@ codex-collab is a [Claude Code skill](https://docs.anthropic.com/en/docs/claude-
 
 ## Installation
 
-Requires [Bun](https://bun.sh/) >= 1.3.14 and [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) on your PATH. Tested on Linux (Ubuntu 22.04), macOS, and Windows 10.
+Requires [Bun](https://bun.sh/) >= 1.3.14 and [Codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`) on your PATH (goals, Guardian, and memory isolation require Codex >= 0.142). Tested on Linux (Ubuntu 22.04), macOS, and Windows 10.
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
@@ -54,7 +54,17 @@ After installation, run `codex-collab health` to verify. If the command is not f
 <details>
 <summary>Where things get installed</summary>
 
-The installer builds a self-contained bundle plus a binary shim. On Linux and macOS these go to `~/.claude/skills/codex-collab/` and `~/.local/bin`. On Windows they go to `%USERPROFILE%\.claude\skills\codex-collab\`, and `install.ps1` adds the shim to your PATH.
+The installer builds a self-contained bundle plus a binary shim:
+
+- **Linux / macOS (`install.sh`)**
+  - Claude Code skill bundle: `~/.claude/skills/codex-collab/`
+  - CLI shim: `~/.local/bin/codex-collab`
+  - Codex-side skill: `~/.codex/skills/claude-collab/` (follows `$CODEX_HOME`)
+  - Opt-in exec-policy rule: `~/.codex/rules/codex-collab.rules` (follows `$CODEX_HOME`; written only if you enable `codex-rule` during an interactive install or via `codex-collab config codex-rule on`)
+- **Windows (`install.ps1`)**
+  - Claude Code skill bundle: `%USERPROFILE%\.claude\skills\codex-collab\`
+  - CLI shims: `%USERPROFILE%\.local\bin\` (`codex-collab.cmd` and `codex-collab`, added to your PATH)
+  - Codex-side skill and rule are omitted since peer messaging is currently not supported on Windows.
 
 Claude discovers the skill automatically, including in a session that is already running. The exception is your first skill: if `~/.claude/skills/` did not exist before, restart Claude Code once so the new directory is watched.
 
@@ -110,10 +120,11 @@ Run `bun run test:fake-models` to exercise the real Codex and Claude Code CLIs a
 ### Uninstalling
 
 ```bash
-codex-collab uninstall
+codex-collab uninstall            # preview and confirm; keeps ~/.codex-collab/
+codex-collab uninstall --purge    # also remove ~/.codex-collab/ (settings, logs, templates)
 ```
 
-It lists what it will stop and remove, then asks before doing anything (`--yes` when there is no terminal to ask). It first stops what codex-collab left running: workspace brokers, channel hosts, waits on replies, and the Claude Code sessions it started that are idle. Then it removes its hooks and rule from Codex (your own hooks stay), the Codex and Claude Code skills, its mailboxes, and the `codex-collab` command. Its records in `~/.codex-collab/` (settings, thread records, logs, and any prompt templates of your own) stay for a later install to pick up: at a terminal it asks whether to delete them too, and `--purge` deletes them without asking. On Windows, `%USERPROFILE%\.local\bin` stays on your PATH, since `install.ps1` adds it only when it is missing and keeps no note of having done so; take it off if nothing else of yours is in it. While a Codex turn runs, or a session it started is working, it changes nothing and says how to end that work. Your threads in Codex and conversations in Claude Code stay, and so does the folder you installed from.
+Stops background processes and removes the CLI shim, skills, hooks, and exec-policy rule (refuses to run while a Codex turn or spawned Claude session is active; pass `--yes` non-interactively). Your Codex threads, Claude Code conversations, and own Codex hooks are untouched.
 
 ## Quick Start
 
@@ -156,6 +167,7 @@ The commands Codex uses to reach Claude (`peers`, `send`, `task`) are under [Pee
 | `questions [id]` | List pending questions in this workspace; with an ID, show the full text |
 | `next` | Block until something needs attention, print it in full with how to respond, then exit |
 | `approve <id>` | Approve a pending request |
+| `approve --guardian [id]` | Override a Guardian denial (without an ID, list pending denials); takes effect on the thread's next run |
 | `decline <id>` | Decline a pending request |
 
 </details>
@@ -241,7 +253,7 @@ The commands Codex uses to reach Claude (`peers`, `send`, `task`) are under [Pee
 
 | Flag | Description |
 |------|-------------|
-| `--json` | JSON output for supported commands (`threads`, `peek`) |
+| `--json` | JSON output for supported commands (`threads`, `peek`, `peers`, `tasks`, `task status\|wait\|result`) |
 | `--all` | List all threads with no display limit |
 | `--discover` | Query Codex server for threads not in the local index |
 | `--limit <n>` | Limit items shown by `threads` or `peek` |

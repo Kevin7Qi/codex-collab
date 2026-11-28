@@ -321,7 +321,7 @@ codex-collab models | templates | health | version
 | `--base <branch>` | Base branch for PR review (default: auto-detected default branch) |
 | `--all` | List all threads with no display limit (threads command) |
 | `--discover` | Query Codex server for threads not in local index (threads command); marks threads open or active on the app-server |
-| `--json` | JSON output (threads, peek commands) |
+| `--json` | JSON output (`threads`, `peek`, `peers`, `tasks`, `task status\|wait\|result`) |
 | `--full` | Include all item types in peek output (default shows messages only) |
 | `--template <name>` | Prompt template for run command (checks `~/.codex-collab/templates/` first, then built-in) |
 | `--goal <objective>` | (run) Create the thread's goal before the first turn (replaces the objective on `--resume`) — see Goal Mode. Still needs a prompt: the prompt is turn one, the goal is the standing objective. **`review` rejects this flag** (exit 1) — a review is a single turn on an ephemeral thread |

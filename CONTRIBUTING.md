@@ -78,7 +78,7 @@ The tag must be `v<version>` matching `package.json` — `update` compares the r
 
 ## Pull Requests
 
-- Keep PRs focused — one feature or fix per PR
+- Keep PRs focused — small related fixes can ship together
 - Run `bun run test:ci` before submitting — it runs `bun run typecheck` and `bun test` with `claude` hidden from PATH, as CI's hosts have it
 - Write tests for new functionality
 - Follow existing code style and patterns

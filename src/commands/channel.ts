@@ -59,7 +59,7 @@ import { verifyMailboxDir } from "../questions";
 import { wakeThread } from "../codex-wake";
 import { hookRanIn } from "../codex-hooks";
 import { loadUserConfig, parseOptions } from "./shared";
-import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../claude-registry";
+import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, registryProcStart, sessionsDir, sniffRegistryVersion } from "../claude-registry";
 import { parseEnvelope } from "../claude-envelope";
 import { formatDuration } from "../format";
 import { type Taken } from "../channel-delivery";
@@ -336,8 +336,7 @@ export async function handleChannelHost(args: string[]): Promise<void> {
         name: a.name,
         socketPath: a.socketPath,
         version: sniffRegistryVersion(),
-        // /proc first: `ps` may not list a process this new yet.
-        procStart: procStartTicksOf(pid) ?? procStartOf(pid),
+        procStart: registryProcStart(pid),
         sessionId: transientSessionId(),
       })), { mode: 0o644 });
       a.entryPath = entryPath;
