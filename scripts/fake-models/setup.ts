@@ -75,7 +75,8 @@ const missingPinnedTool = (dir: string) => (["claude", "codex"] as const).find(n
 
 async function installPinnedTools(env: Record<string, string>) {
   const cache = join(homedir(), ".cache", "codex-collab", "fake-models");
-  const dir = join(cache, `${process.platform}-${process.arch}-claude-${versions.claude}-codex-${versions.codex}`);
+  const libc = process.platform === "linux" ? ((process.report.getReport() as { header: { glibcVersionRuntime?: string } }).header.glibcVersionRuntime ? "-glibc" : "-musl") : "";
+  const dir = join(cache, `${process.platform}-${process.arch}${libc}-claude-${versions.claude}-codex-${versions.codex}`);
   if (existsSync(dir) && missingPinnedTool(dir)) {
     console.log(`Repairing incomplete pinned CLI cache: ${dir}`);
     rmSync(dir, { recursive: true, force: true });
