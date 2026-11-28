@@ -247,7 +247,8 @@ describe.skipIf(!ENABLED || registryBlocked !== null)("claude session-registry c
     // that is live and well-named but carries the wrong procStart.
     const holder = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
     const impostor = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
-    if (!holder.pid || !impostor.pid) throw new Error("holder spawn failed");
+    const impostor2 = spawn("sh", ["-c", "read _ || true"], { stdio: ["pipe", "ignore", "ignore"] });
+    if (!holder.pid || !impostor.pid || !impostor2.pid) throw new Error("holder spawn failed");
     const cleanup: string[] = [];
     try {
       await new Promise((r) => setTimeout(r, 300));
@@ -287,14 +288,23 @@ describe.skipIf(!ENABLED || registryBlocked !== null)("claude session-registry c
       // a recycled pid must not resurrect a dead session's entry.
       put(`${impostor.pid}.json`, mkEntry(impostor.pid, "contract-badprocstart", "Sat Aug  8 10:47:21 2026"));
 
+      // Rejected: the same, in the form a Linux entry carries. A start time
+      // that is ticks but not this pid's must not list either — a date
+      // string failing says nothing about whether the ticks are compared.
+      if (/^\d+$/.test(procStart)) {
+        put(`${impostor2.pid}.json`, mkEntry(impostor2.pid, "contract-badticks", String(Number(procStart) + 100000)));
+      }
+
       const names = listedNames();
       expect(names).toContain("contract-valid");
       expect(names).not.toContain("contract-deadpid");
       expect(names).not.toContain("contract-badprocstart");
+      expect(names).not.toContain("contract-badticks");
     } finally {
       for (const f of cleanup) { try { unlinkSync(f); } catch { /* gone */ } }
       holder.kill();
       impostor.kill();
+      impostor2.kill();
     }
   }, 30_000);
 });
