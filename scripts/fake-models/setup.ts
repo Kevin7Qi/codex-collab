@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { homedir } from "node:os";
 
@@ -60,9 +60,26 @@ trust_level = "trusted"
   return { home, workspace, env };
 }
 
+function pinnedExecutable(bin: string, name: string) {
+  const exe = Bun.which(name, { PATH: bin, cwd: bin });
+  if (!exe) return null;
+  try { return statSync(realpathSync(exe)).isFile() ? exe : null; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return null;
+  }
+}
+
+const toolBin = (dir: string) => join(dir, "node_modules", ".bin");
+const missingPinnedTool = (dir: string) => (["claude", "codex"] as const).find(name => !pinnedExecutable(toolBin(dir), name));
+
 async function installPinnedTools(env: Record<string, string>) {
   const cache = join(homedir(), ".cache", "codex-collab", "fake-models");
   const dir = join(cache, `${process.platform}-${process.arch}-claude-${versions.claude}-codex-${versions.codex}`);
+  if (existsSync(dir) && missingPinnedTool(dir)) {
+    console.log(`Repairing incomplete pinned CLI cache: ${dir}`);
+    rmSync(dir, { recursive: true, force: true });
+  }
   if (!existsSync(dir)) {
     mkdirSync(cache, { recursive: true });
     const staging = mkdtempSync(join(cache, ".install-"));
@@ -73,24 +90,25 @@ async function installPinnedTools(env: Record<string, string>) {
       for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete installEnv[name];
       const proc = Bun.spawn([process.execPath, "add", "--trust", ...tools], { cwd: staging, env: installEnv, stdout: "inherit", stderr: "inherit" });
       if (await proc.exited !== 0) throw new Error("Failed to install pinned fixture CLIs");
+      const missing = missingPinnedTool(staging);
+      if (missing) throw new Error(`Pinned fixture install did not produce a runnable ${missing}`);
       rmSync(installEnv.BUN_INSTALL_CACHE_DIR, { recursive: true, force: true });
       try { renameSync(staging, dir); }
-      catch (error) { if (!existsSync(dir)) throw error; }
+      catch (error) { if (missingPinnedTool(dir)) throw error; }
     } finally {
       rmSync(staging, { recursive: true, force: true });
     }
   }
-  return join(dir, "node_modules", ".bin");
+  return toolBin(dir);
 }
 
 export async function configureTools(env: Record<string, string>, install: boolean) {
   const paths = [dirname(process.execPath), env.PATH ?? ""];
-  if (install) {
-    paths.unshift(await installPinnedTools({ ...env, PATH: paths.join(delimiter) }));
-  }
+  const pinnedBin = install ? await installPinnedTools({ ...env, PATH: paths.join(delimiter) }) : null;
+  if (pinnedBin) paths.unshift(pinnedBin);
   env.PATH = paths.join(delimiter);
   for (const name of ["claude", "codex"] as const) {
-    const exe = Bun.which(name, { PATH: env.PATH });
+    const exe = pinnedBin ? pinnedExecutable(pinnedBin, name) : Bun.which(name, { PATH: env.PATH });
     if (!exe) throw new Error(`Missing ${name} on PATH; rerun with --install`);
     const version = Bun.spawnSync(toolCommand(exe, "--version"), { env });
     if (version.exitCode !== 0) throw new Error(`Cannot run ${name}: ${version.stderr.toString()}`);
