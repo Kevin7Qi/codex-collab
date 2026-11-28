@@ -20,19 +20,17 @@
 // exactly as before.
 
 import net from "node:net";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
-  readlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
-import { homedir } from "node:os";
+import { basename, join } from "node:path";
 import {
   registerThread,
   findShortId,
@@ -45,7 +43,7 @@ import {
   pruneRuns,
 } from "./threads";
 import { EventDispatcher } from "./events";
-import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode, mailboxRoot } from "./config";
+import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
 import { resolveModelDefaults } from "./models";
 import { sessionsDir, procStartOf, procIdentity, MESSAGING_FLOOR, compareVersions, claudeCodeVersion, sniffRegistryVersion, isCodexCollabSocket, workspaceSuffix, buildRegistryEntry } from "./claude-registry";
 import { type InboundMessage, parseEnvelope, peerModeFor, buildEnvelope } from "./claude-envelope";
@@ -2604,4 +2602,21 @@ export function createPeer(host: PeerHost): Peer {
     hasLiveSessions,
     stop,
   };
+}
+
+export interface PeerState {
+  pid: number;
+  name: string;
+  socketPath: string;
+  startedAt: string;
+}
+
+export function readPeerState(stateDir: string): PeerState | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(stateDir, "peer-state.json"), "utf-8"));
+    if (typeof parsed?.pid === "number" && typeof parsed?.socketPath === "string") {
+      return parsed as PeerState;
+    }
+  } catch { /* absent */ }
+  return null;
 }

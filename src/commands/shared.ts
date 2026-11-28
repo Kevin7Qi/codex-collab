@@ -1,5 +1,6 @@
 // src/commands/shared.ts — Shared utilities for CLI command modules
 
+import { DEFAULT_SPAWN_RESUME_SEC } from "../claude-sessions";
 import { formatDuration, pluralize } from "../format";
 import {
   config,
@@ -1570,4 +1571,16 @@ export async function tryServerDelete(client: AppServerClient, threadId: string)
     console.error(`[codex] Warning: could not delete thread on server: ${e instanceof Error ? e.message : String(e)}`);
     return "failed";
   }
+}
+
+/** How long after it was stopped a started session is still resumed:
+ *  `config spawn-resume` in seconds, `off` for never, else the default. */
+export function resumeWindowSec(cfg: UserConfig): number {
+  const v = cfg["spawn-resume"];
+  if (v === undefined) return DEFAULT_SPAWN_RESUME_SEC;
+  if (v === "off") return 0;
+  const n = Number(v);
+  if (Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS) return n;
+  console.error(`[codex] Warning: ignoring invalid spawn-resume in config: ${v}`);
+  return DEFAULT_SPAWN_RESUME_SEC;
 }

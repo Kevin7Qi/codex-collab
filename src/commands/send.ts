@@ -32,7 +32,6 @@ import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
   CLAUDE_EFFORTS,
   DEFAULT_SPAWN_LINGER_SEC,
-  DEFAULT_SPAWN_RESUME_SEC,
   describeModelChoice,
   forgetSpawnedSession,
   isAutocompactWindow,
@@ -74,11 +73,11 @@ import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from ".
 import { codexThreadCwd, insideCodexSandbox, underCodex, codexThreadId, sandboxHint } from "../codex-session";
 import { wakeThread } from "../codex-wake";
 import { isThreadId, messageIdsSince, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
-import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
-import { MAX_TIMEOUT_SECONDS, die, loadUserConfig, parseOptions, type UserConfig } from "./shared";
+import { MAX_TIMEOUT_SECONDS, die, loadUserConfig, parseOptions, type UserConfig, resumeWindowSec } from "./shared";
 import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion, workspaceSuffix } from "../claude-registry";
 import { buildEnvelope, parseEnvelope } from "../claude-envelope";
 import { formatDuration, formatLongDuration } from "../format";
+import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task-outcome";
 
 /** Where `send --file` may read when Codex runs it: inside the folder the
  *  Codex session works in, as Codex's own record of the thread says, never
@@ -346,18 +345,6 @@ export function watchForBlocked(
     lastAnsweredAt: () => answeredAt,
     stop,
   };
-}
-
-/** How long after it was stopped a started session is still resumed:
- *  `config spawn-resume` in seconds, `off` for never, else the default. */
-export function resumeWindowSec(cfg: UserConfig): number {
-  const v = cfg["spawn-resume"];
-  if (v === undefined) return DEFAULT_SPAWN_RESUME_SEC;
-  if (v === "off") return 0;
-  const n = Number(v);
-  if (Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS) return n;
-  console.error(`[codex] Warning: ignoring invalid spawn-resume in config: ${v}`);
-  return DEFAULT_SPAWN_RESUME_SEC;
 }
 
 /** What to tell Codex when it chose a model or effort for a session that

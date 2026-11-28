@@ -2737,7 +2737,8 @@ describe.skipIf(onWindows)("peer status diagnosis", () => {
   // "no broker yet, run `peer up`" sent the user back to the command that
   // had just declined to help.
   test("a live broker with no peer is reported as such, not as no broker", async () => {
-    const { readPeerState, isAlive } = await import("./commands/peer");
+    const { readPeerState } = await import("./peer");
+    const { isAlive } = await import("./process");
     const { loadBrokerState } = await import("./broker");
     const dir = mkdtempSync(join(tmpdir(), "peer-diag-"));
     try {

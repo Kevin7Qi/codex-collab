@@ -18,14 +18,12 @@
 // turn goes on as if it had not run. It waits for nothing: what has not
 // arrived yet is a later hook's.
 
-import { listTasks, loadTask, type TaskRecord, repliesByMessage } from "../claude-tasks";
-import { claimDelivery, isDelivered, isNotice, isThreadId, messageIdsSince, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
+import { loadTask } from "../claude-tasks";
+import { claimDelivery, isNotice, isThreadId, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { HOOK_EVENTS, hookRunsDir, noteHookRan, type HookEvent } from "../codex-hooks";
-import { sanitizeForTerminal } from "../questions";
-import { claimReported, laterFromSession, printedText } from "./task";
 import { buildDelegation } from "../codex-session";
-import { formatAge, listed } from "../format";
 import { undelivered, take, type Taken } from "../channel-delivery";
+import { claimReported, laterFromSession, printedText } from "./task-outcome";
 
 export { HOOK_EVENTS, type HookEvent };
 

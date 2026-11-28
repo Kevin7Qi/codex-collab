@@ -9,8 +9,7 @@ import { resolveStateDir, resolveWorkspaceDir } from "../config";
 import { addressOf, describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, reaperLog, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, stoppedSessionNamed, stoppedSessions, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { outstandingTasksFor } from "../claude-tasks";
 import { describeRanOn, ranOn, type RanOn } from "../claude-transcript";
-import { resumeWindowSec } from "./send";
-import { die, loadUserConfig, parseOptions } from "./shared";
+import { die, loadUserConfig, parseOptions, resumeWindowSec } from "./shared";
 import { insideCodexSandbox, sandboxHint } from "../codex-session";
 import { formatDuration, formatLongDuration } from "../format";
 

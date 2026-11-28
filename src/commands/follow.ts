@@ -12,14 +12,7 @@
 
 import { openSync, readSync, closeSync, fstatSync } from "fs";
 import { resolve } from "path";
-import {
-  findShortId,
-  listRuns,
-  listRunsForThread,
-  loadRun,
-  loadThreadIndex,
-} from "../threads";
-import { resolveRunLogPath } from "./threads";
+import { findShortId, listRuns, listRunsForThread, loadRun, loadThreadIndex, resolveRunLogPath } from "../threads";
 import { LogEntryParser, renderEntry, renderFinalStatus, type RenderOptions } from "../render";
 import type { RunRecord } from "../types";
 import {
