@@ -279,7 +279,7 @@ Codex 用来联系 Claude 的命令（`peers`、`send`、`task`）见[跨会话�
 
 ## 跨会话消息
 
-同一工作区的 Claude 与 Codex 会话可互发消息，需 macOS 或 Linux 及 Claude Code ≥ 2.1.224；Windows 仅限 CLI。
+同一工作区的 Claude 与 Codex 会话可互发消息，macOS 和 Linux 需要 Claude Code ≥ 2.1.224；Windows 需要 Claude Code ≥ 2.1.239。
 
 ```bash
 codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 查看状态
@@ -295,7 +295,7 @@ codex-collab peer up      # 启动 broker 并注册 Codex；单独执行 `peer` 
 <details>
 <summary>在 Codex 中联系 Claude</summary>
 
-在 Codex 会话中，`codex-collab send <name> "message"` 将消息作为一项任务交给工作区内的某个 Claude Code 会话并等待回复（默认 600 秒）。等待时限只约束命令本身：发出后四小时内到达的回复同样会被保存，可用 `task wait` / `task result` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 不会再有回复：失败、会话已结束或任务过期）。对于由 `send` 启动的会话，它停在你可通过 Remote Control 应答的提示上等待的时间不计入这四小时；你应答之后，它至少还有 `linger` 秒用于回复。无存活会话时 `send` 自动启动后台会话，空闲 60 分钟后停止。每次 `send` 与 `peers stop` 需经审批，`config codex-rule on`（实验性）可免除。`install.sh` 安装的 `claude-collab` 技能为 Codex 描述了这些命令。不支持 Windows。
+在 Codex 会话中，`codex-collab send <name> "message"` 将消息作为一项任务交给工作区内的某个 Claude Code 会话并等待回复（默认 600 秒）。等待时限只约束命令本身：发出后四小时内到达的回复同样会被保存，可用 `task wait` / `task result` 取回（退出码 0 已回复、3 仍在进行、5 停在确认提示、1 不会再有回复：失败、会话已结束或任务过期）。对于由 `send` 启动的会话，它停在你可通过 Remote Control 应答的提示上等待的时间不计入这四小时；你应答之后，它至少还有 `linger` 秒用于回复。无存活会话时 `send` 自动启动后台会话，空闲 60 分钟后停止。每次 `send` 与 `peers stop` 需经审批，`config codex-rule on`（实验性）可免除。安装脚本安装的 `claude-collab` 技能为 Codex 描述了这些命令。
 
 每个 Codex 线程都从自己唯一的地址 `codex(<thread>-<workspace>)` 发出消息；只要与它交流过的某个 Claude Code 会话仍在运行，且每天至少有消息经过它（`config address-idle`；线程下一次 `send` 会重新打开它），这个地址就一直有效：Claude 在这里回复，之后也可以随时把该线程需要知道的事写到这里。到达的消息都为该线程保存，并出现在 `send` 与 `task` 的输出中；开启 `config codex-hook on` 后，还会在该线程自己的轮次中送达（每次工具调用之后、轮次即将结束时，或随你的下一条消息）；开启 `config codex-wake on` 后，若该线程在 Codex 的共享 app-server 上处于空闲，则会为它新开一个轮次送达。
 
@@ -352,9 +352,9 @@ Codex 可通过 `send --model <model> --effort <level>` 逐条消息指定模型
 
 `spawn-trust`（`off` / `codex`，默认 `off`）可为你已在 Codex 中信任的文件夹省去这一步。设为 `codex` 后，当 Claude Code 拒绝一个 Codex 已信任的文件夹（该文件夹本身或其所在仓库，含 worktree；信任其上级文件夹不算）时，`send` 会在 `~/.claude.json` 中将其标记为受信任，效果与在该处接受 Claude Code 的信任提示相同，然后启动会话。此后该文件夹的 Claude Code 设置、hooks 与 MCP 服务器都以你的账户运行。只有你本人能开启此项：由 Codex 执行的 `config spawn-trust codex` 会被拒绝。主目录不会以这种方式被信任，因为 Claude Code 从不保存对主目录的信任。
 
-`codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。Codex 只对单条普通命令应用该规则：带重定向、heredoc 或管道的写法（`send - < task.md`）是一段 shell 脚本，Codex 仍会先征求同意；`send --file task.md` 则保持为普通命令。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。Windows 上不可用。
+`codex-rule`（`on` / `off`，默认 `off`）写入或移除一条 Codex exec-policy 规则，使 Codex 执行 `codex-collab send` 与 `codex-collab peers stop` 时无需逐次审批；`off` 或 `--unset` 即可移除。Codex 只对单条普通命令应用该规则：带重定向、heredoc 或管道的写法（`send - < task.md`）是一段 shell 脚本，Codex 仍会先征求同意；`send --file task.md` 则保持为普通命令。开启后，任何 Codex 会话——包括受其所读取内容引导的会话——都可以向你的 Claude Code 会话发送消息、启动会话，并停止由其启动的会话。安装脚本在交互式终端中询问一次并记录选择。
 
-`codex-hook`（`on` / `off`，默认 `off`）在 Codex 的 `~/.codex/hooks.json`（或 `$CODEX_HOME/hooks.json`）中、你自己的 hooks 之后添加三个 hook；`off` 或 `--unset` 只移除这三个；你的 hooks 保持原有位置，Codex 对它们的信任依赖于此。每次工具调用之后、轮次即将结束时，以及你给线程写消息时，它们把 Claude Code 会话发给该线程、而它尚未看到的消息交给它，每条只交一次；`send`、`task` 或 `messages` 已经打印过的消息视为已看到，开启 hook 时邮箱中已有的消息也是如此。若在轮次结束时交付，该轮次会继续，让 Codex 处理收到的内容。任务未得到回复就结束时，或会话的轮次因错误中止而任务仍未结束时，线程同样会收到通知。这些 hook 运行前，Codex 会先请你确认信任。只要 Codex 在过去一小时内在某个线程中运行过它们，且此后它们在文件中的位置和内容都没有变化，`send` 就会告诉该线程回复会自行送达，Codex 无需再去查看；`health` 会显示 Codex 上次运行它们的时间。一条 hook 容纳不下的长消息会被截断，并附上 `codex-collab messages <id>` 以打印全文。Windows 上不可用。
+`codex-hook`（`on` / `off`，默认 `off`）在 Codex 的 `~/.codex/hooks.json`（或 `$CODEX_HOME/hooks.json`）中、你自己的 hooks 之后添加三个 hook；`off` 或 `--unset` 只移除这三个；你的 hooks 保持原有位置，Codex 对它们的信任依赖于此。每次工具调用之后、轮次即将结束时，以及你给线程写消息时，它们把 Claude Code 会话发给该线程、而它尚未看到的消息交给它，每条只交一次；`send`、`task` 或 `messages` 已经打印过的消息视为已看到，开启 hook 时邮箱中已有的消息也是如此。若在轮次结束时交付，该轮次会继续，让 Codex 处理收到的内容。任务未得到回复就结束时，或会话的轮次因错误中止而任务仍未结束时，线程同样会收到通知。这些 hook 运行前，Codex 会先请你确认信任。只要 Codex 在过去一小时内在某个线程中运行过它们，且此后它们在文件中的位置和内容都没有变化，`send` 就会告诉该线程回复会自行送达，Codex 无需再去查看；`health` 会显示 Codex 上次运行它们的时间。一条 hook 容纳不下的长消息会被截断，并附上 `codex-collab messages <id>` 以打印全文。
 
 `codex-wake`（`on` / `off`，默认 `off`）：当某个 Claude Code 会话在 Codex 线程于共享 app-server 上处于空闲时给它发来消息（通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`），codex-collab 会以该消息在线程上新开一个轮次，沿用线程自己的设置。在线程进行轮次期间到达的消息由 hook 交付；只有 Codex 在其中运行这些 hook（`codex-hook`）的线程才会被唤醒，因为它们记录着 Codex 已读过哪些内容。在自有 app-server 中打开的线程（使用本地文件的 Codex 应用会自行运行一个）无法从外部触达，会在其下一个轮次收到消息。
 
