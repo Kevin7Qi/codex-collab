@@ -171,12 +171,19 @@ async function peer(useDefaultModel = false) {
       if (trace.includes("FIXTURE_CLAUDE_RECEIVED_CODEX_REPLY") && /"returned":.*FIXTURE_CONSULT_ANSWER/.test(trace)) return trace;
     }, "Claude → Codex → collab.consult → Claude", 25_000);
     if (useDefaultModel) {
-      const usedResponsesLite = trace.trim().split("\n").some(line => {
-        const { toolSource, item } = JSON.parse(line);
-        return toolSource === "additional_tools" && item?.type === "custom_tool_call"
-          && item.namespace === "functions" && item.name === "exec" && item.input.includes("tools.collab__consult(");
-      });
-      assert(usedResponsesLite, "Default-model consult did not use functions.exec from a Responses Lite additional_tools item");
+      const request = trace.trim().split("\n").map(line => JSON.parse(line)).find(event => event.consultRequest);
+      assert(request, "Expected a captured default-model consult request");
+      const { item, toolSource } = request;
+      if (request.hasAdditionalTools) {
+        assert(toolSource === "additional_tools" && item.type === "custom_tool_call"
+          && item.namespace === "functions" && item.name === "exec" && item.input.includes("tools.collab__consult("),
+        "Default-model consult did not use functions.exec from a Responses Lite additional_tools item");
+        console.log("  Default-model consult used Responses Lite functions.exec");
+      } else {
+        assert(item.type === "function_call" && /(?:^|[_.])consult$/.test(item.name),
+          "Default-model consult did not use a direct consult function call");
+        console.log("  Default-model consult used a direct function call");
+      }
     } else {
       assert.match(trace, /"type":"function_call".*"name":"consult"/);
     }

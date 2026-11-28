@@ -17,7 +17,7 @@ bun run test:fake-models --install
 | `broker` | Two broker clients can run different threads concurrently; competing for the same thread returns `-32001`. |
 | `send` | `send` auto-spawns a Claude session, replies over the per-thread channel, and replays the reply from `messages`. |
 | `peer` | Claude's `ListAgents` finds the workspace broker, its `SendMessage` starts a Codex turn, and `collab.consult` reaches Claude and returns an answer before the final reply. |
-| `peer-default` | The same round trip without naming a Codex model; Codex 0.172.0 selects `gpt-6.2-sol` and routes consult through code mode. |
+| `peer-default` | The same round trip without naming a Codex model; checks and prints which tool format the installed CLI used. Codex 0.172.0 selects `gpt-6.2-sol` and routes consult through code mode. |
 | `failures` | A mid-stream model error fails the run; delaying a response triggers the CLI's timeout. |
 | `held` | A separate app-server holding a thread prevents resume with exit code 8. |
 | `contract` | Runs the live `item/tool/call` contract against the fixture, asserting the real callback and returned answer. |

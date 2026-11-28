@@ -75,7 +75,8 @@ function responses(body: RequestBody, log: (data: object) => void, brokerGate: P
   const input = typeof body.input === "string" ? [] : body.input ?? [];
   const prompt = typeof body.input === "string" ? body.input : text(input.findLast(item => item.role === "user")?.content);
   const returned = input.findLast(item => item.type === "function_call_output" || item.type === "custom_tool_call_output");
-  const additionalTools = input.flatMap(item => item.type === "additional_tools" ? item.tools ?? [] : []);
+  const additionalToolItems = input.filter(item => item.type === "additional_tools");
+  const additionalTools = additionalToolItems.flatMap(item => item.tools ?? []);
   const tools = [...(body.tools ?? []), ...additionalTools];
   const namespace = tools.find(tool => tool.type === "namespace" && tool.name === "collab");
   const consult = namespace?.tools?.find(tool => tool.name === "consult") ?? tools.find(tool => /(?:^|[_.])consult$/.test(tool.name));
@@ -98,6 +99,7 @@ function responses(body: RequestBody, log: (data: object) => void, brokerGate: P
   const response = { id: id("resp"), object: "response", created_at: Math.floor(Date.now() / 1000), model: body.model, output: [], status: "in_progress" };
   const usage = { input_tokens: 2, output_tokens: 3, total_tokens: 5, input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 } };
   log({ api: "responses", model: body.model, marker, item,
+    ...(question && !returned ? { consultRequest: true, hasAdditionalTools: additionalToolItems.length > 0 } : {}),
     ...(item.type === "custom_tool_call" ? { toolSource: additionalExec ? "additional_tools" : "tools" } : {}),
     ...(returned ? { returned: returned.output } : {}),
   });
