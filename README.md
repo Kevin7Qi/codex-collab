@@ -113,6 +113,8 @@ Use `--dev` to symlink source files for live-reloading instead of building a bun
 powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 ```
 
+Run `bun run test:fake-models` to exercise the real Codex and Claude Code CLIs against scripted loopback model APIs, without signing in. It uses Git, Bun, and both CLIs on PATH; add `--install` to download and cache pinned CLI versions (requires Node.js and npm registry access on the first run). See [the harness guide](scripts/fake-models/README.md) for individual scenarios and limitations.
+
 </details>
 
 ### Uninstalling

@@ -1,0 +1,160 @@
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, sep } from "node:path";
+
+export const versions = { claude: "2.1.332", codex: "0.172.0" } as const;
+
+export function toolCommand(name: string, ...args: string[]): string[] {
+  return process.platform === "win32" ? ["cmd.exe", "/d", "/c", name, ...args] : [name, ...args];
+}
+
+export function createFixture(port: number) {
+  // Unix broker sockets live under HOME and have a short kernel pathname limit.
+  const baseDir = process.platform === "win32" ? homedir() : "/tmp";
+  const home = realpathSync(mkdtempSync(join(baseDir, ".cc-fixture-")));
+  const workspace = join(home, "ws");
+  const codexHome = join(home, ".codex");
+  const temp = join(home, "tmp");
+  for (const dir of [workspace, codexHome, temp, join(home, ".claude", "sessions")]) mkdirSync(dir, { recursive: true });
+  const env: Record<string, string> = {};
+  for (const name of ["PATH", "SystemRoot", "ComSpec", "PATHEXT", "USER", "USERNAME", "LANG", "LC_ALL"]) {
+    const value = process.env[name];
+    if (value) env[name] = value;
+  }
+  const base = `http://127.0.0.1:${port}`;
+  const dummyKey = "fixture-invalid-key";
+  Object.assign(env, {
+    HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home,
+    XDG_CONFIG_HOME: home, XDG_DATA_HOME: home, XDG_CACHE_HOME: home,
+    TMPDIR: temp, TMP: temp, TEMP: temp,
+    ANTHROPIC_API_KEY: dummyKey, ANTHROPIC_BASE_URL: base,
+    CODEX_HOME: codexHome, COLLAB_FIXTURE_KEY: dummyKey,
+    CODEX_COLLAB_NO_UPDATE_CHECK: "1", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CODEX_COLLAB_REAP_POLL_MS: "500", CODEX_COLLAB_CHANNEL_CHECK_MS: "500",
+    ENABLE_TOOL_SEARCH: "false", DISABLE_TELEMETRY: "1", DISABLE_AUTOUPDATER: "1",
+    HTTP_PROXY: "http://127.0.0.1:1", HTTPS_PROXY: "http://127.0.0.1:1",
+    ALL_PROXY: "http://127.0.0.1:1", NO_PROXY: "127.0.0.1,localhost",
+    GIT_CONFIG_NOSYSTEM: "1",
+  });
+  const git = Bun.spawnSync(["git", "init", "--quiet", workspace], { env });
+  if (git.exitCode !== 0) throw new Error(`git init failed: ${git.stderr.toString()}`);
+  writeFileSync(join(home, ".claude.json"), JSON.stringify({
+    hasCompletedOnboarding: true,
+    customApiKeyResponses: { approved: [dummyKey], rejected: [] },
+    projects: { [realpathSync(workspace)]: { hasTrustDialogAccepted: true } },
+  }));
+  writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["SendMessage"] } }));
+  writeFileSync(join(codexHome, "config.toml"), `model = "gpt-5.4"
+model_provider = "loopback_fixture"
+analytics.enabled = false
+check_for_update_on_startup = false
+[model_providers.loopback_fixture]
+name = "Loopback fixture"
+base_url = "${base}/v1"
+env_key = "COLLAB_FIXTURE_KEY"
+wire_api = "responses"
+
+[projects.${JSON.stringify(realpathSync(workspace))}]
+trust_level = "trusted"
+`);
+  return { home, workspace, env };
+}
+
+function isFile(path: string) {
+  try { return statSync(path).isFile(); }
+  catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    return false;
+  }
+}
+
+function pinnedExecutable(bin: string, name: string) {
+  const exe = Bun.which(name, { PATH: bin, cwd: bin });
+  return exe && isFile(exe) ? exe : null;
+}
+
+function hasPinnedCodexBinary(dir: string) {
+  const { platform, arch } = process;
+  if (arch !== "x64" && arch !== "arm64") return false;
+  const target = platform === "linux" ? "unknown-linux-musl" : platform === "darwin" ? "apple-darwin" : platform === "win32" ? "pc-windows-msvc" : null;
+  if (!target) return false;
+  const launcher = join(dir, "node_modules", "@openai", "codex", "bin", "codex.js");
+  if (!isFile(launcher)) return false;
+  const require = createRequire(realpathSync(launcher));
+  let pkg: string;
+  try { pkg = dirname(realpathSync(require.resolve(`@openai/codex-${platform}-${arch}/package.json`))); }
+  catch (error) {
+    const { code } = error as NodeJS.ErrnoException;
+    if (code !== "MODULE_NOT_FOUND" && code !== "ENOENT") throw error;
+    return false;
+  }
+  const location = relative(realpathSync(dir), pkg);
+  if (location === ".." || location.startsWith(`..${sep}`) || isAbsolute(location)) return false;
+  const triple = `${arch === "x64" ? "x86_64" : "aarch64"}-${target}`;
+  const binary = platform === "win32" ? "codex.exe" : "codex";
+  return isFile(join(pkg, "vendor", triple, "bin", binary));
+}
+
+const toolBin = (dir: string) => join(dir, "node_modules", ".bin");
+const missingPinnedTool = (dir: string) => (["claude", "codex"] as const).find(name =>
+  !pinnedExecutable(toolBin(dir), name) || (name === "codex" && !hasPinnedCodexBinary(dir)));
+
+async function installPinnedTools(env: Record<string, string>) {
+  const cache = join(homedir(), ".cache", "codex-collab", "fake-models");
+  const libc = process.platform === "linux" ? ((process.report.getReport() as { header: { glibcVersionRuntime?: string } }).header.glibcVersionRuntime ? "-glibc" : "-musl") : "";
+  const dir = join(cache, `${process.platform}-${process.arch}${libc}-claude-${versions.claude}-codex-${versions.codex}`);
+  if (existsSync(dir) && missingPinnedTool(dir)) {
+    console.log(`Repairing incomplete pinned CLI cache: ${dir}`);
+    rmSync(dir, { recursive: true, force: true });
+  }
+  if (!existsSync(dir)) {
+    mkdirSync(cache, { recursive: true });
+    const staging = mkdtempSync(join(cache, ".install-"));
+    try {
+      writeFileSync(join(staging, "package.json"), "{}\n");
+      const tools = [`@anthropic-ai/claude-code@${versions.claude}`, `@openai/codex@${versions.codex}`];
+      const installEnv: Record<string, string> = { ...env, BUN_INSTALL_CACHE_DIR: join(staging, "cache") };
+      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]) delete installEnv[name];
+      const proc = Bun.spawn([process.execPath, "add", "--trust", ...tools], { cwd: staging, env: installEnv, stdout: "inherit", stderr: "inherit" });
+      if (await proc.exited !== 0) throw new Error("Failed to install pinned fixture CLIs");
+      const missing = missingPinnedTool(staging);
+      if (missing) throw new Error(`Pinned fixture install did not produce a runnable ${missing}`);
+      rmSync(installEnv.BUN_INSTALL_CACHE_DIR, { recursive: true, force: true });
+      try { renameSync(staging, dir); }
+      catch (error) { if (missingPinnedTool(dir)) throw error; }
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  }
+  return toolBin(dir);
+}
+
+export async function configureTools(env: Record<string, string>, install: boolean) {
+  const paths = [dirname(process.execPath), env.PATH ?? ""];
+  const pinnedBin = install ? await installPinnedTools({ ...env, PATH: paths.join(delimiter) }) : null;
+  if (pinnedBin) paths.unshift(pinnedBin);
+  env.PATH = paths.join(delimiter);
+  for (const name of ["claude", "codex"] as const) {
+    const exe = pinnedBin ? pinnedExecutable(pinnedBin, name) : Bun.which(name, { PATH: env.PATH });
+    if (!exe) throw new Error(`Missing ${name} on PATH; rerun with --install`);
+    const version = Bun.spawnSync(toolCommand(exe, "--version"), { env });
+    if (version.exitCode !== 0) throw new Error(`Cannot run ${name}: ${version.stderr.toString()}`);
+    const actual = version.stdout.toString().trim();
+    console.log(actual);
+    if (!actual.includes(versions[name])) console.warn(`Fixture validated with ${name} ${versions[name]}; use --install to pin it`);
+    if (name === "codex" && process.platform === "linux" && !Bun.which("bwrap", { PATH: env.PATH })) {
+      const modules = dirname(dirname(realpathSync(exe)));
+      const arch = process.arch === "arm64" ? "arm64" : "x64";
+      const triplet = process.arch === "arm64" ? "aarch64" : "x86_64";
+      for (const parent of [join(modules, "node_modules", "@openai"), dirname(modules)]) {
+        const bin = join(parent, `codex-linux-${arch}`, "vendor", `${triplet}-unknown-linux-musl`, "codex-resources");
+        if (existsSync(join(bin, "bwrap"))) {
+          env.PATH += delimiter + bin;
+          break;
+        }
+      }
+    }
+  }
+}

@@ -156,8 +156,10 @@ describe.skipIf(!ENABLED)("codex app-server contracts", () => {
     try {
       let sawPlaintext = false;
       client.onRequest("item/tool/call", (params: unknown) => {
-        const p = params as { arguments?: unknown };
-        sawPlaintext = JSON.stringify(p?.arguments ?? "").includes(MARK);
+        // The callback is the contract, whether the model calls the function
+        // directly or reaches it through the Responses Lite exec tool.
+        const p = params as { tool?: string; arguments?: { question?: string } } | null;
+        if (p?.tool === "consult" && typeof p.arguments?.question === "string" && p.arguments.question.includes(MARK)) sawPlaintext = true;
         return { contentItems: [{ type: "inputText", text: ANSWER }], success: true };
       });
       const start = await client.request("thread/start", {
