@@ -49,6 +49,21 @@ describe("codex-collab's hooks in Codex's hooks file", () => {
     expect(isOurHandler({ command: '"C:\\bun.exe" "C:\\other\\src\\cli.ts" hook' }, COMMAND)).toBe(false);
   });
 
+  test.skipIf(process.platform !== "win32")("hook status and removal work from a path that cannot install hooks", () => {
+    const path = fresh();
+    const script = process.argv[1];
+    process.argv[1] = "C:\\with%expansion!\\codex-collab";
+    try {
+      expect(() => hookCommand()).toThrow("expansion characters");
+      expect(codexHooksInSync(undefined, path)).toBeNull();
+      installCodexHooks(COMMAND, path);
+      expect(codexHooksInSync(undefined, path)).toBe(false);
+      expect(removeCodexHooks(path)).toBe(true);
+    } finally {
+      process.argv[1] = script;
+    }
+  });
+
   test("hooks reach the CLI by the installer's link when it leads to this CLI, so that a checkout moving changes nothing", () => {
     if (process.platform === "win32") return;
     const dir = join(ROOT, `links-${++n}`);
