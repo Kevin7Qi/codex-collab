@@ -1211,8 +1211,13 @@ describeUnix("reaper", () => {
       register(`${now.pid}.json`, { pid: now.pid, procStart: restarted.procStart, sessionId: sid, name: watched.name, kind: "bg", jobId: "deadbee5", status: "idle", statusUpdatedAt: Date.now() - 5000 });
     };
     try {
-      expect(await runReaper(watched, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, afterRecordRead: restart })).toBe("gone");
+      const said: string[] = [];
+      expect(await runReaper(watched, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3, afterRecordRead: restart, log: (line) => said.push(line) })).toBe("gone");
       expect(looks).toBe(1);
+      // Not followed at all: a reaper that took the restarted session's pid
+      // and was only kept from stopping it later has still stopped watching
+      // its own.
+      expect(said).toEqual(["its record is of a session started since: nothing left to watch"]);
       expect(existsSync(fake.stopLog)).toBe(false);
       expect(readSpawnedSessions(stateDir)).toEqual([restarted]);
     } finally {

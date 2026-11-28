@@ -252,8 +252,17 @@ function hooksRunning(cfg: Record<string, unknown> = {}): () => void {
  *  registers a live entry (a sleeper it starts) whose socket is `socketPath`
  *  — a fake session this test serves. `stop <id>` only logs, so a reaper's
  *  confirming look finds the entry still live and signals the sleeper. */
-function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s", opts: { stopDelaySec?: number; untrusted?: boolean; trustGate?: boolean } = {}): void {
+function writeFakeClaude(binDir: string, socketPath: string, sessionId = "s", opts: { stopDelaySec?: number; untrusted?: boolean; trustGate?: boolean; restartedOnStop?: string } = {}): void {
   mkdirSync(binDir, { recursive: true });
+  // `restartedOnStop`: while it is being stopped the session goes, and
+  // another process records one started since under the same id — its
+  // record's start is this.
+  const restarted = opts.restartedOnStop ? `
+    while read -r p; do kill "$p" 2>/dev/null; done < "${binDir}/sleepers"
+    rm -f "$CODEX_COLLAB_SESSIONS_DIR"/*.json
+    for f in "$HOME"/.codex-collab/workspaces/*/spawned-claude.json; do
+      F="$f" bun -e 'const fs = require("fs"); const f = process.env.F; fs.writeFileSync(f, JSON.stringify(JSON.parse(fs.readFileSync(f, "utf8")).map((r) => ({ ...r, startedAt: "${opts.restartedOnStop}" }))))'
+    done` : "";
   writeFileSync(join(binDir, "claude"), `#!/bin/sh
 case "$1" in
   --bg)
@@ -273,7 +282,7 @@ case "$1" in
     printf '{"pid":%s,"sessionId":"${sessionId}","cwd":"%s","startedAt":%s,"procStart":"%s","version":"2.1.261","peerProtocol":1,"kind":"bg","jobId":"cafe0001","entrypoint":"cli","messagingSocketPath":"%s","name":"%s","nameSource":"peer","status":"idle","updatedAt":%s,"statusUpdatedAt":%s}' \\
       "$pid" "$(pwd)" "$now" "$start" "${socketPath}" "$3" "$now" "$now" > "$CODEX_COLLAB_SESSIONS_DIR/$pid.json"
     ;;
-  stop) echo "stop $2" >> "${binDir}/stop.log"${opts.stopDelaySec ? `; sleep ${opts.stopDelaySec}` : ""} ;;
+  stop) echo "stop $2" >> "${binDir}/stop.log"${opts.stopDelaySec ? `; sleep ${opts.stopDelaySec}` : ""}${restarted} ;;
 esac
 `, { mode: 0o755 });
 }
@@ -744,6 +753,26 @@ describeUnix("peers", () => {
       expect(stopped.stdout).toContain(`Stopped ${spawnedSessionName(WS)}. Its conversation is kept:`);
       expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
       expect(spawnedRecords()).toContainEqual(expect.objectContaining({ id: "cafe0001", stoppedAt: expect.any(String) }));
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("peers stop leaves the record of a session started since under the same id as it is", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-peers-stop-restarted");
+    const fake = startFake(spawnedSessionName(WS), { reply: () => "ok" });
+    writeFakeClaude(binDir, fake.socketPath, "s", { restartedOnStop: "2031-01-01T00:00:00.000Z" });
+    writeConfig({ linger: 600 });
+    try {
+      const env = { PATH: `${binDir}:${process.env.PATH}` };
+      expect((await runCli(["send", "hello"], env)).code).toBe(0);
+      const stopped = await runCli(["peers", "stop", spawnedSessionName(WS)], env);
+      expect(stopped.code).toBe(0);
+      expect(readFileSync(join(binDir, "stop.log"), "utf-8")).toContain("stop cafe0001");
+      expect(spawnedRecords()).toEqual([expect.objectContaining({ id: "cafe0001", startedAt: "2031-01-01T00:00:00.000Z" })]);
+      expect((spawnedRecords() as Array<{ stoppedAt?: string }>)[0].stoppedAt).toBeUndefined();
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
@@ -2889,6 +2918,31 @@ describeUnix("send", () => {
       expect(r.code).toBe(0);
       expect(r.stdout).toMatch(/task: [0-9a-f]{8}  status: replied/);
       expect(r.stdout).toContain("  done after all");
+    } finally {
+      removeConfig();
+      killFakeSleepers(binDir);
+    }
+  });
+
+  test("a session started since under the same id keeps its record when the one at a prompt is stopped", async () => {
+    await settleSpawnState();
+    const binDir = join(TEST_HOME, "bin-blocked-restarted");
+    const fake = startFake(spawnedSessionName(WS), { reply: null });
+    writeFakeClaude(binDir, fake.socketPath, "s", { restartedOnStop: "2031-01-01T00:00:00.000Z" });
+    writeConfig({ linger: 60 });
+    try {
+      const live = runCliLive(["send", "edit the file", "--timeout", "60"], { PATH: `${binDir}:${process.env.PATH}`, CODEX_COLLAB_BLOCKED_POLL_MS: "50" });
+      await waitFor(() => fake.received.length === 1, 15_000);
+      for (const f of readdirSync(REGISTRY)) {
+        const file = join(REGISTRY, f);
+        const entry = JSON.parse(readFileSync(file, "utf-8"));
+        if (entry.name === fake.name) writeFileSync(file, JSON.stringify({ ...entry, status: "waiting" }));
+      }
+      const r = await live.done;
+      expect(r.code).toBe(5);
+      expect(r.stdout).toMatch(/task: [0-9a-f]{8}  status: blocked/);
+      expect(spawnedRecords()).toEqual([expect.objectContaining({ id: "cafe0001", startedAt: "2031-01-01T00:00:00.000Z" })]);
+      expect((spawnedRecords() as Array<{ stoppedAt?: string }>)[0].stoppedAt).toBeUndefined();
     } finally {
       removeConfig();
       killFakeSleepers(binDir);
