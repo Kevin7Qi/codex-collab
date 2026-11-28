@@ -430,7 +430,7 @@ export async function handleSend(args: string[]): Promise<void> {
   const wait = !options.noWait;
 
   if (process.platform === "win32") {
-    die("codex-collab send is unavailable on Windows: codex-collab does not support Claude Code's cross-session messaging, which it rides on, there yet.");
+    die("codex-collab send is unavailable on Windows: Claude Code's cross-session messaging, which it rides on, does not exist there.");
   }
   if (insideCodexSandbox()) {
     die(

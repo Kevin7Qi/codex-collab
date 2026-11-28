@@ -12,7 +12,7 @@ import { carryCodexTrust, claudeTrusts, codexTrust, codexTrustNote, mainWorktree
 
 const onWindows = process.platform === "win32";
 // What reads and writes trust serves `send` and `health`'s trust line, which
-// do not exist on Windows (codex-collab does not support messaging
+// do not exist on Windows (Claude Code has no cross-session messaging
 // there), and its folder rules are Claude Code's and Codex's POSIX ones.
 const describeUnix = onWindows ? describe.skip : describe;
 
