@@ -2941,6 +2941,8 @@ describeUnix("send", () => {
       const r = await live.done;
       expect(r.code).toBe(5);
       expect(r.stdout).toMatch(/task: [0-9a-f]{8}  status: blocked/);
+      // The stop took, so the mark was reached: it is the mark that left the record alone.
+      expect(r.stdout).toContain("session: stopped by codex-collab, conversation kept");
       expect(spawnedRecords()).toEqual([expect.objectContaining({ id: "cafe0001", startedAt: "2031-01-01T00:00:00.000Z" })]);
       expect((spawnedRecords() as Array<{ stoppedAt?: string }>)[0].stoppedAt).toBeUndefined();
     } finally {
