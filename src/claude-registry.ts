@@ -50,6 +50,15 @@ export function procStartTicksOf(pid: number, statPath = `/proc/${pid}/stat`): s
   }
 }
 
+/** A pid's start time as a registry entry carries it: /proc clock ticks on
+ *  Linux, `ps -o lstart=` where there is no /proc (macOS). This is what
+ *  Claude Code writes for its own sessions, and on Linux `claude agents
+ *  --json` lists no entry written the other way (2.1.224 through 2.1.332).
+ *  /proc first also covers a process too new for `ps` to list. */
+export function registryProcStart(pid: number): string {
+  return procStartTicksOf(pid) ?? procStartOf(pid);
+}
+
 /** The pid domain this process lives in, in the form Claude Code writes to
  *  its registry entries on Linux (`pidDomain`): the machine id and the PID
  *  namespace. A pid means something only inside its own domain — a command

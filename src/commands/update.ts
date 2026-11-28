@@ -76,7 +76,7 @@ export async function handleSkill(args: string[]): Promise<void> {
 
   // Two files, one consent: Claude's skill (must already be installed) and
   // Codex's (created when missing — installs that predate it have none).
-  // Not on Windows: Claude Code messaging does not exist there, so the
+  // Not on Windows: codex-collab's messaging is unsupported there, so the
   // Codex skill would teach commands that cannot work (install.ps1 skips
   // it for the same reason).
   const normalize = (s: string) => s.replace(/\r\n/g, "\n");
