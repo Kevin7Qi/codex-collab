@@ -263,3 +263,12 @@ function isEsrch(err: unknown): boolean {
     (err as NodeJS.ErrnoException).code === "ESRCH"
   );
 }
+
+export function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}

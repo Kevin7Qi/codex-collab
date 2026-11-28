@@ -1,9 +1,9 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { applyDiscoverLimit, resolveRunLogPath, collectThreadLogPaths, readThreadLog } from "./threads";
+import { applyDiscoverLimit, collectThreadLogPaths, readThreadLog } from "./threads";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { createRun } from "../threads";
+import { createRun, resolveRunLogPath } from "../threads";
 import type { RunRecord } from "../types";
 
 describe("applyDiscoverLimit", () => {

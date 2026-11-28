@@ -21,10 +21,10 @@ import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { resolveStateDir, resolveWorkspaceDir } from "./config";
-import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./peer";
 import { outstandingTasksFor } from "./claude-tasks";
 import { acquireLockSync } from "./lock";
 import { carryCodexTrust, codexTrustNote, type SpawnTrustSetting } from "./claude-trust";
+import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcProbes } from "./claude-registry";
 
 /** A live Claude Code session as the registry describes it. */
 export interface ClaudeSession {

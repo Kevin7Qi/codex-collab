@@ -77,3 +77,59 @@ function compressedFirstLine(file: string): string {
   const end = text.indexOf("\n");
   return end >= 0 ? text.slice(0, end) : text;
 }
+
+/** Escape for the `<codex_delegation>` envelope. Order matters: `&` first,
+ *  or the entities the later rules produce get escaped a second time. */
+export function escapeDelegation(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/** Wrap a peer message in the envelope the Codex app parses out of ordinary
+ *  turn input and renders as a message bubble.
+ *
+ *  A text convention, not a protocol feature: the app's parser needs both
+ *  tags and unescapes the body, so an unparsed envelope still renders as
+ *  legible text. Injected items land in a pseudo-turn the app never
+ *  displays, whatever shape they take.
+ *
+ *  The app makes `source_thread_id` a link to the chat a message came from.
+ *  The sender here is a Claude session, which has no chat there, and an empty
+ *  value is a link to nothing, so it names the thread the message is going
+ *  to: the one chat that exists. Attribution rides inside `<input>`. */
+export function buildDelegation(input: string, threadId: string): string {
+  return [
+    "<codex_delegation>",
+    `  <source_thread_id>${escapeDelegation(threadId)}</source_thread_id>`,
+    `  <input>${escapeDelegation(input)}</input>`,
+    "</codex_delegation>",
+  ].join("\n");
+}
+
+/** Codex sets CODEX_SANDBOX in every command it runs inside its sandbox,
+ *  and in none it runs outside it. CODEX_SANDBOX_NETWORK_DISABLED is not
+ *  that signal: Codex keeps it set on a command it runs unsandboxed
+ *  (verified on 0.153.4 with an allowed command), so treating it as the
+ *  sandbox would refuse the very rerun the refusal asks for. */
+export function insideCodexSandbox(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CODEX_SANDBOX !== undefined;
+}
+
+/** Whether Codex ran this command at all, sandboxed or not. */
+export function underCodex(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CODEX_SANDBOX !== undefined || env.CODEX_SANDBOX_NETWORK_DISABLED !== undefined || env.CODEX_THREAD_ID !== undefined;
+}
+
+/** The Codex thread this command runs in, as Codex hands it to its shell. */
+export function codexThreadId(env: NodeJS.ProcessEnv = process.env): string | null {
+  const id = env.CODEX_THREAD_ID;
+  return id && /^[0-9a-f-]{8,}$/i.test(id) ? id : null;
+}
+
+/** Said when something fails that a sandbox would explain. Codex does not
+ *  mark its sandbox the same way on every platform, so a failure under
+ *  Codex gets the hint even when CODEX_SANDBOX is absent. */
+export function sandboxHint(): string {
+  return underCodex()
+    ? "\nIf Codex ran this command in its sandbox, that is the cause: the sandbox blocks local sockets and the session registry. Rerun it outside the sandbox (with escalated permissions)."
+    : "";
+}

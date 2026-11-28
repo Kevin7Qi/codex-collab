@@ -54,14 +54,16 @@ import {
   type HostState,
 } from "../claude-channel";
 import { TASK_KEEP_MS, listTasks, loadTask, settled, updateTask, type TaskRecord } from "../claude-tasks";
-import { LATE_ANSWER, outcomeNotice } from "./task";
 import { transientSessionId } from "../claude-sessions";
-import { buildRegistryEntry, ownPidDomain, parseEnvelope, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../peer";
 import { verifyMailboxDir } from "../questions";
 import { wakeThread } from "../codex-wake";
 import { hookRanIn } from "../codex-hooks";
-import type { Taken } from "./hook";
-import { formatDuration, loadUserConfig, parseOptions } from "./shared";
+import { loadUserConfig, parseOptions } from "./shared";
+import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion } from "../claude-registry";
+import { parseEnvelope } from "../claude-envelope";
+import { formatDuration } from "../format";
+import { type Taken } from "../channel-delivery";
+import { LATE_ANSWER, outcomeNotice } from "./task-outcome";
 
 /** How often the host looks whether the sessions its threads talk to still
  *  run. (The variable is a test seam.) */

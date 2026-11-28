@@ -12,14 +12,7 @@
 
 import { openSync, readSync, closeSync, fstatSync } from "fs";
 import { resolve } from "path";
-import {
-  findShortId,
-  listRuns,
-  listRunsForThread,
-  loadRun,
-  loadThreadIndex,
-} from "../threads";
-import { resolveRunLogPath } from "./threads";
+import { findShortId, listRuns, listRunsForThread, loadRun, loadThreadIndex, resolveRunLogPath } from "../threads";
 import { LogEntryParser, renderEntry, renderFinalStatus, type RenderOptions } from "../render";
 import type { RunRecord } from "../types";
 import {
@@ -28,9 +21,9 @@ import {
   getWorkspacePaths,
   resolveThreadIdOrDie,
   isThreadProcessAlive,
-  formatAge,
   type WorkspacePaths,
 } from "./shared";
+import { formatAge } from "../format";
 
 const POLL_INTERVAL_MS = 300;
 

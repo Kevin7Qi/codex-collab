@@ -12,16 +12,9 @@ import { basename, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { writeFileSync } from "node:fs";
 import {
-  buildEnvelope,
-  buildRegistryEntry,
   createPeer,
-  parseEnvelope,
   peerCapability,
-  peerModeFor,
   peerNameFor,
-  isCodexCollabSocket,
-  procStartOf,
-  sessionsDir,
   extractTopic,
   parseHeaders,
   threadPeerLabel,
@@ -30,17 +23,15 @@ import {
   conversationsToEvict,
   conversationModel,
   adoptionFor,
-  workspaceSuffix,
   threadIsGone,
-  compareVersions,
   resolveCollabMode,
   messagingSupported,
-  MESSAGING_FLOOR,
-  buildDelegation,
-  escapeDelegation,
   type Conversation,
   type PeerHost,
 } from "./peer";
+import { buildRegistryEntry, isCodexCollabSocket, procStartOf, sessionsDir, workspaceSuffix, compareVersions, MESSAGING_FLOOR } from "./claude-registry";
+import { buildEnvelope, parseEnvelope, peerModeFor } from "./claude-envelope";
+import { buildDelegation, escapeDelegation } from "./codex-session";
 
 /** The peer never activates on Windows — peerCapability gates win32 before
  *  anything else runs — so the socket/registry integration behavior under
@@ -2746,7 +2737,8 @@ describe.skipIf(onWindows)("peer status diagnosis", () => {
   // "no broker yet, run `peer up`" sent the user back to the command that
   // had just declined to help.
   test("a live broker with no peer is reported as such, not as no broker", async () => {
-    const { readPeerState, isAlive } = await import("./commands/peer");
+    const { readPeerState } = await import("./peer");
+    const { isAlive } = await import("./process");
     const { loadBrokerState } = await import("./broker");
     const dir = mkdtempSync(join(tmpdir(), "peer-diag-"));
     try {

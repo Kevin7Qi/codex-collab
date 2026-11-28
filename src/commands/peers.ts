@@ -9,8 +9,9 @@ import { resolveStateDir, resolveWorkspaceDir } from "../config";
 import { addressOf, describeModelChoice, listClaudeSessions, markSpawnedSessionStopped, readSpawnedSessions, reaperLog, resolveSession, resumableSession, runReaper, spawnedSessionName, stopSpawnedSession, stoppedSessionNamed, stoppedSessions, type ClaudeSession, type SpawnedSession } from "../claude-sessions";
 import { outstandingTasksFor } from "../claude-tasks";
 import { describeRanOn, ranOn, type RanOn } from "../claude-transcript";
-import { insideCodexSandbox, resumeWindowSec, sandboxHint } from "./send";
-import { die, formatDuration, formatLongDuration, loadUserConfig, parseOptions } from "./shared";
+import { die, loadUserConfig, parseOptions, resumeWindowSec } from "./shared";
+import { insideCodexSandbox, sandboxHint } from "../codex-session";
+import { formatDuration, formatLongDuration } from "../format";
 
 function idleFor(session: ClaudeSession, now: number): string | null {
   if (session.status !== "idle" || session.statusUpdatedAt === null) return null;

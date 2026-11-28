@@ -40,9 +40,10 @@ import { modelAliasTargets } from "../src/config";
 import { fetchAllPages, resolveModelDefaults } from "../src/models";
 import type { AppServerClient } from "../src/client";
 import type { Model } from "../src/types";
-import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS, procStartOf, buildRegistryEntry, sniffRegistryVersion, sessionsDir } from "../src/peer";
+import { PEER_DYNAMIC_TOOLS, PEER_DEVELOPER_INSTRUCTIONS } from "../src/peer";
 import { SPAWN_PERMISSION_MODE, SPAWN_SETTINGS, jobHasWorkInFlight, jobSessionId, jobsDir, listClaudeSessions, parseBackgroundId, sessionStatusNow, spawnEnv, stopSpawnedSession } from "../src/claude-sessions";
 import { ranOn, transcriptPath, turnEndedOnError } from "../src/claude-transcript";
+import { procStartOf, buildRegistryEntry, sniffRegistryVersion, sessionsDir } from "../src/claude-registry";
 
 const ENABLED = process.env.CODEX_COLLAB_CONTRACTS === "1";
 

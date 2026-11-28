@@ -30,21 +30,8 @@ import { closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, o
 import { join, resolve, sep } from "node:path";
 import { mailboxRoot, resolveStateDir, resolveWorkspaceDir } from "../config";
 import {
-  buildEnvelope,
-  buildRegistryEntry,
-  ownPidDomain,
-  parseEnvelope,
-  procIdentity,
-  procStartOf,
-  procStartTicksOf,
-  sessionsDir,
-  sniffRegistryVersion,
-  workspaceSuffix,
-} from "../peer";
-import {
   CLAUDE_EFFORTS,
   DEFAULT_SPAWN_LINGER_SEC,
-  DEFAULT_SPAWN_RESUME_SEC,
   describeModelChoice,
   forgetSpawnedSession,
   isAutocompactWindow,
@@ -83,11 +70,14 @@ import { FINAL_STATUSES, TASK_MAX_WAIT_SEC, createTask, isTaskId, loadTask, next
 import { sanitizeForTerminal, verifyMailboxDir } from "../questions";
 import { acquireLockAsync } from "../lock";
 import { isSpawnTrustSetting, trustReachesHome, type SpawnTrustSetting } from "../claude-trust";
-import { codexThreadCwd } from "../codex-session";
+import { codexThreadCwd, insideCodexSandbox, underCodex, codexThreadId, sandboxHint } from "../codex-session";
 import { wakeThread } from "../codex-wake";
 import { isThreadId, messageIdsSince, openChannel, wakeThroughHost, watchInbox, writeNotice, type ChannelMessage, type Contact } from "../claude-channel";
-import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task";
-import { MAX_TIMEOUT_SECONDS, die, formatDuration, formatLongDuration, loadUserConfig, parseOptions, type UserConfig } from "./shared";
+import { MAX_TIMEOUT_SECONDS, die, loadUserConfig, parseOptions, type UserConfig, resumeWindowSec } from "./shared";
+import { buildRegistryEntry, ownPidDomain, procIdentity, procStartOf, procStartTicksOf, sessionsDir, sniffRegistryVersion, workspaceSuffix } from "../claude-registry";
+import { buildEnvelope, parseEnvelope } from "../claude-envelope";
+import { formatDuration, formatLongDuration } from "../format";
+import { COMES_BY_ITSELF, DEFAULT_TASK_WAIT_SEC, LATE_ANSWER, dirHint, exitCodeFor, outcomeNotice, replyComesByItself, reportOutcome, showsHints, waitForTask } from "./task-outcome";
 
 /** Where `send --file` may read when Codex runs it: inside the folder the
  *  Codex session works in, as Codex's own record of the thread says, never
@@ -162,26 +152,6 @@ export function readMessageFile(path: string, root: string | null): { ok: true; 
   }
 }
 
-/** Codex sets CODEX_SANDBOX in every command it runs inside its sandbox,
- *  and in none it runs outside it. CODEX_SANDBOX_NETWORK_DISABLED is not
- *  that signal: Codex keeps it set on a command it runs unsandboxed
- *  (verified on 0.153.4 with an allowed command), so treating it as the
- *  sandbox would refuse the very rerun the refusal asks for. */
-export function insideCodexSandbox(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.CODEX_SANDBOX !== undefined;
-}
-
-/** Whether Codex ran this command at all, sandboxed or not. */
-export function underCodex(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.CODEX_SANDBOX !== undefined || env.CODEX_SANDBOX_NETWORK_DISABLED !== undefined || env.CODEX_THREAD_ID !== undefined;
-}
-
-/** The Codex thread this command runs in, as Codex hands it to its shell. */
-export function codexThreadId(env: NodeJS.ProcessEnv = process.env): string | null {
-  const id = env.CODEX_THREAD_ID;
-  return id && /^[0-9a-f-]{8,}$/i.test(id) ? id : null;
-}
-
 /** The name a task's receiver registers under when the task has an address
  *  of its own — a message from no Codex thread, or one whose thread's address
  *  could not be opened: codex(<thread>-<workspace>-<task>), which IS the
@@ -213,15 +183,6 @@ export function composeMessage(text: string, opts: { threadId: string | null; ch
  *  task in flight is never listed as a Claude session. */
 export function taskSocketPath(id: string): string {
   return join(mailboxRoot(), `task-${id}.sock`);
-}
-
-/** Said when something fails that a sandbox would explain. Codex does not
- *  mark its sandbox the same way on every platform, so a failure under
- *  Codex gets the hint even when CODEX_SANDBOX is absent. */
-export function sandboxHint(): string {
-  return underCodex()
-    ? "\nIf Codex ran this command in its sandbox, that is the cause: the sandbox blocks local sockets and the session registry. Rerun it outside the sandbox (with escalated permissions)."
-    : "";
 }
 
 /** Refused: several sessions are live and none was named. */
@@ -384,18 +345,6 @@ export function watchForBlocked(
     lastAnsweredAt: () => answeredAt,
     stop,
   };
-}
-
-/** How long after it was stopped a started session is still resumed:
- *  `config spawn-resume` in seconds, `off` for never, else the default. */
-export function resumeWindowSec(cfg: UserConfig): number {
-  const v = cfg["spawn-resume"];
-  if (v === undefined) return DEFAULT_SPAWN_RESUME_SEC;
-  if (v === "off") return 0;
-  const n = Number(v);
-  if (Number.isInteger(n) && n > 0 && n <= MAX_TIMEOUT_SECONDS) return n;
-  console.error(`[codex] Warning: ignoring invalid spawn-resume in config: ${v}`);
-  return DEFAULT_SPAWN_RESUME_SEC;
 }
 
 /** What to tell Codex when it chose a model or effort for a session that

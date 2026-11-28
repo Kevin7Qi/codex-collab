@@ -3,41 +3,17 @@
 //   peer            status: capability, broker, registry entry, socket
 //   peer up         ensure the broker (and with it the peer) is running
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { resolveStateDir } from "../config";
 import { parseOptions } from "./shared";
-import { peerCapability, peerNameFor, sessionsDir } from "../peer";
+import { peerCapability, peerNameFor, readPeerState } from "../peer";
 import { listRuns } from "../threads";
 import { ensureConnection, isBrokerAlive, isBrokerBusyError, loadBrokerState } from "../broker";
 import { connectToBroker } from "../broker-client";
 import { attachSupported, controlSocketPath, serverPreference } from "../shared-server";
-
-export interface PeerState {
-  pid: number;
-  name: string;
-  socketPath: string;
-  startedAt: string;
-}
-
-export function readPeerState(stateDir: string): PeerState | null {
-  try {
-    const parsed = JSON.parse(readFileSync(join(stateDir, "peer-state.json"), "utf-8"));
-    if (typeof parsed?.pid === "number" && typeof parsed?.socketPath === "string") {
-      return parsed as PeerState;
-    }
-  } catch { /* absent */ }
-  return null;
-}
-
-export function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
+import { sessionsDir } from "../claude-registry";
+import { isAlive } from "../process";
 
 export async function handlePeer(args: string[]): Promise<void> {
   // `--dir` is a global flag, so it may appear on either side of the

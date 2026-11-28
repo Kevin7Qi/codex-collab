@@ -26,7 +26,7 @@ import {
   writeTask,
   type TaskRecord,
 } from "./claude-tasks";
-import { exitCodeFor, statusLine } from "./commands/task";
+import { exitCodeFor, statusLine } from "./commands/task-outcome";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-tasks-"));
 let n = 0;

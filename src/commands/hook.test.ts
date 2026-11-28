@@ -11,8 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDelivered, writeMessage, writeNotice } from "../claude-channel";
 import { createTask, updateTask, type TaskRecord } from "../claude-tasks";
-import { HOOK_BUDGET_TOKENS, estimateTokens, hookAnswer, repliedTasksIn } from "./hook";
-import { outcomeNotice } from "./task";
+import { hookAnswer, repliedTasksIn } from "./hook";
+import { HOOK_BUDGET_TOKENS, estimateTokens } from "../channel-delivery";
+import { outcomeNotice } from "./task-outcome";
 
 const ROOT = mkdtempSync(join(tmpdir(), "codex-collab-hook-"));
 const THREAD = "01a0985a-445b-7ee2-85b5-52e2b36a6ba4";

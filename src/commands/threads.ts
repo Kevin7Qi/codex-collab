@@ -38,7 +38,6 @@ import {
   resolveThreadIdOrDie,
   resolveThreadIdAllowRaw,
   progress,
-  formatAge,
   isThreadProcessAlive,
   removePidFile,
   withClient,
@@ -48,6 +47,7 @@ import {
   fetchAllPages,
   type WorkspacePaths,
 } from "./shared";
+import { formatAge } from "../format";
 
 // ---------------------------------------------------------------------------
 // Thread discovery from app-server
@@ -266,27 +266,6 @@ function formatGoalTokens(goal: NonNullable<RunRecord["goal"]>): string {
 // ---------------------------------------------------------------------------
 // output
 // ---------------------------------------------------------------------------
-
-/** Resolve one run's own log file: the record's `logFile` (confined to the
- *  workspace or legacy-global logs dirs so a corrupted or adversarial run
- *  record cannot point us at arbitrary filesystem paths), with the shared
- *  thread log as the legacy fallback. Per-run records always
- *  point inside `logs/{shortId}/`; legacy records point at the shared file
- *  or (migration edge) an absolute global path. */
-export function resolveRunLogPath(
-  stateDir: string,
-  logsDir: string,
-  run: RunRecord,
-  globalLogsDir: string = config.logsDir,
-): string {
-  if (run.logFile) {
-    const candidate = resolve(stateDir, run.logFile);
-    const confined = isPathInside(candidate, resolve(logsDir))
-      || isPathInside(candidate, resolve(globalLogsDir));
-    if (confined) return candidate;
-  }
-  return join(logsDir, `${run.shortId}.log`);
-}
 
 /** All log files for a thread in chronological order: legacy shared logs
  *  (pre-per-run history) first, then the per-run files under

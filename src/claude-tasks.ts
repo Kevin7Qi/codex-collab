@@ -18,8 +18,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { procIdentity } from "./peer";
 import type { SpawnedSession } from "./claude-sessions";
+import { procIdentity } from "./claude-registry";
 
 /** `pending`: recorded, the receiver has not delivered yet. `running`:
  *  delivered, and the receiver is listening for the reply. The rest are
@@ -317,4 +317,17 @@ export function sweepTasks(stateDir: string, maxAgeMs: number = TASK_KEEP_MS, no
     } catch { /* gone meanwhile, or not ours to remove */ }
   }
   return removed;
+}
+
+/** The tasks of a thread each message is the reply to, by message id,
+ *  oldest task first: one reply can answer several of the thread's
+ *  messages, and it ends every task it answers. */
+export function repliesByMessage(tasks: TaskRecord[], threadId: string): Map<string, TaskRecord[]> {
+  const out = new Map<string, TaskRecord[]>();
+  for (const t of tasks) {
+    if (!t.reply?.id || t.threadId !== threadId) continue;
+    out.set(t.reply.id, [...(out.get(t.reply.id) ?? []), t]);
+  }
+  for (const list of out.values()) list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+  return out;
 }

@@ -10,7 +10,6 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { buildRegistryEntry, procIdentity, procStartOf, procStartTicksOf } from "./peer";
 import { config, mailboxRoot, resolveWorkspaceDir } from "./config";
 import { createTask, updateTask } from "./claude-tasks";
 import {
@@ -58,6 +57,7 @@ import {
   WorkspaceNotTrustedError,
   type SpawnedSession,
 } from "./claude-sessions";
+import { buildRegistryEntry, procIdentity, procStartOf, procStartTicksOf } from "./claude-registry";
 
 // Sleepers, ps and sh fakes: Unix only, like the messaging this serves.
 const onWindows = process.platform === "win32";
