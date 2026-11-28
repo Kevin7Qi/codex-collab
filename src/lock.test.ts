@@ -11,13 +11,13 @@ let root: string;
 beforeAll(() => { root = mkdtempSync(join(tmpdir(), "cc-lock-")); });
 afterAll(() => { rmSync(root, { recursive: true, force: true }); });
 
-/** A process that takes the lock, says so, and holds it until `then`. */
+/** A process that takes the lock, sets up how it ends (`then`), and says so. */
 function holder(lockPath: string, then: string): { held: Promise<void>; exited: Promise<number | null>; kill: (signal: NodeJS.Signals) => void } {
   const script = join(root, `holder-${Math.random().toString(16).slice(2)}.ts`);
   writeFileSync(script, `import { acquireLockSync } from ${JSON.stringify(join(import.meta.dir, "lock.ts"))};
 acquireLockSync(${JSON.stringify(lockPath)});
-console.log("held");
 ${then}
+console.log("held");
 `);
   const child = spawn(process.execPath, ["run", script], { stdio: ["ignore", "pipe", "inherit"] });
   const held = new Promise<void>((resolve) => child.stdout.on("data", (d) => { if (String(d).includes("held")) resolve(); }));
