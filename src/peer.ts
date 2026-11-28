@@ -609,7 +609,7 @@ export const COLLAB_MODES: readonly CollabMode[] = ["auto", "peer", "cli"] as co
  *  would produce different files on the same machine minutes apart. */
 export function messagingSupported(): { ok: boolean; reason: string } {
   if (process.platform === "win32") {
-    return { ok: false, reason: "Windows (cross-session messaging is macOS/Linux only)" };
+    return { ok: false, reason: "Windows (codex-collab's messaging supports macOS and Linux only)" };
   }
   const version = claudeCodeVersion();
   if (version === null) {

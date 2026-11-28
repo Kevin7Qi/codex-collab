@@ -39,7 +39,7 @@ let THREAD = randomUUID();
 const HOOK_RUNS = join(TEST_HOME, ".codex-collab", "hook-runs");
 
 // Unix sockets, sleep, ps and sh fakes: none of it exists on Windows, where
-// Claude Code has no cross-session messaging for `send` to ride on anyway.
+// codex-collab does not support the messaging `send` rides on there anyway.
 const describeUnix = process.platform === "win32" ? describe.skip : describe;
 // Each case spawns the CLI; the reaper cases also wait out a linger.
 setDefaultTimeout(30_000);
