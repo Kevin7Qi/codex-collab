@@ -3333,8 +3333,9 @@ describeUnix("a Codex thread's address", () => {
 
   test("with codex-wake on, a second reply that comes while a thread of our own is being resumed starts no second run: the hooks hand it over", async () => {
     // No shared app-server: the thread is one `run` has had a turn on, so
-    // the host resumes it as a detached run. A stand-in for the CLI takes
-    // that run's place: it notes what it was given, and is slow to start.
+    // the host resumes it as a detached run, by the CLI it was started
+    // from. Here that is a stand-in which is the CLI for everything but
+    // `run`: there it notes what it was given, and is slow to start.
     rmSync(join(TEST_HOME, ".codex", "app-server-control"), { recursive: true, force: true });
     const host = hostState();
     if (host) {
@@ -3344,9 +3345,13 @@ describeUnix("a Codex thread's address", () => {
     const resumed = join(TEST_HOME, `resumed-${THREAD}.jsonl`);
     const standIn = join(TEST_HOME, `wake-cli-${THREAD}.ts`);
     writeFileSync(standIn, `import { appendFileSync } from "node:fs";
-const text = await Bun.stdin.text();
-appendFileSync(${JSON.stringify(resumed)}, JSON.stringify({ args: process.argv.slice(2), text }) + "\\n");
-await new Promise((r) => setTimeout(r, 3000));
+if (process.argv[2] === "run") {
+  const text = await Bun.stdin.text();
+  appendFileSync(${JSON.stringify(resumed)}, JSON.stringify({ args: process.argv.slice(2), text }) + "\\n");
+  await new Promise((r) => setTimeout(r, 3000));
+} else {
+  await import(${JSON.stringify(CLI)});
+}
 `);
     const runs = (): Array<{ args: string[]; text: string }> => {
       try { return readFileSync(resumed, "utf-8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; }
@@ -3355,7 +3360,8 @@ await new Promise((r) => setTimeout(r, 3000));
     try {
       const fake = startFake("twice-claude", { reply: null });
       registerFake(fake);
-      await runCli(["send", "long job", "--no-wait"], { CODEX_COLLAB_WAKE_CLI: standIn });
+      const sent = spawnSync("bun", ["run", standIn, "send", "long job", "--no-wait"], { cwd: WS, env: cliEnv({}), encoding: "utf-8" });
+      expect(sent.status).toBe(0);
       await got(fake, 1);
       const root = join(TEST_HOME, ".codex-collab", "workspaces");
       const state = readdirSync(root).map((d) => join(root, d)).find((d) => existsSync(join(d, "channels", THREAD)))!;
