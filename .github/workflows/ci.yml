@@ -46,9 +46,21 @@ jobs:
         shell: pwsh
         run: |
           Set-ExecutionPolicy Bypass -Scope Process -Force
-          .\install.ps1
-          codex-collab --help
-          codex-collab health
+          $installer = Join-Path $PWD 'install.ps1'
+          $workDir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'codex-collab-install')
+          Push-Location $workDir.FullName
+          try {
+            $env:CODEX_COLLAB_CODEX_SKILL_DIR = 'relative-codex-skill'
+            & $installer
+            $skill = Join-Path $PWD "$env:CODEX_COLLAB_CODEX_SKILL_DIR\SKILL.md"
+            if ((Get-Content -LiteralPath $skill -Raw) -notmatch '(?m)^name: claude-collab\r?$') {
+              throw "Expected the Codex skill at $skill"
+            }
+            codex-collab --help
+            codex-collab health
+          } finally {
+            Pop-Location
+          }
 
       - name: Smoke-test .cmd shim from CMD (Windows)
         if: runner.os == 'Windows'
@@ -58,4 +70,3 @@ jobs:
           for /f "delims=" %%i in ('powershell -Command "[Environment]::GetEnvironmentVariable('Path','User') + ';' + [Environment]::GetEnvironmentVariable('Path','Machine')"') do set "PATH=%%i;%PATH%"
           codex-collab --help
           codex-collab health
-

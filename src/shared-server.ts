@@ -18,12 +18,15 @@
 // private `codex app-server` child that `connectDirect` has always spawned.
 
 import net from "node:net";
+import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { Duplex } from "node:stream";
 import { config } from "./config";
 import { createRpcEndpoint, NO_RESPONSE } from "./rpc";
+import { terminateProcessTree } from "./process";
 import { connectDirectWithRetry, type AppServerClient, type ConnectOptions } from "./client";
 import type { InitializeParams, InitializeResponse } from "./types";
 
@@ -76,17 +79,43 @@ export function serverPreference(
   return { preference: "auto", reason: "default" };
 }
 
-/** Attaching needs AF_UNIX from node:net, which Windows does not offer. */
-export function attachSupported(platform: string = process.platform): boolean {
-  return platform !== "win32";
-}
-
 export interface SharedConnectOptions {
   socketPath: string;
+  env?: NodeJS.ProcessEnv;
   /** Request timeout in ms. Defaults to config.requestTimeout. */
   requestTimeout?: number;
   /** Connect + upgrade + handshake deadline. */
   connectTimeout?: number;
+}
+
+/** Codex's Windows proxy opens AF_UNIX natively; Bun's node:net treats a
+ *  string path as a named pipe on Windows. The proxy relays WebSocket bytes
+ *  unchanged, so both transports use the same upgrade, framing and RPC. */
+function sharedTransport(opts: SharedConnectOptions): { socket: Duplex; connect: (ready: () => void) => void } {
+  if (process.platform !== "win32") {
+    const socket = new net.Socket();
+    return { socket, connect: (ready) => { socket.connect({ path: opts.socketPath }, ready); } };
+  }
+  if (/["\r\n]/.test(opts.socketPath)) throw new Error("Invalid Windows Codex socket path");
+  const child = spawn("cmd.exe", ["/d", "/s", "/v:off", "/c", '"codex app-server proxy --sock "%CODEX_COLLAB_PROXY_SOCKET%""'], {
+    env: { ...process.env, ...opts.env, CODEX_COLLAB_PROXY_SOCKET: opts.socketPath },
+    stdio: ["pipe", "pipe", "pipe"], windowsHide: true, windowsVerbatimArguments: true,
+  });
+  const socket = Duplex.from({ readable: child.stdout, writable: child.stdin });
+  let stderr = "";
+  child.stderr.on("data", (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2000); });
+  child.on("error", (e) => socket.destroy(e));
+  child.on("close", (code) => {
+    if (code) socket.destroy(new Error(stderr.trim() || `Codex proxy exited with code ${code}`));
+    else socket.destroy();
+  });
+  socket.once("close", () => {
+    const timer = setTimeout(() => {
+      if (child.pid && child.exitCode === null && child.signalCode === null) terminateProcessTree(child.pid);
+    }, 500);
+    child.once("exit", () => clearTimeout(timer));
+  });
+  return { socket, connect: (ready) => { child.once("spawn", ready); } };
 }
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -186,7 +215,7 @@ export function acceptKeyFor(key: string): string {
 export async function connectShared(opts: SharedConnectOptions): Promise<AppServerClient> {
   const requestTimeout = opts.requestTimeout ?? config.requestTimeout;
   const connectTimeout = opts.connectTimeout ?? 5000;
-  const socket = new net.Socket();
+  const { socket, connect } = sharedTransport(opts);
   let upgraded = false;
   let gone = false;
   let goneReason: string | null = null;
@@ -215,6 +244,12 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
 
   const key = randomBytes(16).toString("base64");
   const expectedAccept = acceptKeyFor(key);
+  const upgrade = () => {
+    socket.write(
+      `GET /rpc HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
+      `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+    );
+  };
 
   /** The upgrade response is parsed by hand; everything after it is frames. */
   const awaitUpgrade = new Promise<void>((resolveUpgrade, rejectUpgrade) => {
@@ -241,12 +276,6 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
       if (inbound.length > 0) onFrames(Buffer.alloc(0));
     };
     socket.on("data", onData);
-    socket.once("connect", () => {
-      socket.write(
-        `GET /rpc HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n` +
-        `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
-      );
-    });
   });
 
   function onFrames(chunk: Buffer): void {
@@ -348,7 +377,7 @@ export async function connectShared(opts: SharedConnectOptions): Promise<AppServ
     socket.once("end", hungUp);
     socket.once("close", hungUp);
     awaitUpgrade.then(() => { clearTimeout(timer); resolveConnect(); }, fail);
-    socket.connect({ path: opts.socketPath });
+    connect(upgrade);
   });
 
   async function close(): Promise<void> {
@@ -434,22 +463,14 @@ function attachRequiredError(socketPath: string, detail: string | null): Error {
  * private one. A caller that names a `command` is running a mock server
  * and always gets the private path.
  */
-export async function connectAppServer(opts?: ConnectOptions, platform: string = process.platform): Promise<AppServerClient> {
-  const { preference, reason } = serverPreference();
-  // `shared` is an insistence, not a preference: where attaching cannot
-  // work at all, say so rather than start the private server it ruled out.
-  if (!opts?.command && preference === "shared" && !attachSupported(platform)) {
-    throw new Error(
-      `${reason} asks for Codex's shared app-server, which cannot be reached on Windows (its control socket is a unix socket). ` +
-      `Use 'codex-collab config server auto' or 'private'.`,
-    );
-  }
-  if (!opts?.command && preference !== "private" && attachSupported(platform)) {
+export async function connectAppServer(opts?: ConnectOptions): Promise<AppServerClient> {
+  const { preference } = serverPreference();
+  if (!opts?.command && preference !== "private") {
     const env = opts?.env ? { ...process.env, ...opts.env } : process.env;
     const socketPath = controlSocketPath(env);
     if (existsSync(socketPath)) {
       try {
-        return await connectShared({ socketPath, requestTimeout: opts?.requestTimeout });
+        return await connectShared({ socketPath, requestTimeout: opts?.requestTimeout, env });
       } catch (e) {
         const detail = e instanceof Error ? e.message : String(e);
         if (preference === "shared") throw attachRequiredError(socketPath, detail);

@@ -15,12 +15,12 @@
 //                    message from that session completes the call.
 //                    Judgment, not permission: fail-open on timeout.
 //
-// Everything here degrades: if the registry is absent, the platform is
-// Windows, or the flag is off, start() is a no-op and codex-collab behaves
+// Everything here degrades: if the registry is absent or the flag is off,
+// start() is a no-op and codex-collab behaves
 // exactly as before.
 
 import net from "node:net";
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -45,7 +45,9 @@ import {
 import { EventDispatcher } from "./events";
 import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode } from "./config";
 import { resolveModelDefaults } from "./models";
-import { sessionsDir, procStartOf, registryProcStart, procIdentity, MESSAGING_FLOOR, compareVersions, claudeCodeVersion, sniffRegistryVersion, isCodexCollabSocket, workspaceSuffix, buildRegistryEntry } from "./claude-registry";
+import { sessionsDir, registryProcStart, procIdentity, MESSAGING_FLOOR, WINDOWS_MESSAGING_FLOOR, compareVersions, claudeCodeVersion, sniffRegistryVersion, isCodexCollabSocket, workspaceSuffix, buildRegistryEntry, spawnRegistryHolder } from "./claude-registry";
+import { localAddress, privateSocketUmask } from "./local-ipc";
+import { matchesPeerAuth, newPeerToken, peerAuthFrame, removePeerEntry, writePeerEntry } from "./claude-registry";
 import { type InboundMessage, parseEnvelope, peerModeFor, buildEnvelope } from "./claude-envelope";
 import { buildDelegation } from "./codex-session";
 
@@ -608,15 +610,13 @@ export const COLLAB_MODES: readonly CollabMode[] = ["auto", "peer", "cli"] as co
  *  session happens to be running. Rendering a skill file off a live probe
  *  would produce different files on the same machine minutes apart. */
 export function messagingSupported(): { ok: boolean; reason: string } {
-  if (process.platform === "win32") {
-    return { ok: false, reason: "Windows (codex-collab's messaging supports macOS and Linux only)" };
-  }
+  const floor = process.platform === "win32" ? WINDOWS_MESSAGING_FLOOR : MESSAGING_FLOOR;
   const version = claudeCodeVersion();
   if (version === null) {
     return { ok: false, reason: "Claude Code not found on PATH" };
   }
-  if (compareVersions(version, MESSAGING_FLOOR) < 0) {
-    return { ok: false, reason: `Claude Code ${version} is older than ${MESSAGING_FLOOR}` };
+  if (compareVersions(version, floor) < 0) {
+    return { ok: false, reason: `Claude Code ${version} is older than ${floor}` };
   }
   return { ok: true, reason: "" };
 }
@@ -670,7 +670,6 @@ export function peerCapability(): { ok: boolean; reason: string } {
   // what makes the setting mean what it says.
   const { mode, reason } = resolveCollabMode(readConfiguredMode());
   if (mode === "cli") return { ok: false, reason };
-  if (process.platform === "win32") return { ok: false, reason: "windows (messaging unsupported)" };
   if (!existsSync(sessionsDir())) return { ok: false, reason: "no Claude session registry" };
 
   // A Claude Code too old for peer messaging still keeps a session registry —
@@ -707,7 +706,7 @@ export function peerCapability(): { ok: boolean; reason: string } {
 
 export function createPeer(host: PeerHost): Peer {
   const capability = peerCapability();
-  const socketPath = join(host.stateDir, "peer.sock");
+  const socketPath = localAddress(host.stateDir, "peer");
   const name = peerNameFor(host.cwd);
   const entryPath = join(sessionsDir(), `${process.pid}.json`);
   /** Workspace half of every address this broker hands out. */
@@ -948,7 +947,12 @@ export function createPeer(host: PeerHost): Peer {
     // the workspace default for messages with no thread (front-door errors).
     const sandbox = (asThreadId ? threadConversations.get(asThreadId)?.sandbox : undefined)
       ?? readUserConfig().sandbox;
-    const line = buildEnvelope({
+    let auth: string;
+    try { auth = peerAuthFrame(replyPath); } catch (e) {
+      host.log(`peer: could not authenticate delivery to ${replyPath}: ${(e as Error).message}`);
+      return;
+    }
+    const line = auth + buildEnvelope({
       text,
       ourSocketPath: id.sock,
       ourName: id.name,
@@ -968,10 +972,11 @@ export function createPeer(host: PeerHost): Peer {
   /** Attach a line-parsing inbound handler to a peer socket. `boundThreadId`
    *  pins messages to a specific conversation (thread-peer sockets); null
    *  means front-door routing by sender. */
-  function attachSocketHandler(server: net.Server, boundThreadId: string | null): void {
+  function attachSocketHandler(server: net.Server, boundThreadId: string | null, token?: string): void {
     server.on("connection", (sock) => {
       sock.setEncoding("utf8");
       let buffer = "";
+      let authorized = token === undefined;
       sock.on("data", (chunk: string) => {
         buffer += chunk;
         if (buffer.length > 1024 * 1024) { sock.destroy(); return; }
@@ -979,6 +984,11 @@ export function createPeer(host: PeerHost): Peer {
         while ((idx = buffer.indexOf("\n")) !== -1) {
           const line = buffer.slice(0, idx).trim();
           buffer = buffer.slice(idx + 1);
+          if (!authorized) {
+            if (!matchesPeerAuth(line, token!)) { sock.destroy(); return; }
+            authorized = true;
+            continue;
+          }
           if (!line) continue;
           const msg = parseEnvelope(line);
           if (!msg) continue;
@@ -1000,13 +1010,14 @@ export function createPeer(host: PeerHost): Peer {
     // sweep and stop() because nothing else knows about it.
     let holder: ChildProcess | null = null;
     let server: net.Server | null = null;
+    const tpSocketPath = localAddress(host.stateDir, `peer-${shortId}`);
+    const token = newPeerToken();
     try {
       // The holder is a liveness token: registry entries bind filename pid ==
       // content pid == a live process, one entry per pid, so every extra peer
       // needs a real (tiny) process. Its stdin pipe ties its life to ours.
-      holder = spawn("sh", ["-c", "read _ || true"], {
-        stdio: ["pipe", "ignore", "ignore"],
-      });
+      holder = spawnRegistryHolder();
+      holder.on("error", () => { /* spawn failure */ });
       if (!holder.pid) throw new Error("holder spawn returned no pid");
       // Uniqueness: the name IS the address. A topic label can collide with
       // a live sibling (same topic twice, or the front door's name) — the
@@ -1015,13 +1026,11 @@ export function createPeer(host: PeerHost): Peer {
       let tpName = label ?? `codex-${shortId}`;
       const taken = tpName === name || [...threadPeers.values()].some((tp) => tp.name === tpName);
       if (taken) tpName = `${tpName}-${shortId.slice(0, 4)}`;
-      const tpSocketPath = join(host.stateDir, `peer-${shortId}.sock`);
       const tpEntryPath = join(sessionsDir(), `${holder.pid}.json`);
 
       try { unlinkSync(tpSocketPath); } catch { /* none */ }
-      const prevUmask = process.umask(0o077);
       server = net.createServer();
-      attachSocketHandler(server, threadId);
+      attachSocketHandler(server, threadId, token);
       // A listen failure is asynchronous; without a handler it is an
       // uncaught exception that kills the whole broker. Retire just this
       // thread peer instead — the conversation stays reachable via the
@@ -1030,8 +1039,8 @@ export function createPeer(host: PeerHost): Peer {
         host.log(`peer: thread-peer socket error for ${threadId}: ${e.message} — retiring it`);
         retireThreadPeer(threadId);
       });
-      server.listen(tpSocketPath);
-      process.umask(prevUmask);
+      const restoreUmask = privateSocketUmask();
+      try { server.listen(tpSocketPath); } finally { restoreUmask(); }
 
       const entry = buildRegistryEntry({
         pid: holder.pid,
@@ -1042,7 +1051,7 @@ export function createPeer(host: PeerHost): Peer {
         procStart: registryProcStart(holder.pid),
         sessionId: randomUUID(),
       });
-      writeFileSync(tpEntryPath, JSON.stringify(entry), { mode: 0o644 });
+      writePeerEntry(tpEntryPath, entry, token);
       holder.unref();
 
       threadPeers.set(threadId, {
@@ -1057,9 +1066,9 @@ export function createPeer(host: PeerHost): Peer {
       try { server?.close(); } catch { /* not listening */ }
       try { holder?.kill(); } catch { /* not spawned */ }
       if (holder?.pid) {
-        try { unlinkSync(join(sessionsDir(), `${holder.pid}.json`)); } catch { /* not written */ }
+        removePeerEntry(join(sessionsDir(), `${holder.pid}.json`), tpSocketPath);
       }
-      try { unlinkSync(join(host.stateDir, `peer-${shortId}.sock`)); } catch { /* not bound */ }
+      try { unlinkSync(tpSocketPath); } catch { /* not bound */ }
     }
   }
 
@@ -1069,7 +1078,7 @@ export function createPeer(host: PeerHost): Peer {
     threadPeers.delete(threadId);
     try { tp.server.close(); } catch { /* already down */ }
     try { unlinkSync(tp.socketPath); } catch { /* none */ }
-    try { unlinkSync(tp.entryPath); } catch { /* none */ }
+    removePeerEntry(tp.entryPath, tp.socketPath);
     try { tp.holder.kill(); } catch { /* already dead */ }
     // Nothing keeps the thread loaded now; the next message re-subscribes.
     host.releaseThreadSubscription(threadId);
@@ -1647,8 +1656,12 @@ export function createPeer(host: PeerHost): Peer {
           const entry = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
           if (entry?.messagingSocketPath !== replyPath) continue;
           if (typeof entry?.pid !== "number") continue;
-          process.kill(entry.pid, 0);
-          return true;
+          if (process.platform === "win32") {
+            if (procIdentity(entry) === "live") return true;
+          } else {
+            process.kill(entry.pid, 0);
+            return true;
+          }
         } catch { /* unreadable entry or dead pid — keep scanning */ }
       }
     } catch { /* registry gone */ }
@@ -2461,17 +2474,17 @@ export function createPeer(host: PeerHost): Peer {
       // Socket first, registry second: the entry advertises the socket, so
       // the socket must exist before anyone can read the advertisement.
       try { unlinkSync(socketPath); } catch { /* none */ }
-      const prevUmask = process.umask(0o077);
       server = net.createServer();
-      attachSocketHandler(server, null);
+      const token = newPeerToken();
+      attachSocketHandler(server, null, token);
       // Async listen failures must not crash the broker — a peer that
       // cannot bind simply deactivates; everything else keeps working.
       server.on("error", (e) => {
         host.log(`peer: front-door socket error: ${e.message} — deactivating peer`);
         stop();
       });
-      server.listen(socketPath);
-      process.umask(prevUmask);
+      const restoreUmask = privateSocketUmask();
+      try { server.listen(socketPath); } finally { restoreUmask(); }
 
       const entry = buildRegistryEntry({
         pid: process.pid,
@@ -2483,7 +2496,7 @@ export function createPeer(host: PeerHost): Peer {
         sessionId: randomUUID(),
       });
       mkdirSync(sessionsDir(), { recursive: true });
-      writeFileSync(entryPath, JSON.stringify(entry), { mode: 0o644 });
+      writePeerEntry(entryPath, entry, token);
       writeFileSync(stateFile, JSON.stringify({
         pid: process.pid, name, socketPath, startedAt: new Date().toISOString(),
       }, null, 2) + "\n", { mode: 0o600 });
@@ -2573,7 +2586,7 @@ export function createPeer(host: PeerHost): Peer {
     for (const [threadId] of threadPeers) retireThreadPeer(threadId);
     try { server?.close(); } catch { /* already down */ }
     try { unlinkSync(socketPath); } catch { /* none */ }
-    try { unlinkSync(entryPath); } catch { /* none */ }
+    removePeerEntry(entryPath, socketPath);
     try { unlinkSync(stateFile); } catch { /* none */ }
   }
 

@@ -70,19 +70,17 @@ try {
 # SKILL.md source + current template table) so the installers and
 # `codex-collab skill sync` share one implementation.
 #
-# The Codex-side skill (`skill render --codex`, installed by install.sh under
-# ~/.codex/skills) is deliberately not installed here: it teaches Codex the
-# `peers`/`send` commands, which need Claude Code's cross-session messaging —
-# unavailable on Windows.
 function Generate-SkillMd {
-    param([string]$Entry, [string]$OutPath)
+    param([string]$Entry, [string]$OutPath, [switch]$Codex)
     # PowerShell 5.1 decodes captured native stdout with the CONSOLE code page,
     # which mojibakes SKILL.md's non-ASCII on non-UTF-8 hosts — force UTF-8
     # around the capture and restore afterwards.
     $prevEncoding = [Console]::OutputEncoding
     try {
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $lines = & bun $Entry skill render
+        $renderArgs = @("skill", "render")
+        if ($Codex) { $renderArgs += "--codex" }
+        $lines = & bun $Entry @renderArgs
         if ($LASTEXITCODE -ne 0) { throw "'skill render' failed with exit code $LASTEXITCODE" }
     } finally {
         [Console]::OutputEncoding = $prevEncoding
@@ -99,6 +97,7 @@ if ($Dev) {
 
     # Generate SKILL.md with template table (can't inject into a symlink)
     Generate-SkillMd -Entry (Join-Path $RepoDir "src\cli.ts") -OutPath (Join-Path $SkillDir "SKILL.md")
+    $skillEntry = Join-Path $RepoDir "src\cli.ts"
 
     # Symlink skill files (requires Developer Mode or elevated privileges)
     $links = @(
@@ -170,6 +169,22 @@ if ($Dev) {
     Write-Host "$installDone skill at $SkillDir"
 
     $shimTarget = Join-Path $SkillDir "scripts\codex-collab"
+    $skillEntry = $shimTarget
+}
+
+$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USERPROFILE ".codex" }
+$codexSkillPath = if ($env:CODEX_COLLAB_CODEX_SKILL_DIR) {
+    $env:CODEX_COLLAB_CODEX_SKILL_DIR
+} else {
+    Join-Path $codexHome "skills\claude-collab"
+}
+$codexSkillDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($codexSkillPath)
+$codexSkillFile = Join-Path $codexSkillDir "SKILL.md"
+if (Get-Item -LiteralPath $codexSkillFile -Force -ErrorAction SilentlyContinue) {
+    Write-Host "Kept existing Codex skill at $codexSkillFile. To review and sync it, run 'codex-collab skill sync'."
+} else {
+    New-Item -ItemType Directory -Path $codexSkillDir -Force | Out-Null
+    Generate-SkillMd -Entry $skillEntry -OutPath $codexSkillFile -Codex
 }
 
 # Create .cmd shim (CMD/PowerShell) and extensionless bash wrapper (Git Bash/MSYS2)

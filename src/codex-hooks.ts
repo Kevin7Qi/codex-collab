@@ -51,9 +51,7 @@ export function codexHooksPath(): string {
   return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "hooks.json");
 }
 
-/** Quoted for `sh`, which Codex runs a hook's command with. Hooks exist only
- *  where `send` does (not on Windows), so the command is the same wherever
- *  it is written — unlike `shellQuote`, which quotes for the platform. */
+/** Quoted for the Unix hook shell. */
 function shQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
@@ -65,7 +63,9 @@ function shQuote(value: string): string {
  *  current, so hooks need no rewriting, and Codex no new trust, when that
  *  changes. With no such link, or one leading elsewhere (a CLI run from
  *  another checkout), the path it runs from. */
-export function stableCliPath(cli: string = process.argv[1], links: Array<string | null> = [Bun.which("codex-collab"), join(homedir(), ".local", "bin", "codex-collab")]): string {
+export function stableCliPath(cli: string = process.argv[1], links: Array<string | null> = process.platform === "win32"
+  ? [join(homedir(), ".claude", "skills", "codex-collab", "scripts", "codex-collab")]
+  : [Bun.which("codex-collab"), join(homedir(), ".local", "bin", "codex-collab")]): string {
   let real: string;
   try {
     real = realpathSync(cli);
@@ -83,8 +83,19 @@ export function stableCliPath(cli: string = process.argv[1], links: Array<string
 
 /** The command each hook runs: Bun and this CLI by absolute path, since a
  *  hook the Codex app starts on macOS has a PATH with neither. */
-export function hookCommand(bun: string = process.execPath, cli: string = stableCliPath()): string {
+export function hookCommand(bun: string = process.execPath, cli: string = stableCliPath(), platform: string = process.platform): string {
+  if (platform === "win32") {
+    // Codex wraps the entire command in quotes for cmd.exe /C.
+    if (/["%!\r\n]/.test(bun) || /["%!\r\n]/.test(cli)) {
+      throw new Error("Codex hook paths cannot contain cmd.exe expansion characters (quotes, %, or !)");
+    }
+    return `"${bun}" "${cli}" hook`;
+  }
   return `${shQuote(bun)} ${shQuote(cli)} hook`;
+}
+
+function currentHookCommand(): string {
+  try { return hookCommand(); } catch { return ""; }
 }
 
 /** Whether a hook handler is one of ours: the very command this install
@@ -92,11 +103,11 @@ export function hookCommand(bun: string = process.execPath, cli: string = stable
  *  codex-collab — two quoted paths, the second with codex-collab in it, then
  *  `hook`. Nothing else is, so that no hook of the user's — another project's
  *  `cli.ts hook`, say — is ever taken for one, replaced or removed. */
-export function isOurHandler(h: unknown, current: string = hookCommand()): boolean {
+export function isOurHandler(h: unknown, current: string = currentHookCommand()): boolean {
   const command = (h as { command?: unknown } | null)?.command;
   if (typeof command !== "string") return false;
-  if (command === current) return true;
-  const m = /^'(?:[^']|'\\'')+' '((?:[^']|'\\'')+)' hook$/.exec(command);
+  if (current && command === current) return true;
+  const m = /^'(?:[^']|'\\'')+' '((?:[^']|'\\'')+)' hook$/.exec(command) ?? /^"[^"%!\r\n]+" "([^"%!\r\n]+)" hook$/.exec(command);
   return !!m && /codex-collab/.test(m[1]);
 }
 
@@ -212,7 +223,7 @@ export function installCodexHooks(command: string = hookCommand(), path: string 
 
 /** Take our hooks out, leaving the user's; the file goes when nothing else
  *  is in it. False when none of ours were there. */
-export function removeCodexHooks(path: string = codexHooksPath(), command: string = hookCommand()): boolean {
+export function removeCodexHooks(path: string = codexHooksPath(), command: string = currentHookCommand()): boolean {
   if (!existsSync(path)) return false;
   const doc = readDoc(path);
   if (!doc.hooks) return false;
@@ -240,7 +251,7 @@ export function removeCodexHooks(path: string = codexHooksPath(), command: strin
  *  keys its trust in a hook by the hook's place in the file, so taking ours
  *  out moves those up, and Codex asks for the user's trust in them again;
  *  until then they do not run. */
-export function hooksAfterOurs(path: string = codexHooksPath(), command: string = hookCommand()): string[] {
+export function hooksAfterOurs(path: string = codexHooksPath(), command: string = currentHookCommand()): string[] {
   let doc: HooksDoc;
   try {
     doc = readDoc(path);
@@ -267,7 +278,7 @@ export function hooksAfterOurs(path: string = codexHooksPath(), command: string 
 /** Whether our hooks are installed as this binary would write them: true,
  *  false (some missing or different — `config codex-hook on` writes them
  *  again), or null when none are. */
-export function codexHooksInSync(command: string = hookCommand(), path: string = codexHooksPath()): boolean | null {
+export function codexHooksInSync(command: string = currentHookCommand(), path: string = codexHooksPath()): boolean | null {
   let doc: HooksDoc;
   try {
     doc = readDoc(path);
@@ -317,8 +328,7 @@ export function ourHooksPrint(path: string = codexHooksPath()): string | null {
   // This install's command, worked out once; any install's is ours too
   // (`isOurHandler`), so one this process cannot tell (no script path)
   // leaves that.
-  let command = "";
-  try { command = hookCommand(); } catch { /* no script path */ }
+  const command = currentHookCommand();
   const ours: Array<[string, unknown]> = [];
   for (const [event, groups] of Object.entries(doc.hooks ?? {})) {
     if (!Array.isArray(groups)) continue;

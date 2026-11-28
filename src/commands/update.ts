@@ -76,21 +76,16 @@ export async function handleSkill(args: string[]): Promise<void> {
 
   // Two files, one consent: Claude's skill (must already be installed) and
   // Codex's (created when missing — installs that predate it have none).
-  // Not on Windows: codex-collab's messaging is unsupported there, so the
-  // Codex skill would teach commands that cannot work (install.ps1 skips
-  // it for the same reason).
   const normalize = (s: string) => s.replace(/\r\n/g, "\n");
   const targets: Array<{ label: string; dir: string; file: string; expected: string; installed: string | null; create: boolean; effect: string }> = [
     { label: "SKILL.md", dir, file: "SKILL.md", expected: expectedSkillMd(), installed: installedSkillMd(dir), create: false, effect: "Claude Code reads it the next time it loads the skill; a session that has loaded it already keeps the old text until it loads it again" },
   ];
-  if (process.platform !== "win32") {
-    const installedCodex = installedCodexSkillMd();
-    targets.push({ label: "Codex SKILL.md", dir: codexSkillInstallDir(), file: "SKILL.md", expected: expectedCodexSkillMd(), installed: installedCodex, create: true, effect: codexSkillTakesEffect(installedCodex, expectedCodexSkillMd()) });
-    // The exec-policy rule only for a user who opted in (config codex-rule on).
-    if (codexRuleEnabled()) {
-      const rules = codexRulesInstallPath();
-      targets.push({ label: "Codex rule", dir: dirname(rules), file: basename(rules), expected: expectedCodexRules(), installed: installedCodexRules(rules), create: true, effect: "Codex runs `codex-collab send` and `peers stop` without asking; takes effect in new Codex sessions" });
-    }
+  const installedCodex = installedCodexSkillMd();
+  targets.push({ label: "Codex SKILL.md", dir: codexSkillInstallDir(), file: "SKILL.md", expected: expectedCodexSkillMd(), installed: installedCodex, create: true, effect: codexSkillTakesEffect(installedCodex, expectedCodexSkillMd()) });
+  // The exec-policy rule only for a user who opted in (config codex-rule on).
+  if (codexRuleEnabled()) {
+    const rules = codexRulesInstallPath();
+    targets.push({ label: "Codex rule", dir: dirname(rules), file: basename(rules), expected: expectedCodexRules(), installed: installedCodexRules(rules), create: true, effect: "Codex runs `codex-collab send` and `peers stop` without asking; takes effect in new Codex sessions" });
   }
   // Up-to-date is content equality (same normalization as the drift notice),
   // NOT diff emptiness: a drift in line endings or the end-of-file newline

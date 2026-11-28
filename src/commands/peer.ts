@@ -11,9 +11,14 @@ import { peerCapability, peerNameFor, readPeerState } from "../peer";
 import { listRuns } from "../threads";
 import { ensureConnection, isBrokerAlive, isBrokerBusyError, loadBrokerState } from "../broker";
 import { connectToBroker } from "../broker-client";
-import { attachSupported, controlSocketPath, serverPreference } from "../shared-server";
+import { controlSocketPath, serverPreference } from "../shared-server";
 import { sessionsDir } from "../claude-registry";
 import { isAlive } from "../process";
+import { isCollabPipe } from "../local-ipc";
+
+export async function peerSocketPresent(socketPath: string): Promise<boolean> {
+  return isCollabPipe(socketPath) ? isBrokerAlive(`pipe:${socketPath}`) : existsSync(socketPath);
+}
 
 export async function handlePeer(args: string[]): Promise<void> {
   // `--dir` is a global flag, so it may appear on either side of the
@@ -48,7 +53,7 @@ export async function handlePeer(args: string[]): Promise<void> {
     const peerHealthy = state !== null
       && isAlive(state.pid)
       && existsSync(join(sessionsDir(), `${state.pid}.json`))
-      && existsSync(state.socketPath);
+      && await peerSocketPresent(state.socketPath);
     let why: string | null = null;
     if (brokerLive && capability.ok && !peerHealthy) {
       why = state ? "its peer is not fully registered" : "has no peer";
@@ -68,7 +73,7 @@ export async function handlePeer(args: string[]): Promise<void> {
         kind = probe.server.kind;
         await probe.close().catch(() => undefined);
       } catch { /* went away between the probe and now */ }
-      const sharedAvailable = attachSupported() && existsSync(controlSocketPath());
+      const sharedAvailable = existsSync(controlSocketPath());
       if (kind === "private" && preference === "shared") {
         // `shared` forbids the private server the broker is on — replace it
         // either way; without a socket the replacement fails and says so.
@@ -162,7 +167,7 @@ export async function handlePeer(args: string[]): Promise<void> {
   const brokerAlive = isAlive(state.pid);
   const entryPath = join(sessionsDir(), `${state.pid}.json`);
   const entryPresent = existsSync(entryPath);
-  const socketPresent = existsSync(state.socketPath);
+  const socketPresent = await peerSocketPresent(state.socketPath);
 
   console.log(`Peer name:  ${state.name} (expected for this workspace: ${peerNameFor(cwd)})`);
   console.log(`Broker pid: ${state.pid} (${brokerAlive ? "alive" : "DEAD — stale state"})`);

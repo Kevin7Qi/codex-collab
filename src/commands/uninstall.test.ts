@@ -154,9 +154,7 @@ describe("uninstall", () => {
     const done = await uninstall(h, "--yes");
     expect(done.code).toBe(0);
     expect(done.stdout).toContain("codex-collab is uninstalled.");
-    // install.ps1 installs no Codex skill: one of that name on Windows is
-    // someone else's.
-    expect(existsSync(join(h.codexHome, "skills", "claude-collab"))).toBe(windows);
+    expect(existsSync(join(h.codexHome, "skills", "claude-collab"))).toBe(false);
     for (const gone of [
       join(h.home, ".claude", "skills", "codex-collab"),
       join(h.home, ".local", "bin", "codex-collab"),

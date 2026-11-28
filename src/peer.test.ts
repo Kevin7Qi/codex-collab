@@ -30,15 +30,29 @@ import {
   type PeerHost,
 } from "./peer";
 import { buildRegistryEntry, isCodexCollabSocket, procStartOf, sessionsDir, workspaceSuffix, compareVersions, MESSAGING_FLOOR } from "./claude-registry";
+import { claudeExecutable, matchesPeerAuth, newPeerToken, peerAuthFrame, procIdentity, entryProcStart, removePeerEntry, spawnRegistryHolder, writePeerEntry } from "./claude-registry";
+import { localAddress } from "./local-ipc";
+import { peerSocketPresent } from "./commands/peer";
 import { buildEnvelope, parseEnvelope, peerModeFor } from "./claude-envelope";
 import { buildDelegation, escapeDelegation } from "./codex-session";
 
-/** The peer never activates on Windows — peerCapability gates win32 before
- *  anything else runs — so the socket/registry integration behavior under
- *  test does not exist there: procStartOf shells out to POSIX `ps`, sockets
- *  bind Unix paths, and capability's registry scan is unreachable. Skipping
- *  mirrors production's own gate. */
 const onWindows = process.platform === "win32";
+
+test.skipIf(!onWindows)("peer status probes named-pipe liveness", async () => {
+  const pipe = localAddress(`peer-status-${process.pid}`, "peer");
+  const server = net.createServer();
+  expect(await peerSocketPresent(pipe)).toBe(false);
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(pipe, resolve);
+  });
+  try {
+    expect(await peerSocketPresent(pipe)).toBe(true);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  expect(await peerSocketPresent(pipe)).toBe(false);
+});
 
 // The peer activates only where the mode check finds a messaging-capable
 // Claude Code on PATH; CI has none. Insist on it for this file, the way a
@@ -442,12 +456,62 @@ describe("buildRegistryEntry", () => {
       sessionId: "s-1",
     });
     expect(entry.pid).toBe(1234);
-    expect(entry.procStart).toBe("Sat Aug  8 10:47:21 2026"); // padding preserved
+    expect(entryProcStart(entry)).toBe("Sat Aug  8 10:47:21 2026"); // padding preserved
     expect(entry.messagingSocketPath).toBe("/state/peer.sock");
     expect(entry.peerProtocol).toBe(1);
     expect(entry.nameSource).toBe("user"); // a chosen name, in Claude Code's own vocabulary
   });
 });
+
+test.skipIf(!onWindows)("Windows Claude execution bypasses the npm command shim", () => {
+  const dir = mkdtempSync(join(tmpdir(), "claude-bin-"));
+  try {
+    const pkg = join(dir, "node_modules", "@anthropic-ai", "claude-code", "bin");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(dir, "claude.cmd"), "");
+    const exe = join(pkg, "claude.exe");
+    writeFileSync(exe, "");
+    expect(claudeExecutable(dir)).toBe(exe);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test.skipIf(!onWindows)("Windows peer keys bind a local pipe to its live FILETIME identity", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "peer-win-"));
+  const previous = process.env.CODEX_COLLAB_SESSIONS_DIR;
+  process.env.CODEX_COLLAB_SESSIONS_DIR = dir;
+  const holder = spawnRegistryHolder();
+  const exited = new Promise<void>((resolve) => holder.once("exit", () => resolve()));
+  const endpoint = localAddress(dir, "peer");
+  const file = join(dir, `${holder.pid}.json`);
+  try {
+    const token = newPeerToken()!;
+    const start = procStartOf(holder.pid!);
+    const entry = buildRegistryEntry({
+      pid: holder.pid!, cwd: dir, name: "codex-win", socketPath: endpoint,
+      version: "2.1.239", procStart: start, sessionId: "s-win",
+    });
+    expect(entry.procStartFt).toBe(start);
+    expect(entry.pidDomain).toMatch(/^win32:/);
+    expect(procIdentity({ ...entry, procStartFt: "1" })).toBe("dead");
+    writePeerEntry(file, entry, token);
+    const auth = peerAuthFrame(endpoint);
+    expect(matchesPeerAuth(auth, token)).toBe(true);
+    expect(matchesPeerAuth(auth, "0".repeat(32))).toBe(false);
+    holder.stdin.end();
+    await exited;
+    expect(() => peerAuthFrame(endpoint)).toThrow("No live messaging key");
+    removePeerEntry(file, endpoint);
+    expect(readdirSync(dir)).toEqual([]);
+  } finally {
+    holder.stdin.destroy();
+    holder.kill();
+    if (previous === undefined) delete process.env.CODEX_COLLAB_SESSIONS_DIR;
+    else process.env.CODEX_COLLAB_SESSIONS_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 15000);
 
 describe.skipIf(onWindows)("claim release on turn-start failure", () => {
   test("a failed turn/start releases the thread claim instead of leaking it", async () => {

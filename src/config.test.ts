@@ -392,20 +392,15 @@ describe("describeServer (health)", () => {
     expect(line).toContain("live");
   });
   test("a private server says why the shared one was not used", () => {
-    const missing = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => false, "darwin");
+    const missing = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => false);
     expect(missing).toContain("pid 42");
     expect(missing).toContain("no Codex app-server is listening");
     expect(missing).toContain("codex app-server daemon start");
-    const present = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, "linux");
+    const present = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true);
     expect(present).toContain("exists but the broker keeps the server it started on");
-    const direct = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, "linux", false);
+    const direct = describeServer({ kind: "private", pid: 42 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, false);
     expect(direct).toContain("this invocation did not attach");
-    const chosen = describeServer({ kind: "private" }, { ...env, CODEX_COLLAB_SERVER: "private" }, () => true, "darwin");
+    const chosen = describeServer({ kind: "private" }, { ...env, CODEX_COLLAB_SERVER: "private" }, () => true);
     expect(chosen).toContain("CODEX_COLLAB_SERVER=private");
-  });
-  test("on Windows a private server is the only kind, and the line says so", () => {
-    const line = describeServer({ kind: "private", pid: 7 }, { ...env, CODEX_COLLAB_SERVER: "auto" }, () => true, "win32");
-    expect(line).toContain("not available on Windows");
-    expect(line).not.toContain("daemon start");
   });
 });

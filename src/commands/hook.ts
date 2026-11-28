@@ -18,6 +18,7 @@
 // turn goes on as if it had not run. It waits for nothing: what has not
 // arrived yet is a later hook's.
 
+import { readFileSync } from "node:fs";
 import { loadTask } from "../claude-tasks";
 import { claimDelivery, isNotice, isThreadId, readMessage, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { HOOK_EVENTS, hookRunsDir, noteHookRan, type HookEvent } from "../codex-hooks";
@@ -154,7 +155,7 @@ export function hookAnswer(input: Record<string, unknown>, root?: string, runs: 
 export async function handleHook(_args: string[]): Promise<void> {
   let answer: string | null = null;
   try {
-    const input = JSON.parse(await Bun.stdin.text());
+    const input = JSON.parse(readFileSync(0, "utf8"));
     if (input && typeof input === "object") answer = hookAnswer(input as Record<string, unknown>);
   } catch {
     answer = null;

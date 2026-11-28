@@ -7,26 +7,56 @@
 // process an entry names is alive and the one that registered, and the shape
 // of an entry codex-collab writes. It knows nothing of the peer runtime.
 
-import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, readlinkSync } from "node:fs";
-import { homedir } from "node:os";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, join, sep } from "node:path";
 import { config, mailboxRoot, workspaceHash } from "./config";
+import { isCollabPipe } from "./local-ipc";
 
 
 export function sessionsDir(): string {
   // Override for tests and probes — writing a FAKE registry must never
   // touch the user's real one.
-  return process.env.CODEX_COLLAB_SESSIONS_DIR ?? join(homedir(), ".claude", "sessions");
+  return process.env.CODEX_COLLAB_SESSIONS_DIR ?? join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "sessions");
 }
 
-/** Exact `ps -o lstart=` output for a pid, in the registry's expected form.
- *  TZ/locale pinned, edges trimmed ONLY — `ps` pads the day ("Sat Aug  8")
- *  and the validator compares by exact string equality. */
+export function claudeExecutable(path = process.env.PATH): string {
+  if (process.platform !== "win32") return "claude";
+  const exe = Bun.which("claude.exe", { PATH: path });
+  if (exe) return exe;
+  const shim = Bun.which("claude.cmd", { PATH: path });
+  if (shim) {
+    const npmExe = join(dirname(shim), "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe");
+    if (existsSync(npmExe)) return npmExe;
+  }
+  return "claude";
+}
+
+/** Windows FILETIME (100 ns ticks), or the exact UTC/C `ps -o lstart=`
+ *  output on Unix. Never coerce FILETIME to a JavaScript number. */
 export function procStartOf(pid: number): string {
+  if (process.platform === "win32") {
+    if (!Number.isInteger(pid) || pid <= 0 || pid > 0xffffffff) throw new Error("Invalid PID");
+    const value = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-Process -ErrorAction Stop -Id ${pid}).StartTime.ToFileTimeUtc()`],
+      { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    if (!/^\d+$/.test(value)) throw new Error(`Could not read creation time for PID ${pid}`);
+    return value;
+  }
   return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
     env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
   }).toString().replace(/^\s+|\s+$/g, "");
+}
+
+/** One registry entry per PID. The child exits when its owner's stdin pipe
+ *  closes, even if the owner was terminated without cleanup. */
+export function spawnRegistryHolder() {
+  const command = process.platform === "win32"
+    ? [process.execPath, "-e", "process.stdin.resume()"]
+    : ["sh", "-c", "read _ || true"];
+  return spawn(command[0], command.slice(1), { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
 }
 
 /** A pid's start time as Claude Code records it for its OWN sessions on
@@ -68,6 +98,7 @@ export function registryProcStart(pid: number): string {
  *  are compared as strings, and one written differently would read as
  *  another machine's. null where there is no such thing (not Linux). */
 export function ownPidDomain(): string | null {
+  if (process.platform === "win32") return `win32:${hostname().toLowerCase()}`;
   if (process.platform !== "linux") return null;
   let machine = "";
   try { machine = readFileSync("/etc/machine-id", "utf-8").trim(); } catch { /* none */ }
@@ -117,13 +148,76 @@ export function procIdentity(entry: Record<string, unknown>, probes: ProcProbes 
     if ((e as NodeJS.ErrnoException).code === "ESRCH") return "dead";
     // EPERM: it exists and is someone else's — the start time decides.
   }
-  if (typeof entry.procStart !== "string") return "live";
+  const start = entryProcStart(entry);
+  if (start === null) return "live";
   const ticks = (probes.ticksOf ?? procStartTicksOf)(pid);
-  if (ticks !== null && /^\d+$/.test(entry.procStart)) return entry.procStart === ticks ? "live" : "dead";
+  if (ticks !== null && /^\d+$/.test(start)) return start === ticks ? "live" : "dead";
   let lstart: string | null = null;
   try { lstart = (probes.lstartOf ?? procStartOf)(pid); } catch { lstart = null; }
   if (lstart === null) return "unverifiable";
-  return entry.procStart === lstart ? "live" : "dead";
+  return start === lstart ? "live" : "dead";
+}
+
+export function entryProcStart(entry: Record<string, unknown>): string | null {
+  const start = entry.procStartFt ?? entry.procStart;
+  return typeof start === "string" ? start : null;
+}
+
+function pipeKeySuffix(path: string): string | null {
+  const name = /^\\\\\.\\pipe\\((?:LOCAL\\)?[\w-]+)$/i.exec(path)?.[1];
+  if (!name) return null;
+  return `.${createHash("sha256").update(`\\\\.\\pipe\\${name.toLowerCase()}`).digest("hex")}.key`;
+}
+
+export function newPeerToken(): string | undefined {
+  return process.platform === "win32" ? randomBytes(16).toString("hex") : undefined;
+}
+
+export function writePeerEntry(file: string, entry: Record<string, unknown>, token?: string): void {
+  const suffix = typeof entry.messagingSocketPath === "string" ? pipeKeySuffix(entry.messagingSocketPath) : null;
+  if (token && suffix) {
+    writeFileSync(file.slice(0, -5) + suffix, JSON.stringify({
+      peerToken: token, procStartFt: entry.procStartFt, pidDomain: entry.pidDomain,
+    }), { mode: 0o600 });
+  }
+  writeFileSync(file, JSON.stringify(entry), { mode: 0o644 });
+}
+
+export function removePeerEntry(file: string, endpoint: string): void {
+  try { unlinkSync(file); } catch { /* gone */ }
+  const suffix = pipeKeySuffix(endpoint);
+  if (suffix) { try { unlinkSync(file.slice(0, -5) + suffix); } catch { /* gone */ } }
+}
+
+/** Windows Claude requires an auth frame before a message. The recipient
+ *  publishes its token separately from the registry entry, tied to the
+ *  live owner of the exact local pipe. Never send it to a network path. */
+export function peerAuthFrame(endpoint: string): string {
+  if (process.platform !== "win32") return "";
+  const suffix = pipeKeySuffix(endpoint);
+  if (suffix) {
+    const domain = ownPidDomain();
+    for (const file of readdirSync(sessionsDir())) {
+      if (!file.endsWith(suffix) || !/^\d+\./.test(file)) continue;
+      const pid = Number(file.slice(0, -suffix.length));
+      try {
+        const key = JSON.parse(readFileSync(join(sessionsDir(), file), "utf8"));
+        if (key.pidDomain !== domain || typeof key.procStartFt !== "string" ||
+            typeof key.peerToken !== "string" || !/^[0-9a-f]{32}$/.test(key.peerToken)) continue;
+        if (procIdentity({ pid, pidDomain: key.pidDomain, procStartFt: key.procStartFt }) !== "live") continue;
+        return JSON.stringify({ type: "auth", token: key.peerToken }) + "\n";
+      } catch { /* stale, torn or unreadable */ }
+    }
+  }
+  throw new Error("No live messaging key for this local Claude Code pipe");
+}
+
+export function matchesPeerAuth(line: string, token: string): boolean {
+  try {
+    const auth = JSON.parse(line);
+    return auth?.type === "auth" && typeof auth.token === "string" && /^[0-9a-f]{32}$/.test(auth.token) &&
+      timingSafeEqual(Buffer.from(auth.token, "hex"), Buffer.from(token, "hex"));
+  } catch { return false; }
 }
 
 /** Lowest Claude Code that binds a cross-session messaging socket. From its
@@ -131,6 +225,7 @@ export function procIdentity(entry: Record<string, unknown>, probes: ProcProbes 
  *  Later releases fixed bugs around it, but this is where the capability
  *  starts, and gating higher would refuse installs that work. */
 export const MESSAGING_FLOOR = "2.1.224";
+export const WINDOWS_MESSAGING_FLOOR = "2.1.239";
 
 /** Compare dotted numeric versions. Returns <0, 0, >0 like a comparator, and
  *  treats a missing or non-numeric segment as 0 so "2.1" sorts below "2.1.1"
@@ -158,7 +253,7 @@ export function claudeCodeVersion(): string | null {
   let value: string | null = null;
   try {
     // `claude --version` prints e.g. "2.1.241 (Claude Code)".
-    const out = execFileSync("claude", ["--version"], {
+    const out = execFileSync(claudeExecutable(), ["--version"], {
       encoding: "utf-8",
       timeout: 5000,
       stdio: ["ignore", "pipe", "ignore"],
@@ -204,6 +299,7 @@ export function sniffRegistryVersion(): string {
  *  already write, and Claude Code validates none of it. */
 export function isCodexCollabSocket(socketPath: unknown): boolean {
   if (typeof socketPath !== "string" || socketPath.length === 0) return false;
+  if (isCollabPipe(socketPath)) return true;
   const root = config.dataDir;
   if (socketPath === root || socketPath.startsWith(root + sep)) return true;
   // A task's receiver (see `send`) registers a socket under the temp root
@@ -240,7 +336,9 @@ export function buildRegistryEntry(opts: {
     sessionId: opts.sessionId,
     cwd: opts.cwd,
     startedAt: now,
-    procStart: opts.procStart,
+    ...(process.platform === "win32"
+      ? { procStartFt: opts.procStart, pidDomain: ownPidDomain() }
+      : { procStart: opts.procStart }),
     version: opts.version,
     peerProtocol: 1,
     kind: "interactive",

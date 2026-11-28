@@ -9,7 +9,6 @@ import { tmpdir } from "node:os";
 import net from "node:net";
 import {
   acceptKeyFor,
-  attachSupported,
   connectAppServer,
   connectShared,
   controlSocketPath,
@@ -31,10 +30,10 @@ type Handler = (msg: Record<string, unknown>, reply: (m: unknown) => void, ws: {
 /** A fake app-server on a unix socket: answers initialize, then hands every
  *  other request to `onRequest`. Returns the server and a way to push
  *  notifications / server requests to the most recent client. */
-function fakeServer(socketPath: string, onRequest: Handler, opts: { silentInitialize?: boolean } = {}) {
+function fakeServer(socketPath: string | null, onRequest: Handler, opts: { silentInitialize?: boolean } = {}) {
   let latest: { send(s: string): void } | null = null;
   const server = Bun.serve({
-    unix: socketPath,
+    ...(socketPath === null ? { hostname: "127.0.0.1", port: 0 } : { unix: socketPath }),
     fetch(req, srv) {
       if (srv.upgrade(req)) return undefined as unknown as Response;
       return new Response("not a websocket", { status: 400 });
@@ -60,6 +59,32 @@ function fakeServer(socketPath: string, onRequest: Handler, opts: { silentInitia
     stop: () => server.stop(true),
   };
 }
+
+test.skipIf(!onWindows)("shared-server attaches through a Windows Codex cmd shim", async () => {
+  const dir = shortTempDir();
+  const socketPath = join(dir, "control & %PATH%!.sock");
+  const fake = fakeServer(null, (msg, reply) => reply({ id: msg.id, result: { data: [], nextCursor: null } }));
+  try {
+    writeFileSync(join(dir, "codex.cmd"), '@echo off\r\n"%FIXTURE_BUN%" "%~dp0proxy.cjs" %*\r\n');
+    writeFileSync(join(dir, "proxy.cjs"), `
+      if (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(["app-server", "proxy", "--sock", process.env.FIXTURE_SOCKET])) process.exit(7);
+      const socket = require("node:net").connect(${fake.server.port}, "127.0.0.1");
+      process.stdin.pipe(socket).pipe(process.stdout);
+    `);
+    const client = await connectShared({ socketPath, env: {
+      PATH: `${dir};${process.env.PATH}`, FIXTURE_BUN: process.execPath, FIXTURE_SOCKET: socketPath,
+    } });
+    try {
+      expect(client.userAgent).toBe("fake-shared/1.0");
+      expect(await client.request<{ data: unknown[]; nextCursor: string | null }>("model/list", {})).toEqual({ data: [], nextCursor: null });
+    } finally {
+      await client.close();
+    }
+  } finally {
+    fake.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}, 10000);
 
 describe.skipIf(onWindows)("shared-server: WebSocket client", () => {
   test("a socket that accepts and hangs up before any answer fails at once, not at the deadline", async () => {
@@ -226,14 +251,9 @@ describe("shared-server: preference and socket resolution", () => {
     }
   });
 
-  test("attach is unsupported on Windows only", () => {
-    expect(attachSupported("win32")).toBe(false);
-    expect(attachSupported("darwin")).toBe(true);
-    expect(attachSupported("linux")).toBe(true);
-  });
 });
 
-describe.skipIf(onWindows)("shared-server: connectAppServer decision", () => {
+describe("shared-server: connectAppServer decision", () => {
   let dir: string;
   const saved: Record<string, string | undefined> = {};
   beforeEach(() => {
@@ -245,7 +265,7 @@ describe.skipIf(onWindows)("shared-server: connectAppServer decision", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test("auto attaches when the control socket answers", async () => {
+  test.skipIf(onWindows)("auto attaches when the control socket answers", async () => {
     const sock = join(dir, "c.sock");
     const fake = fakeServer(sock, (msg, reply) => reply({ id: msg.id, result: {} }));
     process.env.CODEX_COLLAB_SERVER = "auto";
@@ -267,7 +287,7 @@ describe.skipIf(onWindows)("shared-server: connectAppServer decision", () => {
     expect(err.message).toContain("codex app-server daemon start");
   });
 
-  test("a socket file that nothing serves is skipped under auto and fatal under shared", async () => {
+  test.skipIf(onWindows)("a socket file that nothing serves is skipped under auto and fatal under shared", async () => {
     const sock = join(dir, "dead.sock");
     writeFileSync(sock, ""); // a plain file where a socket used to be
     process.env.CODEX_COLLAB_SERVER_SOCKET = sock;
@@ -289,14 +309,7 @@ describe.skipIf(onWindows)("shared-server: connectAppServer decision", () => {
     await client.close();
   });
 
-  test("shared on Windows is refused, not quietly downgraded to a private server", async () => {
-    process.env.CODEX_COLLAB_SERVER = "shared";
-    const err = await connectAppServer(undefined, "win32").catch((e: unknown) => e) as Error;
-    expect(err.message).toContain("cannot be reached on Windows");
-    expect(err.message).toContain("config server auto");
-  });
-
-  test("private never looks at the socket", async () => {
+  test.skipIf(onWindows)("private never looks at the socket", async () => {
     const sock = join(dir, "c.sock");
     let touched = false;
     const fake = fakeServer(sock, (msg, reply) => { touched = true; reply({ id: msg.id, result: {} }); });
