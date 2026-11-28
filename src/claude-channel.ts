@@ -30,9 +30,9 @@ import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { config, mailboxRoot, workspaceHash } from "./config";
 import { verifyMailboxDir } from "./questions";
-import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcIdentity } from "./peer";
 import { acquireLockAsync, acquireLockSync } from "./lock";
 import { spawnEnv } from "./claude-sessions";
+import { isCodexCollabSocket, procIdentity, sessionsDir, workspaceSuffix, type ProcIdentity } from "./claude-registry";
 
 /** A Codex thread id as Codex hands it to its shell: a UUID. Every path built
  *  from one goes through this, since an id comes from the environment. */

@@ -28,9 +28,9 @@ import {
   getWorkspacePaths,
   resolveThreadIdOrDie,
   isThreadProcessAlive,
-  formatAge,
   type WorkspacePaths,
 } from "./shared";
+import { formatAge } from "../format";
 
 const POLL_INTERVAL_MS = 300;
 

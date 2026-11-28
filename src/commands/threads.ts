@@ -38,7 +38,6 @@ import {
   resolveThreadIdOrDie,
   resolveThreadIdAllowRaw,
   progress,
-  formatAge,
   isThreadProcessAlive,
   removePidFile,
   withClient,
@@ -48,6 +47,7 @@ import {
   fetchAllPages,
   type WorkspacePaths,
 } from "./shared";
+import { formatAge } from "../format";
 
 // ---------------------------------------------------------------------------
 // Thread discovery from app-server

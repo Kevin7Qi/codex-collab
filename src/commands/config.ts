@@ -3,13 +3,12 @@
 import { config, listTemplates, resolveStateDir, resolveWorkspaceDir } from "../config";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { peerCapability, sessionsDir, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
+import { peerCapability, COLLAB_MODES, readConfiguredMode, resolveCollabMode } from "../peer";
 import { SERVER_PREFERENCES, attachSupported, controlSocketPath, serverPreference } from "../shared-server";
 import { readPeerState, isAlive, type PeerState } from "./peer";
 import { CLAUDE_EFFORTS, CLAUDE_MODEL_TIERS, DEFAULT_SPAWN_AUTOCOMPACT, DEFAULT_SPAWN_EFFORT, DEFAULT_SPAWN_LINGER_SEC, DEFAULT_SPAWN_RESUME_SEC, describeModelChoice, isAutocompactWindow, isModelName, isSpawnEffortSetting, spawnEffortFor } from "../claude-sessions";
 import { codexRuleEnabled, codexRulesInSync, codexRulesInstallPath, codexSkillInSync, codexSkillInstallDir, installCodexRules, removeCodexRules } from "../skill";
 import { claudeConfigFile, claudeTrusts, codexConfigFile, codexTrust, isSpawnTrustSetting, trustReachesHome } from "../claude-trust";
-import { underCodex } from "./send";
 import { codexHookEnabled, codexHooksInSync, codexHooksPath, forgetHookRuns, hooksAfterOurs, installCodexHooks, lastHookRun, ourHooksPrint, removeCodexHooks, restoreCodexHooks, snapshotCodexHooks } from "../codex-hooks";
 import { DEFAULT_ADDRESS_IDLE_SEC, claimEveryMessage } from "../claude-channel";
 
@@ -109,7 +108,6 @@ import type { Model, AccountRead } from "../types";
 import { MIN_BUN, bunTooOld } from "../bun-version";
 import {
   die,
-  formatAge,
   parseOptions,
   withClient,
   fetchAllPages,
@@ -119,6 +117,9 @@ import {
   type UserConfig,
   MAX_TIMEOUT_SECONDS,
 } from "./shared";
+import { sessionsDir } from "../claude-registry";
+import { underCodex } from "../codex-session";
+import { formatAge } from "../format";
 
 // ---------------------------------------------------------------------------
 // config

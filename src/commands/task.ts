@@ -10,12 +10,13 @@ import { resolve } from "node:path";
 import { resolveStateDir } from "../config";
 import { shellQuote } from "../approvals";
 import { describeModelChoice, promptNow, remoteControlReaches, sessionStatusNow } from "../claude-sessions";
-import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus } from "../claude-tasks";
+import { FINAL_STATUSES, listTasks, loadTask, nextTurnAfter, resolveTaskId, settled, type TaskRecord, type TaskStatus, repliesByMessage } from "../claude-tasks";
 import { describeTrouble, describeTurnError, turnEndedOnError, turnTrouble } from "../claude-transcript";
 import { sanitizeForTerminal } from "../questions";
 import { channelName, claimDelivery, isNotice, isThreadId, messagesSince, noticesAbout, threadStateDirs, type ChannelMessage } from "../claude-channel";
 import { RECENT_HOOK_RUN_MS, hooksRunIn } from "../codex-hooks";
-import { EXIT_CODES, die, formatDuration, parseOptions } from "./shared";
+import { EXIT_CODES, die, parseOptions } from "./shared";
+import { formatDuration, listed } from "../format";
 
 /** Default wait (seconds) of `send` and of `task wait`. It bounds how long the
  *  COMMAND blocks, and nothing else: the task goes on, and its reply is kept. */
@@ -63,24 +64,6 @@ function since(iso: string | undefined, now = Date.now()): string {
  *  answers. The hook finds what a command printed by this same text. */
 export function printedText(text: string): string {
   return sanitizeForTerminal(text).trimEnd().split("\n").map((l) => `  ${l}`).join("\n");
-}
-
-/** "a", "a and b", "a, b and c". */
-export function listed(items: string[]): string {
-  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
-}
-
-/** The tasks of a thread each message is the reply to, by message id,
- *  oldest task first: one reply can answer several of the thread's
- *  messages, and it ends every task it answers. */
-export function repliesByMessage(tasks: TaskRecord[], threadId: string): Map<string, TaskRecord[]> {
-  const out = new Map<string, TaskRecord[]>();
-  for (const t of tasks) {
-    if (!t.reply?.id || t.threadId !== threadId) continue;
-    out.set(t.reply.id, [...(out.get(t.reply.id) ?? []), t]);
-  }
-  for (const list of out.values()) list.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
-  return out;
 }
 
 /** What a report says of a task still waiting for its reply, when that

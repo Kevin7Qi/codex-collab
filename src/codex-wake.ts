@@ -14,9 +14,9 @@ import { existsSync } from "node:fs";
 import { releaseDelivery, threadStateDirs } from "./claude-channel";
 import type { AppServerClient } from "./client";
 import { hooksRunIn } from "./codex-hooks";
-import { take, undelivered, type Taken } from "./commands/hook";
-import { buildDelegation } from "./peer";
 import { attachSupported, connectShared, controlSocketPath } from "./shared-server";
+import { buildDelegation } from "./codex-session";
+import { take, undelivered, type Taken } from "./channel-delivery";
 
 export type WakeOutcome = { woke: true; messages: number } | { woke: false; why: string };
 

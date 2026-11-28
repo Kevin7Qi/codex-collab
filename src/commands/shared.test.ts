@@ -12,8 +12,6 @@ import {
   turnOverrides,
   resolveApproval,
   sandboxModeLabel,
-  formatDuration,
-  formatLongDuration,
   isThreadProcessAlive,
   defaultOptions,
   recordTerminalRunState,
@@ -26,6 +24,7 @@ import {
   type Options,
 } from "./shared";
 import { createRun, loadRun, registerThread } from "../threads";
+import { formatDuration, formatLongDuration } from "../format";
 import { config, MODEL_ALIASES } from "../config";
 import type { AppServerClient } from "../client";
 import type { Model, ThreadStartResponse } from "../types";

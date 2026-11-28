@@ -7,11 +7,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveStateDir } from "../config";
 import { parseOptions } from "./shared";
-import { peerCapability, peerNameFor, sessionsDir } from "../peer";
+import { peerCapability, peerNameFor } from "../peer";
 import { listRuns } from "../threads";
 import { ensureConnection, isBrokerAlive, isBrokerBusyError, loadBrokerState } from "../broker";
 import { connectToBroker } from "../broker-client";
 import { attachSupported, controlSocketPath, serverPreference } from "../shared-server";
+import { sessionsDir } from "../claude-registry";
 
 export interface PeerState {
   pid: number;

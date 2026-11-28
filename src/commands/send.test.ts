@@ -14,14 +14,16 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { buildEnvelope, buildRegistryEntry, parseEnvelope, procStartOf, workspaceSuffix } from "../peer";
 import { spawnedSessionName } from "../claude-sessions";
-import { choiceNotAppliedNote, codexThreadId, composeMessage, insideCodexSandbox, nextExpiryLook, senderName, splitTarget, sweepDeadReceivers, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
+import { choiceNotAppliedNote, composeMessage, nextExpiryLook, senderName, splitTarget, sweepDeadReceivers, watchForBlocked, watchForLost, watchForStalledTurn } from "./send";
 import { formatSessions, unverifiedNotice, whereItLives } from "./peers";
 import { replyComesByItself } from "./task";
 import { channelName, writeMessage } from "../claude-channel";
 import { hookCommand, installCodexHooks, noteHookRan } from "../codex-hooks";
 import type { TaskRecord } from "../claude-tasks";
+import { buildRegistryEntry, procStartOf, workspaceSuffix } from "../claude-registry";
+import { buildEnvelope, parseEnvelope } from "../claude-envelope";
+import { codexThreadId, insideCodexSandbox } from "../codex-session";
 
 const CLI = join(import.meta.dir, "..", "cli.ts");
 const TEST_HOME = mkdtempSync(join(tmpdir(), "codex-collab-send-home-"));

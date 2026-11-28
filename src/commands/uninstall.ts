@@ -28,10 +28,10 @@ import { jobHasWorkInFlight, locateSpawnedSession, markSpawnedSessionStopped, re
 import { readHostClaim, readHostState } from "../claude-channel";
 import { isBrokerAlive, isBrokerBusyError, loadBrokerState } from "../broker";
 import { connectToBroker } from "../broker-client";
-import { isCodexCollabSocket, procIdentity, sessionsDir, type ProcIdentity } from "../peer";
 import { isAlive } from "./peer";
-import { insideCodexSandbox } from "./send";
 import { die, requireConsent } from "./shared";
+import { isCodexCollabSocket, procIdentity, sessionsDir, type ProcIdentity } from "../claude-registry";
+import { insideCodexSandbox } from "../codex-session";
 
 /** A run left "running" by a runner that died without a word, and recorded
  *  before runs named their runner, reads as work after this long no more. */

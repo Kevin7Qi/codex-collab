@@ -12,16 +12,9 @@ import { basename, join, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { writeFileSync } from "node:fs";
 import {
-  buildEnvelope,
-  buildRegistryEntry,
   createPeer,
-  parseEnvelope,
   peerCapability,
-  peerModeFor,
   peerNameFor,
-  isCodexCollabSocket,
-  procStartOf,
-  sessionsDir,
   extractTopic,
   parseHeaders,
   threadPeerLabel,
@@ -30,17 +23,15 @@ import {
   conversationsToEvict,
   conversationModel,
   adoptionFor,
-  workspaceSuffix,
   threadIsGone,
-  compareVersions,
   resolveCollabMode,
   messagingSupported,
-  MESSAGING_FLOOR,
-  buildDelegation,
-  escapeDelegation,
   type Conversation,
   type PeerHost,
 } from "./peer";
+import { buildRegistryEntry, isCodexCollabSocket, procStartOf, sessionsDir, workspaceSuffix, compareVersions, MESSAGING_FLOOR } from "./claude-registry";
+import { buildEnvelope, parseEnvelope, peerModeFor } from "./claude-envelope";
+import { buildDelegation, escapeDelegation } from "./codex-session";
 
 /** The peer never activates on Windows — peerCapability gates win32 before
  *  anything else runs — so the socket/registry integration behavior under

@@ -47,6 +47,9 @@ import {
 import { EventDispatcher } from "./events";
 import { config, resolveModel, resolveWorkspaceDir, sandboxModeOf, sandboxPolicyFor, workspaceHash, type SandboxMode, mailboxRoot } from "./config";
 import { resolveModelDefaults } from "./models";
+import { sessionsDir, procStartOf, procIdentity, MESSAGING_FLOOR, compareVersions, claudeCodeVersion, sniffRegistryVersion, isCodexCollabSocket, workspaceSuffix, buildRegistryEntry } from "./claude-registry";
+import { type InboundMessage, parseEnvelope, peerModeFor, buildEnvelope } from "./claude-envelope";
+import { buildDelegation } from "./codex-session";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -249,181 +252,7 @@ interface PendingConsult {
  *  channel: an unanswered question expires and Codex proceeds on its own. */
 export const CONSULT_TIMEOUT_MS = 600_000;
 
-// ─── Registry entry ─────────────────────────────────────────────────────────
-
-export function sessionsDir(): string {
-  // Override for tests and probes — writing a FAKE registry must never
-  // touch the user's real one.
-  return process.env.CODEX_COLLAB_SESSIONS_DIR ?? join(homedir(), ".claude", "sessions");
-}
-
-/** Exact `ps -o lstart=` output for a pid, in the registry's expected form.
- *  TZ/locale pinned, edges trimmed ONLY — `ps` pads the day ("Sat Aug  8")
- *  and the validator compares by exact string equality. */
-export function procStartOf(pid: number): string {
-  return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
-    env: { ...process.env, TZ: "UTC", LC_ALL: "C" },
-  }).toString().replace(/^\s+|\s+$/g, "");
-}
-
-/** A pid's start time as Claude Code records it for its OWN sessions on
- *  Linux: field 22 of /proc/<pid>/stat (`starttime`, clock ticks since boot),
- *  kept as the decimal string it is. null anywhere that cannot be read — not
- *  Linux, the pid gone, or a pid from another namespace.
- *
- *  `comm` (field 2) is the executable's name in parentheses and may itself
- *  hold spaces and parentheses, so the fields are counted from the LAST ")". */
-export function procStartTicksOf(pid: number, statPath = `/proc/${pid}/stat`): string | null {
-  if (process.platform !== "linux") return null;
-  try {
-    const stat = readFileSync(statPath, "utf-8");
-    const close = stat.lastIndexOf(")");
-    if (close === -1) return null;
-    // After ") " comes field 3 (state); starttime is field 22, index 19 here.
-    const ticks = stat.slice(close + 2).split(" ")[19];
-    return ticks !== undefined && /^\d+$/.test(ticks) ? ticks : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The pid domain this process lives in, in the form Claude Code writes to
- *  its registry entries on Linux (`pidDomain`): the machine id and the PID
- *  namespace. A pid means something only inside its own domain — a command
- *  Codex runs in its sandbox (its own PID namespace from 0.154) sees none of
- *  the host's pids. Built exactly as Claude Code builds it, a part it cannot
- *  read left empty (a container often has no /etc/machine-id): two domains
- *  are compared as strings, and one written differently would read as
- *  another machine's. null where there is no such thing (not Linux). */
-export function ownPidDomain(): string | null {
-  if (process.platform !== "linux") return null;
-  let machine = "";
-  try { machine = readFileSync("/etc/machine-id", "utf-8").trim(); } catch { /* none */ }
-  let ns = "";
-  try { ns = readlinkSync("/proc/self/ns/pid"); } catch { /* none */ }
-  return `linux:${machine}:${ns}`;
-}
-
-/** What one look at a registry entry's process says: it is the process that
- *  registered, it is not, or this process has no means to tell. */
-export type ProcIdentity = "live" | "dead" | "unverifiable";
-
-/** Test seams: the three probes `procIdentity` makes. */
-export interface ProcProbes {
-  ownDomain?: () => string | null;
-  ticksOf?: (pid: number) => string | null;
-  lstartOf?: (pid: number) => string;
-  signal?: (pid: number) => void;
-}
-
-/** Whether the process a registry entry names is alive AND the one that
- *  registered. The one place this is decided, for every reader of Claude
- *  Code's entries.
- *
- *  `procStart` comes in two representations: Claude Code on Linux writes
- *  /proc clock ticks, and where there is no /proc (macOS) — as in the
- *  entries codex-collab writes itself — it is `ps -o lstart=`. A match on
- *  either is a match; comparing one against the other made every Linux
- *  session look dead.
- *
- *  `unverifiable` is for an entry from another pid domain, or one whose
- *  start time nothing here can read (Codex's pre-0.154 sandbox forbids `ps`
- *  and answers `kill -0` with EPERM). Callers may take other evidence for
- *  such an entry — never a reason to signal its pid. */
-export function procIdentity(entry: Record<string, unknown>, probes: ProcProbes = {}): ProcIdentity {
-  const pid = entry.pid;
-  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return "dead";
-  // Domain first: in another domain the pid names a different process, or
-  // none, and neither answer says anything about the session.
-  if (typeof entry.pidDomain === "string") {
-    const own = (probes.ownDomain ?? ownPidDomain)();
-    if (own !== null && own !== entry.pidDomain) return "unverifiable";
-  }
-  try {
-    (probes.signal ?? ((p: number) => { process.kill(p, 0); }))(pid);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ESRCH") return "dead";
-    // EPERM: it exists and is someone else's — the start time decides.
-  }
-  if (typeof entry.procStart !== "string") return "live";
-  const ticks = (probes.ticksOf ?? procStartTicksOf)(pid);
-  if (ticks !== null && /^\d+$/.test(entry.procStart)) return entry.procStart === ticks ? "live" : "dead";
-  let lstart: string | null = null;
-  try { lstart = (probes.lstartOf ?? procStartOf)(pid); } catch { lstart = null; }
-  if (lstart === null) return "unverifiable";
-  return entry.procStart === lstart ? "live" : "dead";
-}
-
-/** Lowest Claude Code that binds a cross-session messaging socket. From its
- *  changelog: 2.1.224 "Added cross-session SendMessage … (macOS and Linux)".
- *  Later releases fixed bugs around it, but this is where the capability
- *  starts, and gating higher would refuse installs that work. */
-export const MESSAGING_FLOOR = "2.1.224";
-
-/** Compare dotted numeric versions. Returns <0, 0, >0 like a comparator, and
- *  treats a missing or non-numeric segment as 0 so "2.1" sorts below "2.1.1"
- *  and a suffixed build ("2.1.224-beta") compares on its numbers. */
-export function compareVersions(a: string, b: string): number {
-  const parts = (v: string) => v.split(".").map((n) => parseInt(n, 10) || 0);
-  const [x, y] = [parts(a), parts(b)];
-  for (let i = 0; i < Math.max(x.length, y.length); i++) {
-    const d = (x[i] ?? 0) - (y[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  return 0;
-}
-
-/** The installed Claude Code's version, or null when it cannot be determined
- *  (not installed, not on PATH, or output we do not recognize).
- *
- *  Memoized: this shells out, and it is asked once per render and once per
- *  broker start. A version that changes under a running process is a Claude
- *  Code upgrade, which `skill sync` notices separately. */
-let claudeVersionCache: { value: string | null } | null = null;
-export function claudeCodeVersion(): string | null {
-  if (claudeVersionCache) return claudeVersionCache.value;
-  let value: string | null = null;
-  try {
-    // `claude --version` prints e.g. "2.1.241 (Claude Code)".
-    const out = execFileSync("claude", ["--version"], {
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    value = /(\d+\.\d+\.\d+)/.exec(out)?.[1] ?? null;
-  } catch { /* absent, not executable, or too slow — treat as unknown */ }
-  claudeVersionCache = { value };
-  return value;
-}
-
-/** Test seam: forget the memoized version. */
-export function resetClaudeVersionCache(): void {
-  claudeVersionCache = null;
-}
-
-/** A plausible Claude Code version string for our registry entries: borrow
- *  it from any live sibling session's entry, else the installed binary's,
- *  else the last version this was verified against. The registry does not
- *  validate it, but `claude agents` shows it. */
-export function sniffRegistryVersion(): string {
-  try {
-    for (const file of readdirSync(sessionsDir())) {
-      if (!file.endsWith(".json")) continue;
-      try {
-        const parsed = JSON.parse(readFileSync(join(sessionsDir(), file), "utf-8"));
-        if (typeof parsed?.version === "string" && typeof parsed?.pid === "number") {
-          try {
-            process.kill(parsed.pid, 0);
-            return parsed.version;
-          } catch { /* dead entry — keep looking */ }
-        }
-      } catch { /* unreadable entry — keep looking */ }
-    }
-  } catch { /* no registry dir */ }
-  // No live sibling to borrow from: the installed binary's version, then
-  // the last one this was verified against.
-  return claudeCodeVersion() ?? "2.1.226";
-}
+// ─── Addresses ──────────────────────────────────────────────────────────────
 
 /** Peer address for a workspace: codex-<dir>-<workspace hash>, sanitized. A
  *  directory that already leads with "codex" would stutter
@@ -438,22 +267,6 @@ export function sniffRegistryVersion(): string {
  *  `~/.codex-collab/workspaces/<slug>-<hash>/` uses, so an address and its
  *  state dir visibly correspond, and every cwd inside one checkout resolves
  *  to one address. */
-/** True when a registry entry's messaging socket belongs to a codex-collab
- *  broker (any workspace) rather than a real Claude session. Exported for
- *  tests. Path-based rather than a marker field: the socket path is one we
- *  already write, and Claude Code validates none of it. */
-export function isCodexCollabSocket(socketPath: unknown): boolean {
-  if (typeof socketPath !== "string" || socketPath.length === 0) return false;
-  const root = config.dataDir;
-  if (socketPath === root || socketPath.startsWith(root + sep)) return true;
-  // A task's receiver (see `send`) registers a socket under the temp root
-  // (short enough for any home directory); it is a Codex session's, not
-  // Claude's. The temp root follows TMPDIR, which differs between processes —
-  // a sandboxed shell, a login that sets its own — so it is recognised by its
-  // own name wherever it sits, not only where this process would put it.
-  const tmpRoot = mailboxRoot();
-  return socketPath.startsWith(tmpRoot + sep) || basename(dirname(socketPath)) === basename(tmpRoot);
-}
 
 export function peerNameFor(cwd: string): string {
   // Both halves must name the same thing. The hash is of the workspace ROOT,
@@ -611,16 +424,6 @@ export const THREAD_HELD_NOTICE =
   "[codex-collab] This conversation's thread is open for writing in another Codex process (the Codex app, a `codex` session, or an app-server daemon). " +
   "Close it there, or wait several minutes after it goes idle for the thread to be unloaded, then send your message again — nothing was lost.";
 
-/** The workspace half of every peer address this broker registers. The
- *  session registry is shared across workspaces and the name IS the
- *  messaging address, so a name carrying only a topic or a thread slug can
- *  be claimed by two checkouts at once and SendMessage reaches whichever
- *  registered last. Same suffix the front door carries, so every address
- *  from one workspace is recognizably from it. */
-export function workspaceSuffix(cwd: string): string {
-  return workspaceHash(cwd).slice(0, 6);
-}
-
 /** Peer name for a sender-chosen topic: codex-<topic-slug>. */
 /** How a topic ROUTES, independent of how it displays. Two messages naming
  *  the same topic must land on the same conversation, so this must never
@@ -671,137 +474,6 @@ export function threadPeerLabel(firstMessage: string, shortId: string, suffix = 
   return `codex(${slug ? `${slug}-` : ""}${shortId.slice(0, 4)}${suffix ? `-${suffix}` : ""})`;
 }
 
-export function buildRegistryEntry(opts: {
-  pid: number;
-  cwd: string;
-  name: string;
-  socketPath: string;
-  version: string;
-  procStart: string;
-  sessionId: string;
-}): Record<string, unknown> {
-  const now = Date.now();
-  return {
-    pid: opts.pid,
-    sessionId: opts.sessionId,
-    cwd: opts.cwd,
-    startedAt: now,
-    procStart: opts.procStart,
-    version: opts.version,
-    peerProtocol: 1,
-    kind: "interactive",
-    entrypoint: "cli",
-    messagingSocketPath: opts.socketPath,
-    name: opts.name,
-    // Claude Code's own values are `derived` (from the cwd) and `user` (set
-    // deliberately). A peer address is chosen, never derived, and renderings
-    // that hide derived names keep a `user` one visible.
-    nameSource: "user",
-    status: "idle",
-    updatedAt: now,
-    statusUpdatedAt: now,
-  };
-}
-
-// ─── Envelope parse / wrap ──────────────────────────────────────────────────
-
-export interface InboundMessage {
-  msgId: string;
-  /** Reply socket path (uds: prefix stripped). */
-  replyPath: string;
-  fromName: string;
-  text: string;
-}
-
-const CROSS_SESSION_RE =
-  /<cross-session-message\b([^>]*)>\n?([\s\S]*?)\n?<\/cross-session-message>/;
-
-/** Parse one line of the messaging socket protocol. Returns null for
- *  anything that is not a deliverable user message (control frames,
- *  malformed JSON, unknown versions). */
-export function parseEnvelope(line: string): InboundMessage | null {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(line);
-  } catch {
-    return null;
-  }
-  if (parsed?.type !== "user") return null;
-  const from = typeof parsed.from === "string" ? parsed.from : "";
-  const replyPath = from.startsWith("uds:") ? from.slice(4) : from;
-  if (!replyPath) return null;
-  const message = parsed.message as { content?: unknown } | undefined;
-  const content = typeof message?.content === "string" ? message.content : "";
-  const m = CROSS_SESSION_RE.exec(content);
-  // Attribute order in the opening tag is the sender's choice — pull
-  // from-name out of the attribute blob, not by position. The name flows
-  // into logs and Codex's context, so strip control characters and bound
-  // its length; the message text itself is passed through (multiline is
-  // legitimate content).
-  const rawName = (m && /\bfrom-name="([^"]*)"/.exec(m[1])?.[1]) || "claude";
-  // eslint-disable-next-line no-control-regex
-  const fromName = rawName.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 80) || "claude";
-  const text = (m ? m[2] : content).trim();
-  if (!text) return null;
-  return {
-    // Cap the id we retain: the dedupe set stores these, and an oversized
-    // id (real ones are 36-char UUIDs) would let a hostile sender park
-    // megabytes in memory 500 entries at a time.
-    msgId: typeof parsed.msg_id === "string" ? parsed.msg_id.slice(0, 128) : randomUUID(),
-    replyPath,
-    fromName,
-    text,
-  };
-}
-
-/** Permission-mode class a sender attests in `from-mode`. Receivers gate
- *  delivery on it (see {@link buildEnvelope}). */
-export type PeerMode = "prompting" | "bypass";
-
-/** Our attested mode class, from how the peer's Codex threads actually run:
- *  an unsandboxed thread is the analogue of Claude's bypassPermissions;
- *  anything sandboxed prompts-or-restricts, so it is "prompting". */
-export function peerModeFor(sandbox: string | undefined): PeerMode {
-  return sandbox === "danger-full-access" ? "bypass" : "prompting";
-}
-
-/** Build an outbound envelope line. The SENDER performs the
- *  cross-session-message wrapping (that is the protocol's convention).
- *
- *  `from-mode` is a DELIVERY GATE, not decoration. The receiver computes
- *  its own mode class (bypassPermissions → "bypass", else "prompting") and:
- *    asserted && matches   → accept
- *    asserted && differs   → hold ("mode-mismatch")
- *    not asserted, bypass  → hold ("no-mode-asserted")
- *    not asserted, prompting → accept
- *  A held message is never delivered — it waits behind an approve/deny
- *  dialog, which a Remote Control session does not surface, so it simply
- *  never appears. Omitting the attribute therefore made us invisible to
- *  every bypass-mode session.
- *
- *  Attribute ORDER is load-bearing: the receiver re-serializes what it
- *  parsed and rejects the message unless it matches byte-for-byte. The
- *  canonical order is from, from-session, hop-chain, from-name, from-mode. */
-export function buildEnvelope(opts: {
-  text: string;
-  ourSocketPath: string;
-  ourName: string;
-  mode?: PeerMode;
-}): string {
-  const modeAttr = opts.mode ? ` from-mode="${opts.mode}"` : "";
-  const wrapped =
-    `<cross-session-message from="uds:${opts.ourSocketPath}" from-name="${opts.ourName}"${modeAttr}>\n` +
-    `${opts.text}\n</cross-session-message>`;
-  return JSON.stringify({
-    msgV: 1,
-    msg_id: randomUUID(),
-    type: "user",
-    message: { role: "user", content: wrapped },
-    priority: "next",
-    from: `uds:${opts.ourSocketPath}`,
-  }) + "\n";
-}
-
 // ─── Thread bootstrap material ──────────────────────────────────────────────
 
 export const PEER_DEVELOPER_INSTRUCTIONS = `You are working as a peer alongside Claude Code sessions in this workspace.
@@ -815,33 +487,6 @@ export const PEER_DEVELOPER_INSTRUCTIONS = `You are working as a peer alongside 
  *  consult tool is gone for the remainder of a resumed thread's life. */
 export const PEER_RESUME_INSTRUCTIONS = PEER_DEVELOPER_INSTRUCTIONS +
   `\n- NOTE: the collab.consult tool is unavailable in this session. Ask questions in your reply instead.`;
-
-/** Escape for the `<codex_delegation>` envelope. Order matters: `&` first,
- *  or the entities the later rules produce get escaped a second time. */
-export function escapeDelegation(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/** Wrap a peer message in the envelope the Codex app parses out of ordinary
- *  turn input and renders as a message bubble.
- *
- *  A text convention, not a protocol feature: the app's parser needs both
- *  tags and unescapes the body, so an unparsed envelope still renders as
- *  legible text. Injected items land in a pseudo-turn the app never
- *  displays, whatever shape they take.
- *
- *  The app makes `source_thread_id` a link to the chat a message came from.
- *  The sender here is a Claude session, which has no chat there, and an empty
- *  value is a link to nothing, so it names the thread the message is going
- *  to: the one chat that exists. Attribution rides inside `<input>`. */
-export function buildDelegation(input: string, threadId: string): string {
-  return [
-    "<codex_delegation>",
-    `  <source_thread_id>${escapeDelegation(threadId)}</source_thread_id>`,
-    `  <input>${escapeDelegation(input)}</input>`,
-    "</codex_delegation>",
-  ].join("\n");
-}
 
 /** The model a new conversation starts on: the message's header when it
  *  carries one, else the workspace default — canonicalized either way.

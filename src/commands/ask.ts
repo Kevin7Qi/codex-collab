@@ -22,8 +22,9 @@ import {
   updateQuestion,
   writeQuestion,
 } from "../questions";
-import { die, formatDuration, parseOptions } from "./shared";
+import { die, parseOptions } from "./shared";
 import type { QuestionRecord } from "../types";
+import { formatDuration } from "../format";
 
 export async function handleAsk(args: string[]): Promise<void> {
   const { positional, options } = parseOptions(args);

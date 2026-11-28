@@ -16,8 +16,9 @@ import {
   questionSummary,
   writeAnswerExclusive,
 } from "../questions";
-import { die, formatAge, parseOptions, validateIdOrDie } from "./shared";
+import { die, parseOptions, validateIdOrDie } from "./shared";
 import type { QuestionRecord } from "../types";
+import { formatAge } from "../format";
 
 interface FoundQuestion {
   mailboxDir: string;
