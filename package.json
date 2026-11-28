@@ -27,7 +27,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "test:ci": "bun run scripts/ci-local.ts"
+    "test:ci": "bun run scripts/ci-local.ts",
+    "test:fake-models": "bun run scripts/fake-models/launch.ts"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

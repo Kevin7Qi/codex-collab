@@ -15,6 +15,7 @@ bun run test:ci       # what CI runs, the way it runs it (no claude on PATH) —
 
 - Bun is the TypeScript runtime — never use npm/yarn/pnpm for running
 - Contract tests against live `codex`/`claude` binaries live in `contracts/` — opt-in via `CODEX_COLLAB_CONTRACTS=1 bun test contracts/` (skipped by default; spends a few trivial model turns, writes probe entries into the real session registry, and starts two background Claude Code sessions in the current folder, which Claude Code must trust; all removed afterwards)
+- For a no-sign-in smoke test with the real CLIs and canned loopback model replies, run `bun run test:fake-models`; see [the harness guide](scripts/fake-models/README.md) for setup and coverage.
 
 ## Architecture Notes
 
