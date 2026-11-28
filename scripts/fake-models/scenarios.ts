@@ -17,6 +17,7 @@ import { toolCommand } from "./setup";
 
 const cwd = process.cwd();
 const home = homedir();
+const pinned = process.env.CODEX_COLLAB_FIXTURE_PINNED === "1";
 assert(process.env.COLLAB_FIXTURE_KEY === "fixture-invalid-key" && process.env.CODEX_HOME === join(home, ".codex") && cwd === join(home, "ws"),
   "Run via bun run test:fake-models, not directly");
 const stateDir = resolveStateDir(cwd);
@@ -174,8 +175,8 @@ async function peer(useDefaultModel = false) {
       const request = trace.trim().split("\n").map(line => JSON.parse(line)).find(event => event.consultRequest);
       assert(request, "Expected a captured default-model consult request");
       const { item, toolSource } = request;
-      if (request.hasAdditionalTools) {
-        assert(toolSource === "additional_tools" && item.type === "custom_tool_call"
+      if (pinned || request.hasAdditionalTools) {
+        assert(request.hasAdditionalTools && toolSource === "additional_tools" && item.type === "custom_tool_call"
           && item.namespace === "functions" && item.name === "exec" && item.input.includes("tools.collab__consult("),
         "Default-model consult did not use functions.exec from a Responses Lite additional_tools item");
         console.log("  Default-model consult used Responses Lite functions.exec");

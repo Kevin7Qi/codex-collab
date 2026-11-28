@@ -6,6 +6,7 @@ import { configureTools, createFixture } from "./setup";
 const args = process.argv.slice(2);
 const names = args.filter(arg => !arg.startsWith("-"));
 const flags = args.filter(arg => arg.startsWith("-"));
+const install = flags.includes("--install");
 if (names.length > 1 || flags.some(flag => !["--install", "--keep"].includes(flag))) {
   console.error("Usage: bun run test:fake-models [scenario] [--install] [--keep]");
   process.exit(2);
@@ -41,10 +42,10 @@ try {
   const fixture = createFixture(server.port!);
   home = fixture.home;
   console.log(`Fixture: ${home}`);
-  await configureTools(fixture.env, args.includes("--install"));
+  await configureTools(fixture.env, install);
   worker = Bun.spawn([process.execPath, join(import.meta.dir, "scenarios.ts"), ...names], {
     cwd: fixture.workspace,
-    env: fixture.env,
+    env: { ...fixture.env, CODEX_COLLAB_FIXTURE_PINNED: install ? "1" : "0" },
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
