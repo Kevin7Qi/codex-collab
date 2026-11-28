@@ -440,12 +440,12 @@ describeUnix("stopped sessions and resuming", () => {
     // process before the reaper got to mark what it saw go.
     recordSpawnedSession(stateDir, rec("aaaa1111", { pid: 4242 }));
     markSpawnedSessionStopped(stateDir, "aaaa1111");
-    recordSpawnedSession(stateDir, rec("aaaa1111", { pid: 5252 }), { supersedes: "aaaa1111" });
-    markSpawnedSessionStopped(stateDir, "aaaa1111", new Date(), 4242);
+    recordSpawnedSession(stateDir, rec("aaaa1111", { pid: 5252, startedAt: "t2" }), { supersedes: "aaaa1111" });
+    markSpawnedSessionStopped(stateDir, "aaaa1111", new Date(), "t");
     expect(readSpawnedSessions(stateDir)).toEqual([expect.objectContaining({ id: "aaaa1111", pid: 5252 })]);
     expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeUndefined();
-    // The process it does watch is marked as before.
-    markSpawnedSessionStopped(stateDir, "aaaa1111", new Date(), 5252);
+    // The session it does watch is marked as before.
+    markSpawnedSessionStopped(stateDir, "aaaa1111", new Date(), "t2");
     expect(readSpawnedSessions(stateDir)[0].stoppedAt).toBeDefined();
   });
 
@@ -1157,6 +1157,33 @@ describeUnix("reaper", () => {
     } finally {
       setProcProbesForTests(null);
       bystander.kill();
+    }
+  });
+
+  test("a session restarted under the same id and conversation is its new reaper's: the old one leaves it and its record alone", async () => {
+    clearRegistry();
+    const dir = join(root, "fake-claude-replaced");
+    mkdirSync(dir, { recursive: true });
+    const stateDir = join(root, "state-reap-replaced");
+    const sid = "00000000-0000-4000-8000-000000000004";
+    const before = spawn("true", [], { stdio: "ignore" });
+    await new Promise((r) => before.on("exit", r));
+    const now = spawn("sleep", ["300"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 50));
+    const fake = installFakeClaude(dir, { register: false });
+    // What the old reaper was started with, and the record `send` wrote for
+    // the session it restarted: the same job and conversation, idle past
+    // its linger, which the old reaper would otherwise follow and stop.
+    const watched: SpawnedSession = { id: "deadbee4", pid: before.pid!, name: "claude(ws-a-x)", startedAt: "2026-09-19T12:00:00.000Z", lingerSec: 1, procStart: "1", sessionId: sid };
+    const restarted: SpawnedSession = { ...watched, pid: now.pid!, procStart: procStartOf(now.pid!) ?? undefined, startedAt: "2026-09-19T12:05:00.000Z" };
+    recordSpawnedSession(stateDir, restarted);
+    try {
+      register(`${now.pid}.json`, { pid: now.pid, procStart: restarted.procStart, sessionId: sid, name: watched.name, kind: "bg", jobId: "deadbee4", status: "idle", statusUpdatedAt: Date.now() - 5000 });
+      expect(await runReaper(watched, stateDir, { pollMs: 10, claudeBin: fake.bin, maxRounds: 3 })).toBe("gone");
+      expect(existsSync(fake.stopLog)).toBe(false);
+      expect(readSpawnedSessions(stateDir)).toEqual([restarted]);
+    } finally {
+      now.kill();
     }
   });
 
