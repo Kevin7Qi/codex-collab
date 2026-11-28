@@ -16,7 +16,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 ## 核心优势
 
 - **原生跨会话消息**：工作区 broker 会将 Codex 注册进 Claude Code 的跨会话消息体系，Claude 会话可直接向 Codex 发送消息（`SendMessage`），Codex 也会以消息回复——任务中途还能通过 `collab.consult` 工具向 Claude 提问。热路径上不再经过 CLI。
-- **结构化通信**：与 Codex 之间通过 stdio JSON-RPC 通信，每个事件都有完整的类型定义，可解析、可追踪。
+- **结构化通信**：通过 Codex app-server JSON-RPC 协议通信——当 Codex 的共享 app-server 正在运行时，经由其控制 socket 接入；否则通过 stdio 启动私有实例。每个事件都有完整的类型定义，可解析、可追踪。
 - **实时进度反馈**：Codex 工作时实时推送进度，Claude 随时掌握运行状态。
 - **一键代码审查**：一条命令即可在只读沙箱中审查 PR、未提交更改或特定 commit。
 - **会话复用**：接续先前的会话继续对话，在既有上下文基础上推进，不必从头开始。
@@ -27,7 +27,7 @@ codex-collab 是一个 [Claude Code 技能](https://docs.anthropic.com/en/docs/c
 
 ## 安装
 
-需要 [Bun](https://bun.sh/) >= 1.3.14 和 [Codex CLI](https://github.com/openai/codex)（`npm install -g @openai/codex`）并加入 PATH。已在 Linux (Ubuntu 22.04)、macOS 与 Windows 10 上测试通过。
+需要 [Bun](https://bun.sh/) >= 1.3.14 和 [Codex CLI](https://github.com/openai/codex)（`npm install -g @openai/codex`）并加入 PATH（Goal 模式、Guardian 与记忆隔离需要 Codex >= 0.142）。已在 Linux (Ubuntu 22.04)、macOS 与 Windows 10 上测试通过。
 
 ```bash
 git clone https://github.com/Kevin7Qi/codex-collab.git
@@ -54,7 +54,17 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 <details>
 <summary>安装位置</summary>
 
-安装脚本会构建一份独立 bundle 和一个可执行文件 shim。Linux 与 macOS 上分别放置于 `~/.claude/skills/codex-collab/` 和 `~/.local/bin`；Windows 上放置于 `%USERPROFILE%\.claude\skills\codex-collab\`，并由 `install.ps1` 将 shim 加入 PATH。
+安装脚本会构建一份独立 bundle 和可执行文件 shim：
+
+- **Linux / macOS（`install.sh`）**
+  - Claude Code 技能 bundle：`~/.claude/skills/codex-collab/`
+  - CLI shim：`~/.local/bin/codex-collab`
+  - Codex 侧技能：`~/.codex/skills/claude-collab/`（设置了 `$CODEX_HOME` 时遵循该路径）
+  - 可选 exec-policy 规则：`~/.codex/rules/codex-collab.rules`（设置了 `$CODEX_HOME` 时遵循该路径；仅在启用 `codex-rule` 时写入——交互式安装会询问一次，或通过 `codex-collab config codex-rule on` 开启）
+- **Windows（`install.ps1`）**
+  - Claude Code 技能 bundle：`%USERPROFILE%\.claude\skills\codex-collab\`
+  - CLI shim：`%USERPROFILE%\.local\bin\`（`codex-collab.cmd` 与 `codex-collab`，自动加入 PATH）
+  - 由于 Windows 目前暂不支持跨会话消息，不会安装 Codex 侧技能与规则。
 
 完成后 Claude 会自动发现该技能，正在运行中的会话同样生效。唯一的例外是首次安装技能：若 `~/.claude/skills/` 此前并不存在，需重启一次 Claude Code，新目录才会被监听。
 
@@ -108,10 +118,11 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Dev
 ### 卸载
 
 ```bash
-codex-collab uninstall
+codex-collab uninstall            # 预览并确认；保留 ~/.codex-collab/
+codex-collab uninstall --purge    # 同时删除 ~/.codex-collab/（配置、日志与模板）
 ```
 
-它会先列出将要停止和删除的内容，并在动手之前征求确认（无终端可询问时需传入 `--yes`）。它首先停止 codex-collab 留下的进程：各工作区的 broker、通道主机、等待回复的进程，以及它启动且处于空闲的 Claude Code 会话。随后删除它写入 Codex 的 hooks 和规则（你自己的 hooks 保持不变）、Codex 与 Claude Code 两侧的 skill、它的邮箱目录，以及 `codex-collab` 命令。它在 `~/.codex-collab/` 中的记录（配置、线程记录、日志，以及你自己的提示模板）会保留，供日后重新安装时沿用：在终端中它会询问是否一并删除，传入 `--purge` 则不经询问直接删除。在 Windows 上，`%USERPROFILE%\.local\bin` 会留在 PATH 中：`install.ps1` 仅在缺失时才添加它，且不记录是否由它添加；若该目录中已没有你的其他文件，可自行将其移出 PATH。若有 Codex 回合正在运行，或它启动的会话仍在工作，卸载不做任何改动，并说明如何结束这些工作。你在 Codex 中的线程、在 Claude Code 中的对话，以及当初安装所用的目录都会保留。
+停止后台进程并移除 CLI shim、技能、hooks 与 exec-policy 规则（若有 Codex 回合或启动的 Claude 会话仍在运行则会中止；无终端可询问时传入 `--yes`）。你在 Codex 中的线程、Claude Code 中的对话以及你自己的 Codex hooks 均不受影响。
 
 ## 快速开始
 
@@ -154,6 +165,7 @@ Codex 用来联系 Claude 的命令（`peers`、`send`、`task`）见[跨会话�
 | `questions [id]` | 列出当前工作区待处理的问题；带 ID 时显示完整内容 |
 | `next` | 持续等待，直到出现需要处理的事件；完整打印内容及响应方式后退出 |
 | `approve <id>` | 批准待处理的请求 |
+| `approve --guardian [id]` | 推翻 Guardian 的拒绝决定并放行（不带 ID 时列出待处理的拒绝记录）；在会话下一次运行时生效 |
 | `decline <id>` | 拒绝待处理的请求 |
 
 </details>
@@ -239,7 +251,7 @@ Codex 用来联系 Claude 的命令（`peers`、`send`、`task`）见[跨会话�
 
 | 参数 | 说明 |
 |------|------|
-| `--json` | 对支持的命令输出 JSON（`threads`、`peek`） |
+| `--json` | 对支持的命令输出 JSON（`threads`、`peek`、`peers`、`tasks`、`task status\|wait\|result`） |
 | `--all` | 列出全部会话，不限制显示数量 |
 | `--discover` | 从 Codex app server 查询本地索引中没有的会话 |
 | `--limit <n>` | 限制 `threads` 或 `peek` 显示的条目数 |
