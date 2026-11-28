@@ -330,6 +330,8 @@ codex-collab config --unset             # 取消所有设置
 
 **实验性功能：** `codex-rule`、`codex-hook` 与 `codex-wake` 默认关闭。开启后，`codex-rule` 使任何 Codex 会话执行 `codex-collab send` 与 `peers stop` 时都无需审批，`codex-hook` 在 Codex 线程自己的轮次中把 Claude 发来的消息交给它，`codex-wake` 则为此新开一个轮次（详见下文）。
 
+**已知限制：** 对于在 Codex 应用中打开的本地文件线程，`codex-wake` 无法为其新开轮次。Codex 应用运行自己的 app-server，外部无法接入，因此消息会在该线程的下一个轮次送达（开启 `codex-hook` 时，在该轮次中交付）。`codex-wake` 适用于在 Codex 共享 app-server 上处于空闲的线程：通过 SSH 使用的 Codex 应用，或接入 `codex app-server daemon` 的终端 `codex`。
+
 <details><summary><code>mode</code> 与 <code>server</code></summary>
 
 `mode` 控制 codex-collab 与 Claude 的通信方式：`auto`（默认）在平台支持时采用跨会话消息，否则走命令行路径；`peer` 强制使用跨会话消息；`cli` 则完全关闭该机制。修改后执行 `codex-collab peer up` 使之生效。

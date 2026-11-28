@@ -337,6 +337,8 @@ Available keys: `model`, `mode`, `server`, `reasoning`, `sandbox`, `approval`, `
 
 **Experimental:** `codex-rule`, `codex-hook` and `codex-wake` are off by default. Turned on, `codex-rule` lets any Codex session run `codex-collab send` and `peers stop` without asking, `codex-hook` hands a Codex thread what Claude sends it inside its own turns, and `codex-wake` starts a turn for it (details below).
 
+**Known limitation:** `codex-wake` cannot start a turn on a thread that is open in the Codex app on local files. The app runs an app-server of its own, which cannot be reached from outside, so the message reaches the thread at its next turn instead (with `codex-hook` on, inside that turn). Wake works for a thread that is idle on Codex's shared app-server: the Codex app over SSH, or a terminal `codex` attached to `codex app-server daemon`.
+
 <details><summary><code>mode</code> and <code>server</code></summary>
 
 `mode`: `auto` (default) uses peer messaging where the platform supports it and the CLI path otherwise; `peer` insists on it; `cli` turns it off entirely. A change applies when the workspace broker restarts: `codex-collab peer up`.
